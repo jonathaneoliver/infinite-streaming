@@ -45,7 +45,7 @@ func TestAnchorCapsNoAverage(t *testing.T) {
 }
 
 func TestStandardLadderFilled(t *testing.T) {
-	got := StandardLadder(tearsH264, DefaultBumpPct, DefaultMaxStep)
+	got := StandardLadder(tearsH264, DefaultBumpPct, DefaultMaxStep, 0)
 	if len(got) != 34 {
 		t.Fatalf("filled ladder: got %d rungs want 34 (12 anchors + 22 fills)", len(got))
 	}
@@ -114,8 +114,37 @@ func TestValidateOverlapNotFlagged(t *testing.T) {
 	}
 }
 
+func TestStandardLadderTopHeadroom(t *testing.T) {
+	base := StandardLadder(tearsH264, DefaultBumpPct, DefaultMaxStep, 0)
+	got := StandardLadder(tearsH264, DefaultBumpPct, DefaultMaxStep, DefaultTopHeadroomPct)
+	// Headroom adds a start rung above the +bump top anchor, plus the
+	// geometric fill(s) bridging the 1.25×→1.05× gap.
+	if len(got) <= len(base) {
+		t.Fatalf("headroom ladder len %d should exceed base %d", len(got), len(base))
+	}
+	// Top rung = top peak (29.584915 Mbps) × 1.25 = 36.981.
+	if got[0].Kind != "headroom" {
+		t.Errorf("top rung kind = %q, want headroom", got[0].Kind)
+	}
+	if got[0].Mbps < 36.97 || got[0].Mbps > 36.99 {
+		t.Errorf("headroom cap = %.3f, want ~36.981 (top peak × 1.25)", got[0].Mbps)
+	}
+	if got[0].Variant != "3840x2160" {
+		t.Errorf("headroom rung variant = %q, want 3840x2160", got[0].Variant)
+	}
+	// Still strictly descending within the step ratio.
+	for i := 1; i < len(got); i++ {
+		if got[i].Mbps >= got[i-1].Mbps {
+			t.Errorf("not descending at %d", i)
+		}
+		if r := got[i-1].Mbps / got[i].Mbps; r > DefaultMaxStep+0.002 {
+			t.Errorf("step %d ratio %.4fx exceeds %.2fx", i, r, DefaultMaxStep)
+		}
+	}
+}
+
 func TestBuildPattern(t *testing.T) {
-	rungs := StandardLadder(tearsH264, DefaultBumpPct, DefaultMaxStep)
+	rungs := StandardLadder(tearsH264, DefaultBumpPct, DefaultMaxStep, 0)
 	n := len(rungs)
 
 	up := BuildPattern(RampUp, rungs, 12)

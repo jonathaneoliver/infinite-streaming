@@ -62,6 +62,11 @@ const MAX_STEP_CHOICES = [1.1, 1.15, 1.2, 1.5, 2.0] as const;
 const DEFAULT_MAX_STEP = 1.15;
 const maxStep = ref<number>(DEFAULT_MAX_STEP);
 
+// #551 — start the ladder this % over the top variant's peak (a headroom
+// start rung above the +bump top anchor) so playback settles at the top
+// variant before the pattern constrains it. Mirrors the Go default.
+const DEFAULT_TOP_HEADROOM = 25;
+
 interface LadderVariant {
   avgBps: number;
   peakBps: number;
@@ -70,14 +75,19 @@ interface LadderVariant {
 const round3 = (v: number): number => Math.round(v * 1000) / 1000;
 
 /** Dual-rung (avg+peak) + geometrically-filled limit ladder, descending
- *  by Mbps. Mirrors go-proxy/pkg/ladder.StandardLadder — keep in sync
- *  with that package's golden vectors (ladder_test.go). */
-function standardLadder(variants: LadderVariant[], bumpPct: number, step: number): number[] {
+ *  by Mbps, with an optional top-headroom start rung. Mirrors
+ *  go-proxy/pkg/ladder.StandardLadder — keep in sync with that package's
+ *  golden vectors (ladder_test.go). */
+function standardLadder(variants: LadderVariant[], bumpPct: number, step: number, topHeadroomPct: number): number[] {
   const f = 1 + bumpPct / 100;
   const anchors: number[] = [];
   for (const v of variants) {
     if (v.peakBps > 0) anchors.push(round3((v.peakBps * f) / 1e6));
     if (v.avgBps > 0) anchors.push(round3((v.avgBps * f) / 1e6));
+  }
+  if (topHeadroomPct > 0) {
+    const maxPeak = variants.reduce((m, v) => Math.max(m, v.peakBps), 0);
+    if (maxPeak > 0) anchors.push(round3((maxPeak * (1 + topHeadroomPct / 100)) / 1e6));
   }
   anchors.sort((a, b) => b - a); // descending
   if (step <= 1 || anchors.length < 2) return anchors;
@@ -188,7 +198,7 @@ function ladderVariants(): LadderVariant[] {
  *  dual-rung + geometrically-filled limit ladder (#551), then orders it
  *  per template — mirrors ladder.BuildPattern in go-proxy/pkg/ladder. */
 function buildSteps(t: Template, marginPct: number, stepSecs: number): Pattern['steps'] {
-  const desc = standardLadder(ladderVariants(), marginPct, maxStep.value); // descending
+  const desc = standardLadder(ladderVariants(), marginPct, maxStep.value, DEFAULT_TOP_HEADROOM); // descending
   if (!desc.length) return [];
   const asc = desc.slice().reverse(); // ascending
 

@@ -6,6 +6,7 @@ import (
 )
 
 func TestStandardLadderRatesDualRungFilled(t *testing.T) {
+	t.Setenv("CHAR_LADDER_TOP_HEADROOM_PCT", "0") // isolate the dual-rung core
 	// Fixture matching the current test-dev master playlist: 5 variants,
 	// all carrying AVERAGE-BANDWIDTH alongside BANDWIDTH.
 	rec := mkPlayerWithVariants(t, []variantSeed{
@@ -61,6 +62,7 @@ func TestStandardLadderRatesDualRungFilled(t *testing.T) {
 }
 
 func TestStandardLadderRatesPeakOnly(t *testing.T) {
+	t.Setenv("CHAR_LADDER_TOP_HEADROOM_PCT", "0")
 	// AVERAGE-BANDWIDTH absent ⇒ a single (peak) anchor per variant.
 	rec := mkPlayerWithVariants(t, []variantSeed{
 		{res: "640x360", avg: 0, peak: 1000000, url: "p.m3u8"},
@@ -81,6 +83,7 @@ func TestStandardLadderRatesPeakOnly(t *testing.T) {
 
 func TestStandardLadderRatesEnvBump(t *testing.T) {
 	t.Setenv("CHAR_LADDER_BUMP_PCT", "0")
+	t.Setenv("CHAR_LADDER_TOP_HEADROOM_PCT", "0")
 	rec := mkPlayerWithVariants(t, []variantSeed{
 		{res: "640x360", avg: 0, peak: 1000000, url: "p.m3u8"},
 	})
@@ -91,6 +94,30 @@ func TestStandardLadderRatesEnvBump(t *testing.T) {
 	// bump 0 ⇒ cap = peak exactly (1.000 Mbps).
 	if got := rates[0].CapMbps; got < 0.999 || got > 1.001 {
 		t.Errorf("cap=%.3f want 1.000 (peak × bump 0%%)", got)
+	}
+}
+
+func TestStandardLadderRatesTopHeadroom(t *testing.T) {
+	// Default 25% top-headroom: the top rung is the top variant's peak
+	// × 1.25, tagged source=headroom, above the +5% top anchor.
+	rec := mkPlayerWithVariants(t, []variantSeed{
+		{res: "640x360", avg: 724620, peak: 998009, url: "p.m3u8"},
+		{res: "3840x2160", avg: 10845181, peak: 15363854, url: "q.m3u8"},
+	})
+	rates, err := StandardLadderRates(rec)
+	if err != nil {
+		t.Fatalf("StandardLadderRates: %v", err)
+	}
+	top := rates[0]
+	if top.Source != "headroom" {
+		t.Errorf("top rung source=%q want headroom", top.Source)
+	}
+	// 15363854 × 1.25 / 1e6 = 19.205.
+	if top.CapMbps < 19.19 || top.CapMbps > 19.22 {
+		t.Errorf("headroom cap=%.3f want ~19.205 (top peak × 1.25)", top.CapMbps)
+	}
+	if top.Resolution != "3840x2160" {
+		t.Errorf("headroom rung attributed to %q, want 3840x2160", top.Resolution)
 	}
 }
 

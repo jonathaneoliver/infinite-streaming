@@ -32,6 +32,10 @@ Pattern mode (generates a step list from the player's current variants):
                      (AVERAGE-BANDWIDTH) rung per variant, then fills the
                      gaps — raise --max-step to coarsen + shorten the pattern
                      (a pyramid over a dense ladder can run ~13 min/cycle)
+  --top-headroom PCT start the ladder this %% over the top variant's peak
+                     (default 25; adds a headroom start rung above the
+                     top anchor so playback settles before constraining;
+                     0 disables it)
   --clear-pattern    stop any running pattern (back to slider rate)
   --show-pattern     print current pattern + active step
 
@@ -69,6 +73,7 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	stepSeconds := fs.Int("step-seconds", 12, "per-step duration: 6|12|18|24")
 	margin := fs.Int("margin", 5, "headroom %% above variant rate: 0|5|10|25|50 (5 covers protocol overhead)")
 	maxStep := fs.Float64("max-step", ladder.DefaultMaxStep, "max ratio between consecutive caps before a geometric fill is inserted (default 1.15; raise to coarsen + shorten the pattern)")
+	topHeadroom := fs.Float64("top-headroom", ladder.DefaultTopHeadroomPct, "start the ladder this %% over the top variant's peak (default 25; 0 disables the headroom start rung)")
 	clearPattern := fs.Bool("clear-pattern", false, "stop any running pattern")
 	showPattern := fs.Bool("show-pattern", false, "print current pattern, don't modify")
 	clear := fs.Bool("clear", false, "send {shape:null}")
@@ -93,7 +98,7 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	case *clearPattern:
 		return doClearPattern(client, ctx, pid, asJSON)
 	case *pattern != "":
-		return doPattern(client, ctx, pid, asJSON, *pattern, *stepSeconds, *margin, *maxStep)
+		return doPattern(client, ctx, pid, asJSON, *pattern, *stepSeconds, *margin, *maxStep, *topHeadroom)
 	}
 
 	if *rate < 0 && *delay < 0 && *loss < 0 {
@@ -320,7 +325,7 @@ func doClearPattern(client *api.Client, ctx context.Context, pid string, asJSON 
 // anchor per variant, +marginPct flat, with geometric fills to maxStep
 // (#551). Snapshots pre-state for `harness undo` and PATCHes.
 func doPattern(client *api.Client, ctx context.Context, pid string, asJSON bool,
-	tplStr string, stepSecs, marginPct int, maxStep float64) error {
+	tplStr string, stepSecs, marginPct int, maxStep, topHeadroomPct float64) error {
 
 	tpl, err := parseTemplate(tplStr)
 	if err != nil {
@@ -345,7 +350,7 @@ func doPattern(client *api.Client, ctx context.Context, pid string, asJSON bool,
 	if err != nil {
 		return err
 	}
-	rungs, err := variantLadder(rec, float64(marginPct), maxStep)
+	rungs, err := variantLadder(rec, float64(marginPct), maxStep, topHeadroomPct)
 	if err != nil {
 		return err
 	}
@@ -416,7 +421,7 @@ func parseMarginPct(n int) (proxy.PatternMarginPct, error) {
 // go-proxy/pkg/ladder, descending by cap. bumpPct is the flat headroom
 // (the operator --margin); maxStep is the fill density. Returns an error
 // when the player has no variants yet (master playlist not fetched).
-func variantLadder(rec *proxy.PlayerRecord, bumpPct, maxStep float64) ([]ladder.Rung, error) {
+func variantLadder(rec *proxy.PlayerRecord, bumpPct, maxStep, topHeadroomPct float64) ([]ladder.Rung, error) {
 	if rec == nil || rec.CurrentPlay == nil || rec.CurrentPlay.Manifest == nil || rec.CurrentPlay.Manifest.Variants == nil {
 		return nil, errors.New("player has no manifest variants yet — has it fetched the master playlist?")
 	}
@@ -432,7 +437,7 @@ func variantLadder(rec *proxy.PlayerRecord, bumpPct, maxStep float64) ([]ladder.
 		}
 		lv = append(lv, ladder.Variant{AvgBps: avg, PeakBps: v.Bandwidth, Resolution: v.Resolution})
 	}
-	rungs := ladder.StandardLadder(lv, bumpPct, maxStep)
+	rungs := ladder.StandardLadder(lv, bumpPct, maxStep, topHeadroomPct)
 	if len(rungs) == 0 {
 		return nil, errors.New("manifest_variants present but all bandwidths zero")
 	}

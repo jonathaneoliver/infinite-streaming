@@ -40,10 +40,14 @@ type VariantRate struct {
 	CapMbps    float64 `json:"cap_mbps"`   // the rate to shape to for this rung
 }
 
-// LadderBumpPct / LadderMaxStep read the optional operator overrides,
-// falling back to the shared package defaults (5% flat bump, 1.15× steps).
+// LadderBumpPct / LadderMaxStep / LadderTopHeadroomPct read the optional
+// operator overrides, falling back to the shared package defaults (5% flat
+// bump, 1.15× steps, 25% top-headroom start rung).
 func LadderBumpPct() float64 { return envFloat("CHAR_LADDER_BUMP_PCT", ladder.DefaultBumpPct) }
 func LadderMaxStep() float64 { return envFloat("CHAR_LADDER_MAX_STEP", ladder.DefaultMaxStep) }
+func LadderTopHeadroomPct() float64 {
+	return envFloat("CHAR_LADDER_TOP_HEADROOM_PCT", ladder.DefaultTopHeadroomPct)
+}
 
 func envFloat(key string, def float64) float64 {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
@@ -73,7 +77,7 @@ func StandardLadderRates(rec *PlayerRecord) ([]VariantRate, error) {
 		lv = append(lv, ladder.Variant{AvgBps: v.AverageBandwidth, PeakBps: v.Bandwidth, Resolution: v.Resolution})
 	}
 	bump := LadderBumpPct()
-	rungs := ladder.StandardLadder(lv, bump, LadderMaxStep())
+	rungs := ladder.StandardLadder(lv, bump, LadderMaxStep(), LadderTopHeadroomPct())
 	if len(rungs) == 0 {
 		return nil, errors.New("ladder: all variants had zero bandwidth")
 	}

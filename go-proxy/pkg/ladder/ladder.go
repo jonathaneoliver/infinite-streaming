@@ -37,6 +37,11 @@ import (
 const (
 	DefaultBumpPct = 5.0
 	DefaultMaxStep = 1.15
+	// DefaultTopHeadroomPct prepends a starting rung at the top variant's
+	// peak × (1 + this/100), above the +bump top anchor, so a sweep settles
+	// the player comfortably at the top variant before constraining it.
+	// Over the RAW top peak, not compounded with the bump.
+	DefaultTopHeadroomPct = 25.0
 )
 
 // Variant is one rung of a player's published manifest ladder, reduced to
@@ -50,8 +55,9 @@ type Variant struct {
 }
 
 // Rung is one cap in the limit ladder, in Mbps. Kind is "peak", "avg"
-// (an anchor derived from a variant's BANDWIDTH / AVERAGE-BANDWIDTH) or
-// "fill" (a geometric interpolation inserted between two anchors).
+// (an anchor derived from a variant's BANDWIDTH / AVERAGE-BANDWIDTH),
+// "fill" (a geometric interpolation inserted between two anchors), or
+// "headroom" (the optional top start rung above the top variant's peak).
 // Anchors carry their source variant in Variant; fills carry the two
 // anchors they sit between in HiVar/LoVar (a fill between a variant's own
 // avg and peak is that variant's discriminating band).
@@ -125,9 +131,31 @@ func FillLadder(anchors []Rung, maxStep float64) []Rung {
 }
 
 // StandardLadder is the one entry point callers use: dual-rung anchors at
-// the given flat bump, geometrically filled to maxStep, sorted descending.
-func StandardLadder(vs []Variant, bumpPct, maxStep float64) []Rung {
-	return FillLadder(AnchorCaps(vs, bumpPct), maxStep)
+// the given flat bump, optionally a top-headroom start rung at the top
+// variant's peak × (1 + topHeadroomPct/100), geometrically filled to
+// maxStep, sorted descending. topHeadroomPct <= 0 disables the start rung.
+func StandardLadder(vs []Variant, bumpPct, maxStep, topHeadroomPct float64) []Rung {
+	anchors := AnchorCaps(vs, bumpPct)
+	if topHeadroomPct > 0 {
+		maxPeak := 0
+		topRes := ""
+		for _, v := range vs {
+			if v.PeakBps > maxPeak {
+				maxPeak = v.PeakBps
+				topRes = v.Resolution
+			}
+		}
+		if maxPeak > 0 {
+			hr := Rung{
+				Mbps:    round3(float64(maxPeak) * (1 + topHeadroomPct/100) / 1e6),
+				Variant: topRes,
+				Kind:    "headroom",
+			}
+			anchors = append([]Rung{hr}, anchors...)
+			sort.SliceStable(anchors, func(i, j int) bool { return anchors[i].Mbps > anchors[j].Mbps })
+		}
+	}
+	return FillLadder(anchors, maxStep)
 }
 
 func round3(v float64) float64 { return math.Round(v*1000) / 1000 }
