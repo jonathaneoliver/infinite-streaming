@@ -305,6 +305,41 @@ const series = computed<SeriesSpec[]>(() => {
   const out = [...baseSeries];
   const ladder = variants.value;
   if (!ladder.length) return out;
+  // "Displayed Variant": the same resolution that drives the player-state
+  // "Video Res" line (player_metrics.video_resolution), but plotted as
+  // THAT variant's published peak BANDWIDTH per sample. Group the manifest
+  // by resolution → list of peak Mbps. A ladder MAY carry several variants
+  // at one resolution (different bitrates / HDR vs SDR), so resolution
+  // alone can be ambiguous: when it is, disambiguate with the player's
+  // reported video_bitrate_mbps (nearest peak), else fall back to the
+  // highest same-resolution rung.
+  const peaksByRes: Record<string, number[]> = {};
+  for (const v of ladder) {
+    const peak = Number(v.bandwidth);
+    if (v.resolution && Number.isFinite(peak) && peak > 0) {
+      (peaksByRes[v.resolution] ??= []).push(peak / 1_000_000);
+    }
+  }
+  out.push({
+    label: 'Displayed Variant',
+    color: '#a855f7',
+    accessor: (p: PlayerRecord) => {
+      const res = p.player_metrics?.video_resolution;
+      if (!res) return null;
+      const peaks = peaksByRes[res];
+      if (!peaks || !peaks.length) return null;
+      if (peaks.length === 1) return peaks[0];
+      const vb = p.player_metrics?.video_bitrate_mbps;
+      if (vb && vb > 0) {
+        return peaks.reduce(
+          (best, mbps) => (Math.abs(mbps - vb) < Math.abs(best - vb) ? mbps : best),
+          peaks[0],
+        );
+      }
+      return Math.max(...peaks);
+    },
+    stepped: true,
+  });
   // Mute the variant-line color so it doesn't out-shout the live
   // traces. Slate-400 reads at a glance but stays in the background.
   const AVG_COLOR = '#94a3b8';
