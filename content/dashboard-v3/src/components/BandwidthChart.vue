@@ -17,7 +17,7 @@
  *     - Player Variant             — active video bitrate
  *
  *   Server-side rendition (from server_metrics):
- *     - Server Variant — rendition_mbps the server thinks the client picked
+ *     - Serving Variant — rendition_mbps the server thinks the client picked
  *
  * Y-max is controlled by the panel-level BitrateChartPanelToolbar via
  * the shared chart-coordination state.
@@ -287,7 +287,7 @@ const baseSeries: SeriesSpec[] = [
     stepped: true,
   },
   {
-    label: 'Server Variant',
+    label: 'Serving Variant',
     color: '#b45309',
     accessor: (p: PlayerRecord) => p.server_metrics?.rendition_mbps ?? null,
     stepped: true,
@@ -303,8 +303,8 @@ const baseSeries: SeriesSpec[] = [
  *  whole X range; sharing a `groupLegend` collapses them all to a
  *  single legend chip that toggles every line at once.
  *
- *  Defaults: avg ON (the operator's natural mental ABR reference),
- *  peak OFF (clutters the chart for advanced inspection only). */
+ *  Defaults: peak ON (the rate ABR actually keys on — see abr-ladder
+ *  standard), avg OFF (toggle on for the typical-body-bitrate reference). */
 const series = computed<SeriesSpec[]>(() => {
   const out = [...baseSeries];
   const ladder = variants.value;
@@ -361,6 +361,7 @@ const series = computed<SeriesSpec[]>(() => {
         stepped: false,
         borderDash: [6, 4],
         groupLegend: 'Variant avg bandwidth',
+        hidden: true,
       });
     }
     const peakBw = Number(v.bandwidth);
@@ -374,7 +375,6 @@ const series = computed<SeriesSpec[]>(() => {
         stepped: false,
         borderDash: [2, 4],
         groupLegend: 'Variant peak bandwidth',
-        hidden: true,
       });
     }
   }
