@@ -359,7 +359,7 @@ const series = computed<SeriesSpec[]>(() => {
         color: AVG_COLOR,
         accessor: () => mbps,
         stepped: false,
-        borderDash: [6, 4],
+        borderDash: [2, 4],
         groupLegend: 'Variant avg bandwidth',
         hidden: true,
       });
@@ -373,7 +373,7 @@ const series = computed<SeriesSpec[]>(() => {
         color: PEAK_COLOR,
         accessor: () => mbps,
         stepped: false,
-        borderDash: [2, 4],
+        borderDash: [6, 4],
         groupLegend: 'Variant peak bandwidth',
       });
     }
