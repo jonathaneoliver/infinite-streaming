@@ -277,7 +277,11 @@ const baseSeries: SeriesSpec[] = [
     accessor: (p: PlayerRecord) => p.player_metrics?.network_bitrate_mbps ?? null,
   },
   {
-    label: 'Player Variant',
+    // video_bitrate_mbps == indicatedBitrate == the variant AVPlayer has
+    // SELECTED to fetch (the ABR pick). It leads the on-screen rung by the
+    // buffer depth — hence "Fetching", paired with "Displayed Variant"
+    // (the decoded/on-screen rung) added in the series computed below.
+    label: 'Fetching Variant',
     color: '#ef4444',
     accessor: (p: PlayerRecord) => p.player_metrics?.video_bitrate_mbps ?? null,
     stepped: true,
