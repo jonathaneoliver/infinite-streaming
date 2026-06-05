@@ -432,6 +432,41 @@ function bandwidthMbpsForResolution(
   return undefined;
 }
 
+/** Snap a player-reported DECODED resolution (presentationSize on iOS /
+ *  videoWidth×videoHeight on web) to the nearest manifest rung BY FRAME
+ *  HEIGHT, returning that rung's canonical resolution string + peak Mbps.
+ *  The decoded size legitimately differs from the manifest RESOLUTION
+ *  attribute (coded-vs-display like 1080↔1088 mod-16, PAR / clean aperture,
+ *  packager quirks), so an exact-string match would leave the lane showing
+ *  non-manifest "WxH". Returns null when there's no manifest / parseable
+ *  height, so the caller falls back to the raw player value. */
+function manifestVariantForDisplayedRes(
+  variants: IngestRow['manifestVariants'],
+  videoResolution: string,
+): { resolution: string; mbps: number | undefined } | null {
+  if (!videoResolution || !variants || variants.length === 0) return null;
+  const heightOf = (s: string): number => {
+    const m = /(\d+)\s*[x×]\s*(\d+)/i.exec(s);
+    return m ? Number(m[2]) : NaN;
+  };
+  const h = heightOf(videoResolution);
+  if (!Number.isFinite(h)) return null;
+  let best: { resolution: string; mbps: number | undefined } | null = null;
+  let bestDelta = Infinity;
+  for (const v of variants) {
+    const r = String(v?.resolution ?? '').trim();
+    const vh = heightOf(r);
+    if (!r || !Number.isFinite(vh)) continue;
+    const delta = Math.abs(vh - h);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      const bw = Number(v?.bandwidth ?? 0);
+      best = { resolution: r, mbps: Number.isFinite(bw) && bw > 0 ? bw / 1_000_000 : undefined };
+    }
+  }
+  return best;
+}
+
 /** Find the canonical resolution for a given bitrate by consulting the
  *  manifest's variant ladder. Mirrors the legacy session-shell.js
  *  `manifestResolutionForBitrateFromVariants`: the bitrate match is
@@ -709,12 +744,15 @@ function ingest(r: IngestRow) {
   // Operator preference: a single resolution should read with the
   // same colour everywhere on the chart. Issue #486.
   if (r.videoResolution) {
-    const matchMbps = bandwidthMbpsForResolution(r.manifestVariants, r.videoResolution);
+    // Snap the decoded WxH to the manifest's canonical rung (nearest height)
+    // so the lane reads manifest-matching values, not e.g. "1920x1088".
+    // Falls back to the raw player value when there's no manifest.
+    const snapped = manifestVariantForDisplayedRes(r.manifestVariants, r.videoResolution);
     statefulEvents.push({
       ts: t,
       type: 'DISPLAY_RES',
-      resolution: r.videoResolution,
-      mbps: matchMbps,
+      resolution: snapped?.resolution ?? r.videoResolution,
+      mbps: snapped?.mbps ?? bandwidthMbpsForResolution(r.manifestVariants, r.videoResolution),
     });
   }
 
