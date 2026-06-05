@@ -31,6 +31,7 @@ import { computed, onBeforeUnmount, ref, toRef, watch } from 'vue';
 import { ensureVisTimeline } from '@/composables/useChartJs';
 import { useChartCoordination, DEFAULT_FOCUS_MS } from '@/composables/useChartCoordination';
 import type { Stream } from '@/composables/useSessionTimeSeries';
+import { nearestVariantByBitrate } from '@/composables/useManifestVariants';
 
 interface LaneCfg { label: string; color: string }
 const EVENT_LANES: Record<string, LaneCfg> = {
@@ -467,35 +468,6 @@ function manifestVariantForDisplayedRes(
   return best;
 }
 
-/** Find the canonical resolution for a given bitrate by consulting the
- *  manifest's variant ladder. Mirrors the legacy session-shell.js
- *  `manifestResolutionForBitrateFromVariants`: the bitrate match is
- *  tolerant (±max(0.5 Mbps, 5% of the variant's Mbps)) so EWMA drift
- *  doesn't lose the match. Returns '' if no variant is close enough,
- *  so the caller can fall back to the player-reported resolution. */
-function manifestResolutionForBitrate(
-  variants: IngestRow['manifestVariants'],
-  targetMbps: number,
-): string {
-  if (!Number.isFinite(targetMbps)) return '';
-  if (!variants || variants.length === 0) return '';
-  let best: string | null = null;
-  let bestDelta = Infinity;
-  for (const v of variants) {
-    const vBw = Number(v?.bandwidth ?? 0);
-    if (!Number.isFinite(vBw) || vBw <= 0) continue;
-    const vMbps = vBw / 1_000_000;
-    const delta = Math.abs(vMbps - targetMbps);
-    const tol = Math.max(0.5, vMbps * 0.05);
-    if (delta < tol && delta < bestDelta) {
-      bestDelta = delta;
-      const r = String(v?.resolution ?? '').trim();
-      if (r) best = r;
-    }
-  }
-  return best ?? '';
-}
-
 function laneClose(key: string, t: number) {
   const cur = openRanges[key];
   if (!cur) return;
@@ -756,28 +728,32 @@ function ingest(r: IngestRow) {
     });
   }
 
-  // VARIANT — keyed on the MANIFEST's canonical resolution for the
-  // rung so transient `video_resolution` flicker during a switch
-  // doesn't create phantom lanes.
+  // VARIANT — keyed on the MANIFEST's canonical rung (resolution AND peak
+  // Mbps), NOT the player's reported video_bitrate. video_bitrate is
+  // AVPlayer's indicatedBitrate — a jittery EWMA that wobbles around the
+  // true rung (e.g. 29.6/29.9 for a 29.86 Mbps 4K variant). Snapping to the
+  // nearest published peak collapses phantom near-duplicate lanes and kills
+  // jitter-driven SHIFT markers. Issue #619.
   const mbpsRaw = r.videoBitrateMbps;
   if (mbpsRaw != null && mbpsRaw > 0) {
-    const mbpsRounded = Math.round(mbpsRaw * 10) / 10;
-    const variantRes = manifestResolutionForBitrate(r.manifestVariants, mbpsRounded);
-    if (variantRes) {
+    const rung = nearestVariantByBitrate(r.manifestVariants, mbpsRaw);
+    if (rung && rung.resolution) {
+      const canonMbps = rung.peakMbps;
+      const variantRes = rung.resolution;
       if (prevVariantMbps != null) {
-        if (mbpsRaw > prevVariantMbps + 0.01) {
-          pushPoint('PLAYBACK', t, 'SHIFT UP', '#3b82f6', `\n${prevVariantMbps.toFixed(2)} → ${mbpsRaw.toFixed(2)} Mbps`);
-        } else if (mbpsRaw < prevVariantMbps - 0.01) {
-          pushPoint('PLAYBACK', t, 'SHIFT DOWN', '#ef4444', `\n${prevVariantMbps.toFixed(2)} → ${mbpsRaw.toFixed(2)} Mbps`);
+        if (canonMbps > prevVariantMbps + 0.01) {
+          pushPoint('PLAYBACK', t, 'SHIFT UP', '#3b82f6', `\n${prevVariantMbps.toFixed(2)} → ${canonMbps.toFixed(2)} Mbps`);
+        } else if (canonMbps < prevVariantMbps - 0.01) {
+          pushPoint('PLAYBACK', t, 'SHIFT DOWN', '#ef4444', `\n${prevVariantMbps.toFixed(2)} → ${canonMbps.toFixed(2)} Mbps`);
         }
       }
-      prevVariantMbps = mbpsRaw;
-      const key = variantLaneId(mbpsRounded, variantRes);
-      ensureVariantLane(mbpsRounded, variantRes);
+      prevVariantMbps = canonMbps;
+      const key = variantLaneId(canonMbps, variantRes);
+      ensureVariantLane(canonMbps, variantRes);
       statefulEvents.push({
         ts: t,
         type: 'VARIANT',
-        mbps: mbpsRounded,
+        mbps: canonMbps,
         variantRes,
         variantKey: key,
       });

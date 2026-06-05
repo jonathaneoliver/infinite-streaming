@@ -25,7 +25,7 @@
 import { computed, ref, toRef } from 'vue';
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
-import { useManifestVariants } from '@/composables/useManifestVariants';
+import { useManifestVariants, nearestVariantByBitrate } from '@/composables/useManifestVariants';
 import { usePlayer } from '@/composables/usePlayer';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import type { PlayerRecord } from '@/repo/v2-repo';
@@ -277,16 +277,6 @@ const baseSeries: SeriesSpec[] = [
     accessor: (p: PlayerRecord) => p.player_metrics?.network_bitrate_mbps ?? null,
   },
   {
-    // video_bitrate_mbps == indicatedBitrate == the variant AVPlayer has
-    // SELECTED to fetch (the ABR pick). It leads the on-screen rung by the
-    // buffer depth — hence "Fetching", paired with "Displayed Variant"
-    // (the decoded/on-screen rung) added in the series computed below.
-    label: 'Fetching Variant',
-    color: '#ef4444',
-    accessor: (p: PlayerRecord) => p.player_metrics?.video_bitrate_mbps ?? null,
-    stepped: true,
-  },
-  {
     label: 'Serving Variant',
     color: '#b45309',
     accessor: (p: PlayerRecord) => p.server_metrics?.rendition_mbps ?? null,
@@ -309,6 +299,20 @@ const series = computed<SeriesSpec[]>(() => {
   const out = [...baseSeries];
   const ladder = variants.value;
   if (!ladder.length) return out;
+  // "Fetching Variant": video_bitrate_mbps == AVPlayer indicatedBitrate ==
+  // the rung it SELECTED to fetch (leads the screen by the buffer). It's a
+  // jittery EWMA, so plot the nearest published peak instead of the raw
+  // value — a clean stepped rung line, not a 29.6/29.9 wobble (#619).
+  out.push({
+    label: 'Fetching Variant',
+    color: '#ef4444',
+    accessor: (p: PlayerRecord) => {
+      const vb = p.player_metrics?.video_bitrate_mbps;
+      if (vb == null || vb <= 0) return null;
+      return nearestVariantByBitrate(ladder, vb)?.peakMbps ?? vb;
+    },
+    stepped: true,
+  });
   // "Displayed Variant": the same value that drives the player-state
   // "Video Res" line (player_metrics.video_resolution = the DECODED frame
   // size, presentationSize on iOS / videoWidth×videoHeight on web), plotted
