@@ -305,38 +305,39 @@ const series = computed<SeriesSpec[]>(() => {
   const out = [...baseSeries];
   const ladder = variants.value;
   if (!ladder.length) return out;
-  // "Displayed Variant": the same resolution that drives the player-state
-  // "Video Res" line (player_metrics.video_resolution), but plotted as
-  // THAT variant's published peak BANDWIDTH per sample. Group the manifest
-  // by resolution → list of peak Mbps. A ladder MAY carry several variants
-  // at one resolution (different bitrates / HDR vs SDR), so resolution
-  // alone can be ambiguous: when it is, disambiguate with the player's
-  // reported video_bitrate_mbps (nearest peak), else fall back to the
-  // highest same-resolution rung.
-  const peaksByRes: Record<string, number[]> = {};
-  for (const v of ladder) {
-    const peak = Number(v.bandwidth);
-    if (v.resolution && Number.isFinite(peak) && peak > 0) {
-      (peaksByRes[v.resolution] ??= []).push(peak / 1_000_000);
-    }
-  }
+  // "Displayed Variant": the same value that drives the player-state
+  // "Video Res" line (player_metrics.video_resolution = the DECODED frame
+  // size, presentationSize on iOS / videoWidth×videoHeight on web), plotted
+  // as that variant's published peak BANDWIDTH per sample.
+  //
+  // Matched by NEAREST frame HEIGHT, not exact "WxH": the decoded size
+  // legitimately differs from the manifest RESOLUTION attribute (coded vs
+  // display, e.g. 1080 encoded as 1088 for mod-16; PAR / clean aperture;
+  // packager quirks), so an exact string match would blank the line.
+  // (We deliberately do NOT disambiguate with video_bitrate_mbps — that's
+  // indicatedBitrate, i.e. the variant being FETCHED/selected, which leads
+  // the displayed rung by the buffer; using it here would mislabel during
+  // switches. Same-height variants therefore can't be told apart for the
+  // displayed rung — this project's ladders have one rung per height.)
+  const heightOf = (res?: string | null): number | null => {
+    if (!res) return null;
+    const m = /(\d+)\s*[x×]\s*(\d+)/i.exec(res);
+    return m ? Number(m[2]) : null;
+  };
+  const rungs = ladder
+    .map((v) => ({ h: heightOf(v.resolution), peak: Number(v.bandwidth) / 1_000_000 }))
+    .filter((r) => r.h != null && Number.isFinite(r.peak) && r.peak > 0) as { h: number; peak: number }[];
   out.push({
     label: 'Displayed Variant',
     color: '#a855f7',
     accessor: (p: PlayerRecord) => {
-      const res = p.player_metrics?.video_resolution;
-      if (!res) return null;
-      const peaks = peaksByRes[res];
-      if (!peaks || !peaks.length) return null;
-      if (peaks.length === 1) return peaks[0];
-      const vb = p.player_metrics?.video_bitrate_mbps;
-      if (vb && vb > 0) {
-        return peaks.reduce(
-          (best, mbps) => (Math.abs(mbps - vb) < Math.abs(best - vb) ? mbps : best),
-          peaks[0],
-        );
+      const h = heightOf(p.player_metrics?.video_resolution);
+      if (h == null || !rungs.length) return null;
+      let best = rungs[0];
+      for (const r of rungs) {
+        if (Math.abs(r.h - h) < Math.abs(best.h - h)) best = r;
       }
-      return Math.max(...peaks);
+      return best.peak;
     },
     stepped: true,
   });
