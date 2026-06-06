@@ -93,3 +93,35 @@ func TestSessionCloseViaUINonUICloser(t *testing.T) {
 		t.Error("AppiumLauncher should implement UICloser")
 	}
 }
+
+// Session.ReleaseDevice is opt-in (#627): without CHAR_RELEASE_DEVICE=1 it
+// must not touch the device, even for an Appium launcher — so it never
+// kills WDA mid-suite. AppiumLauncher must implement DeviceReleaser, and a
+// non-releaser launcher (Manual) is a silent no-op.
+func TestSessionReleaseDeviceGating(t *testing.T) {
+	if _, ok := any(NewAppiumLauncher()).(DeviceReleaser); !ok {
+		t.Error("AppiumLauncher should implement DeviceReleaser")
+	}
+
+	// Env unset → no-op even with a real Appium launcher bound to an iOS
+	// device. (If the gate leaked, this would shell out to devicectl.)
+	t.Setenv("CHAR_RELEASE_DEVICE", "")
+	s := &Session{Launcher: NewAppiumLauncher(), Device: Device{Platform: PlatformIPhone, UDID: "udid-x"}}
+	if err := s.ReleaseDevice(context.Background()); err != nil {
+		t.Errorf("ReleaseDevice with gate unset = %v, want nil (no-op)", err)
+	}
+
+	// Opt-in set, but a non-releaser launcher (Manual) is still a no-op.
+	t.Setenv("CHAR_RELEASE_DEVICE", "1")
+	sm := &Session{Launcher: NewManualLauncher(), Device: Device{Platform: PlatformIPhone}}
+	if err := sm.ReleaseDevice(context.Background()); err != nil {
+		t.Errorf("ReleaseDevice on non-DeviceReleaser launcher = %v, want nil", err)
+	}
+
+	// Opt-in set, Appium launcher, but a non-iOS platform → no devicectl,
+	// returns nil.
+	sa := &Session{Launcher: NewAppiumLauncher(), Device: Device{Platform: PlatformAndroidTV, UDID: "android-1"}}
+	if err := sa.ReleaseDevice(context.Background()); err != nil {
+		t.Errorf("ReleaseDevice on non-iOS platform = %v, want nil", err)
+	}
+}

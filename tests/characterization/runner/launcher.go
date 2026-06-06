@@ -49,3 +49,18 @@ type UICloser interface {
 	// home) is not fatal.
 	ClosePlaybackViaUI(ctx context.Context, d Device) error
 }
+
+// DeviceReleaser is the optional capability of fully releasing the device
+// after a run — terminating WebDriverAgent so iOS's system "Automation
+// Running" overlay clears. Appium deliberately keeps WDA resident between
+// sessions (useNewWDA=false) for fast reuse across back-to-back tests, so
+// ending the WebDriver session does NOT stop WDA. Killing it therefore
+// costs a WDA (re)launch on the next run, which is why callers gate this
+// behind CHAR_RELEASE_DEVICE=1 rather than running it unconditionally.
+// Only AppiumLauncher implements it.
+type DeviceReleaser interface {
+	// ReleaseDevice frees the device of automation residue (terminates the
+	// WDA runner on real iOS devices). No-op for simulators and platforms
+	// without the overlay. Best-effort.
+	ReleaseDevice(ctx context.Context, d Device) error
+}

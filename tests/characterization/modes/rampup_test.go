@@ -154,6 +154,11 @@ func runRampup(t *testing.T, p runner.Platform) {
 			if err := launcher.Close(); err != nil {
 				t.Logf("close launcher: %v", err)
 			}
+			// #627: opt-in device release (CHAR_RELEASE_DEVICE=1) — clears
+			// the iOS "Automation Running" overlay by terminating WDA.
+			if err := sess.ReleaseDevice(cleanCtx); err != nil {
+				t.Logf("release device: %v", err)
+			}
 		})
 
 	case conservativeStart:
@@ -204,6 +209,11 @@ func runRampup(t *testing.T, p runner.Platform) {
 			}
 			if err := launcher.Close(); err != nil {
 				t.Logf("close launcher: %v", err)
+			}
+			// #627: opt-in device release (CHAR_RELEASE_DEVICE=1) — clears
+			// the iOS "Automation Running" overlay by terminating WDA.
+			if err := sess.ReleaseDevice(cleanCtx); err != nil {
+				t.Logf("release device: %v", err)
 			}
 		})
 

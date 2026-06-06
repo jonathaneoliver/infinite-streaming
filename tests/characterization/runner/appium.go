@@ -268,6 +268,32 @@ func (a *AppiumLauncher) pressBack(ctx context.Context, sessID string) error {
 	return err
 }
 
+// wdaRunnerExecutableMatch is a substring of the WebDriverAgent runner's
+// executable URL on a real device. The runner ships as
+// WebDriverAgentRunner-Runner.app, so its on-device executable name shares
+// this prefix — unlike its bundle-id leaf ("xctrunner"), which is why the
+// bundle-leaf lookup in devicectlTerminate can't find it.
+const wdaRunnerExecutableMatch = "WebDriverAgent"
+
+// ReleaseDevice fully releases a real iOS device after a run by
+// terminating the WebDriverAgent runner, so iOS's system "Automation
+// Running" overlay clears. Appium leaves WDA resident between sessions
+// (useNewWDA=false) for fast reuse, so ending the WebDriver session does
+// NOT stop WDA — we shell to devicectl, the same tool the CLI launcher
+// uses for real devices. No-op for simulators (no overlay, and devicectl
+// can't target them) and non-iOS platforms; best-effort, since
+// terminating a WDA that isn't running is itself a no-op. Satisfies
+// runner.DeviceReleaser. Gated opt-in by the caller (Session.ReleaseDevice
+// reads CHAR_RELEASE_DEVICE) so it never kills WDA mid-suite.
+func (a *AppiumLauncher) ReleaseDevice(ctx context.Context, d Device) error {
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad:
+		return devicectlTerminateMatching(ctx, d.UDID, wdaRunnerExecutableMatch)
+	default:
+		return nil
+	}
+}
+
 // Screenshot saves a PNG of the device's current screen to path.
 // Returns the path on success. Intended to be called from a sweep
 // runner to attach visual context to interesting steps.

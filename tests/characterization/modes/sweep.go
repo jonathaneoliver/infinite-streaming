@@ -95,6 +95,12 @@ func OpenSession(t *testing.T, platform runner.Platform) *runner.Session {
 		if err := launcher.Close(); err != nil {
 			t.Logf("close launcher: %v", err)
 		}
+		// #627: optionally release the device (terminate WDA so the iOS
+		// "Automation Running" overlay clears). Opt-in via
+		// CHAR_RELEASE_DEVICE=1; default keeps WDA resident for fast reuse.
+		if err := sess.ReleaseDevice(ctx); err != nil {
+			t.Logf("release device: %v", err)
+		}
 	})
 	return sess
 }

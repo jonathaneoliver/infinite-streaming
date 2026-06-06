@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -62,6 +63,24 @@ func (s *Session) CloseViaUI(ctx context.Context) error {
 		return nil
 	}
 	return c.ClosePlaybackViaUI(ctx, s.Device)
+}
+
+// ReleaseDevice fully releases the device after a run — e.g. terminating
+// WebDriverAgent so iOS's "Automation Running" overlay clears. Opt-in:
+// runs only when CHAR_RELEASE_DEVICE=1, because Appium keeps WDA resident
+// between sessions by design for fast reuse across back-to-back tests, so
+// killing it costs a WDA (re)launch on the next run. No-op for launchers
+// that can't release the device (CLI / Manual). Call in a test's cleanup
+// AFTER Launcher.Close().
+func (s *Session) ReleaseDevice(ctx context.Context) error {
+	if s == nil || os.Getenv("CHAR_RELEASE_DEVICE") != "1" {
+		return nil
+	}
+	r, ok := s.Launcher.(DeviceReleaser)
+	if !ok {
+		return nil
+	}
+	return r.ReleaseDevice(ctx, s.Device)
 }
 
 // WaitForHeartbeat polls the harness until the bound player reports
