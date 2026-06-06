@@ -148,6 +148,13 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		    playback_status, playback_reason,
 		    device_class, device_model, player_tech,
 		    app_version, os_version_major, os_version_minor,
+		    -- #634: tie-break key for the outcome argMaxes below. A
+		    -- play-terminal row that shares its ts with the final
+		    -- heartbeat (e.g. a pre-fix proxy-synthesized play_end,
+		    -- which cloned the dead session's event_time) must still
+		    -- win, or playback_status flaps between in_progress and
+		    -- the terminal value from one read to the next.
+		    last_event IN ('play_end', 'session_end') AS is_terminal_row,
 		    lagInFrame(video_bitrate_mbps, 1, video_bitrate_mbps) OVER w AS prev_bitrate,
 		    lagInFrame(video_resolution,   1, video_resolution)   OVER w AS prev_resolution
 		  FROM %s.%s
@@ -248,11 +255,13 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		    argMax(stalling_time_ms, ts) AS stalling_time_ms,
 		    -- #550 Phase 2: outcome (argMax on terminal row; in_progress
 		    -- mid-play rows return last value seen, which is what we
-		    -- want for live sessions).
-		    argMax(playback_status, ts) AS playback_status,
-		    argMax(playback_reason, ts) AS playback_reason,
-		    argMax(terminal_error_code, ts)   AS terminal_error_code,
-		    argMax(terminal_error_domain, ts) AS terminal_error_domain,
+		    -- want for live sessions). #634: keyed on (ts, is_terminal_row)
+		    -- so a terminal row at the same ts as the final heartbeat
+		    -- still wins deterministically instead of flapping.
+		    argMax(playback_status, (ts, is_terminal_row)) AS playback_status,
+		    argMax(playback_reason, (ts, is_terminal_row)) AS playback_reason,
+		    argMax(terminal_error_code, (ts, is_terminal_row))   AS terminal_error_code,
+		    argMax(terminal_error_domain, (ts, is_terminal_row)) AS terminal_error_domain,
 		    argMax(error_code, ts)   AS last_error_code,
 		    argMax(error_domain, ts) AS last_error_domain,
 		    max(error_count) AS error_count,
