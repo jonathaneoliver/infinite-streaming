@@ -1243,11 +1243,20 @@ final class PlayerViewModel: ObservableObject {
         if alreadyTerminal {
             NSLog("[endSession] terminal already=\(diagnostics.terminalStatus ?? "?") — re-emitting play_end for delivery")
         }
+        // #635 — build the payload + capture the base URL SYNCHRONOUSLY,
+        // same pattern as reload(). The back-tap calls endSessionForUserBack()
+        // and then navigates immediately; AppRoot's route onChange clears
+        // currentURL before a queued Task would run, and the event-name
+        // send path's `guard currentURL != nil` silently dropped the
+        // terminal PATCH — every UI-stopped play dangled `in_progress`
+        // until the proxy's #556 inactive_timeout synthesizer closed it.
+        // #554: the play-terminal event is `play_end` (renamed from
+        // `session_end`). The forwarder still classifies both names,
+        // so historical rows keep working.
+        let endPayload = buildMetricsPayload(event: "play_end", at: Date())
+        guard let baseURL = metricsBaseURL() else { return }
         Task { [weak self] in
-            // #554: the play-terminal event is `play_end` (renamed from
-            // `session_end`). The forwarder still classifies both names,
-            // so historical rows keep working.
-            await self?.sendPlayerMetrics(event: "play_end")
+            await self?.sendPlayerMetrics(payload: endPayload, via: baseURL)
         }
     }
 
@@ -2025,6 +2034,20 @@ extension PlayerViewModel {
     fileprivate func sendPlayerMetrics(payload: [String: Any]) async {
         guard currentURL != nil else { return }
         guard let baseURL = metricsBaseURL() else { return }
+        await sendPlayerMetrics(payload: payload, via: baseURL)
+    }
+
+    /// Teardown-proof variant (#635) — used by endSession(), whose send
+    /// races route teardown: the back-tap navigates immediately and
+    /// AppRoot's route onChange clears `currentURL` before the queued
+    /// Task runs, so the `guard currentURL != nil` above silently
+    /// dropped the terminal play_end. Callers capture the base URL
+    /// synchronously at the terminal moment and hand it in; this path
+    /// deliberately does NOT re-check `currentURL` — a terminal row
+    /// must still go out when the player is already torn down. The
+    /// FIFO chain is shared with the guarded path so terminal rows
+    /// can't overtake in-flight heartbeats.
+    fileprivate func sendPlayerMetrics(payload: [String: Any], via baseURL: URL) async {
         if payload.isEmpty { return }
         logMetricsEmit(payload: payload)
         // CRITICAL: read-tail / set-tail must be synchronous (no
