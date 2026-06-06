@@ -40,8 +40,10 @@ const (
 	// DefaultTopHeadroomPct prepends a starting rung at the top variant's
 	// peak × (1 + this/100), above the +bump top anchor, so a sweep settles
 	// the player comfortably at the top variant before constraining it.
-	// Over the RAW top peak, not compounded with the bump.
-	DefaultTopHeadroomPct = 25.0
+	// Over the RAW top peak, not compounded with the bump. 50% gives
+	// AVPlayer's conservative upshift enough room to actually reach the top
+	// (4K) rung — at +25% it lagged on the rung below until the apex.
+	DefaultTopHeadroomPct = 50.0
 )
 
 // Variant is one rung of a player's published manifest ladder, reduced to
