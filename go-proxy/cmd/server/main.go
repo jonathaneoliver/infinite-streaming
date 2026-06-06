@@ -2705,6 +2705,7 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			target[resetKey] = normalizeRequestFailureType(resetType)
 		}
 	}
+	resetFailureWindowState(payload, target)
 	targetPort = getString(target, "x_forwarded_port")
 	if transportUpdated {
 		typeRaw := getString(target, "transport_failure_type")
@@ -2849,6 +2850,7 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 					session[resetKey] = normalizeRequestFailureType(resetType)
 				}
 			}
+			resetFailureWindowState(payload, session)
 			if transportUpdated && transportSnapshot != nil {
 				for key, value := range transportSnapshot {
 					session[key] = value
@@ -7442,6 +7444,36 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 		return nil, false
 	}
 	return cloneSession(merged), true
+}
+
+// resetFailureWindowState clears the persisted per-surface failure
+// window cursor (`<prefix>_failure_at` / `<prefix>_failure_recover_at`)
+// for every surface whose fault CONFIG the incoming settings payload
+// touches (#643). The cursor is the engine's "where in the
+// fault/recover cycle am I" state, written back by the per-request
+// handlers; without this reset a re-arm RESUMES the previous arm's
+// half-consumed window — e.g. arm `--consecutive 10`, consume 4, re-arm
+// ×10 → only 6 more faults fire before the OLD recover point is hit and
+// the rule silently goes quiet. The next matching request after a
+// config change must always open a fresh window.
+//
+// Covers the `all` surface too — the normalization loops above it
+// historically listed only segment/manifest/master_manifest.
+func resetFailureWindowState(payload map[string]interface{}, target SessionData) {
+	for _, prefix := range []string{"segment", "manifest", "master_manifest", "all"} {
+		touched := false
+		for _, suffix := range []string{"_failure_type", "_failure_frequency", "_consecutive_failures", "_failure_mode"} {
+			if _, ok := payload[prefix+suffix]; ok {
+				touched = true
+				break
+			}
+		}
+		if !touched {
+			continue
+		}
+		delete(target, prefix+"_failure_at")
+		delete(target, prefix+"_failure_recover_at")
+	}
 }
 
 // resetPlayScopedServerCounters zeroes the proxy-ACCUMULATED counters that
