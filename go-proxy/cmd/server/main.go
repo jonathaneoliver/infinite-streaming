@@ -5168,6 +5168,14 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if entry.AttemptID == 0 {
 			entry.AttemptID = attemptID
 		}
+		// #613: TotalMs is provisionally set at upstream-headers-complete
+		// (~TTFB) by the fetch helper, before the body transfer happens.
+		// Lift it to TTFB+Transfer here — the single chokepoint every
+		// logged row passes through — so no response-serving path can ship
+		// a row with the pre-transfer value. Idempotent (max), so paths
+		// that already set TotalMs ≥ TTFB+Transfer (e.g. fault rows) are
+		// untouched.
+		mergeTotalTiming(&entry)
 		a.addNetworkLogEntry(sessionID, entry)
 	}
 	filename := strings.TrimPrefix(r.URL.Path, "/")
@@ -5718,7 +5726,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				log.Printf("segment_corrupted write error session_id=%s err=%v", getString(sessionData, "session_id"), copyErr)
 			}
 			netEntry.TransferMs = transferMs
-			mergeTotalTiming(netEntry)
+			// TotalMs lift now happens uniformly in the logEntry closure (#613).
 			actionTaken = "segment_corrupted_zero_fill"
 			bumpFaultCounter(sessionData, failureType)
 			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
