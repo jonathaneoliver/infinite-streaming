@@ -35,7 +35,10 @@ func TestEventSwitchUnchanged(t *testing.T) {
 		{"rate_shift_up", nil, []string{"info=shift_up"}},
 		{"rate_shift_down", nil, []string{"info=shift_down"}},
 		{"video_first_frame", nil, []string{"info=first_frame"}},
-		{"video_start_time", nil, []string{"info=playback_start"}},
+		// #622 — video_start_time no longer derives a label (its old
+		// `playback_start` relabel duplicated first_frame and read like
+		// a play boundary). The metric field is unaffected.
+		{"video_start_time", nil, nil},
 		{"play_start", nil, []string{"info=play_start"}}, // #603 play-open boundary
 		// warning — degraded but functioning
 		{"timejump", nil, []string{"warning=timejump"}},
