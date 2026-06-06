@@ -1271,7 +1271,15 @@ final class PlayerViewModel: ObservableObject {
         // immutable, so the later reset can't retroactively blank it.
         diagnostics.markTerminal(status: "user_stopped", reason: "reloaded")
         let endPayload = buildMetricsPayload(event: "play_end", at: Date())
-        Task { [weak self] in await self?.sendPlayerMetrics(payload: endPayload) }
+        // #635 — play-boundary events go out via the teardown-proof path.
+        // The guarded send only survives here because buildURLAndLoad()
+        // below happens to re-set currentURL synchronously; its early
+        // returns (no activeServer / empty selectedContent) would leave
+        // currentURL nil and silently drop the boundary rows.
+        let reloadBaseURL = metricsBaseURL()
+        if let reloadBaseURL {
+            Task { [weak self] in await self?.sendPlayerMetrics(payload: endPayload, via: reloadBaseURL) }
+        }
 
         Task { [weak self] in
             await self?.requestHARSnapshot(reason: "user_reload", force: true)
@@ -1300,7 +1308,9 @@ final class PlayerViewModel: ObservableObject {
         // for mid-session streaming recovery (see the retry / auto-recovery
         // path). play_start carries the new play_id just minted above.
         let startPayload = buildMetricsPayload(event: "play_start", at: Date())
-        Task { [weak self] in await self?.sendPlayerMetrics(payload: startPayload) }
+        if let reloadBaseURL {
+            Task { [weak self] in await self?.sendPlayerMetrics(payload: startPayload, via: reloadBaseURL) }
+        }
         currentURL = nil
         buildURLAndLoad()
     }
@@ -2015,16 +2025,12 @@ extension PlayerViewModel {
         playIdLastActivityAt = Date()
     }
 
-    /// Convenience that builds the payload synchronously here and forwards
-    /// to `sendPlayerMetrics(payload:)`. Use this from any callsite that
-    /// has the `at:` instant in hand and doesn't already need to control
-    /// payload composition.
-    fileprivate func sendPlayerMetrics(event: String, at eventAt: Date = Date(), extra: [String: Any] = [:]) async {
-        guard currentURL != nil else { return }
-        guard metricsBaseURL() != nil else { return }
-        let payload = buildMetricsPayload(event: event, at: eventAt, extra: extra)
-        await sendPlayerMetrics(payload: payload)
-    }
+    // #635 — the old `sendPlayerMetrics(event:at:extra:)` convenience
+    // (build-the-payload-inside-the-call) was removed: its lazy build +
+    // currentURL guard is exactly the combination that silently dropped
+    // the back-tap play_end. Build the payload synchronously at the
+    // firing context via buildMetricsPayload(event:at:extra:) and hand
+    // the immutable dict to one of the senders below.
 
     /// Snapshot-at-firing-context entry point. Callers build the payload
     /// at the moment the underlying event fires (so `event_time`,
