@@ -140,13 +140,24 @@ func runRampup(t *testing.T, p runner.Platform) {
 		}
 		sess = s
 		t.Cleanup(func() {
-			cleanCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+			cleanCtx, c := context.WithTimeout(context.Background(), 15*time.Second)
 			defer c()
 			if err := sess.ClearShape(cleanCtx); err != nil {
 				t.Logf("clear shape: %v", err)
 			}
+			// #627: close the play via the app's own UI so it emits a real
+			// client play_end (cleanly ended in the sessions view), before
+			// Close() tears the Appium session down.
+			if err := sess.CloseViaUI(cleanCtx); err != nil {
+				t.Logf("close playback via UI: %v", err)
+			}
 			if err := launcher.Close(); err != nil {
 				t.Logf("close launcher: %v", err)
+			}
+			// #627: opt-in device release (CHAR_RELEASE_DEVICE=1) — clears
+			// the iOS "Automation Running" overlay by terminating WDA.
+			if err := sess.ReleaseDevice(cleanCtx); err != nil {
+				t.Logf("release device: %v", err)
 			}
 		})
 
@@ -185,13 +196,24 @@ func runRampup(t *testing.T, p runner.Platform) {
 		}
 		sess = s
 		t.Cleanup(func() {
-			cleanCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+			cleanCtx, c := context.WithTimeout(context.Background(), 15*time.Second)
 			defer c()
 			if err := sess.ClearShape(cleanCtx); err != nil {
 				t.Logf("clear shape: %v", err)
 			}
+			// #627: close the play via the app's own UI so it emits a real
+			// client play_end (cleanly ended in the sessions view), before
+			// Close() tears the Appium session down.
+			if err := sess.CloseViaUI(cleanCtx); err != nil {
+				t.Logf("close playback via UI: %v", err)
+			}
 			if err := launcher.Close(); err != nil {
 				t.Logf("close launcher: %v", err)
+			}
+			// #627: opt-in device release (CHAR_RELEASE_DEVICE=1) — clears
+			// the iOS "Automation Running" overlay by terminating WDA.
+			if err := sess.ReleaseDevice(cleanCtx); err != nil {
+				t.Logf("release device: %v", err)
 			}
 		})
 
