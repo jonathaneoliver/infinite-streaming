@@ -1243,11 +1243,20 @@ final class PlayerViewModel: ObservableObject {
         if alreadyTerminal {
             NSLog("[endSession] terminal already=\(diagnostics.terminalStatus ?? "?") — re-emitting play_end for delivery")
         }
+        // #635 — build the payload + capture the base URL SYNCHRONOUSLY,
+        // same pattern as reload(). The back-tap calls endSessionForUserBack()
+        // and then navigates immediately; AppRoot's route onChange clears
+        // currentURL before a queued Task would run, and the event-name
+        // send path's `guard currentURL != nil` silently dropped the
+        // terminal PATCH — every UI-stopped play dangled `in_progress`
+        // until the proxy's #556 inactive_timeout synthesizer closed it.
+        // #554: the play-terminal event is `play_end` (renamed from
+        // `session_end`). The forwarder still classifies both names,
+        // so historical rows keep working.
+        let endPayload = buildMetricsPayload(event: "play_end", at: Date())
+        guard let baseURL = metricsBaseURL() else { return }
         Task { [weak self] in
-            // #554: the play-terminal event is `play_end` (renamed from
-            // `session_end`). The forwarder still classifies both names,
-            // so historical rows keep working.
-            await self?.sendPlayerMetrics(event: "play_end")
+            await self?.sendPlayerMetrics(payload: endPayload, via: baseURL)
         }
     }
 
@@ -1262,7 +1271,15 @@ final class PlayerViewModel: ObservableObject {
         // immutable, so the later reset can't retroactively blank it.
         diagnostics.markTerminal(status: "user_stopped", reason: "reloaded")
         let endPayload = buildMetricsPayload(event: "play_end", at: Date())
-        Task { [weak self] in await self?.sendPlayerMetrics(payload: endPayload) }
+        // #635 — play-boundary events go out via the teardown-proof path.
+        // The guarded send only survives here because buildURLAndLoad()
+        // below happens to re-set currentURL synchronously; its early
+        // returns (no activeServer / empty selectedContent) would leave
+        // currentURL nil and silently drop the boundary rows.
+        let reloadBaseURL = metricsBaseURL()
+        if let reloadBaseURL {
+            Task { [weak self] in await self?.sendPlayerMetrics(payload: endPayload, via: reloadBaseURL) }
+        }
 
         Task { [weak self] in
             await self?.requestHARSnapshot(reason: "user_reload", force: true)
@@ -1291,7 +1308,9 @@ final class PlayerViewModel: ObservableObject {
         // for mid-session streaming recovery (see the retry / auto-recovery
         // path). play_start carries the new play_id just minted above.
         let startPayload = buildMetricsPayload(event: "play_start", at: Date())
-        Task { [weak self] in await self?.sendPlayerMetrics(payload: startPayload) }
+        if let reloadBaseURL {
+            Task { [weak self] in await self?.sendPlayerMetrics(payload: startPayload, via: reloadBaseURL) }
+        }
         currentURL = nil
         buildURLAndLoad()
     }
@@ -2006,16 +2025,12 @@ extension PlayerViewModel {
         playIdLastActivityAt = Date()
     }
 
-    /// Convenience that builds the payload synchronously here and forwards
-    /// to `sendPlayerMetrics(payload:)`. Use this from any callsite that
-    /// has the `at:` instant in hand and doesn't already need to control
-    /// payload composition.
-    fileprivate func sendPlayerMetrics(event: String, at eventAt: Date = Date(), extra: [String: Any] = [:]) async {
-        guard currentURL != nil else { return }
-        guard metricsBaseURL() != nil else { return }
-        let payload = buildMetricsPayload(event: event, at: eventAt, extra: extra)
-        await sendPlayerMetrics(payload: payload)
-    }
+    // #635 — the old `sendPlayerMetrics(event:at:extra:)` convenience
+    // (build-the-payload-inside-the-call) was removed: its lazy build +
+    // currentURL guard is exactly the combination that silently dropped
+    // the back-tap play_end. Build the payload synchronously at the
+    // firing context via buildMetricsPayload(event:at:extra:) and hand
+    // the immutable dict to one of the senders below.
 
     /// Snapshot-at-firing-context entry point. Callers build the payload
     /// at the moment the underlying event fires (so `event_time`,
@@ -2025,6 +2040,20 @@ extension PlayerViewModel {
     fileprivate func sendPlayerMetrics(payload: [String: Any]) async {
         guard currentURL != nil else { return }
         guard let baseURL = metricsBaseURL() else { return }
+        await sendPlayerMetrics(payload: payload, via: baseURL)
+    }
+
+    /// Teardown-proof variant (#635) — used by endSession(), whose send
+    /// races route teardown: the back-tap navigates immediately and
+    /// AppRoot's route onChange clears `currentURL` before the queued
+    /// Task runs, so the `guard currentURL != nil` above silently
+    /// dropped the terminal play_end. Callers capture the base URL
+    /// synchronously at the terminal moment and hand it in; this path
+    /// deliberately does NOT re-check `currentURL` — a terminal row
+    /// must still go out when the player is already torn down. The
+    /// FIFO chain is shared with the guarded path so terminal rows
+    /// can't overtake in-flight heartbeats.
+    fileprivate func sendPlayerMetrics(payload: [String: Any], via baseURL: URL) async {
         if payload.isEmpty { return }
         logMetricsEmit(payload: payload)
         // CRITICAL: read-tail / set-tail must be synchronous (no
