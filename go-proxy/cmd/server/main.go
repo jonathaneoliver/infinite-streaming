@@ -1030,6 +1030,20 @@ func terminalFrameForSession(session SessionData, reason string) (SessionData, b
 	frame := cloneSession(session)
 	frame["player_metrics_last_event"] = "play_end"
 	frame["player_metrics_trigger_type"] = "play_end"
+	// #634 — the cloned snapshot still carries the dead session's FINAL
+	// HEARTBEAT event_time. Emitting the terminal frame at that exact
+	// instant ties with the real heartbeat row in session_events (the
+	// forwarder anchors `ts` to event_time), and the plays aggregate's
+	// argMax(playback_status, ts) then breaks the tie arbitrarily —
+	// playback_status flaps between in_progress and user_stopped from
+	// one read to the next. Stamp the synthetic row 1ms after the
+	// snapshot so it strictly wins ordering, without distorting the
+	// play's timeline by the reap delay (~60s). Unparseable/missing
+	// event_time is left alone — the merge chokepoint and the forwarder
+	// fallback already stamp wall clock in that case.
+	if t, ok := parseEventTime(getString(session, "player_metrics_event_time")); ok {
+		frame["player_metrics_event_time"] = t.Add(time.Millisecond).UTC().Format(time.RFC3339Nano)
+	}
 	if status := getString(session, "player_metrics_playback_status"); status == "" || status == "in_progress" {
 		if getInt(session, "player_metrics_video_first_frame_time_ms") > 0 {
 			frame["player_metrics_playback_status"] = "user_stopped"
