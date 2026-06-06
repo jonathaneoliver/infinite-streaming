@@ -33,7 +33,7 @@ Pattern mode (generates a step list from the player's current variants):
                      gaps — raise --max-step to coarsen + shorten the pattern
                      (a pyramid over a dense ladder can run ~13 min/cycle)
   --top-headroom PCT start the ladder this %% over the top variant's peak
-                     (default 25; adds a headroom start rung above the
+                     (default 50; adds a headroom start rung above the
                      top anchor so playback settles before constraining;
                      0 disables it)
   --clear-pattern    stop any running pattern (back to slider rate)
@@ -73,7 +73,7 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	stepSeconds := fs.Int("step-seconds", 12, "per-step duration: 6|12|18|24")
 	margin := fs.Int("margin", 5, "headroom %% above variant rate: 0|5|10|25|50 (5 covers protocol overhead)")
 	maxStep := fs.Float64("max-step", ladder.DefaultMaxStep, "max ratio between consecutive caps before a geometric fill is inserted (default 1.15; raise to coarsen + shorten the pattern)")
-	topHeadroom := fs.Float64("top-headroom", ladder.DefaultTopHeadroomPct, "start the ladder this %% over the top variant's peak (default 25; 0 disables the headroom start rung)")
+	topHeadroom := fs.Float64("top-headroom", ladder.DefaultTopHeadroomPct, "start the ladder this %% over the top variant's peak (default 50; 0 disables the headroom start rung)")
 	clearPattern := fs.Bool("clear-pattern", false, "stop any running pattern")
 	showPattern := fs.Bool("show-pattern", false, "print current pattern, don't modify")
 	clear := fs.Bool("clear", false, "send {shape:null}")

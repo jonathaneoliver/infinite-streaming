@@ -64,8 +64,10 @@ const maxStep = ref<number>(DEFAULT_MAX_STEP);
 
 // #551 — start the ladder this % over the top variant's peak (a headroom
 // start rung above the +bump top anchor) so playback settles at the top
-// variant before the pattern constrains it. Mirrors the Go default.
-const DEFAULT_TOP_HEADROOM = 25;
+// variant before the pattern constrains it. Mirrors the Go default
+// (ladder.DefaultTopHeadroomPct); 50% gives conservative upshift room to
+// reach the top rung.
+const DEFAULT_TOP_HEADROOM = 50;
 
 interface LadderVariant {
   avgBps: number;

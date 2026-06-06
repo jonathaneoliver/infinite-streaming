@@ -118,16 +118,16 @@ func TestStandardLadderTopHeadroom(t *testing.T) {
 	base := StandardLadder(tearsH264, DefaultBumpPct, DefaultMaxStep, 0)
 	got := StandardLadder(tearsH264, DefaultBumpPct, DefaultMaxStep, DefaultTopHeadroomPct)
 	// Headroom adds a start rung above the +bump top anchor, plus the
-	// geometric fill(s) bridging the 1.25×→1.05× gap.
+	// geometric fill(s) bridging the 1.50×→1.05× gap.
 	if len(got) <= len(base) {
 		t.Fatalf("headroom ladder len %d should exceed base %d", len(got), len(base))
 	}
-	// Top rung = top peak (29.584915 Mbps) × 1.25 = 36.981.
+	// Top rung = top peak (29.584915 Mbps) × 1.50 = 44.377.
 	if got[0].Kind != "headroom" {
 		t.Errorf("top rung kind = %q, want headroom", got[0].Kind)
 	}
-	if got[0].Mbps < 36.97 || got[0].Mbps > 36.99 {
-		t.Errorf("headroom cap = %.3f, want ~36.981 (top peak × 1.25)", got[0].Mbps)
+	if got[0].Mbps < 44.36 || got[0].Mbps > 44.39 {
+		t.Errorf("headroom cap = %.3f, want ~44.377 (top peak × 1.50)", got[0].Mbps)
 	}
 	if got[0].Variant != "3840x2160" {
 		t.Errorf("headroom rung variant = %q, want 3840x2160", got[0].Variant)

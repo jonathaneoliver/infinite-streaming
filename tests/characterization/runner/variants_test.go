@@ -98,8 +98,8 @@ func TestStandardLadderRatesEnvBump(t *testing.T) {
 }
 
 func TestStandardLadderRatesTopHeadroom(t *testing.T) {
-	// Default 25% top-headroom: the top rung is the top variant's peak
-	// × 1.25, tagged source=headroom, above the +5% top anchor.
+	// Default 50% top-headroom: the top rung is the top variant's peak
+	// × 1.50, tagged source=headroom, above the +5% top anchor.
 	rec := mkPlayerWithVariants(t, []variantSeed{
 		{res: "640x360", avg: 724620, peak: 998009, url: "p.m3u8"},
 		{res: "3840x2160", avg: 10845181, peak: 15363854, url: "q.m3u8"},
@@ -112,9 +112,9 @@ func TestStandardLadderRatesTopHeadroom(t *testing.T) {
 	if top.Source != "headroom" {
 		t.Errorf("top rung source=%q want headroom", top.Source)
 	}
-	// 15363854 × 1.25 / 1e6 = 19.205.
-	if top.CapMbps < 19.19 || top.CapMbps > 19.22 {
-		t.Errorf("headroom cap=%.3f want ~19.205 (top peak × 1.25)", top.CapMbps)
+	// 15363854 × 1.50 / 1e6 = 23.046.
+	if top.CapMbps < 23.03 || top.CapMbps > 23.06 {
+		t.Errorf("headroom cap=%.3f want ~23.046 (top peak × 1.50)", top.CapMbps)
 	}
 	if top.Resolution != "3840x2160" {
 		t.Errorf("headroom rung attributed to %q, want 3840x2160", top.Resolution)
