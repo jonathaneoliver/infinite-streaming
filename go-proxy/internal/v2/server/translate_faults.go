@@ -106,6 +106,14 @@ func clearV1FaultSurfaces(s map[string]any) {
 		s[surface+"_failure_units"] = "requests"
 		s[surface+"_consecutive_units"] = "requests"
 		s[surface+"_frequency_units"] = "seconds"
+		// #643 — also clear the engine's persisted window cursor, or a
+		// re-armed rule RESUMES the previous arm's half-consumed
+		// fault/recover window and silently under-delivers. This is the
+		// v2 twin of resetFailureWindowState on the v1 PATCH path
+		// (cmd/server/main.go); the harness CLI arms faults through
+		// HERE, which is why the v1-side fix alone didn't take.
+		delete(s, surface+"_failure_at")
+		delete(s, surface+"_failure_recover_at")
 	}
 }
 
