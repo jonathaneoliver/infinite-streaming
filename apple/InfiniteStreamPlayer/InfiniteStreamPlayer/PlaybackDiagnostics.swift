@@ -544,10 +544,15 @@ final class PlaybackDiagnostics: ObservableObject {
         terminalErrorCode = 0
         terminalErrorDomain = ""
         terminalErrorDetails = ""
-        // Fresh play → restart the EBVS clock. Nil now so reset()'s
-        // nil-coalesce sets it to the new Date() at this fresh play
-        // boundary, not the prior play's start.
-        playStartAt = nil
+        // Fresh play → restart the EBVS clock AT THIS BOUNDARY — the
+        // moment the user committed to the new play — not at
+        // startPlayback's later reset(). Under a slow network the master
+        // preflight alone can outlast the EBVS threshold; a back-out
+        // during that window must classify abandoned_start, and with a
+        // nil clock endSessionForUserBack's `let startedAt` guard fell
+        // through to user_stopped (#646 verification fallout). reset()'s
+        // nil-coalesce in startPlayback now keeps this boundary stamp.
+        playStartAt = Date()
     }
 
     /// Add elapsed-since-last-transition to the *prior* state's

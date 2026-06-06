@@ -215,6 +215,17 @@ final class PlayerViewModel: ObservableObject {
     private var codecRetries = 0
     private let maxCodecRetries = 3
     private var statusObserver: NSKeyValueObservation?
+    /// #646 — per-item KVO on AVPlayerItem.status. `.failed` is the
+    /// canonical "item could not load" signal (404'd master, DNS, …);
+    /// nothing else fires for load-time failures, so without this
+    /// observer `start_failure` is unreachable. Replaced per item in
+    /// startPlayback (reassignment invalidates the old observation).
+    private var itemStatusObserver: NSKeyValueObservation?
+    /// One fatal escalation per item — a mid-stream failure can fire
+    /// BOTH AVPlayerItemFailedToPlayToEndTime and the .failed status
+    /// flip; without the latch the second arrival would double-schedule
+    /// auto-recovery. Reset in startPlayback alongside the observer.
+    private var itemFatalHandled = false
 
     // MARK: - Diagnostics + metrics pipeline (legacy iOS analytics)
     //
@@ -922,6 +933,22 @@ final class PlayerViewModel: ObservableObject {
         // (issue #486). Rebuilt per-item so the streams stay bound to the
         // playerItem that AVFoundation is actually observing.
         attachAVMetrics(to: item)
+        // #646 — observe the item's own status. `.failed` is the ONLY
+        // signal a load-time failure produces (a 404'd master never
+        // starts playing, so AVPlayerItemFailedToPlayToEndTime can't
+        // fire) — without this, such plays emit `error` events but no
+        // terminal row and `start_failure` is unreachable. Routes
+        // through handlePlayerError so the autoRecovery branch and the
+        // start_failure / mid_stream_failure classification stay in one
+        // place. Reassignment invalidates the previous item's observer.
+        itemFatalHandled = false
+        itemStatusObserver = item.observe(\.status, options: [.new]) { [weak self] observedItem, _ in
+            guard observedItem.status == .failed else { return }
+            let err = observedItem.error
+            Task { @MainActor [weak self] in
+                self?.handlePlayerError(err)
+            }
+        }
         player.isMuted = isMuted
         player.automaticallyWaitsToMinimizeStalling = true
         player.play()
@@ -1475,6 +1502,13 @@ final class PlayerViewModel: ObservableObject {
     }
 
     private func handlePlayerError(_ error: Error?) {
+        // #646 — one fatal escalation per item: a mid-stream failure can
+        // arrive via BOTH the FailedToPlayToEndTime notification and the
+        // item-status .failed flip; the second arrival would otherwise
+        // double-schedule auto-recovery (or re-run the terminal path).
+        // The latch resets in startPlayback with each new item.
+        if itemFatalHandled { return }
+        itemFatalHandled = true
         let message = error?.localizedDescription ?? "playback error"
         // Codec errors on Apple devices are extremely rare (the chips
         // hardware-decode H.264 / HEVC / AV1 with plenty of headroom),
