@@ -101,4 +101,47 @@ func TestTerminalFrameForSession(t *testing.T) {
 			t.Fatalf("source mutated: last_event = %q, want playing", got)
 		}
 	})
+
+	// #634 — the frame must NOT reuse the snapshot's event_time verbatim:
+	// that ties with the final heartbeat row in session_events and the
+	// plays aggregate's argMax(playback_status, ts) flaps. The synthetic
+	// terminal row is stamped 1ms after the snapshot.
+	t.Run("event_time is bumped 1ms past the snapshot's", func(t *testing.T) {
+		src := SessionData{
+			"player_metrics_last_event":                "heartbeat",
+			"player_metrics_playback_status":           "in_progress",
+			"player_metrics_video_first_frame_time_ms": 1200,
+			"player_metrics_event_time":                "2026-06-06T16:46:38.903Z",
+		}
+		frame, ok := terminalFrameForSession(src, reason)
+		if !ok {
+			t.Fatal("expected a frame")
+		}
+		got, gok := parseEventTime(getString(frame, "player_metrics_event_time"))
+		if !gok {
+			t.Fatalf("frame event_time unparseable: %q", getString(frame, "player_metrics_event_time"))
+		}
+		want, _ := parseEventTime("2026-06-06T16:46:38.904Z")
+		if !got.Equal(want) {
+			t.Fatalf("frame event_time = %v, want %v (snapshot + 1ms)", got, want)
+		}
+		// Source stays untouched — the bump is on the clone only.
+		if got := getString(src, "player_metrics_event_time"); got != "2026-06-06T16:46:38.903Z" {
+			t.Fatalf("source event_time mutated: %q", got)
+		}
+	})
+
+	t.Run("missing event_time is left for downstream wall-clock stamping", func(t *testing.T) {
+		frame, ok := terminalFrameForSession(SessionData{
+			"player_metrics_last_event":                "heartbeat",
+			"player_metrics_playback_status":           "in_progress",
+			"player_metrics_video_first_frame_time_ms": 1200,
+		}, reason)
+		if !ok {
+			t.Fatal("expected a frame")
+		}
+		if got := getString(frame, "player_metrics_event_time"); got != "" {
+			t.Fatalf("event_time = %q, want empty (no fabricated stamp)", got)
+		}
+	})
 }

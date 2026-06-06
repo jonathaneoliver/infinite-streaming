@@ -277,8 +277,13 @@ func computeEventLabelsWithState(s *labelState, r *row) []string {
 		ps.downshiftTimes = append(ps.downshiftTimes, now) // #553 qoe_downshift_storm window
 	case "video_first_frame":
 		out = []string{SevInfo + "=first_frame"}
-	case "video_start_time":
-		out = []string{SevInfo + "=playback_start"}
+	// #622 — `video_start_time` no longer derives a label. Its old
+	// `playback_start` relabel marked the VST/first-render moment,
+	// which `first_frame` already covers, and the name read like a
+	// play-level boundary — easily confused with the real play-open
+	// `play_start` (#603/#621). The video_start_time METRIC (startup
+	// latency) is untouched; only the derived label is gone.
+	// Forward-only: historical rows keep their playback_start labels.
 	case "play_start":
 		// #603 — explicit play-open boundary (symmetric to play_end).
 		// Distinct from `restart`, which is mid-session recovery only.

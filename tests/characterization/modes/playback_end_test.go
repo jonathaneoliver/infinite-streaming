@@ -138,9 +138,19 @@ func runPlaybackEnds(t *testing.T, p runner.Platform) {
 			t.Fatalf("arm master_manifest 404: %v", err)
 		}
 		defer sess.ClearFaults(ctx)
+		// Settle: the fault PATCH acks 200 before the rule is active on
+		// the request path (#648) — a reload tapped immediately can slip
+		// its master fetch through unfaulted (~230ms window observed).
+		// Remove once #648 lands.
+		holdContext(ctx, 1*time.Second)
 
+		// Capture the prior play_id BEFORE the tap — the rotation lands
+		// within ~1s (faster since #621 emits play_start from the fresh
+		// branch), so reading it after the tap races: the "prior" id is
+		// already the new one and waitForNewPlayID times out empty.
+		priorID := currentPlayID(ctx, sess)
 		tapReload(t, ctx, sess, appium)
-		preID := waitForNewPlayID(ctx, sess, currentPlayID(ctx, sess), 15*time.Second)
+		preID := waitForNewPlayID(ctx, sess, priorID, 15*time.Second)
 		t.Logf("[StartFailureManifest404] new play_id=%s — waiting for start_failure", preID)
 
 		got, src := awaitTerminalStatus(t, ctx, sess, preID, 60*time.Second, []string{"start_failure"})
@@ -156,21 +166,36 @@ func runPlaybackEnds(t *testing.T, p runner.Platform) {
 		}
 	})
 
-	// — Abandoned start: arm an extreme delay on master_manifest so the
-	// player can't progress past startup, wait EBVS threshold + buffer,
-	// then tap back. The forwarder classifier should mark the play as
-	// abandoned_start (slow_startup) because the user quit before first
-	// frame with elapsed > ebvs_threshold_ms.
+	// — Abandoned start: crawl-rate shape so the player is STILL TRYING
+	// (data trickling, no error) when the user gives up. A request fault
+	// can't model this anymore: every hang/drop variant errors the item,
+	// and since #646 wired AVPlayerItem.status==.failed → start_failure,
+	// an errored item truthfully reports the PLAYER's failure, not the
+	// USER's abandonment. abandoned_start requires a pending-but-alive
+	// startup: the master/playlist (KBs) squeeze through the cap, the
+	// first segment (MBs) crawls, first frame never arrives, and the
+	// back-tap at EBVS+buffer lands while AVPlayer is still buffering —
+	// the client's endSessionForUserBack then classifies
+	// abandoned_start/slow_startup.
 	t.Run("AbandonedStartSlowStartup", func(t *testing.T) {
-		// 30s delay >> EBVS 10s default — long enough that even with
-		// fast retries the master_manifest never resolves in time.
-		if err := armSustainedFault(ctx, sess, "request_body_hang", "master_manifest", 10); err != nil {
-			t.Fatalf("arm master_manifest hang: %v", err)
+		// 0.05 Mbps ≈ 6 KB/s: manifests pass in ~1s, a multi-MB first
+		// segment needs minutes — comfortably outlasting EBVS+buffer.
+		if err := sess.ApplyRate(ctx, 0.05); err != nil {
+			t.Fatalf("apply crawl rate: %v", err)
 		}
-		defer sess.ClearFaults(ctx)
+		defer sess.ClearShape(ctx)
+		// Settle gap: PATCH /shape returns 200 once the proxy accepts the
+		// change, but tc rule installation lands slightly later (same gap
+		// rampup_test works around). Without it the reload's first segment
+		// races through at LAN speed, first frame renders, and the
+		// back-tap correctly classifies user_stopped instead of
+		// abandoned_start (EBVS is pre-first-frame only).
+		holdContext(ctx, 2500*time.Millisecond)
 
+		// Same pre-tap capture as StartFailureManifest404 — see comment there.
+		priorID := currentPlayID(ctx, sess)
 		tapReload(t, ctx, sess, appium)
-		preID := waitForNewPlayID(ctx, sess, currentPlayID(ctx, sess), 15*time.Second)
+		preID := waitForNewPlayID(ctx, sess, priorID, 15*time.Second)
 
 		// Wait EBVS + buffer so the elapsed-since-play-start unambiguously
 		// crosses the threshold from the classifier's perspective.
@@ -196,12 +221,22 @@ func runPlaybackEnds(t *testing.T, p runner.Platform) {
 		}
 
 		// Recover playback for the final sub-test.
-		_ = sess.ClearFaults(ctx)
+		if err := sess.ClearShape(ctx); err != nil {
+			t.Logf("[AbandonedStartSlowStartup] clear shape: %v", err)
+		}
 		if err := appium.TapByAccessibilityID(ctx, sess, "home-continue-watching"); err != nil {
 			t.Logf("[AbandonedStartSlowStartup] re-enter via continue-watching failed: %v", err)
 		}
 		if !waitForState(t, ctx, sess, "playing", recoveryTimeout) {
-			t.Fatalf("post-recovery: player did not reach playing")
+			// A crawl-starved AVPlayer can wedge on its half-open media
+			// socket even after the shape clears (known stale-connection
+			// pattern). Reload replaces the AVPlayer instance entirely —
+			// same recovery an operator performs.
+			t.Logf("[AbandonedStartSlowStartup] still not playing post-shape-clear — reloading for a fresh AVPlayer")
+			tapReload(t, ctx, sess, appium)
+			if !waitForState(t, ctx, sess, "playing", recoveryTimeout) {
+				t.Fatalf("post-recovery: player did not reach playing (even after reload)")
+			}
 		}
 	})
 

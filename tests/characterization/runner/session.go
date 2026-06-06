@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 )
-
 
 // Session is the open-handle the runner hands to characterization tests.
 // One Session = one (device, player_id, harness connection) triple. Tests
@@ -42,6 +42,45 @@ func (s *Session) PlayerState(ctx context.Context) (*PlayerRecord, error) {
 		return nil, errors.New("session: no player bound")
 	}
 	return ShowPlayer(ctx, s.PlayerID)
+}
+
+// CloseViaUI closes the playback screen the way a user would — driving
+// the app's own back navigation through the launcher — so the app emits
+// its real client play_end and the play shows up cleanly ended in the
+// sessions view (#627) rather than dangling in_progress after a hard
+// terminate. Re-entering playback (the next test's launch) rotates the
+// play_id, so back-to-back tests get distinct, bounded plays; multiple
+// play_ids within one test are fine.
+//
+// No-op for launchers that can't drive the UI (CLI / Manual). Call this
+// in a test's cleanup BEFORE Launcher.Close() tears the session down.
+func (s *Session) CloseViaUI(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	c, ok := s.Launcher.(UICloser)
+	if !ok {
+		return nil
+	}
+	return c.ClosePlaybackViaUI(ctx, s.Device)
+}
+
+// ReleaseDevice fully releases the device after a run — e.g. terminating
+// WebDriverAgent so iOS's "Automation Running" overlay clears. Opt-in:
+// runs only when CHAR_RELEASE_DEVICE=1, because Appium keeps WDA resident
+// between sessions by design for fast reuse across back-to-back tests, so
+// killing it costs a WDA (re)launch on the next run. No-op for launchers
+// that can't release the device (CLI / Manual). Call in a test's cleanup
+// AFTER Launcher.Close().
+func (s *Session) ReleaseDevice(ctx context.Context) error {
+	if s == nil || os.Getenv("CHAR_RELEASE_DEVICE") != "1" {
+		return nil
+	}
+	r, ok := s.Launcher.(DeviceReleaser)
+	if !ok {
+		return nil
+	}
+	return r.ReleaseDevice(ctx, s.Device)
 }
 
 // WaitForHeartbeat polls the harness until the bound player reports

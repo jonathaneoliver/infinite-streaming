@@ -1030,6 +1030,20 @@ func terminalFrameForSession(session SessionData, reason string) (SessionData, b
 	frame := cloneSession(session)
 	frame["player_metrics_last_event"] = "play_end"
 	frame["player_metrics_trigger_type"] = "play_end"
+	// #634 — the cloned snapshot still carries the dead session's FINAL
+	// HEARTBEAT event_time. Emitting the terminal frame at that exact
+	// instant ties with the real heartbeat row in session_events (the
+	// forwarder anchors `ts` to event_time), and the plays aggregate's
+	// argMax(playback_status, ts) then breaks the tie arbitrarily —
+	// playback_status flaps between in_progress and user_stopped from
+	// one read to the next. Stamp the synthetic row 1ms after the
+	// snapshot so it strictly wins ordering, without distorting the
+	// play's timeline by the reap delay (~60s). Unparseable/missing
+	// event_time is left alone — the merge chokepoint and the forwarder
+	// fallback already stamp wall clock in that case.
+	if t, ok := parseEventTime(getString(session, "player_metrics_event_time")); ok {
+		frame["player_metrics_event_time"] = t.Add(time.Millisecond).UTC().Format(time.RFC3339Nano)
+	}
 	if status := getString(session, "player_metrics_playback_status"); status == "" || status == "in_progress" {
 		if getInt(session, "player_metrics_video_first_frame_time_ms") > 0 {
 			frame["player_metrics_playback_status"] = "user_stopped"
@@ -2691,6 +2705,7 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			target[resetKey] = normalizeRequestFailureType(resetType)
 		}
 	}
+	resetFailureWindowState(payload, target)
 	targetPort = getString(target, "x_forwarded_port")
 	if transportUpdated {
 		typeRaw := getString(target, "transport_failure_type")
@@ -2835,6 +2850,7 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 					session[resetKey] = normalizeRequestFailureType(resetType)
 				}
 			}
+			resetFailureWindowState(payload, session)
 			if transportUpdated && transportSnapshot != nil {
 				for key, value := range transportSnapshot {
 					session[key] = value
@@ -7428,6 +7444,36 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 		return nil, false
 	}
 	return cloneSession(merged), true
+}
+
+// resetFailureWindowState clears the persisted per-surface failure
+// window cursor (`<prefix>_failure_at` / `<prefix>_failure_recover_at`)
+// for every surface whose fault CONFIG the incoming settings payload
+// touches (#643). The cursor is the engine's "where in the
+// fault/recover cycle am I" state, written back by the per-request
+// handlers; without this reset a re-arm RESUMES the previous arm's
+// half-consumed window — e.g. arm `--consecutive 10`, consume 4, re-arm
+// ×10 → only 6 more faults fire before the OLD recover point is hit and
+// the rule silently goes quiet. The next matching request after a
+// config change must always open a fresh window.
+//
+// Covers the `all` surface too — the normalization loops above it
+// historically listed only segment/manifest/master_manifest.
+func resetFailureWindowState(payload map[string]interface{}, target SessionData) {
+	for _, prefix := range []string{"segment", "manifest", "master_manifest", "all"} {
+		touched := false
+		for _, suffix := range []string{"_failure_type", "_failure_frequency", "_consecutive_failures", "_failure_mode"} {
+			if _, ok := payload[prefix+suffix]; ok {
+				touched = true
+				break
+			}
+		}
+		if !touched {
+			continue
+		}
+		delete(target, prefix+"_failure_at")
+		delete(target, prefix+"_failure_recover_at")
+	}
 }
 
 // resetPlayScopedServerCounters zeroes the proxy-ACCUMULATED counters that

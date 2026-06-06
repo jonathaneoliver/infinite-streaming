@@ -195,7 +195,7 @@ func launchApp(ctx context.Context, d Device, bundleID string) error {
 type devicectlListResult struct {
 	Result struct {
 		Devices []struct {
-			Identifier         string `json:"identifier"`
+			Identifier       string `json:"identifier"`
 			DeviceProperties struct {
 				Name string `json:"name"`
 			} `json:"deviceProperties"`
@@ -319,6 +319,57 @@ func devicectlPID(ctx context.Context, identifier, leaf string) (int, error) {
 	needle := "/" + leaf + ".app/"
 	for _, p := range resp.Result.RunningProcesses {
 		if strings.Contains(p.Executable, needle) {
+			return p.ProcessIdentifier, nil
+		}
+	}
+	return 0, nil
+}
+
+// devicectlTerminateMatching terminates the first running process whose
+// executable URL contains substr (case-insensitive). Used to stop the
+// WebDriverAgent runner, whose on-device executable name
+// ("WebDriverAgentRunner-Runner") doesn't match its bundle-id leaf
+// ("xctrunner"), so the /<leaf>.app/ path in devicectlTerminate can't find
+// it. Returns nil when nothing matches (already stopped = OK).
+func devicectlTerminateMatching(ctx context.Context, identifier, substr string) error {
+	pid, err := devicectlPIDMatching(ctx, identifier, substr)
+	if err != nil {
+		return err
+	}
+	if pid == 0 {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "xcrun", "devicectl", "device", "process", "terminate",
+		"--device", identifier, "--pid", fmt.Sprintf("%d", pid))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("devicectl terminate pid=%d: %w: %s", pid, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// devicectlPIDMatching returns the PID of the first running process whose
+// executable URL contains substr (case-insensitive). (0, nil) when none.
+func devicectlPIDMatching(ctx context.Context, identifier, substr string) (int, error) {
+	cmd := exec.CommandContext(ctx, "xcrun", "devicectl", "device", "info", "processes",
+		"--device", identifier, "--json-output", "-")
+	raw, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("devicectl info processes: %w", err)
+	}
+	var resp struct {
+		Result struct {
+			RunningProcesses []struct {
+				Executable        string `json:"executable"`
+				ProcessIdentifier int    `json:"processIdentifier"`
+			} `json:"runningProcesses"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return 0, fmt.Errorf("decode processes: %w", err)
+	}
+	low := strings.ToLower(substr)
+	for _, p := range resp.Result.RunningProcesses {
+		if strings.Contains(strings.ToLower(p.Executable), low) {
 			return p.ProcessIdentifier, nil
 		}
 	}

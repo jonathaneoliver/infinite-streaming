@@ -145,6 +145,13 @@ final class PlayerViewModel: ObservableObject {
     /// - Soak rotation Task firing
     private var currentPlayID: String = UUID().uuidString
 
+    /// #621 — the play_id whose `play_start` boundary has already been
+    /// emitted. startPlayback's fresh branch compares against this so a
+    /// same-play re-prepare (settings tweak, double-prepare on launch)
+    /// doesn't double-stamp the boundary. Never reset — comparing ids
+    /// is sufficient because play_ids are never reused.
+    private var lastPlayStartEmittedPlayID: String?
+
     /// `start_time` (#587) — client-supplied, play-scoped play start
     /// (ISO-8601 UTC). Minted with `currentPlayID` and rotated at the
     /// SAME boundaries (`regeneratePlayID`); sent as `?start_time=` on
@@ -208,6 +215,17 @@ final class PlayerViewModel: ObservableObject {
     private var codecRetries = 0
     private let maxCodecRetries = 3
     private var statusObserver: NSKeyValueObservation?
+    /// #646 — per-item KVO on AVPlayerItem.status. `.failed` is the
+    /// canonical "item could not load" signal (404'd master, DNS, …);
+    /// nothing else fires for load-time failures, so without this
+    /// observer `start_failure` is unreachable. Replaced per item in
+    /// startPlayback (reassignment invalidates the old observation).
+    private var itemStatusObserver: NSKeyValueObservation?
+    /// One fatal escalation per item — a mid-stream failure can fire
+    /// BOTH AVPlayerItemFailedToPlayToEndTime and the .failed status
+    /// flip; without the latch the second arrival would double-schedule
+    /// auto-recovery. Reset in startPlayback alongside the observer.
+    private var itemFatalHandled = false
 
     // MARK: - Diagnostics + metrics pipeline (legacy iOS analytics)
     //
@@ -625,7 +643,15 @@ final class PlayerViewModel: ObservableObject {
         Array(previewContent.prefix(limit))
     }
 
-    private func applyContentFilter() {
+    /// `rebuildIfUnchanged` is the caller's intent when the filter does
+    /// NOT move the selection: settings changes (protocol / codec) map
+    /// the same content name to a DIFFERENT URL, so they must rebuild
+    /// anyway; a catalogue refresh whose filter leaves the selection
+    /// alone must NOT — at launch the fetchContentList completion used
+    /// to land ~77ms after setSelectedContent's load and re-run
+    /// startPlayback on the SAME play (double play_start + pointless
+    /// AVPlayer item churn). Issue #621.
+    private func applyContentFilter(rebuildIfUnchanged: Bool = true) {
         let wasPlaying = currentURL != nil
         let filtered = filteredContent
         guard !filtered.isEmpty else {
@@ -637,14 +663,15 @@ final class PlayerViewModel: ObservableObject {
         let pick = filtered.contains(where: { $0.name == selectedContent })
             ? selectedContent
             : (filtered.first?.name ?? "")
-        if pick != selectedContent {
+        let pickChanged = pick != selectedContent
+        if pickChanged {
             selectedContent = pick
             // Filter forced a content swap — same boundary as
             // setSelectedContent. New play, attempt resets to 1.
             regeneratePlayID()
             resetAttemptID()
         }
-        if wasPlaying { buildURLAndLoad() }
+        if wasPlaying && (pickChanged || rebuildIfUnchanged) { buildURLAndLoad() }
     }
 
     // MARK: - Content fetch
@@ -675,7 +702,9 @@ final class PlayerViewModel: ObservableObject {
                 self.content = items
                 self.statusText = "Loaded \(items.count) items"
                 self.writeContentCache(items, for: server)
-                self.applyContentFilter()
+                // Catalogue refresh: re-pick only if the filter moved the
+                // selection; never re-prepare an unchanged running play (#621).
+                self.applyContentFilter(rebuildIfUnchanged: false)
             } catch {
                 self.statusText = "Refresh failed: \(error.localizedDescription)"
             }
@@ -904,6 +933,22 @@ final class PlayerViewModel: ObservableObject {
         // (issue #486). Rebuilt per-item so the streams stay bound to the
         // playerItem that AVFoundation is actually observing.
         attachAVMetrics(to: item)
+        // #646 — observe the item's own status. `.failed` is the ONLY
+        // signal a load-time failure produces (a 404'd master never
+        // starts playing, so AVPlayerItemFailedToPlayToEndTime can't
+        // fire) — without this, such plays emit `error` events but no
+        // terminal row and `start_failure` is unreachable. Routes
+        // through handlePlayerError so the autoRecovery branch and the
+        // start_failure / mid_stream_failure classification stay in one
+        // place. Reassignment invalidates the previous item's observer.
+        itemFatalHandled = false
+        itemStatusObserver = item.observe(\.status, options: [.new]) { [weak self] observedItem, _ in
+            guard observedItem.status == .failed else { return }
+            let err = observedItem.error
+            Task { @MainActor [weak self] in
+                self?.handlePlayerError(err)
+            }
+        }
         player.isMuted = isMuted
         player.automaticallyWaitsToMinimizeStalling = true
         player.play()
@@ -915,6 +960,7 @@ final class PlayerViewModel: ObservableObject {
             scheduleLiveOffsetSeek(reason: "playback started")
         }
         let playingEventAt = Date()
+        let wasRestart = resumingFromRestart
         if resumingFromRestart {
             // #603 — restart (retry / recovery) within the SAME play. Fold the
             // re-prepare wait (buffering accrued since the retry) into residency
@@ -946,11 +992,42 @@ final class PlayerViewModel: ObservableObject {
         metricsSessionId = nil
         metricsLastSessionLookup = nil
         let contentName = selectedContent
+        // #621 — play_start fires at EVERY play-open boundary, not just
+        // reload: cold start, re-enter-playback, reload, and the #403
+        // soak-rotation all mint a fresh play_id and route through this
+        // non-restart branch. retry / auto-recovery keeps play_id and is
+        // a `restart` (within-play), so it must NOT re-open the play.
+        // The play_id dedupe handles the OTHER same-play repeat:
+        // buildURLAndLoad also re-prepares on settings tweaks WITHOUT
+        // rotating play_id (per its doc comment), and the launch flow
+        // can run startPlayback twice for one play — emit only when this
+        // play_id hasn't had its boundary stamped yet (observed as
+        // play_start×2 on the launch play without this guard).
+        // Stamped 1ms before `playing` so ORDER BY ts renders the
+        // boundary first (an exact ms tie orders arbitrarily; both rows
+        // are non-terminal so nothing downstream else cares). Replaces
+        // the reload()-only emit from #603.
+        let isNewPlay = !wasRestart && currentPlayID != lastPlayStartEmittedPlayID
+        if isNewPlay {
+            lastPlayStartEmittedPlayID = currentPlayID
+        }
+        let playStartPayload: [String: Any]? = !isNewPlay ? nil : buildMetricsPayload(
+            event: "play_start",
+            at: playingEventAt.addingTimeInterval(-0.001),
+            extra: [
+                "player_metrics_content_url": url.absoluteString,
+                "player_metrics_content_name": contentName
+            ])
         let playingPayload = buildMetricsPayload(event: "playing", at: playingEventAt, extra: [
             "player_metrics_content_url": url.absoluteString,
             "player_metrics_content_name": contentName
         ])
         Task { [weak self] in
+            // Sequential awaits in ONE task pin the wire order:
+            // play_start strictly before playing.
+            if let playStartPayload {
+                await self?.sendPlayerMetrics(payload: playStartPayload)
+            }
             await self?.sendPlayerMetrics(payload: playingPayload)
         }
         // Restart the 1Hz heartbeat so its first tick lands exactly
@@ -965,63 +1042,27 @@ final class PlayerViewModel: ObservableObject {
         return path.contains("master_") && path.hasSuffix(".m3u8")
     }
 
-    /// Preflight the master URL — captures redirects (so AVPlayer's
-    /// item is built off the resolved per-session URL) and falls back
-    /// across segment-length variants if the requested one 404s.
+    /// Preflight the requested master URL — captures redirects (so
+    /// AVPlayer's item is built off the resolved per-session URL) and
+    /// backs off on transient 429s.
     ///
-    /// The encoding pipeline produces master.m3u8 + master_2s.m3u8 +
-    /// master_6s.m3u8 independently per clip. Some older content has
-    /// only the original master.m3u8; some has master.m3u8 + a sub-
-    /// playlist (e.g. playlist_6s_360p.m3u8) but no top-level
-    /// master_6s.m3u8. Probe the candidates in user-preference order
-    /// and use the first one that responds 200, so a clip with a
-    /// missing master_6s still plays at master_2s or LL master.
+    /// #641 — probes ONLY the URL it was given. The old cross-variant
+    /// fallback chain (requested → _6s → _2s → plain master, from
+    /// #268/#271) silently overrode the operator's Segment Length
+    /// selection when the requested master 404'd, which made
+    /// 6s-vs-2s characterization untrustworthy and masked real
+    /// missing-manifest failures (a 404'd master played anyway via a
+    /// sibling). Test-rig principle: play exactly what was asked, or
+    /// fail visibly through AVPlayer's normal item-status path so the
+    /// play gets a start_failure / mid_stream_failure terminal row.
+    /// Android never had a fallback — this restores parity.
     private func preflightMasterPlaylist(url: URL) async -> URL {
-        let candidates = masterFallbackChain(for: url)
-        for candidate in candidates {
-            if let resolved = await preflightSingleMaster(url: candidate) {
-                if candidate.absoluteString != url.absoluteString {
-                    log("Master preflight: requested \(url.lastPathComponent) missing, using \(candidate.lastPathComponent)")
-                }
-                return resolved
-            }
+        if let resolved = await preflightSingleMaster(url: url) {
+            return resolved
         }
-        // All candidates failed — hand back the original URL and let
+        // Preflight failed — hand back the original URL and let
         // AVPlayer surface the error via the normal item-status path.
         return url
-    }
-
-    /// Generate the ordered fallback chain for a master URL. If the
-    /// caller asked for `master_6s.m3u8`, we try `_6s` then `_2s` then
-    /// the un-suffixed master. If they asked for `_2s`, `_6s` is the
-    /// next candidate, then plain master. LL master (`master.m3u8`)
-    /// only falls back to itself — there's no shorter form.
-    private func masterFallbackChain(for url: URL) -> [URL] {
-        let path = url.path
-        let suffixes = ["_6s.m3u8", "_2s.m3u8", ".m3u8"]
-        guard let matched = suffixes.first(where: { path.hasSuffix("/master\($0)") || path.hasSuffix("/manifest\($0.replacingOccurrences(of: ".m3u8", with: ".mpd"))") })
-        else { return [url] }
-        let stem = String(path.dropLast(matched.count))
-        // For each candidate suffix not equal to the matched one, build a
-        // new URL preserving query (player_id) + scheme + host + port.
-        var chain: [URL] = []
-        // Always try the user's requested variant first.
-        chain.append(url)
-        let isHLS = matched.hasSuffix(".m3u8")
-        let manifestBase = isHLS ? "/master" : "/manifest"
-        for s in suffixes where s != matched {
-            // Strip the leading underscore for ".m3u8" — the un-suffixed
-            // variant uses just "master.m3u8" / "manifest.mpd".
-            let altSuffix = isHLS ? s : s.replacingOccurrences(of: ".m3u8", with: ".mpd")
-            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
-            // stem already excludes the matched suffix and includes the
-            // path up to "/master" or "/manifest" — build the new path
-            // by appending the alt suffix.
-            let stemWithoutBasename = String(stem.dropLast((isHLS ? "/master".count : "/manifest".count)))
-            components.path = stemWithoutBasename + manifestBase + altSuffix
-            if let alt = components.url { chain.append(alt) }
-        }
-        return chain
     }
 
     /// Single-URL preflight with retry-after-aware 429 handling.
@@ -1243,11 +1284,20 @@ final class PlayerViewModel: ObservableObject {
         if alreadyTerminal {
             NSLog("[endSession] terminal already=\(diagnostics.terminalStatus ?? "?") — re-emitting play_end for delivery")
         }
+        // #635 — build the payload + capture the base URL SYNCHRONOUSLY,
+        // same pattern as reload(). The back-tap calls endSessionForUserBack()
+        // and then navigates immediately; AppRoot's route onChange clears
+        // currentURL before a queued Task would run, and the event-name
+        // send path's `guard currentURL != nil` silently dropped the
+        // terminal PATCH — every UI-stopped play dangled `in_progress`
+        // until the proxy's #556 inactive_timeout synthesizer closed it.
+        // #554: the play-terminal event is `play_end` (renamed from
+        // `session_end`). The forwarder still classifies both names,
+        // so historical rows keep working.
+        let endPayload = buildMetricsPayload(event: "play_end", at: Date())
+        guard let baseURL = metricsBaseURL() else { return }
         Task { [weak self] in
-            // #554: the play-terminal event is `play_end` (renamed from
-            // `session_end`). The forwarder still classifies both names,
-            // so historical rows keep working.
-            await self?.sendPlayerMetrics(event: "play_end")
+            await self?.sendPlayerMetrics(payload: endPayload, via: baseURL)
         }
     }
 
@@ -1262,7 +1312,15 @@ final class PlayerViewModel: ObservableObject {
         // immutable, so the later reset can't retroactively blank it.
         diagnostics.markTerminal(status: "user_stopped", reason: "reloaded")
         let endPayload = buildMetricsPayload(event: "play_end", at: Date())
-        Task { [weak self] in await self?.sendPlayerMetrics(payload: endPayload) }
+        // #635 — play-boundary events go out via the teardown-proof path.
+        // The guarded send only survives here because buildURLAndLoad()
+        // below happens to re-set currentURL synchronously; its early
+        // returns (no activeServer / empty selectedContent) would leave
+        // currentURL nil and silently drop the boundary rows.
+        let reloadBaseURL = metricsBaseURL()
+        if let reloadBaseURL {
+            Task { [weak self] in await self?.sendPlayerMetrics(payload: endPayload, via: reloadBaseURL) }
+        }
 
         Task { [weak self] in
             await self?.requestHARSnapshot(reason: "user_reload", force: true)
@@ -1286,12 +1344,10 @@ final class PlayerViewModel: ObservableObject {
         // it's a within-play recovery attempt that must preserve counters.
         regeneratePlayID()
         resetAttemptID()
-        // #603 — a reload opens a NEW play, so emit play_start (the play-open
-        // boundary, symmetric to play_end), NOT restart. `restart` is reserved
-        // for mid-session streaming recovery (see the retry / auto-recovery
-        // path). play_start carries the new play_id just minted above.
-        let startPayload = buildMetricsPayload(event: "play_start", at: Date())
-        Task { [weak self] in await self?.sendPlayerMetrics(payload: startPayload) }
+        // #621 — no explicit play_start here anymore: reload routes
+        // through buildURLAndLoad → startPlayback's fresh (non-restart)
+        // branch, which now emits play_start for EVERY play-open
+        // boundary. The reload-only emit from #603 would double-stamp.
         currentURL = nil
         buildURLAndLoad()
     }
@@ -1446,6 +1502,13 @@ final class PlayerViewModel: ObservableObject {
     }
 
     private func handlePlayerError(_ error: Error?) {
+        // #646 — one fatal escalation per item: a mid-stream failure can
+        // arrive via BOTH the FailedToPlayToEndTime notification and the
+        // item-status .failed flip; the second arrival would otherwise
+        // double-schedule auto-recovery (or re-run the terminal path).
+        // The latch resets in startPlayback with each new item.
+        if itemFatalHandled { return }
+        itemFatalHandled = true
         let message = error?.localizedDescription ?? "playback error"
         // Codec errors on Apple devices are extremely rare (the chips
         // hardware-decode H.264 / HEVC / AV1 with plenty of headroom),
@@ -2006,16 +2069,12 @@ extension PlayerViewModel {
         playIdLastActivityAt = Date()
     }
 
-    /// Convenience that builds the payload synchronously here and forwards
-    /// to `sendPlayerMetrics(payload:)`. Use this from any callsite that
-    /// has the `at:` instant in hand and doesn't already need to control
-    /// payload composition.
-    fileprivate func sendPlayerMetrics(event: String, at eventAt: Date = Date(), extra: [String: Any] = [:]) async {
-        guard currentURL != nil else { return }
-        guard metricsBaseURL() != nil else { return }
-        let payload = buildMetricsPayload(event: event, at: eventAt, extra: extra)
-        await sendPlayerMetrics(payload: payload)
-    }
+    // #635 — the old `sendPlayerMetrics(event:at:extra:)` convenience
+    // (build-the-payload-inside-the-call) was removed: its lazy build +
+    // currentURL guard is exactly the combination that silently dropped
+    // the back-tap play_end. Build the payload synchronously at the
+    // firing context via buildMetricsPayload(event:at:extra:) and hand
+    // the immutable dict to one of the senders below.
 
     /// Snapshot-at-firing-context entry point. Callers build the payload
     /// at the moment the underlying event fires (so `event_time`,
@@ -2025,6 +2084,20 @@ extension PlayerViewModel {
     fileprivate func sendPlayerMetrics(payload: [String: Any]) async {
         guard currentURL != nil else { return }
         guard let baseURL = metricsBaseURL() else { return }
+        await sendPlayerMetrics(payload: payload, via: baseURL)
+    }
+
+    /// Teardown-proof variant (#635) — used by endSession(), whose send
+    /// races route teardown: the back-tap navigates immediately and
+    /// AppRoot's route onChange clears `currentURL` before the queued
+    /// Task runs, so the `guard currentURL != nil` above silently
+    /// dropped the terminal play_end. Callers capture the base URL
+    /// synchronously at the terminal moment and hand it in; this path
+    /// deliberately does NOT re-check `currentURL` — a terminal row
+    /// must still go out when the player is already torn down. The
+    /// FIFO chain is shared with the guarded path so terminal rows
+    /// can't overtake in-flight heartbeats.
+    fileprivate func sendPlayerMetrics(payload: [String: Any], via baseURL: URL) async {
         if payload.isEmpty { return }
         logMetricsEmit(payload: payload)
         // CRITICAL: read-tail / set-tail must be synchronous (no

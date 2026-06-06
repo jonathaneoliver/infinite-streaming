@@ -30,7 +30,7 @@ A `timejump` between `buffering_start` and `buffering_end` is normal stall recov
 ## What triggers `restart`
 
 - Player explicitly tore down the AVPlayer instance and built a new one. Usually app-level (user navigated away and back) or recovery-from-fatal-error.
-- After `restart`, `playback_start` fires when the new instance has its first decoded frame.
+- After `restart`, `first_frame` fires when the new instance has its first decoded frame. (Rows ingested before #622 also carry a redundant `playback_start` label at the same moment — dropped because it duplicated `first_frame` and read like a play-open boundary, which is `play_start`'s job.)
 - A restart cluster (multiple restarts in <30s) suggests the player is in an unrecoverable state and the app/operator is repeatedly retrying.
 
 ## Variant ladder vs effective ladder
