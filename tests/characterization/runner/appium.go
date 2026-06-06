@@ -222,6 +222,43 @@ func (a *AppiumLauncher) Kill(ctx context.Context, d Device) error {
 	return err
 }
 
+// SetSegmentLength switches the app's Segment Length via the settings UI
+// (#630) so a sweep can run e.g. 6s then 2s back-to-back on one device.
+// value is "2s" / "6s" / "ll" — matching the segment-<value> accessibility
+// ids the app exposes (added in #630). Drives the real UI: settings button
+// → Segment-length row → the value → back out of the drawer. Changing the
+// segment rebuilds the manifest and rotates play_id, so the caller should
+// re-bind (WaitForBind) and treat what follows as a fresh play.
+//
+// iOS only. Returns an error if a tap target is missing — typically an app
+// that predates #630 (rebuild + redeploy so the AX ids are present).
+func (a *AppiumLauncher) SetSegmentLength(ctx context.Context, d Device, value string) error {
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+	default:
+		return fmt.Errorf("SetSegmentLength: unsupported platform %s", d.Platform)
+	}
+	a.mu.Lock()
+	sessID := a.sessions[d.UDID]
+	a.mu.Unlock()
+	if sessID == "" {
+		return errors.New("SetSegmentLength: no active appium session for device")
+	}
+	steps := []struct{ what, id string }{
+		{"open settings", "playback-settings-button"},
+		{"open segment picker", "settings-row-segment"},
+		{"select " + value, "segment-" + value},
+		{"close settings", "settings-back-button"},
+	}
+	for _, s := range steps {
+		if err := a.tapByAccessibilityID(ctx, sessID, s.id); err != nil {
+			return fmt.Errorf("SetSegmentLength %q: %s (%s): %w", value, s.what, s.id, err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return nil
+}
+
 // Screenshot saves a PNG of the device's current screen to path.
 // Returns the path on success. Intended to be called from a sweep
 // runner to attach visual context to interesting steps.
