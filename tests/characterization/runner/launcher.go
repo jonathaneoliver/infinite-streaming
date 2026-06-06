@@ -32,3 +32,20 @@ type Launcher interface {
 	// session). Safe to call multiple times.
 	Close() error
 }
+
+// UICloser is the optional capability of driving the player's OWN UI to
+// close the playback screen — the way a real user does — so the app runs
+// its normal exit path and emits a genuine client play_end (#627). That
+// leaves the play cleanly ended in the sessions view (one bounded
+// play_id per play) instead of dangling in_progress after a hard
+// process terminate. Only AppiumLauncher implements it; CLI and Manual
+// launchers can't drive the UI, so callers type-assert and skip when the
+// launcher doesn't satisfy this interface.
+type UICloser interface {
+	// ClosePlaybackViaUI navigates the app back out of the playback
+	// screen (iOS back chevron / Android system Back), triggering the
+	// app's endSessionForUserBack → play_end. Best-effort: returns an
+	// error the caller may log, but a missing back affordance (already on
+	// home) is not fatal.
+	ClosePlaybackViaUI(ctx context.Context, d Device) error
+}

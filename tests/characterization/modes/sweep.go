@@ -80,10 +80,17 @@ func OpenSession(t *testing.T, platform runner.Platform) *runner.Session {
 		t.Fatalf("launch %s: %v", picked, err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := sess.ClearShape(ctx); err != nil {
 			t.Logf("clear shape: %v", err)
+		}
+		// #627: close the play the way a user does — drive the app's own
+		// back navigation so it emits a real client play_end and the play
+		// shows up cleanly ended in the sessions view. No-op for CLI /
+		// Manual launchers. Must run before Close() tears the session down.
+		if err := sess.CloseViaUI(ctx); err != nil {
+			t.Logf("close playback via UI: %v", err)
 		}
 		if err := launcher.Close(); err != nil {
 			t.Logf("close launcher: %v", err)

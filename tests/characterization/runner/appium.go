@@ -222,6 +222,52 @@ func (a *AppiumLauncher) Kill(ctx context.Context, d Device) error {
 	return err
 }
 
+// ClosePlaybackViaUI closes the playback screen the way a user does —
+// tapping the back chevron on iOS, or pressing system Back on Android —
+// so the app runs its normal exit path (endSessionForUserBack) and emits
+// a real client play_end (#627). The app then sits on the home picker and
+// rotates its play_id on the next ResumePlayback, so the just-ended play
+// is bounded and cleanly terminal in the sessions view instead of
+// dangling in_progress after a hard terminate_app.
+//
+// Best-effort and idempotent: if no session exists, or the back
+// affordance isn't present (already on home / play already ended), it's a
+// no-op rather than an error where possible. Satisfies runner.UICloser.
+func (a *AppiumLauncher) ClosePlaybackViaUI(ctx context.Context, d Device) error {
+	a.mu.Lock()
+	sessID := a.sessions[d.UDID]
+	a.mu.Unlock()
+	if sessID == "" {
+		return nil // never launched; nothing to close
+	}
+	var err error
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+		// The iOS playback overlay's back chevron — the same element
+		// LaunchToHome taps — invokes vm.endSessionForUserBack() before
+		// navigating home, which is what emits play_end.
+		err = a.tapByAccessibilityID(ctx, sessID, "playback-back-button")
+	case PlatformAndroidTV:
+		// Android has no visible back button; the playback screen's
+		// Compose BackHandler calls endSessionForUserBack() on system
+		// Back, so drive the W3C/UiAutomator2 back press.
+		err = a.pressBack(ctx, sessID)
+	default:
+		return nil // tvOS (onExitCommand) / web not driven here yet
+	}
+	// Give the app a beat to fire its terminal metrics POST before the
+	// caller tears the Appium session (and the app's network path) down.
+	time.Sleep(800 * time.Millisecond)
+	return err
+}
+
+// pressBack issues the W3C "back" navigation (Android system Back) on the
+// given Appium session.
+func (a *AppiumLauncher) pressBack(ctx context.Context, sessID string) error {
+	_, err := a.doRequest(ctx, "POST", "/session/"+sessID+"/back", map[string]any{})
+	return err
+}
+
 // Screenshot saves a PNG of the device's current screen to path.
 // Returns the path on success. Intended to be called from a sweep
 // runner to attach visual context to interesting steps.
