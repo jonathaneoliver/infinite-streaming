@@ -83,20 +83,36 @@ func runPyramid(t *testing.T, p runner.Platform) {
 		t.Fatal("StandardLadderRates returned no entries")
 	}
 
-	// Filter by variant identity, not numeric floor — see the long
-	// comment in rampup_test.go for why.
+	// #632: end the sweep ON the lowest variant without stalling. The floor
+	// is the bottom variant's PEAK anchor (peak × bump, e.g. 360p
+	// 0.998 ×1.05 ≈ 1.05 Mbps): below the next variant's peak so the player
+	// is forced down to the bottom variant, yet above the bottom variant's
+	// own peak so it stays sustainable (no underrun). The bottom variant's
+	// avg rung and the sub-peak fills below it are dropped — a cap under the
+	// bottom variant's peak can't be delivered and would stall. (rampup
+	// excludes the whole bottom variant to start ABOVE the floor; the
+	// pyramid's descent wants the opposite: to settle on it.)
 	bottomRes := desc[len(desc)-1].Resolution
+	floor := 0.0
+	for _, v := range desc {
+		if v.Resolution == bottomRes && v.Source == "peak" {
+			floor = v.CapMbps
+			break
+		}
+	}
+	if floor == 0 {
+		// No peak anchor (AVERAGE-BANDWIDTH-only manifest) — fall back to the
+		// bottom variant's lowest rung.
+		floor = desc[len(desc)-1].CapMbps
+	}
 	asc := make([]runner.VariantRate, 0, len(desc))
 	for _, v := range desc {
-		if v.Resolution == bottomRes {
-			continue
+		if v.CapMbps+1e-9 < floor {
+			continue // drop rungs below the bottom variant's peak (stall risk)
 		}
 		asc = append(asc, v)
 	}
-	floor := 0.0
-	if len(asc) > 0 {
-		floor = asc[len(asc)-1].CapMbps
-	}
+	// desc is descending; reverse so asc runs low → high, starting at floor.
 	for i, j := 0, len(asc)-1; i < j; i, j = i+1, j-1 {
 		asc[i], asc[j] = asc[j], asc[i]
 	}
