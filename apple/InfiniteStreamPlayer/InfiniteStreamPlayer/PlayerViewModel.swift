@@ -1015,63 +1015,27 @@ final class PlayerViewModel: ObservableObject {
         return path.contains("master_") && path.hasSuffix(".m3u8")
     }
 
-    /// Preflight the master URL — captures redirects (so AVPlayer's
-    /// item is built off the resolved per-session URL) and falls back
-    /// across segment-length variants if the requested one 404s.
+    /// Preflight the requested master URL — captures redirects (so
+    /// AVPlayer's item is built off the resolved per-session URL) and
+    /// backs off on transient 429s.
     ///
-    /// The encoding pipeline produces master.m3u8 + master_2s.m3u8 +
-    /// master_6s.m3u8 independently per clip. Some older content has
-    /// only the original master.m3u8; some has master.m3u8 + a sub-
-    /// playlist (e.g. playlist_6s_360p.m3u8) but no top-level
-    /// master_6s.m3u8. Probe the candidates in user-preference order
-    /// and use the first one that responds 200, so a clip with a
-    /// missing master_6s still plays at master_2s or LL master.
+    /// #641 — probes ONLY the URL it was given. The old cross-variant
+    /// fallback chain (requested → _6s → _2s → plain master, from
+    /// #268/#271) silently overrode the operator's Segment Length
+    /// selection when the requested master 404'd, which made
+    /// 6s-vs-2s characterization untrustworthy and masked real
+    /// missing-manifest failures (a 404'd master played anyway via a
+    /// sibling). Test-rig principle: play exactly what was asked, or
+    /// fail visibly through AVPlayer's normal item-status path so the
+    /// play gets a start_failure / mid_stream_failure terminal row.
+    /// Android never had a fallback — this restores parity.
     private func preflightMasterPlaylist(url: URL) async -> URL {
-        let candidates = masterFallbackChain(for: url)
-        for candidate in candidates {
-            if let resolved = await preflightSingleMaster(url: candidate) {
-                if candidate.absoluteString != url.absoluteString {
-                    log("Master preflight: requested \(url.lastPathComponent) missing, using \(candidate.lastPathComponent)")
-                }
-                return resolved
-            }
+        if let resolved = await preflightSingleMaster(url: url) {
+            return resolved
         }
-        // All candidates failed — hand back the original URL and let
+        // Preflight failed — hand back the original URL and let
         // AVPlayer surface the error via the normal item-status path.
         return url
-    }
-
-    /// Generate the ordered fallback chain for a master URL. If the
-    /// caller asked for `master_6s.m3u8`, we try `_6s` then `_2s` then
-    /// the un-suffixed master. If they asked for `_2s`, `_6s` is the
-    /// next candidate, then plain master. LL master (`master.m3u8`)
-    /// only falls back to itself — there's no shorter form.
-    private func masterFallbackChain(for url: URL) -> [URL] {
-        let path = url.path
-        let suffixes = ["_6s.m3u8", "_2s.m3u8", ".m3u8"]
-        guard let matched = suffixes.first(where: { path.hasSuffix("/master\($0)") || path.hasSuffix("/manifest\($0.replacingOccurrences(of: ".m3u8", with: ".mpd"))") })
-        else { return [url] }
-        let stem = String(path.dropLast(matched.count))
-        // For each candidate suffix not equal to the matched one, build a
-        // new URL preserving query (player_id) + scheme + host + port.
-        var chain: [URL] = []
-        // Always try the user's requested variant first.
-        chain.append(url)
-        let isHLS = matched.hasSuffix(".m3u8")
-        let manifestBase = isHLS ? "/master" : "/manifest"
-        for s in suffixes where s != matched {
-            // Strip the leading underscore for ".m3u8" — the un-suffixed
-            // variant uses just "master.m3u8" / "manifest.mpd".
-            let altSuffix = isHLS ? s : s.replacingOccurrences(of: ".m3u8", with: ".mpd")
-            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
-            // stem already excludes the matched suffix and includes the
-            // path up to "/master" or "/manifest" — build the new path
-            // by appending the alt suffix.
-            let stemWithoutBasename = String(stem.dropLast((isHLS ? "/master".count : "/manifest".count)))
-            components.path = stemWithoutBasename + manifestBase + altSuffix
-            if let alt = components.url { chain.append(alt) }
-        }
-        return chain
     }
 
     /// Single-URL preflight with retry-after-aware 429 handling.
