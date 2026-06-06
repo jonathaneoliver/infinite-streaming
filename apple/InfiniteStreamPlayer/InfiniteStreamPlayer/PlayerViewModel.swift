@@ -145,6 +145,13 @@ final class PlayerViewModel: ObservableObject {
     /// - Soak rotation Task firing
     private var currentPlayID: String = UUID().uuidString
 
+    /// #621 — the play_id whose `play_start` boundary has already been
+    /// emitted. startPlayback's fresh branch compares against this so a
+    /// same-play re-prepare (settings tweak, double-prepare on launch)
+    /// doesn't double-stamp the boundary. Never reset — comparing ids
+    /// is sufficient because play_ids are never reused.
+    private var lastPlayStartEmittedPlayID: String?
+
     /// `start_time` (#587) — client-supplied, play-scoped play start
     /// (ISO-8601 UTC). Minted with `currentPlayID` and rotated at the
     /// SAME boundaries (`regeneratePlayID`); sent as `?start_time=` on
@@ -625,7 +632,15 @@ final class PlayerViewModel: ObservableObject {
         Array(previewContent.prefix(limit))
     }
 
-    private func applyContentFilter() {
+    /// `rebuildIfUnchanged` is the caller's intent when the filter does
+    /// NOT move the selection: settings changes (protocol / codec) map
+    /// the same content name to a DIFFERENT URL, so they must rebuild
+    /// anyway; a catalogue refresh whose filter leaves the selection
+    /// alone must NOT — at launch the fetchContentList completion used
+    /// to land ~77ms after setSelectedContent's load and re-run
+    /// startPlayback on the SAME play (double play_start + pointless
+    /// AVPlayer item churn). Issue #621.
+    private func applyContentFilter(rebuildIfUnchanged: Bool = true) {
         let wasPlaying = currentURL != nil
         let filtered = filteredContent
         guard !filtered.isEmpty else {
@@ -637,14 +652,15 @@ final class PlayerViewModel: ObservableObject {
         let pick = filtered.contains(where: { $0.name == selectedContent })
             ? selectedContent
             : (filtered.first?.name ?? "")
-        if pick != selectedContent {
+        let pickChanged = pick != selectedContent
+        if pickChanged {
             selectedContent = pick
             // Filter forced a content swap — same boundary as
             // setSelectedContent. New play, attempt resets to 1.
             regeneratePlayID()
             resetAttemptID()
         }
-        if wasPlaying { buildURLAndLoad() }
+        if wasPlaying && (pickChanged || rebuildIfUnchanged) { buildURLAndLoad() }
     }
 
     // MARK: - Content fetch
@@ -675,7 +691,9 @@ final class PlayerViewModel: ObservableObject {
                 self.content = items
                 self.statusText = "Loaded \(items.count) items"
                 self.writeContentCache(items, for: server)
-                self.applyContentFilter()
+                // Catalogue refresh: re-pick only if the filter moved the
+                // selection; never re-prepare an unchanged running play (#621).
+                self.applyContentFilter(rebuildIfUnchanged: false)
             } catch {
                 self.statusText = "Refresh failed: \(error.localizedDescription)"
             }
@@ -915,6 +933,7 @@ final class PlayerViewModel: ObservableObject {
             scheduleLiveOffsetSeek(reason: "playback started")
         }
         let playingEventAt = Date()
+        let wasRestart = resumingFromRestart
         if resumingFromRestart {
             // #603 — restart (retry / recovery) within the SAME play. Fold the
             // re-prepare wait (buffering accrued since the retry) into residency
@@ -946,11 +965,42 @@ final class PlayerViewModel: ObservableObject {
         metricsSessionId = nil
         metricsLastSessionLookup = nil
         let contentName = selectedContent
+        // #621 — play_start fires at EVERY play-open boundary, not just
+        // reload: cold start, re-enter-playback, reload, and the #403
+        // soak-rotation all mint a fresh play_id and route through this
+        // non-restart branch. retry / auto-recovery keeps play_id and is
+        // a `restart` (within-play), so it must NOT re-open the play.
+        // The play_id dedupe handles the OTHER same-play repeat:
+        // buildURLAndLoad also re-prepares on settings tweaks WITHOUT
+        // rotating play_id (per its doc comment), and the launch flow
+        // can run startPlayback twice for one play — emit only when this
+        // play_id hasn't had its boundary stamped yet (observed as
+        // play_start×2 on the launch play without this guard).
+        // Stamped 1ms before `playing` so ORDER BY ts renders the
+        // boundary first (an exact ms tie orders arbitrarily; both rows
+        // are non-terminal so nothing downstream else cares). Replaces
+        // the reload()-only emit from #603.
+        let isNewPlay = !wasRestart && currentPlayID != lastPlayStartEmittedPlayID
+        if isNewPlay {
+            lastPlayStartEmittedPlayID = currentPlayID
+        }
+        let playStartPayload: [String: Any]? = !isNewPlay ? nil : buildMetricsPayload(
+            event: "play_start",
+            at: playingEventAt.addingTimeInterval(-0.001),
+            extra: [
+                "player_metrics_content_url": url.absoluteString,
+                "player_metrics_content_name": contentName
+            ])
         let playingPayload = buildMetricsPayload(event: "playing", at: playingEventAt, extra: [
             "player_metrics_content_url": url.absoluteString,
             "player_metrics_content_name": contentName
         ])
         Task { [weak self] in
+            // Sequential awaits in ONE task pin the wire order:
+            // play_start strictly before playing.
+            if let playStartPayload {
+                await self?.sendPlayerMetrics(payload: playStartPayload)
+            }
             await self?.sendPlayerMetrics(payload: playingPayload)
         }
         // Restart the 1Hz heartbeat so its first tick lands exactly
@@ -1303,14 +1353,10 @@ final class PlayerViewModel: ObservableObject {
         // it's a within-play recovery attempt that must preserve counters.
         regeneratePlayID()
         resetAttemptID()
-        // #603 — a reload opens a NEW play, so emit play_start (the play-open
-        // boundary, symmetric to play_end), NOT restart. `restart` is reserved
-        // for mid-session streaming recovery (see the retry / auto-recovery
-        // path). play_start carries the new play_id just minted above.
-        let startPayload = buildMetricsPayload(event: "play_start", at: Date())
-        if let reloadBaseURL {
-            Task { [weak self] in await self?.sendPlayerMetrics(payload: startPayload, via: reloadBaseURL) }
-        }
+        // #621 — no explicit play_start here anymore: reload routes
+        // through buildURLAndLoad → startPlayback's fresh (non-restart)
+        // branch, which now emits play_start for EVERY play-open
+        // boundary. The reload-only emit from #603 would double-stamp.
         currentURL = nil
         buildURLAndLoad()
     }

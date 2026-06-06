@@ -139,8 +139,13 @@ func runPlaybackEnds(t *testing.T, p runner.Platform) {
 		}
 		defer sess.ClearFaults(ctx)
 
+		// Capture the prior play_id BEFORE the tap — the rotation lands
+		// within ~1s (faster since #621 emits play_start from the fresh
+		// branch), so reading it after the tap races: the "prior" id is
+		// already the new one and waitForNewPlayID times out empty.
+		priorID := currentPlayID(ctx, sess)
 		tapReload(t, ctx, sess, appium)
-		preID := waitForNewPlayID(ctx, sess, currentPlayID(ctx, sess), 15*time.Second)
+		preID := waitForNewPlayID(ctx, sess, priorID, 15*time.Second)
 		t.Logf("[StartFailureManifest404] new play_id=%s — waiting for start_failure", preID)
 
 		got, src := awaitTerminalStatus(t, ctx, sess, preID, 60*time.Second, []string{"start_failure"})
@@ -169,8 +174,10 @@ func runPlaybackEnds(t *testing.T, p runner.Platform) {
 		}
 		defer sess.ClearFaults(ctx)
 
+		// Same pre-tap capture as StartFailureManifest404 — see comment there.
+		priorID := currentPlayID(ctx, sess)
 		tapReload(t, ctx, sess, appium)
-		preID := waitForNewPlayID(ctx, sess, currentPlayID(ctx, sess), 15*time.Second)
+		preID := waitForNewPlayID(ctx, sess, priorID, 15*time.Second)
 
 		// Wait EBVS + buffer so the elapsed-since-play-start unambiguously
 		// crosses the threshold from the classifier's perspective.
