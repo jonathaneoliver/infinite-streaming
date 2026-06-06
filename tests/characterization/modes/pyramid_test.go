@@ -362,8 +362,14 @@ func runPyramid(t *testing.T, p runner.Platform) {
 		if st.ExitReason == "skipped-player-wedged" {
 			continue
 		}
-		failed := st.StallsDelta > 0 || st.MinBufferS < runner.SustainableBufferS
-		if !failed {
+		// #632: only an ACTUAL stall fails a non-bottom rung. A transient
+		// min_buf=0 with stalls=0 is the expected dip-and-recover when the
+		// player upshifts onto a thin-margin peak rung (+5% over the
+		// variant's peak): it drains the buffer fetching the bigger
+		// segments, then refills without ever underrunning. Climbing from
+		// the 360p floor exposes this (modest buffers); a warm 4K start
+		// masked it. We tolerate the dip and key on real stalls.
+		if st.StallsDelta == 0 {
 			continue
 		}
 		upperFailures = append(upperFailures, fmt.Sprintf(
@@ -372,7 +378,7 @@ func runPyramid(t *testing.T, p runner.Platform) {
 			st.StallsDelta, st.MinBufferS))
 	}
 	if len(upperFailures) > 0 {
-		t.Errorf("player stalled / depleted buffer at %d non-bottom variant(s):\n  %s",
+		t.Errorf("player stalled at %d non-bottom variant(s):\n  %s",
 			len(upperFailures), joinLines(upperFailures))
 	}
 }

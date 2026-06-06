@@ -259,16 +259,19 @@ func RunVariantSweep(ctx context.Context, t *testing.T, sess *runner.Session, mo
 //
 //  1. position_s hasn't advanced more than 0.5 s over the lookback
 //     window (the player isn't moving through content)
-//  2. AND the latest buffer depth is still below SustainableBufferS
-//     (the buffer hasn't started refilling — if it has, the player is
-//     recovering and we should hold the next step, not declare wedge)
+//  2. AND the buffer never reached SustainableBufferS anywhere in the
+//     window (it stayed pinned near-empty — if it climbed back at any
+//     point the player is alive and cycling, not dead, so don't wedge)
 //
-// The second check is what prevents the false-positive we saw on iPad
-// sim: step 2's buffer drained to 0 mid-step but recovered to >20 s by
-// the end. Position was naturally frozen during the drain, but on the
-// last sample buffer had climbed back — the player WAS coming back.
-// Old single-signal check called that a wedge and skipped 34 steps.
-// Returns false when there's not enough sample data yet to judge.
+// The second check prevents the false-positives we saw on iPad sim: a
+// buffer that drains to 0 mid-step but recovers to >20 s — the player is
+// coming back, not wedged. #632 widened it from "last sample" to "any
+// sample in the window": on a thin-margin peak-rung upshift the buffer
+// oscillates (drains fetching big segments, refills, may drain again), so
+// the LAST sample can read ~0 even though the player hit a healthy buffer
+// seconds earlier. Keying on the window max spares that dip-and-recover
+// while still catching a player pinned empty throughout. Returns false
+// when there's not enough sample data yet to judge.
 func playerWedged(s *runner.Sampler, lookback time.Duration) bool {
 	n := int(lookback / time.Second)
 	if n < 5 {
@@ -284,10 +287,13 @@ func playerWedged(s *runner.Sampler, lookback time.Duration) bool {
 	if last.PositionS > first+0.5 {
 		return false
 	}
-	// Position not advancing, but is the buffer recovering? Then the
-	// player will resume soon — hold off on declaring wedge.
-	if last.BufferDepthS >= runner.SustainableBufferS {
-		return false
+	// Position not advancing, but did the buffer reach a healthy level
+	// anywhere in the window? Then the player is cycling/recovering, not
+	// dead — hold off on declaring wedge.
+	for _, smp := range samples {
+		if smp.BufferDepthS >= runner.SustainableBufferS {
+			return false
+		}
 	}
 	return true
 }
