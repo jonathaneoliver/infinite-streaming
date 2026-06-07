@@ -846,7 +846,10 @@ interface LabelChip {
   count: number;
   cls: 'info' | 'warning' | 'critical' | 'error' | 'testing';
 }
-function labelChips(r: SessionRow): LabelChip[] {
+// All chips for a row, incl. the testing tier — severity-ranked. Internal;
+// the column uses labelChips() (testing filtered out) and the Test-meta pill
+// uses testingMeta().
+function allLabelChips(r: SessionRow): LabelChip[] {
   const pairs = Array.isArray(r.labels) ? r.labels : [];
   const out: LabelChip[] = [];
   for (const p of pairs) {
@@ -875,6 +878,30 @@ function labelChips(r: SessionRow): LabelChip[] {
     || a.label.localeCompare(b.label),
   );
   return out;
+}
+
+// Playback-signal chips for the Labels column. #658: the testing= KV tier is
+// structured run metadata, not events — pulled out into a separate Test-meta
+// pill (testingMeta) so it stops competing with error/warning chips.
+function labelChips(r: SessionRow): LabelChip[] {
+  return allLabelChips(r).filter((c) => c.cls !== 'testing');
+}
+
+// #658: collapse the testing= labels into one pill — a headline (test ·
+// platform when present) with the full set available on hover — instead of
+// a dozen chips. Returns null when the play carries no testing metadata.
+function testingMeta(r: SessionRow): { headline: string; all: string[] } | null {
+  const all: string[] = [];
+  let test = '', platform = '';
+  for (const c of allLabelChips(r)) {
+    if (c.cls !== 'testing') continue;
+    all.push(c.name);
+    if (c.name.startsWith('test_')) test = c.name.slice('test_'.length);
+    else if (c.name.startsWith('platform_')) platform = c.name.slice('platform_'.length);
+  }
+  if (all.length === 0) return null;
+  const headline = [test, platform].filter(Boolean).join(' · ') || 'test run';
+  return { headline, all: all.sort() };
 }
 
 // #653: how many label chips to show before collapsing the rest behind a
@@ -1407,7 +1434,12 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                       title="Show fewer"
                       @click.stop="toggleLabelRow(String(r.play_id))"
                     >show less</button>
-                    <span v-if="labelChips(r).length === 0" class="dash">—</span>
+                    <span
+                      v-if="testingMeta(r)"
+                      class="label-test-meta"
+                      :title="(testingMeta(r)?.all || []).join(', ')"
+                    >🧪 {{ testingMeta(r)?.headline }}</span>
+                    <span v-if="labelChips(r).length === 0 && !testingMeta(r)" class="dash">—</span>
                   </td>
                   <td>
                     <span class="health-badge" :class="'issue-' + fmtHealthBadge(r).cls" :title="fmtHealthBadge(r).tip">{{ fmtHealthBadge(r).score }}</span>
@@ -1712,6 +1744,21 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   cursor: pointer;
 }
 .label-more:hover { background: #e0e7ff; }
+/* #658: compact pill for the testing= run metadata (test · platform), full
+   set on hover — keeps the structured KV facts out of the playback chips. */
+.label-test-meta {
+  display: inline-block;
+  padding: 1px 6px;
+  margin: 0 3px 2px 0;
+  border-radius: 10px;
+  font: 600 11px system-ui;
+  line-height: 1.4;
+  white-space: nowrap;
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #cbd5e1;
+  cursor: default;
+}
 
 /* Hierarchical labels filter — mirrors SessionDisplay's Focus Window
  * event-filter accordion. One row per severity tier with a clickable
