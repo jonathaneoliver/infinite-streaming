@@ -803,8 +803,21 @@ const MAX_RENDER_ROWS = 1500;
 const windowedRows = computed<Row[]>(() => {
   const rows = windowedFull.value;
   if (rows.length <= MAX_RENDER_ROWS) return rows;
-  // Keep the most recent N by ts (the live tail operators watch).
-  return rows.slice().sort((a, b) => a.ts - b.ts).slice(-MAX_RENDER_ROWS);
+  const sorted = rows.slice().sort((a, b) => a.ts - b.ts);
+  // When an event is selected, center the cap window on it so the
+  // highlighted row is actually rendered — otherwise the latest-N slice
+  // clips a selection that's further back than MAX_RENDER_ROWS rows (the
+  // log merges 4 sources, so a long play overflows fast). No selection →
+  // keep the most-recent N (the live tail operators watch).
+  const cur = cursorRowTs.value;
+  if (cur != null) {
+    let idx = sorted.findIndex((r) => r.ts >= cur);
+    if (idx < 0) idx = sorted.length - 1;
+    let start = idx - Math.floor(MAX_RENDER_ROWS / 2);
+    start = Math.max(0, Math.min(start, sorted.length - MAX_RENDER_ROWS));
+    return sorted.slice(start, start + MAX_RENDER_ROWS);
+  }
+  return sorted.slice(-MAX_RENDER_ROWS);
 });
 /** True when rows were dropped from the rendered set (shown in the bar). */
 const renderCapped = computed(() => windowedFull.value.length > MAX_RENDER_ROWS);
@@ -1045,7 +1058,7 @@ function onRowsWheel(e: WheelEvent) {
       <label v-if="hasAVMetrics" class="opt" title="iOS 18 AVMetrics raw events (issue #486 spike). Parallel observation stream from AVFoundation — compare side-by-side against today's heartbeat-derived Events."><input type="checkbox" v-model="showAVMetrics" /> AVMetrics ({{ counts.avm }})</label>
       <label class="opt"><input type="checkbox" v-model="showRaw" /> Raw</label>
       <span class="count">{{ counts.total }} row{{ counts.total === 1 ? '' : 's' }}</span>
-      <span v-if="renderCapped" class="count" title="Only the most recent rows are rendered for performance; narrow the focus bar to see older rows">(showing last {{ MAX_RENDER_ROWS }})</span>
+      <span v-if="renderCapped" class="count" :title="cursorRowTs != null ? 'Rendering a window around the selected event; narrow the focus bar to see the rest' : 'Only the most recent rows are rendered for performance; narrow the focus bar to see older rows'">(showing {{ MAX_RENDER_ROWS }} of {{ windowedFull.length }}{{ cursorRowTs != null ? ' around selection' : '' }})</span>
       <button
         type="button"
         class="btn live-toggle"
