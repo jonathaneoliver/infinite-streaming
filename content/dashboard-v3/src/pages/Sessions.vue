@@ -1398,14 +1398,14 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                       type="button"
                       class="label-more"
                       title="Show all labels"
-                      @click="toggleLabelRow(String(r.play_id))"
+                      @click.stop="toggleLabelRow(String(r.play_id))"
                     >+{{ hiddenLabelCount(r) }} more</button>
                     <button
                       v-else-if="expandedLabelRows.has(String(r.play_id))"
                       type="button"
                       class="label-more"
                       title="Show fewer"
-                      @click="toggleLabelRow(String(r.play_id))"
+                      @click.stop="toggleLabelRow(String(r.play_id))"
                     >show less</button>
                     <span v-if="labelChips(r).length === 0" class="dash">—</span>
                   </td>
