@@ -312,12 +312,13 @@ function deriveHealth(r: SessionRow): void {
     const dDrop = Math.min(dropPct * 2, 15);
     const dErr = Math.min((r.errors_per_hr ?? 0) * 5, 20);
     r.health_score = Math.max(0, 100 - (dRebuf + dStalls + dDown + dDrop + dErr + breach));
+    const r3 = (x: number) => Math.round(x * 1000) / 1000;
     r.health_breakdown = {
-      rebuffer_pct: Math.round(rebufPct * 10) / 10,
-      stalls_per_hr: Math.round((r.stalls_per_hr ?? 0) * 10) / 10,
-      downshifts_per_min: Math.round((r.downshifts_per_min ?? 0) * 10) / 10,
-      drop_pct: Math.round(dropPct * 100) / 100,
-      errors_per_hr: Math.round((r.errors_per_hr ?? 0) * 10) / 10,
+      rebuffer_pct: r3(rebufPct),
+      stalls_per_hr: r3(r.stalls_per_hr ?? 0),
+      downshifts_per_min: r3(r.downshifts_per_min ?? 0),
+      drop_pct: r3(dropPct),
+      errors_per_hr: r3(r.errors_per_hr ?? 0),
       breach,
     };
   } else {
@@ -814,8 +815,9 @@ function fmtIssuesBadge(r: SessionRow): IssueBadge {
 }
 interface HealthBadge { score: number; cls: 'ok' | 'warn' | 'bad'; tip: string }
 function fmtHealthBadge(r: SessionRow): HealthBadge {
-  const s = Number(r.health_score) || 0;
-  const cls: HealthBadge['cls'] = s >= 90 ? 'ok' : s >= 70 ? 'warn' : 'bad';
+  const raw = Number(r.health_score) || 0;
+  const s = Math.round(raw * 100) / 100; // #659: 2dp display
+  const cls: HealthBadge['cls'] = raw >= 90 ? 'ok' : raw >= 70 ? 'warn' : 'bad';
   const b = r.health_breakdown || {};
   const tip = b.short_play
     ? `short play — ${b.hard_failure ? 'hard failure' : 'no failures'}${b.breach ? `, breach −${b.breach}` : ''}`
@@ -850,14 +852,14 @@ function fmtRatioPct(v: number | undefined, warn: number, bad: number): PctCell 
   let color = '#065f46';
   if (v >= bad) color = '#991b1b';
   else if (v >= warn) color = '#92400e';
-  return { label: `${pct.toFixed(pct < 10 ? 2 : 1)}%`, color };
+  return { label: `${pct.toFixed(3)}%`, color };
 }
 function fmtRate(v: number | undefined, warn: number, bad: number): PctCell {
   if (v === undefined || !Number.isFinite(v)) return { label: '—', color: '#9ca3af' };
   let color = '#065f46';
   if (v >= bad) color = '#991b1b';
   else if (v >= warn) color = '#92400e';
-  return { label: v.toFixed(1), color };
+  return { label: v.toFixed(3), color };
 }
 function fmtMsDur(v: number | undefined): PctCell {
   if (v === undefined || !Number.isFinite(v) || v <= 0) return { label: '—', color: '#9ca3af' };
@@ -1986,8 +1988,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   padding: 4px 4px 2px 26px;     /* indent under the chevron */
 }
 .lf-label-row {
-  display: grid;
-  grid-template-columns: 18px 1fr auto;
+  display: flex;
   gap: 6px;
   align-items: center;
   padding: 2px 8px;
@@ -2018,21 +2019,21 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   text-decoration-thickness: 1.5px;
   text-decoration-color: var(--tier-color);
 }
-.lf-label-check { font-weight: 700; }
+.lf-label-check { font-weight: 700; flex: none; }
 /* Tighten the ⊘ glyph — many fonts render it overly wide. */
 .lf-label-row.state-exclude .lf-label-check { letter-spacing: -1px; }
 .lf-label-name {
-  /* min-width:0 lets the 1fr grid track shrink below the (nowrap) label
-     width so it ellipsizes instead of overflowing the panel and pushing the
-     count column off the right edge. */
+  /* flex item that shrinks (min-width:0 + ellipsis) so the count sits right
+     after the name rather than being pushed to the far edge. */
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font: 500 12px ui-monospace, Menlo, monospace;
 }
 .lf-label-count {
+  flex: none;
   font: 600 11px ui-monospace, Menlo, monospace;
-  opacity: 0.85;
-  text-align: right;
+  opacity: 0.7;
   white-space: nowrap;
 }
 
