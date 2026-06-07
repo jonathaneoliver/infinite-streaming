@@ -847,6 +847,9 @@ function onRowsWheel(e: WheelEvent) {
 }
 
 .rows {
+  /* position:relative makes this the offsetParent so the cursor
+     auto-scroll's target.offsetTop is measured against THIS container. */
+  position: relative;
   max-height: 480px;
   overflow-y: auto;
 }
