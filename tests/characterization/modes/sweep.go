@@ -266,6 +266,61 @@ func RunVariantSweep(ctx context.Context, t *testing.T, sess *runner.Session, mo
 	return r
 }
 
+// RunCycledVariantSweep runs `steps` as a variant sweep `reps` times on the
+// SAME live play — no relaunch between cycles. Each cycle is bracketed by
+// StartCycle/EndCycle so the dashboard's cycle-band overlay separates the
+// reps, and the cap jump between the last step of one cycle and the first
+// step of the next is a real, observable transition: rampup drops top→floor,
+// rampdown jumps floor→top, pyramid floor→floor. Watching the player
+// re-converge across that jump — with buffer + current variant carried over,
+// not reset by a relaunch — is the point of running multiple cycles.
+//
+// Returns one *Report per cycle, each with its own samples (RunVariantSweep
+// starts/stops a fresh Sampler per call). `variants` is applied to every
+// report's .Variants; `playID` (when non-empty) to .PlayIDs. Finalize runs
+// per cycle. The caller writes + validates each returned report — the
+// per-mode pass criteria differ, so they stay out here.
+func RunCycledVariantSweep(
+	ctx context.Context, t *testing.T, sess *runner.Session, mode string,
+	steps []runner.Step, reps int, variants []runner.VariantRate, playID string,
+	samplePeriod, minHold, maxHold, earlyExitWindow time.Duration, earlyExitTol float64,
+) []*runner.Report {
+	t.Helper()
+	if reps < 1 {
+		reps = 1
+	}
+	reports := make([]*runner.Report, 0, reps)
+	for rep := 1; rep <= reps; rep++ {
+		// cap_mbps is "none" at the cycle level — the cap VARIES within
+		// the sweep, so the cycle label can't pin one value. Idx and Rep
+		// both track the rep counter (these cycles repeat the same sweep,
+		// not a (boundary,fault,cap) tuple).
+		if _, err := runner.StartCycle(ctx, sess, runner.CycleID{
+			Test: mode, Idx: rep, Rep: rep,
+		}); err != nil {
+			t.Logf("[%s cycle %d/%d] StartCycle: %v (band may be missing)", mode, rep, reps, err)
+		}
+		t.Logf("════ %s cycle %d/%d ════", mode, rep, reps)
+		// Fresh copy per cycle — RunVariantSweep mutates Step timing /
+		// exit fields in place, so reps must not share the backing array.
+		cycleSteps := make([]runner.Step, len(steps))
+		copy(cycleSteps, steps)
+		report := RunVariantSweep(ctx, t, sess, mode, cycleSteps, samplePeriod,
+			minHold, maxHold, earlyExitWindow, earlyExitTol)
+		report.Variants = variants
+		if playID != "" {
+			report.PlayIDs = []string{playID}
+		}
+		report.Finalize(time.Now())
+		reports = append(reports, report)
+	}
+	// Close the trailing cycle band so the archive shows a definite edge.
+	if err := runner.EndCycle(ctx, sess); err != nil {
+		t.Logf("EndCycle: %v", err)
+	}
+	return reports
+}
+
 // playerWedged returns true when the player has given up and isn't
 // recovering — distinct from "currently stalled but climbing back".
 // Two-signal check:

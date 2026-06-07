@@ -122,108 +122,118 @@ func runRampdown(t *testing.T, p runner.Platform) {
 		steps[i] = runner.Step{RateMbps: v.CapMbps, Hold: rampdownMaxHold, Variant: &v}
 	}
 
-	report := RunVariantSweep(ctx, t, sess, "rampdown", steps, time.Second,
+	// #cycles — run the descent REPS times on the SAME live play (default
+	// 3, CHAR_RAMPDOWN_REPS). Between cycles the cap jumps floor→top; the
+	// player carries its buffer + current variant across that jump, so we
+	// see how it re-converges on the descent each time (the instructive
+	// part — a single pass can't show it).
+	reps := envInt("CHAR_RAMPDOWN_REPS", 3)
+	reports := RunCycledVariantSweep(ctx, t, sess, "rampdown", steps, reps,
+		unionRungs(sweep), playID, time.Second,
 		rampdownMinHold, rampdownMaxHold, rampdownEarlyExitWindow, rampdownEarlyExitTol)
-	// We need the per-variant rung list (not the per-step list) for
-	// Finalize's classify-by-variant pass.
-	report.Variants = unionRungs(sweep)
-	if playID != "" {
-		report.PlayIDs = []string{playID}
-	}
-	report.Finalize(time.Now())
 
 	out := runner.DefaultOutDir(t.TempDir())
-	// Filename pattern: rampdown-<platform>-<player8>-<run_id>.<ext>
-	// Including the 8-char player_id prefix makes parallel runs on
-	// different devices land in distinct files without collision.
+	// Filename pattern: rampdown-<platform>-<player8>-<run_id>-cyc<n>.<ext>.
+	// The 8-char player_id prefix keeps parallel device runs distinct; the
+	// cycle suffix keeps each cycle's report in its own file.
 	playerShort := sess.PlayerID
 	if len(playerShort) > 8 {
 		playerShort = playerShort[:8]
 	}
-	base := fmt.Sprintf("rampdown-%s-%s-%s", p, playerShort, runID)
-	jsonPath, err := runner.WriteReport(out, base, report)
-	if err != nil {
-		t.Fatalf("write report: %v", err)
-	}
-	LogReport(t, jsonPath)
-	if htmlPath, err := runner.WriteChart(out, base, report); err == nil {
-		t.Logf("chart: %s", htmlPath)
-	} else {
-		t.Logf("chart write skipped: %v", err)
-	}
-
-	// Headline findings.
-	t.Logf("lowest sustainable cap: %.3f Mbps", report.Summary.LowestSustainableCapMbps)
-	if report.Summary.HighestStallingCapMbps > 0 {
-		t.Logf("highest stalling cap:   %.3f Mbps", report.Summary.HighestStallingCapMbps)
-	}
-	t.Logf("total stalls: %d / stall seconds: %.1f / profile shifts: %d",
-		report.Summary.TotalStalls, report.Summary.TotalStallSeconds, report.Summary.ProfileShifts)
-
-	// Post-sweep labels — record headline numbers on the play so they
-	// appear next to the metadata when queried later.
-	endLabels := map[string]string{
-		"completed":            time.Now().UTC().Format("20060102T150405Z"),
-		"lowest_sustainable":   fmt.Sprintf("%.3f", report.Summary.LowestSustainableCapMbps),
-		"bottom_variant_floor": fmt.Sprintf("%.3f", report.Summary.BottomVariantFloorMbps),
-		"total_stalls":         fmt.Sprintf("%d", report.Summary.TotalStalls),
-		"profile_shifts":       fmt.Sprintf("%d", report.Summary.ProfileShifts),
-	}
-	if err := sess.LabelPlay(context.Background(), endLabels); err != nil {
-		t.Logf("label play (end): %v", err)
-	}
-
-	// Pass criteria.
-	if report.Summary.SampleCount == 0 {
-		t.Fatal("no samples collected")
-	}
-	// (1) Every variant must have been observed at some point during the
-	// sweep — proves the player actually walked the ladder.
-	missing := []string{}
-	for i, v := range report.Variants {
-		if i >= len(report.Summary.VariantSampleCounts) || report.Summary.VariantSampleCounts[i] == 0 {
-			missing = append(missing, v.Resolution)
+	var last *runner.Report
+	for ri, report := range reports {
+		cyc := ri + 1
+		last = report
+		base := fmt.Sprintf("rampdown-%s-%s-%s-cyc%d", p, playerShort, runID, cyc)
+		jsonPath, err := runner.WriteReport(out, base, report)
+		if err != nil {
+			t.Fatalf("cyc%d write report: %v", cyc, err)
 		}
-	}
-	if len(missing) > 0 {
-		t.Errorf("player did not visit every variant — missing: %v", missing)
-	}
-	t.Logf("variants visited (samples per rung): %v", report.Summary.VariantSampleCounts)
+		LogReport(t, jsonPath)
+		if htmlPath, err := runner.WriteChart(out, base, report); err == nil {
+			t.Logf("chart: %s", htmlPath)
+		} else {
+			t.Logf("chart write skipped: %v", err)
+		}
 
-	// (2) Any stall or buffer depletion on a step whose target variant
-	// is NOT the bottom rung is a failure. At the bottom rung the player
-	// has no escape downshift, so failures there are expected when the
-	// cap drops below what that variant needs. At higher rungs a failure
-	// means the player couldn't recover fast enough by downshifting —
-	// that's the bug. We don't short-circuit; we want the recovery data
-	// in the report.
-	bottomRes := ""
-	if n := len(report.Variants); n > 0 {
-		bottomRes = report.Variants[n-1].Resolution
-	}
-	upperFailures := []string{}
-	for i := range report.Steps {
-		st := &report.Steps[i]
-		if st.Variant == nil || st.Variant.Resolution == bottomRes {
+		// Headline findings (per cycle).
+		t.Logf("cyc%d lowest sustainable cap: %.3f Mbps", cyc, report.Summary.LowestSustainableCapMbps)
+		if report.Summary.HighestStallingCapMbps > 0 {
+			t.Logf("cyc%d highest stalling cap:   %.3f Mbps", cyc, report.Summary.HighestStallingCapMbps)
+		}
+		t.Logf("cyc%d total stalls: %d / stall seconds: %.1f / profile shifts: %d",
+			cyc, report.Summary.TotalStalls, report.Summary.TotalStallSeconds, report.Summary.ProfileShifts)
+
+		// Pass criteria (per cycle).
+		if report.Summary.SampleCount == 0 {
+			t.Errorf("cyc%d: no samples collected", cyc)
 			continue
 		}
-		// Skipped steps didn't actually run — zero MinBuffer is the
-		// default value, not a measured stall. Don't flag them.
-		if st.ExitReason == "skipped-player-wedged" {
-			continue
+		// (1) Every variant must have been observed at some point during the
+		// sweep — proves the player actually walked the ladder.
+		missing := []string{}
+		for i, v := range report.Variants {
+			if i >= len(report.Summary.VariantSampleCounts) || report.Summary.VariantSampleCounts[i] == 0 {
+				missing = append(missing, v.Resolution)
+			}
 		}
-		failed := st.StallsDelta > 0 || st.MinBufferS < runner.SustainableBufferS
-		if !failed {
-			continue
+		if len(missing) > 0 {
+			t.Errorf("cyc%d: player did not visit every variant — missing: %v", cyc, missing)
 		}
-		upperFailures = append(upperFailures, fmt.Sprintf(
-			"step %d cap=%.3f Mbps %s/%s: stalls=%d min_buf=%.1fs",
-			i+1, st.RateMbps, st.Variant.Resolution, st.Variant.Source,
-			st.StallsDelta, st.MinBufferS))
+		t.Logf("cyc%d variants visited (samples per rung): %v", cyc, report.Summary.VariantSampleCounts)
+
+		// (2) Any stall or buffer depletion on a step whose target variant
+		// is NOT the bottom rung is a failure. At the bottom rung the player
+		// has no escape downshift, so failures there are expected when the
+		// cap drops below what that variant needs. At higher rungs a failure
+		// means the player couldn't recover fast enough by downshifting —
+		// that's the bug. We don't short-circuit; we want the recovery data
+		// in the report.
+		bottomRes := ""
+		if n := len(report.Variants); n > 0 {
+			bottomRes = report.Variants[n-1].Resolution
+		}
+		upperFailures := []string{}
+		for i := range report.Steps {
+			st := &report.Steps[i]
+			if st.Variant == nil || st.Variant.Resolution == bottomRes {
+				continue
+			}
+			// Skipped steps didn't actually run — zero MinBuffer is the
+			// default value, not a measured stall. Don't flag them.
+			if st.ExitReason == "skipped-player-wedged" {
+				continue
+			}
+			failed := st.StallsDelta > 0 || st.MinBufferS < runner.SustainableBufferS
+			if !failed {
+				continue
+			}
+			upperFailures = append(upperFailures, fmt.Sprintf(
+				"step %d cap=%.3f Mbps %s/%s: stalls=%d min_buf=%.1fs",
+				i+1, st.RateMbps, st.Variant.Resolution, st.Variant.Source,
+				st.StallsDelta, st.MinBufferS))
+		}
+		if len(upperFailures) > 0 {
+			t.Errorf("cyc%d: player stalled / depleted buffer at %d non-bottom variant(s):\n  %s",
+				cyc, len(upperFailures), joinLines(upperFailures))
+		}
 	}
-	if len(upperFailures) > 0 {
-		t.Errorf("player stalled / depleted buffer at %d non-bottom variant(s):\n  %s",
-			len(upperFailures), joinLines(upperFailures))
+
+	// Post-sweep labels — headline numbers from the LAST cycle on the play
+	// (one play, so the labels reflect the final cycle; the per-cycle
+	// reports + cycle bands carry the rest).
+	if last != nil {
+		endLabels := map[string]string{
+			"completed":            time.Now().UTC().Format("20060102T150405Z"),
+			"cycles":               fmt.Sprintf("%d", len(reports)),
+			"lowest_sustainable":   fmt.Sprintf("%.3f", last.Summary.LowestSustainableCapMbps),
+			"bottom_variant_floor": fmt.Sprintf("%.3f", last.Summary.BottomVariantFloorMbps),
+			"total_stalls":         fmt.Sprintf("%d", last.Summary.TotalStalls),
+			"profile_shifts":       fmt.Sprintf("%d", last.Summary.ProfileShifts),
+		}
+		if err := sess.LabelPlay(context.Background(), endLabels); err != nil {
+			t.Logf("label play (end): %v", err)
+		}
 	}
 }
 

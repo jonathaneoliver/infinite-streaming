@@ -150,6 +150,9 @@ The CLI launcher expects each player app to be built with `skipHomeOnLaunch=true
 | `LAUNCH_MODE` | `cli` | `manual` \| `cli` \| `appium` |
 | `CHARACTERIZATION_OUTDIR` | `t.TempDir()` | persistent artifacts directory (set for CI / aggregator use) |
 | `CHARACTERIZATION_DEVICE_UDID` | unset = first-match | target a specific device by UDID. Use to run parallel tests across multiple sims of the same platform — each terminal exports its own UDID, no race for the same device. |
+| `CHAR_RAMPUP_REPS` | `3` | rampup cycles per run, on ONE live play. Between cycles the cap drops top→floor and the player re-climbs — the inter-cycle transition is the instructive part. |
+| `CHAR_RAMPDOWN_REPS` | `3` | rampdown cycles per run, on ONE live play. Between cycles the cap jumps floor→top and the player re-descends (buffer + variant carry across). |
+| `CHAR_PYRAMID_REPS` | `2` | pyramid (up-then-down) cycles per run, on ONE live play. Confirms climb/descent behaviour is stable run-to-run. |
 | `CHAR_OTEL_ENDPOINT` | unset | OTLP HTTP collector URL — e.g. `http://localhost:4318`. When set, every cycle emits an OpenTelemetry span to the configured backend (alongside the cycle_id label PATCH). See **Tracing** below. |
 | `CHAR_OTEL_STDOUT` | unset | non-empty enables the stdout span exporter (verbose, debug only). |
 | `CHAR_OTEL_DISABLE` | unset | non-empty forces the no-op tracer regardless of `CHAR_OTEL_ENDPOINT`. |
