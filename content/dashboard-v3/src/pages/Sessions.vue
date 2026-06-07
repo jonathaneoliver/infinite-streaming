@@ -20,6 +20,17 @@ interface SessionRow {
   player_id?: string;
   group_id?: string;
   content_id?: string;
+  // #673 — Scenario (run-identity) source fields. These typed columns are
+  // already on the play summary (find.go final SELECT, #550 Phase 4) and
+  // reach us via PlaySummary's index signature; the Scenario column surfaces
+  // them. test / platform / run_id have no column and come from the testing=
+  // label tier instead (see scenario()).
+  device_class?: string;
+  device_model?: string;
+  player_tech?: string;
+  app_version?: string;
+  os_version_major?: number | string;
+  os_version_minor?: number | string;
   started?: string;
   last_seen?: string;
   classification?: string;
@@ -131,6 +142,12 @@ const filters = ref<{
   // surface without test-noise. See Characterization.vue for how
   // the framework stamps these labels at the start of each run.
   harness: 'all' | 'only' | 'hide';
+  // #673 — Scenario facets. platform/test are read from the testing= label
+  // tier (harnessPlatform / harnessTest); '' = no constraint. They sit
+  // alongside the harness tristate: Harness scopes "is this a test run at
+  // all", these narrow to a specific platform or test mode within that.
+  platform: string;
+  test: string;
   // Tristate label filter:
   //   - labels:        AND-required INCLUDES (row.labels must contain every entry)
   //   - labelsExclude: AND-required EXCLUDES (row.labels must contain NONE of these)
@@ -142,6 +159,7 @@ const filters = ref<{
   player_id: '', group_id: '', content_id: '', play_id: '',
   classification: 'all',
   harness: 'all',
+  platform: '', test: '',
   labels: [], labelsExclude: [],
 });
 
@@ -187,20 +205,41 @@ function shortRunId(runID: string | null): string {
   return utc.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-// Compact "harness pill" payload — what's shown on the row when the
-// play was stamped by the test framework. Null when the play isn't a
-// harness run.
-function harnessPill(r: SessionRow): { runId: string; platform: string; test: string; tooltip: string } | null {
-  const runID = harnessRunId(r);
-  if (!runID) return null;
-  const platform = harnessPlatform(r) ?? 'unknown';
-  const test = harnessTest(r) ?? '—';
-  return {
-    runId: shortRunId(runID),
-    platform,
-    test,
-    tooltip: `Test harness run\nrun_id: ${runID}\nplatform: ${platform}\ntest: ${test}`,
+// #673 — Scenario (run-identity) cell. A play's *dimensions* — what it IS
+// (test, platform, device, content versions) — as opposed to the event
+// labels, which are what HAPPENED during it (stalls, faults, breaches, with
+// counts). They were intermingled in the testing= label tier; this pulls
+// the identity fields into one structured cell.
+//
+// Sourced as a HYBRID, deliberately:
+//   - typed columns (device/app/player/os) — authoritative, already on the
+//     summary, not lossy the way sanitized LowCardinality labels are.
+//   - testing= label tails (test/platform/run_id) — no typed column exists.
+// Content has its own column, so it's intentionally not duplicated here.
+interface ScenarioField { key: string; label: string; value: string }
+function scenario(r: SessionRow): { fields: ScenarioField[]; tooltip: string } | null {
+  const col = (k: string) => {
+    const v = (r as any)[k];
+    return v === undefined || v === null || v === '' ? '' : String(v);
   };
+  const osMaj = col('os_version_major');
+  const osMin = col('os_version_minor');
+  const runID = harnessRunId(r);
+  const candidates: ScenarioField[] = [
+    { key: 'test',     label: 'test',     value: harnessTest(r) ?? '' },
+    { key: 'platform', label: 'platform', value: harnessPlatform(r) ?? '' },
+    { key: 'device',   label: 'device',   value: col('device_model') || col('device_class') },
+    { key: 'player',   label: 'player',   value: col('player_tech') },
+    { key: 'app',      label: 'app',      value: col('app_version') },
+    { key: 'os',       label: 'os',       value: osMaj ? (osMin ? `${osMaj}.${osMin}` : osMaj) : '' },
+    { key: 'run',      label: 'run',      value: shortRunId(runID) },
+  ];
+  const fields = candidates.filter((f) => f.value);
+  if (fields.length === 0) return null;
+  const tooltip = fields
+    .map((f) => `${f.label}: ${f.value}`)
+    .join('\n') + (runID ? `\nrun_id: ${runID}` : '');
+  return { fields, tooltip };
 }
 
 // rows / loading / error are computeds backed by playsQuery; declared
@@ -451,6 +490,8 @@ function matches(r: SessionRow): boolean {
     && (!f.group_id || r.group_id === f.group_id)
     && (!f.content_id || r.content_id === f.content_id)
     && (!f.play_id || r.play_id === f.play_id)
+    && (!f.platform || harnessPlatform(r) === f.platform)
+    && (!f.test || harnessTest(r) === f.test)
     && matchesClassification(r)
     && matchesHarness(r)
     && matchesLabels(r);
@@ -663,6 +704,13 @@ const playerOptions = computed(() => distinctFor('player_id'));
 const groupOptions = computed(() => distinctFor('group_id'));
 const contentOptions = computed(() => distinctFor('content_id'));
 const playOptions = computed(() => distinctFor('play_id'));
+// #673 — Scenario facet option sets. Derived (not row keys), so distinctFor
+// can't build them; map each row through the harness label-tail readers and
+// dedupe. Independent of the four id selects — a platform spans many plays.
+const platformOptions = computed(() =>
+  Array.from(new Set(rows.value.map((r) => harnessPlatform(r)).filter(Boolean) as string[])).sort());
+const testOptions = computed(() =>
+  Array.from(new Set(rows.value.map((r) => harnessTest(r)).filter(Boolean) as string[])).sort());
 
 // When a parent filter narrows enough that the current value is no
 // longer in the visible set, clear it. Mirrors `fillSelect` in the
@@ -671,6 +719,8 @@ watch(playerOptions, (opts) => { if (filters.value.player_id && !opts.includes(f
 watch(groupOptions, (opts) => { if (filters.value.group_id && !opts.includes(filters.value.group_id)) filters.value.group_id = ''; });
 watch(contentOptions, (opts) => { if (filters.value.content_id && !opts.includes(filters.value.content_id)) filters.value.content_id = ''; });
 watch(playOptions, (opts) => { if (filters.value.play_id && !opts.includes(filters.value.play_id)) filters.value.play_id = ''; });
+watch(platformOptions, (opts) => { if (filters.value.platform && !opts.includes(filters.value.platform)) filters.value.platform = ''; });
+watch(testOptions, (opts) => { if (filters.value.test && !opts.includes(filters.value.test)) filters.value.test = ''; });
 
 function clearFilters() {
   filters.value.player_id = '';
@@ -679,6 +729,8 @@ function clearFilters() {
   filters.value.play_id = '';
   filters.value.classification = 'all';
   filters.value.harness = 'all';
+  filters.value.platform = '';
+  filters.value.test = '';
   filters.value.labels = [];
   filters.value.labelsExclude = [];
 }
@@ -938,28 +990,12 @@ function allLabelChips(r: SessionRow): LabelChip[] {
   return out;
 }
 
-// Playback-signal chips for the Labels column. #658: the testing= KV tier is
-// structured run metadata, not events — pulled out into a separate Test-meta
-// pill (testingMeta) so it stops competing with error/warning chips.
+// Playback-signal chips for the Labels column. #658/#673: the testing= KV
+// tier is structured run metadata, not events — it's pulled out of the chip
+// flow (here) and rendered in the dedicated Scenario column (scenario()) so
+// it stops competing with the error/warning chips.
 function labelChips(r: SessionRow): LabelChip[] {
   return allLabelChips(r).filter((c) => c.cls !== 'testing');
-}
-
-// #658: collapse the testing= labels into one pill — a headline (test ·
-// platform when present) with the full set available on hover — instead of
-// a dozen chips. Returns null when the play carries no testing metadata.
-function testingMeta(r: SessionRow): { headline: string; all: string[] } | null {
-  const all: string[] = [];
-  let test = '', platform = '';
-  for (const c of allLabelChips(r)) {
-    if (c.cls !== 'testing') continue;
-    all.push(c.name);
-    if (c.name.startsWith('test_')) test = c.name.slice('test_'.length);
-    else if (c.name.startsWith('platform_')) platform = c.name.slice('platform_'.length);
-  }
-  if (all.length === 0) return null;
-  const headline = [test, platform].filter(Boolean).join(' · ') || 'test run';
-  return { headline, all: all.sort() };
 }
 
 // #656: cause/effect split. CAUSE = things the operator/harness deliberately
@@ -1050,6 +1086,7 @@ const COLUMNS = [
   { key: 'duration_ms',      label: 'Duration',   type: 'number' as const,  sortable: true },
   { key: 'player_id',        label: 'Player',     type: 'string' as const,  sortable: true },
   { key: 'content_id',       label: 'Content',    type: 'string' as const,  sortable: true },
+  { key: 'scenario',         label: 'Scenario',   type: 'string' as const,  sortable: false },
   { key: 'play_id',          label: 'Play ID',    type: 'string' as const,  sortable: true },
   { key: 'last_state',       label: 'State',      type: 'string' as const,  sortable: true },
   { key: 'playback_status',  label: 'Outcome',    type: 'string' as const,  sortable: true },
@@ -1301,6 +1338,24 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
               >{{ c.label }}</button>
             </div>
 
+            <!-- #673 — Scenario facets. Only rendered when the current rows
+                 carry harness-stamped platform/test metadata, so manual-only
+                 views aren't cluttered with empty selects. -->
+            <label v-if="platformOptions.length" class="ctrl-label">
+              <span>Platform:</span>
+              <select v-model="filters.platform" class="ctrl-input">
+                <option value="">all ({{ platformOptions.length }})</option>
+                <option v-for="v in platformOptions" :key="v" :value="v">{{ v }}</option>
+              </select>
+            </label>
+            <label v-if="testOptions.length" class="ctrl-label">
+              <span>Test:</span>
+              <select v-model="filters.test" class="ctrl-input">
+                <option value="">all ({{ testOptions.length }})</option>
+                <option v-for="v in testOptions" :key="v" :value="v">{{ v }}</option>
+              </select>
+            </label>
+
             <button type="button" class="btn btn-secondary" @click="clearFilters">Clear filters</button>
             <span class="match-count">{{ matchCount }}</span>
             <!-- #563 — high-signal rates show by default; this reveals the
@@ -1468,14 +1523,18 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                   <td>{{ r.player_id || '' }}</td>
                   <td>
                     <div>{{ r.content_id || '' }}</div>
-                    <div v-if="harnessPill(r)" class="harness-pill" :title="harnessPill(r)!.tooltip">
-                      🧪
-                      <span class="harness-test">{{ harnessPill(r)!.test }}</span>
-                      <span class="harness-sep">·</span>
-                      <span class="harness-platform">{{ harnessPill(r)!.platform }}</span>
-                      <span class="harness-sep">·</span>
-                      <span class="harness-run">{{ harnessPill(r)!.runId }}</span>
-                    </div>
+                  </td>
+                  <td class="cell-scenario">
+                    <template v-if="scenario(r)">
+                      <span
+                        v-for="f in scenario(r)!.fields"
+                        :key="f.key"
+                        class="scenario-chip"
+                        :class="'scenario-' + f.key"
+                        :title="scenario(r)!.tooltip"
+                      ><span class="scenario-key">{{ f.label }}</span>{{ f.value }}</span>
+                    </template>
+                    <span v-else class="dash">—</span>
                   </td>
                   <td class="cell-play-id">
                     <a v-if="r.play_id && r.player_id" :href="viewerHref(r)" class="play-id-link">{{ r.play_id }}</a>
@@ -1525,12 +1584,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                       title="Show fewer"
                       @click.stop="toggleLabelRow(String(r.play_id))"
                     >show less</button>
-                    <span
-                      v-if="testingMeta(r)"
-                      class="label-test-meta"
-                      :title="(testingMeta(r)?.all || []).join(', ')"
-                    >🧪 {{ testingMeta(r)?.headline }}</span>
-                    <span v-if="labelChips(r).length === 0 && !testingMeta(r)" class="dash">—</span>
+                    <span v-if="labelChips(r).length === 0" class="dash">—</span>
                   </td>
                   <td>
                     <span class="health-badge" :class="'issue-' + fmtHealthBadge(r).cls" :title="fmtHealthBadge(r).tip">{{ fmtHealthBadge(r).score }}</span>
@@ -1677,15 +1731,15 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   border-color: #1d4ed8;
 }
 
-/* Harness origin pill — sub-line under the content cell when a
-   play was stamped by the characterization framework. Compact;
-   reuses the colour palette of the test-runner page so the visual
-   tie between Sessions ↔ Characterization is obvious. */
-.harness-pill {
+/* #673 Scenario column — one small "key value" chip per run-identity
+   field. Reuses the green test-runner palette so the visual tie between
+   Sessions ↔ Characterization carries over from the old harness pill. */
+.cell-scenario { min-width: 180px; max-width: 280px; line-height: 1.7; }
+.scenario-chip {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   gap: 4px;
-  margin-top: 2px;
+  margin: 0 4px 2px 0;
   padding: 1px 6px;
   border-radius: 10px;
   background: #ecfdf5;
@@ -1694,10 +1748,18 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   font: 500 10px ui-monospace, SFMono-Regular, monospace;
   white-space: nowrap;
 }
-.harness-test { font-weight: 700; }
-.harness-platform { color: #047857; }
-.harness-run { color: #065f46; opacity: 0.85; }
-.harness-sep { color: #34d399; }
+.scenario-key {
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  color: #047857;
+  opacity: 0.85;
+}
+/* The two harness-stamped identity fields lead — tint them so test/platform
+   read as the primary "which run is this" signal vs. the device/version tail. */
+.scenario-test  { background: #d1fae5; border-color: #34d399; }
+.scenario-run   { opacity: 0.85; }
 
 .btn {
   display: inline-block;
@@ -1859,20 +1921,6 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 }
 /* #658: compact pill for the testing= run metadata (test · platform), full
    set on hover — keeps the structured KV facts out of the playback chips. */
-.label-test-meta {
-  display: inline-block;
-  padding: 1px 6px;
-  margin: 0 3px 2px 0;
-  border-radius: 10px;
-  font: 600 11px system-ui;
-  line-height: 1.4;
-  white-space: nowrap;
-  background: #f1f5f9;
-  color: #475569;
-  border: 1px solid #cbd5e1;
-  cursor: default;
-}
-
 /* Hierarchical labels filter — mirrors SessionDisplay's Focus Window
  * event-filter accordion. One row per severity tier with a clickable
  * header (toggle ALL labels in that tier), a chevron (collapse), and
