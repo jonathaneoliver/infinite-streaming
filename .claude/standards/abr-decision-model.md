@@ -11,6 +11,18 @@ A player makes ABR decisions from two primary inputs:
 
 Decision per segment: pick the *highest variant whose declared bandwidth × safety factor* ≤ *estimated bandwidth*, subject to buffer not being below the panic threshold.
 
+## iOS AVPlayer initial-variant selection (startup)
+
+The *first* variant — before any throughput data exists — does NOT follow the per-segment rule above:
+
+- **Pre-iOS 13:** AVPlayer starts on the **first applicable variant** listed in the master playlist.
+- **iOS 13+:** AVPlayer starts on a variant chosen to **"optimize the startup experience"** — a heuristic, NOT first-listed; it can pick higher based on its in-memory throughput estimate.
+- **iOS 14+:** `AVPlayerItem.startsOnFirstEligibleVariant = YES` restores the deterministic first-variant behaviour.
+
+The estimate is built **live from the current playback's segment downloads** (`observedBitrate`); Apple documents **no persistence** across app launch or device reboot, and leaves the in-process cross-`AVPlayerItem` case unspecified. There is **no `DEFAULT` attribute for video variants** (`EXT-X-STREAM-INF`) — `DEFAULT=YES` is audio/subtitle only (`EXT-X-MEDIA`); video startup is governed by list order + the heuristic + the API knobs (`preferredPeakBitRate`, `startsOnFirstEligibleVariant`).
+
+**Rig consequence:** the only reliable way to make startup land on a sustainable variant is to apply the rate cap BEFORE the player's first segment fetch (true cold start), so the heuristic measures a slow link. A mid-play manifest rebuild under a cap (e.g. segment switch) is NOT a cold start — it can re-probe to a high variant and starve. See finding `avplayer-startup-variant-selection-2026-06-07.md` and the carry-over experiment (#680).
+
 Safety factor: typically 0.7-0.9 (player wants headroom). When the buffer is small, it skews lower.
 
 ## Why downshifts cascade
