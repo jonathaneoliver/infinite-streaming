@@ -552,6 +552,13 @@ type ControlEventHub struct {
 	mu      sync.Mutex
 	nextID  int
 	clients map[int]*ControlClient
+	// lastServerStart holds the most recent server_start boot marker so it
+	// can be replayed to clients that subscribe AFTER boot. The restart
+	// that produces the marker is the same event that drops the forwarder's
+	// SSE subscription, and Broadcast to zero clients is a no-op — so
+	// without replay the marker would be lost before the forwarder
+	// reconnects. Set via BroadcastServerStart, replayed in AddClient. #671.
+	lastServerStart *ControlEvent
 }
 
 type ControlClient struct {
@@ -586,6 +593,15 @@ func (h *ControlEventHub) AddClient(buffer int) (int, <-chan ControlEvent) {
 	id := h.nextID
 	c := &ControlClient{ch: make(chan ControlEvent, buffer)}
 	h.clients[id] = c
+	// Replay the sticky boot marker so a forwarder reconnecting after a
+	// restart still archives the server_start. The channel was just created
+	// with room, so this never blocks. #671.
+	if h.lastServerStart != nil {
+		select {
+		case c.ch <- *h.lastServerStart:
+		default:
+		}
+	}
 	return id, c.ch
 }
 
@@ -623,6 +639,18 @@ func (h *ControlEventHub) Broadcast(ev ControlEvent) {
 			}
 		}
 	}
+}
+
+// BroadcastServerStart records the boot marker as sticky (replayed to every
+// future subscriber by AddClient) and broadcasts it to any client already
+// connected. Separate from Broadcast so only the boot marker is retained —
+// ordinary control events are not stickied. #671.
+func (h *ControlEventHub) BroadcastServerStart(ev ControlEvent) {
+	h.mu.Lock()
+	stored := ev
+	h.lastServerStart = &stored
+	h.mu.Unlock()
+	h.Broadcast(ev)
 }
 
 // AVMetricEventHub fans out iOS 18 AVMetrics raw events (issue #486) to
@@ -1968,7 +1996,11 @@ func main() {
 	// survived the proxy restart. Without this, pre-existing sessions
 	// keep their session-map values but the kernel forgot — they end
 	// up uncapped. Issue #480.
-	app.restoreShapeApplication()
+	restoredShapes, skippedShapes := app.restoreShapeApplication()
+	// Record the restart as an archivable control_event so a cap-drop spike
+	// landing in the boot restore window is attributable to a redeploy rather
+	// than a shaper bug. Sticky-replayed to the forwarder on reconnect. #671.
+	app.emitServerStart(restoredShapes, skippedShapes)
 	// 100 ms TCP_INFO sampler — folds smoothed RTT / jitter / lifetime
 	// min / RTO into per-session windows that get drained on each
 	// snapshot broadcast (issue #401). Linux-only kernel read; the
@@ -2250,6 +2282,26 @@ func (a *App) emitControlEventForSession(sessionID, source, event, info string) 
 		Source:    source,
 		Event:     event,
 		Info:      info,
+	})
+}
+
+// emitServerStart records a global (session-less) boot marker into
+// control_events so a proxy restart is correlatable with the cap-drop spikes
+// it can produce (the restore window before restoreShapeApplication re-installs
+// each port's tc filter — see #671). source=auto: server-driven, not operator
+// or harness. Carries the shape-restoration counts so an operator can see how
+// many sessions were re-capped on boot. Goes through BroadcastServerStart so
+// the forwarder still archives it after its SSE reconnects post-restart.
+func (a *App) emitServerStart(restored, skipped int) {
+	if a == nil || a.controlHub == nil {
+		return
+	}
+	info := fmt.Sprintf("restored=%d;skipped=%d;baseline_mbps=%d", restored, skipped, a.defaultRateMbps)
+	a.controlHub.BroadcastServerStart(ControlEvent{
+		Ts:     time.Now().UTC(),
+		Source: "auto",
+		Event:  "server_start",
+		Info:   info,
 	})
 }
 
@@ -4319,12 +4371,11 @@ func (a *App) restoreTransportFaultSchedules() {
 // pre-existed the restart end up running uncapped, which silently
 // breaks both operator-set rate overrides and the deployment baseline
 // cap (issue #480). Matches restoreTransportFaultSchedules' pattern.
-func (a *App) restoreShapeApplication() {
+func (a *App) restoreShapeApplication() (restored, skipped int) {
 	if a.traffic == nil {
-		return
+		return 0, 0
 	}
 	seenPorts := map[int]struct{}{}
-	restored, skipped := 0, 0
 	for _, session := range a.getSessionList() {
 		portStr := getString(session, "x_forwarded_port")
 		if portStr == "" {
@@ -4350,6 +4401,7 @@ func (a *App) restoreShapeApplication() {
 		restored++
 	}
 	log.Printf("shape restoration on boot: restored=%d skipped=%d baseline_mbps=%d", restored, skipped, a.defaultRateMbps)
+	return restored, skipped
 }
 
 func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
