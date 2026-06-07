@@ -545,7 +545,8 @@ type ControlEventRow struct {
 
 	// Event Closed-set action name. See issue #474 for the full vocab —
 	// e.g. `fault_on`, `pattern_step`, `loop_server`,
-	// `fault_rule_enabled`, `session_start`, `session_end`.
+	// `fault_rule_enabled`, `session_start`, `session_end`,
+	// `server_start`.
 	Event string `json:"event"`
 
 	// EventFingerprint FNV-64a hash over (player, play, ts_ms, source, event, info).
