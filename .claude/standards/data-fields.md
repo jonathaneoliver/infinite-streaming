@@ -990,8 +990,9 @@ source
                  'proxy'   = runtime auto-transition (fault loop, pattern
                              step advance, loop_server detection,
                              proxy-detected session_end)
-                 'auto'    = automated test runner (placeholder; no emit
-                             path yet)
+                 'auto'    = server-driven lifecycle, not operator or
+                             runtime-transition. Today: server_start
+                             (proxy boot marker, #671).
   gotchas:     'harness' events are the ones to subpoena when investigating
                "why did the network change at 15:42:30" — they're the
                operator-or-script-driven mutations. 'proxy' events are
@@ -1127,6 +1128,24 @@ session_start                [harness | proxy]
 session_end                  [harness | proxy]
   meaning:     session lifecycle ended. Last row for this session.
   label:       info=*session_end
+
+server_start                 [auto]
+  meaning:     the go-proxy process (re)started. Emitted once on boot
+               after shape restoration. GLOBAL — no player_id/play_id/
+               session_id, so it does NOT attach to any one play's
+               timeline; query it session-less (see gotchas).
+  info:        restored=N;skipped=M;baseline_mbps=B — the
+               restoreShapeApplication counts (how many sessions had
+               their tc cap re-installed on boot).
+  label:       info=*server_start
+  gotchas:     this is the marker to correlate a ~line-rate throughput
+               spike against: between boot and shape restoration, session
+               ports run unshaped (no tc filter yet) → a spike landing
+               just after a server_start is a redeploy artifact, not a
+               shaper bug (#671). Because it has no player_id,
+               `harness query control <play>` won't surface it — use
+               `harness raw GET "/analytics/api/v2/control_events?event=server_start"`
+               or filter plays by `--label-has info=*server_start`.
 
 control_change               [harness | proxy] [debug]
   meaning:     generic fallback when the changed field hasn't been

@@ -673,6 +673,11 @@ func computeControlLabels(r *ctrlRow) []string {
 		return out
 	case "content_changed":
 		return []string{SevInfo + "=" + synthMark + "content_changed"}
+	case "server_start":
+		// Proxy restart/boot marker (#671). Global (no player_id) — info
+		// carries restored/skipped/baseline_mbps. info-tier so it never
+		// tints a row, but is filterable via `--label-has info=*server_start`.
+		return []string{SevInfo + "=" + synthMark + "server_start"}
 	case "session_start":
 		return []string{SevInfo + "=" + synthMark + "session_start"}
 	case "session_end":
