@@ -4366,11 +4366,16 @@ func (a *App) restoreTransportFaultSchedules() {
 // restoreShapeApplication re-applies the tc rate/delay/loss state for
 // every session in the loaded session map. Required on boot because
 // the container's network namespace is recreated on restart — tc
-// classes/filters don't survive, but the session map (persisted on
-// disk via saveSessionList) does. Without this, sessions that
-// pre-existed the restart end up running uncapped, which silently
-// breaks both operator-set rate overrides and the deployment baseline
-// cap (issue #480). Matches restoreTransportFaultSchedules' pattern.
+// classes/filters don't survive.
+//
+// CAVEAT (#686): this is currently a NO-OP across a real restart. The
+// session map is in-memory only (saveSessionList → publishSnapshot;
+// there is no disk persistence), so at boot the list is empty and this
+// restores nothing (the server_start marker reports restored=0). Until
+// #686 adds disk persistence, sessions that pre-existed a restart run
+// uncapped at the deployment baseline until shaping is re-applied —
+// which is the restore-window rate spike #686 tracks. Matches
+// restoreTransportFaultSchedules' pattern (and shares its limitation).
 func (a *App) restoreShapeApplication() (restored, skipped int) {
 	if a.traffic == nil {
 		return 0, 0
