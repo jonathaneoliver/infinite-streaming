@@ -200,7 +200,15 @@ function applyViewport(v: ChartViewport) {
 function applyYMax(v: number | undefined) {
   if (!chart || !chart.options?.scales?.y) return;
   chart.options.scales.y.max = v;
+  // #664: push the new scale to the rendered chart immediately ('none' =
+  // no animation), otherwise the Y-max buttons don't take effect until some
+  // other update fires.
+  try { chart.update('none'); } catch { /* ignore */ }
 }
+
+// #664: re-apply Y-max live when the prop changes (the buttons set
+// coord.bandwidthYMax → :y-max). Without this it's only read at chart init.
+watch(() => props.yMax, (v) => applyYMax(v));
 
 // Serialise init so concurrent watch callbacks don't each `new Chart()`
 // on the same canvas (Chart.js throws "Canvas is already in use" the
