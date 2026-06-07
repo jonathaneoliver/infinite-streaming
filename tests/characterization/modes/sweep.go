@@ -243,7 +243,15 @@ func RunVariantSweep(ctx context.Context, t *testing.T, sess *runner.Session, mo
 		// lower (descending sweep) so we'd just stack more stalls onto
 		// a dead player. Mark the rest skipped and exit so the report
 		// reflects "we stopped here because the player wedged."
-		if playerWedged(s, 10*time.Second) {
+		//
+		// #632: skip this on the FIRST step. The entry step is where the
+		// player resumes (often probing high — e.g. 4K with no
+		// preferredPeakBitRate ceiling — then downshifting to the capped
+		// rung) and rebuffers from empty. Position is legitimately frozen
+		// during that downshift+rebuffer, which is NOT a wedge — declaring
+		// one here aborts a player that's actively recovering. Later steps
+		// start from a settled buffer, so the check is valid there.
+		if i > 0 && playerWedged(s, 10*time.Second) {
 			t.Logf("  player wedged (position not advancing) — skipping remaining %d step(s)",
 				len(steps)-i-1)
 			for k := i + 1; k < len(steps); k++ {
@@ -264,16 +272,19 @@ func RunVariantSweep(ctx context.Context, t *testing.T, sess *runner.Session, mo
 //
 //  1. position_s hasn't advanced more than 0.5 s over the lookback
 //     window (the player isn't moving through content)
-//  2. AND the latest buffer depth is still below SustainableBufferS
-//     (the buffer hasn't started refilling — if it has, the player is
-//     recovering and we should hold the next step, not declare wedge)
+//  2. AND the buffer never reached SustainableBufferS anywhere in the
+//     window (it stayed pinned near-empty — if it climbed back at any
+//     point the player is alive and cycling, not dead, so don't wedge)
 //
-// The second check is what prevents the false-positive we saw on iPad
-// sim: step 2's buffer drained to 0 mid-step but recovered to >20 s by
-// the end. Position was naturally frozen during the drain, but on the
-// last sample buffer had climbed back — the player WAS coming back.
-// Old single-signal check called that a wedge and skipped 34 steps.
-// Returns false when there's not enough sample data yet to judge.
+// The second check prevents the false-positives we saw on iPad sim: a
+// buffer that drains to 0 mid-step but recovers to >20 s — the player is
+// coming back, not wedged. #632 widened it from "last sample" to "any
+// sample in the window": on a thin-margin peak-rung upshift the buffer
+// oscillates (drains fetching big segments, refills, may drain again), so
+// the LAST sample can read ~0 even though the player hit a healthy buffer
+// seconds earlier. Keying on the window max spares that dip-and-recover
+// while still catching a player pinned empty throughout. Returns false
+// when there's not enough sample data yet to judge.
 func playerWedged(s *runner.Sampler, lookback time.Duration) bool {
 	n := int(lookback / time.Second)
 	if n < 5 {
@@ -289,10 +300,13 @@ func playerWedged(s *runner.Sampler, lookback time.Duration) bool {
 	if last.PositionS > first+0.5 {
 		return false
 	}
-	// Position not advancing, but is the buffer recovering? Then the
-	// player will resume soon — hold off on declaring wedge.
-	if last.BufferDepthS >= runner.SustainableBufferS {
-		return false
+	// Position not advancing, but did the buffer reach a healthy level
+	// anywhere in the window? Then the player is cycling/recovering, not
+	// dead — hold off on declaring wedge.
+	for _, smp := range samples {
+		if smp.BufferDepthS >= runner.SustainableBufferS {
+			return false
+		}
 	}
 	return true
 }
@@ -392,6 +406,12 @@ func abs(x float64) float64 {
 }
 
 // bufferStable returns true when the buffer hasn't trended down across the
+// minStableBufferS is the floor a buffer must clear before bufferStable
+// will call a step "stable" — guards against a flat near-empty buffer
+// reading as settled (#632). Low enough not to disturb genuinely-stable
+// steps, which sit well above it.
+const minStableBufferS = 1.0
+
 // last earlyExitWindow seconds — defined as (mean of latest third) ≥
 // (mean of earliest third) - tolerance. Requires at least 10 samples in
 // the window to fire (avoids declaring stability from noise).
@@ -413,6 +433,15 @@ func bufferStable(s *runner.Sampler, window time.Duration, tol float64) bool {
 	late := samples[len(samples)-third:]
 	earlyMean := meanBuffer(early)
 	lateMean := meanBuffer(late)
+	// #632: a buffer pinned near empty is stalled, not "stable" — a flat
+	// 0→0 trace would otherwise satisfy the trend test below and trigger a
+	// premature early-exit (we saw a floor step exit "early-stable" at 20s
+	// with buf=0 while the player was still rebuffering off a 4K→360p
+	// downshift). Require a minimally healthy buffer before calling it
+	// stable, so such a step rides toward maxHold and lets the buffer fill.
+	if lateMean < minStableBufferS {
+		return false
+	}
 	return lateMean >= earlyMean-tol
 }
 
