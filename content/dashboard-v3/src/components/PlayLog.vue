@@ -809,6 +809,46 @@ const windowedRows = computed<Row[]>(() => {
 /** True when rows were dropped from the rendered set (shown in the bar). */
 const renderCapped = computed(() => windowedFull.value.length > MAX_RENDER_ROWS);
 
+/** Highlight the row matching the synchronized "selected event" cursor
+ *  (coord.state.cursorMs) — same coordination NetworkLog uses, so picking
+ *  an event lights up the corresponding Play Log line too. Rows are point
+ *  events, so we light the containing/predecessor row: the latest row at or
+ *  before the cursor (successor if the cursor precedes the first row).
+ *  Rows sharing that ts all highlight. */
+const cursorRowTs = computed<number | null>(() => {
+  const ms = coord.state.cursorMs;
+  if (ms == null || !Number.isFinite(ms)) return null;
+  let pred = -Infinity, succ = Infinity;
+  for (const r of windowedFull.value) {
+    if (r.ts <= ms) { if (r.ts > pred) pred = r.ts; }
+    else if (r.ts < succ) succ = r.ts;
+  }
+  if (pred !== -Infinity) return pred;
+  if (succ !== Infinity) return succ;
+  return null;
+});
+
+// Scroll the highlighted row into view inside the inner container only (no
+// outer page scroll), mirroring NetworkLog's cursor follow.
+watch(
+  () => coord.state.cursorMs,
+  () => {
+    if (cursorRowTs.value == null) return;
+    nextTick(() => {
+      const el = rowsScrollRef.value;
+      if (!el) return;
+      const target = el.querySelector('.row.cursor-current') as HTMLElement | null;
+      if (!target) return;
+      const top = el.scrollTop;
+      const bottom = top + el.clientHeight;
+      const rTop = target.offsetTop;
+      const rBottom = rTop + target.offsetHeight;
+      if (rTop < top) el.scrollTop = rTop;
+      else if (rBottom > bottom) el.scrollTop = rBottom - el.clientHeight;
+    });
+  },
+);
+
 const rowsWithFields = computed<RowWithFields[]>(() => {
   // Build chronological copy so the diff against the previous
   // snapshot is well-defined regardless of the display sort
@@ -1064,7 +1104,7 @@ function onRowsWheel(e: WheelEvent) {
           v-for="(r, i) in sortedRows"
           :key="i"
           class="row"
-          :class="[`src-${r.source}`, rowSeverityClass(r)]"
+          :class="[`src-${r.source}`, rowSeverityClass(r), { 'cursor-current': cursorRowTs !== null && r.ts === cursorRowTs }]"
           :title="rowTooltip(r)"
         >
           <div class="cell c-time">{{ fmtTime(r.ts) }}</div>
@@ -1277,6 +1317,16 @@ function onRowsWheel(e: WheelEvent) {
 }
 
 .row:hover { background: #f9fafb; }
+/* Synchronized "selected event" cursor — mirrors NetworkLog so picking an
+   event highlights the matching Play Log line. The .rows ancestor lifts
+   specificity above the .row.src-* tints defined below. */
+.rows .row.cursor-current {
+  background: rgba(29, 78, 216, 0.14);
+  border-top: 2px dashed #1d4ed8;
+  border-bottom: 2px dashed #1d4ed8;
+  box-shadow: inset 4px 0 0 #1d4ed8;
+}
+.rows .row.cursor-current:hover { background: rgba(29, 78, 216, 0.20); }
 
 .row.src-event { background: #fafafa; }
 .row.src-event:hover { background: #f3f4f6; }
