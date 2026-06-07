@@ -1142,10 +1142,13 @@ server_start                 [auto]
                spike against: between boot and shape restoration, session
                ports run unshaped (no tc filter yet) → a spike landing
                just after a server_start is a redeploy artifact, not a
-               shaper bug (#671). Because it has no player_id,
-               `harness query control <play>` won't surface it — use
-               `harness raw GET "/analytics/api/v2/control_events?event=server_start"`
-               or filter plays by `--label-has info=*server_start`.
+               shaper bug (#671). It has no player_id, so query it by event
+               (the control_events read path no longer requires player_id
+               when an event/label filter is given, #671):
+                 `harness query control --event server_start`
+               or `harness raw GET "/analytics/api/v2/control_events?event=server_start"`.
+               (`harness query control <play>` is the per-player form; a
+               session-less event won't appear under any play.)
 
 control_change               [harness | proxy] [debug]
   meaning:     generic fallback when the changed field hasn't been
