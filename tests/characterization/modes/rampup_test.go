@@ -389,8 +389,14 @@ func runRampup(t *testing.T, p runner.Platform) {
 		if st.ExitReason == "skipped-player-wedged" {
 			continue
 		}
-		failed := st.StallsDelta > 0 || st.MinBufferS < runner.SustainableBufferS
-		if !failed {
+		// #650 (port of #632): only an ACTUAL stall fails a non-bottom rung.
+		// Rampup upshifts onto thin-margin peak rungs (+5% over the variant's
+		// peak), where the buffer transiently drains to min_buf=0 fetching the
+		// bigger segments and then refills without underrunning — expected ABR
+		// behaviour, not a defect. Key on real stalls, not the dip. (rampdown
+		// keeps the stricter min_buf check: a descent fills the buffer, so a
+		// dip there is genuinely suspicious.)
+		if st.StallsDelta == 0 {
 			continue
 		}
 		upperFailures = append(upperFailures, fmt.Sprintf(
@@ -399,7 +405,7 @@ func runRampup(t *testing.T, p runner.Platform) {
 			st.StallsDelta, st.MinBufferS))
 	}
 	if len(upperFailures) > 0 {
-		t.Errorf("player stalled / depleted buffer at %d non-bottom variant(s):\n  %s",
+		t.Errorf("player stalled at %d non-bottom variant(s):\n  %s",
 			len(upperFailures), joinLines(upperFailures))
 	}
 
