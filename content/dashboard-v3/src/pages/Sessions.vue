@@ -904,10 +904,25 @@ function testingMeta(r: SessionRow): { headline: string; all: string[] } | null 
   return { headline, all: all.sort() };
 }
 
-// #653: how many label chips to show before collapsing the rest behind a
-// "+N more" toggle. Severity-ranked above, so the visible head is the
-// highest-signal chips.
-const LABEL_CHIP_CAP = 8;
+// #656: cause/effect split. CAUSE = things the operator/harness deliberately
+// injected (fault toggles, shaper/pattern edits, lifecycle); EFFECT =
+// everything else, i.e. how the player reacted (qoe_*, stalls, downshifts,
+// breaches, transport/segment failures). Classify by label family; the
+// `*` synthMark prefix is stripped first.
+const CAUSE_RE = /^(fault|pattern|shaper_config|timeouts_changed|loop_server|session_start|session_end|content_changed|label_changed|control_change)/;
+function isCauseLabel(name: string): boolean {
+  const n = name.startsWith('*') ? name.slice(1) : name;
+  return CAUSE_RE.test(n);
+}
+function causeChips(r: SessionRow): LabelChip[] {
+  return labelChips(r).filter((c) => isCauseLabel(c.name));
+}
+function effectChips(r: SessionRow): LabelChip[] {
+  return labelChips(r).filter((c) => !isCauseLabel(c.name));
+}
+
+// #653/#656: per-group cap before the "+N more" toggle collapses the tail.
+const LABEL_CHIP_CAP = 6;
 
 // Per-row "show all labels" state, keyed by play_id. Collapsed by default.
 const expandedLabelRows = ref<Set<string>>(new Set());
@@ -916,14 +931,19 @@ function toggleLabelRow(playId: string) {
   if (s.has(playId)) s.delete(playId); else s.add(playId);
   expandedLabelRows.value = s;
 }
-// Chips to actually render for a row: all when expanded, else the capped head.
-function visibleLabelChips(r: SessionRow): LabelChip[] {
-  const all = labelChips(r);
-  if (expandedLabelRows.value.has(String(r.play_id))) return all;
-  return all.slice(0, LABEL_CHIP_CAP);
+// Visible head of each group: all when expanded, else the capped head.
+function visibleCauseChips(r: SessionRow): LabelChip[] {
+  const all = causeChips(r);
+  return expandedLabelRows.value.has(String(r.play_id)) ? all : all.slice(0, LABEL_CHIP_CAP);
 }
+function visibleEffectChips(r: SessionRow): LabelChip[] {
+  const all = effectChips(r);
+  return expandedLabelRows.value.has(String(r.play_id)) ? all : all.slice(0, LABEL_CHIP_CAP);
+}
+// Combined hidden count across both groups (drives the "+N more" label).
 function hiddenLabelCount(r: SessionRow): number {
-  return Math.max(0, labelChips(r).length - LABEL_CHIP_CAP);
+  return Math.max(0, causeChips(r).length - LABEL_CHIP_CAP)
+    + Math.max(0, effectChips(r).length - LABEL_CHIP_CAP);
 }
 
 // #563 — human-readable "how did this play end?" from the Phase 2
@@ -1413,13 +1433,26 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                     <span v-if="flagChips(r).length === 0" class="dash">—</span>
                   </td>
                   <td class="cell-labels">
-                    <span
-                      v-for="chip in visibleLabelChips(r)"
-                      :key="chip.label"
-                      class="label-chip"
-                      :class="'label-' + chip.cls"
-                      :title="chip.label"
-                    >{{ chip.count }}× {{ chip.name }}</span>
+                    <template v-if="visibleCauseChips(r).length">
+                      <span class="label-group-tag" title="Operator / harness injected (faults, shaping, patterns)">inj</span>
+                      <span
+                        v-for="chip in visibleCauseChips(r)"
+                        :key="'c-' + chip.label"
+                        class="label-chip"
+                        :class="'label-' + chip.cls"
+                        :title="chip.label"
+                      >{{ chip.count }}× {{ chip.name }}</span>
+                    </template>
+                    <template v-if="visibleEffectChips(r).length">
+                      <span class="label-group-tag" title="Player reaction (QoE, stalls, shifts, breaches)">plyr</span>
+                      <span
+                        v-for="chip in visibleEffectChips(r)"
+                        :key="'e-' + chip.label"
+                        class="label-chip"
+                        :class="'label-' + chip.cls"
+                        :title="chip.label"
+                      >{{ chip.count }}× {{ chip.name }}</span>
+                    </template>
                     <button
                       v-if="hiddenLabelCount(r) > 0 && !expandedLabelRows.has(String(r.play_id))"
                       type="button"
@@ -1744,6 +1777,17 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   cursor: pointer;
 }
 .label-more:hover { background: #e0e7ff; }
+/* #656: tiny uppercase divider tag preceding the injected / player chip
+   groups, so cause vs effect read as distinct clusters. */
+.label-group-tag {
+  display: inline-block;
+  margin: 0 4px 2px 0;
+  font: 700 9px system-ui;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  vertical-align: middle;
+}
 /* #658: compact pill for the testing= run metadata (test · platform), full
    set on hover — keeps the structured KV facts out of the playback chips. */
 .label-test-meta {
