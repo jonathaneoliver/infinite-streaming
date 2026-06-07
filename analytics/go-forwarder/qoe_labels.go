@@ -167,14 +167,23 @@ func computeQoEEventLabels(cfg *QoEThresholds, ps *playLabelState, r *row, now t
 		current = append(current, l)
 	}
 
-	// ── Edge-trigger: emit rising edges, re-arm the active set ─────────
-	// A label not in qoeActive is a new occurrence (first determination,
-	// or a recurrence after it cleared) → emit. One already active is the
-	// same instance persisting → suppress. Rebuild qoeActive from `current`
-	// so a condition going false re-arms it for next time. #595.
+	// ── Edge-trigger + clear-cooldown re-arm ──────────────────────────
+	// A label not in qoeActive is a rising edge (first determination, or a
+	// recurrence after it cleared). Edge-triggering alone (#595) still
+	// re-chips on EVERY rising edge, so a noisy condition that flaps above/
+	// below its threshold spawns a chip per re-crossing. The cooldown gates
+	// re-fires: a rising edge emits only if the label has been off for
+	// ≥ RefireCooldownS since it was last true (qoeLastOn) — so a flapping
+	// episode is one chip, not dozens. A continuously-true label stays
+	// suppressed; a condition going false re-arms it once the cooldown
+	// elapses. #595, #657.
 	if ps.qoeActive == nil {
 		ps.qoeActive = make(map[string]struct{})
 	}
+	if ps.qoeLastOn == nil {
+		ps.qoeLastOn = make(map[string]time.Time)
+	}
+	cooldown := time.Duration(cfg.RefireCooldownS) * time.Second
 	prevActive := ps.qoeActive
 	next := make(map[string]struct{}, len(current))
 	var out []string
@@ -184,18 +193,27 @@ func computeQoEEventLabels(cfg *QoEThresholds, ps *playLabelState, r *row, now t
 		}
 		next[l] = struct{}{}
 		if _, on := prevActive[l]; !on {
-			out = append(out, l)
+			// Rising edge — emit only if never fired or clear for ≥ cooldown.
+			if last, seen := ps.qoeLastOn[l]; !seen || now.Sub(last) >= cooldown {
+				out = append(out, l)
+			}
 		}
+		ps.qoeLastOn[l] = now // true on this row — extend the episode
 	}
 	ps.qoeActive = next
 
 	// ── Terminal row: summary (current-at-end) + outcome + tier ────────
 	if firstTerminal {
-		// Force-emit the still-true conditions that edge-triggering
-		// suppressed above, so the summary row carries the full
-		// current-at-end set and qoe_tier_* below reads a correct set.
+		// Force-emit every still-true condition not already emitted this row
+		// (edge-trigger AND cooldown both suppress repeats), so the summary
+		// row carries the full current-at-end set and qoe_tier_* reads it right.
+		emitted := make(map[string]struct{}, len(out))
+		for _, l := range out {
+			emitted[l] = struct{}{}
+		}
 		for _, l := range current {
-			if _, on := prevActive[l]; on {
+			if _, e := emitted[l]; !e {
+				emitted[l] = struct{}{}
 				out = append(out, l)
 			}
 		}
@@ -353,11 +371,16 @@ func fpsDipLabel(cfg *QoEThresholds, r *row) string {
 	return ""
 }
 
-// throughputDivergenceLabel fires when the client-reported network
-// bitrate diverges by more than ThroughputDivergenceFactor from EITHER
-// the recent-peak server-measured throughput OR the provisioned cap.
-// Always records the current server throughput into the windowed peak
-// trail (even when network_bitrate is absent, so the peak is warm).
+// throughputDivergenceLabel fires when the client measured MATERIALLY LESS
+// throughput than the server actually delivered — nb < recent server-peak ×
+// (1 - ThroughputDivergenceFactor). Only this under-read direction is kept:
+// the over-read direction (client bitrate >> server, the AVPlayer burst quirk;
+// see reference_ios_avg_bitrate_overreads) was the bulk of the per-heartbeat
+// noise and is not a delivery problem, so it no longer trips this label. The
+// under-read is a genuine client/server disagreement — the client believes it
+// has less bandwidth than was delivered, which can drive over-conservative ABR.
+// Always records the current server throughput into the windowed peak trail
+// (even when network_bitrate is absent) so the peak stays warm. #657.
 func throughputDivergenceLabel(cfg *QoEThresholds, ps *playLabelState, r *row, now time.Time) string {
 	window := time.Duration(cfg.ABR.ThroughputPeakWindowS) * time.Second
 	var peak float64
@@ -368,24 +391,34 @@ func throughputDivergenceLabel(cfg *QoEThresholds, ps *playLabelState, r *row, n
 		return "" // no responsive client measurement to compare
 	}
 	factor := cfg.ABR.ThroughputDivergenceFactor
-	if peak > 0 && math.Abs(nb-peak)/peak > factor {
-		return qoeLabel(SevWarning, "qoe_throughput_divergence")
-	}
-	if limit := float64(r.EffectiveRateLimitMbps); limit > 0 && math.Abs(nb-limit)/limit > factor {
+	if peak > 0 && nb < peak*(1-factor) {
 		return qoeLabel(SevWarning, "qoe_throughput_divergence")
 	}
 	return ""
 }
 
-// rateCapBreachLabel fires when the observed client network bitrate
-// exceeds the effective cap by more than RateCapBreachFactor. Uses the
-// instantaneous network_bitrate (not the iOS avg, which over-reads).
+// rateCapBreachLabel fires when the SERVER actually delivered above the
+// effective cap by more than RateCapBreachFactor. The cap is kernel-enforced
+// (tc/nftables), so it can't be breached at the wire by the client — the
+// client's network_bitrate over-reads 2-3× the cap on AVPlayer burst (a known
+// quirk, not a breach; see reference_ios_avg_bitrate_overreads). So we gate on
+// the kernel-measured served rate (nftables_bandwidth_mbps), falling back to
+// the proxy's per-segment transfer rate — making this a real over-delivery /
+// shaping-failure detector (e.g. the boot restore-window spike, #671) instead
+// of a per-heartbeat over-read alarm. #657.
 func rateCapBreachLabel(cfg *QoEThresholds, r *row) string {
 	limit := float64(r.EffectiveRateLimitMbps)
 	if limit <= 0 {
 		return ""
 	}
-	if float64(r.NetworkBitrateMbps) > limit*cfg.Network.RateCapBreachFactor {
+	served := float64(r.NftablesBandwidthMbps)
+	if served <= 0 {
+		served = float64(r.MbpsTransferRate)
+	}
+	if served <= 0 {
+		return ""
+	}
+	if served > limit*cfg.Network.RateCapBreachFactor {
 		return qoeLabel(SevWarning, "qoe_rate_cap_breach")
 	}
 	return ""

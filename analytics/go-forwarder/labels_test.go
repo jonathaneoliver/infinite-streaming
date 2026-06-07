@@ -365,13 +365,19 @@ func TestQoEThroughputDivergence(t *testing.T) {
 	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", PlayingTimeMs: 10000, NetworkBitrateMbps: 10, MbpsTransferRate: 10}); hasLabel(got, want) {
 		t.Fatalf("matching throughput should not diverge: %v", got)
 	}
-	// nb 5 vs peak 10 → 50% > 15% → diverge.
+	// nb 5 under server peak 10 → client under-read by 50% > 15% → diverge.
 	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", PlayingTimeMs: 10000, NetworkBitrateMbps: 5, MbpsTransferRate: 10}); !hasLabel(got, want) {
-		t.Fatalf("nb 5 vs peak 10 should diverge: %v", got)
+		t.Fatalf("nb 5 under server peak 10 should diverge: %v", got)
 	}
-	// nb 5 vs cap 10 (no server peak) → diverge via limit branch.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", PlayingTimeMs: 10000, NetworkBitrateMbps: 5, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
-		t.Fatalf("nb 5 vs cap 10 should diverge: %v", got)
+	// #657: the over-read direction (nb 30 >> server peak 10, the AVPlayer
+	// burst quirk) is no longer divergence — it was the per-heartbeat noise.
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", PlayingTimeMs: 10000, NetworkBitrateMbps: 30, MbpsTransferRate: 10}); hasLabel(got, want) {
+		t.Fatalf("over-read (nb 30 vs peak 10) must not diverge post-#657: %v", got)
+	}
+	// #657: with no server peak (transfer rate 0) the cap is no longer a
+	// divergence baseline — there's nothing server-side to compare against.
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", PlayingTimeMs: 10000, NetworkBitrateMbps: 5, EffectiveRateLimitMbps: 10}); hasLabel(got, want) {
+		t.Fatalf("cap-only comparison dropped in #657; should not diverge: %v", got)
 	}
 }
 
@@ -402,13 +408,22 @@ func TestQoEAbrStartupGate(t *testing.T) {
 
 func TestQoERateCapBreach(t *testing.T) {
 	want := qoeLabel(SevWarning, "qoe_rate_cap_breach")
-	// 12 > 10*1.10=11 → breach.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NetworkBitrateMbps: 12, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
-		t.Fatalf("12 over cap 10 should breach: %v", got)
+	// #657: gate on the kernel-measured served rate. 12 > 10*1.10=11 → breach.
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NftablesBandwidthMbps: 12, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
+		t.Fatalf("served 12 over cap 10 should breach: %v", got)
+	}
+	// Fallback to the proxy per-segment transfer rate when nftables is absent.
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", MbpsTransferRate: 12, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
+		t.Fatalf("transfer-rate fallback 12 over cap 10 should breach: %v", got)
 	}
 	// 10.5 < 11 → no breach.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NetworkBitrateMbps: 10.5, EffectiveRateLimitMbps: 10}); hasLabel(got, want) {
-		t.Fatalf("10.5 within factor should not breach: %v", got)
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NftablesBandwidthMbps: 10.5, EffectiveRateLimitMbps: 10}); hasLabel(got, want) {
+		t.Fatalf("served 10.5 within factor should not breach: %v", got)
+	}
+	// #657: a client network_bitrate over-read (30) must NOT breach when the
+	// server actually delivered under the cap (the whole point of the re-base).
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NetworkBitrateMbps: 30, MbpsTransferRate: 9, EffectiveRateLimitMbps: 10}); hasLabel(got, want) {
+		t.Fatalf("client over-read must not breach post-#657: %v", got)
 	}
 }
 
@@ -683,9 +698,18 @@ func TestQoEReFiresOnNewInstance(t *testing.T) {
 	if got := computeEventLabelsWithState(s, cold("2026-06-03 00:00:03.000")); hasLabel(got, want) {
 		t.Fatalf("cleared row must not emit %s: %v", want, got)
 	}
-	// Cleared then true again = a new instance → re-emit.
-	if got := computeEventLabelsWithState(s, hot("2026-06-03 00:00:04.000")); !hasLabel(got, want) {
-		t.Fatalf("recurrence after clearing should re-emit %s: %v", want, got)
+	// #657: a recurrence WITHIN the 30s clear-cooldown is the same episode
+	// flapping (last true at :02, recurs at :10 = 8s clear) → stay suppressed.
+	if got := computeEventLabelsWithState(s, hot("2026-06-03 00:00:10.000")); hasLabel(got, want) {
+		t.Fatalf("recurrence within cooldown must stay suppressed %s: %v", want, got)
+	}
+	// Clear again, then recur AFTER the cooldown elapses (last true at :10,
+	// recurs at :45 = 35s clear ≥ 30s) → genuinely new episode → re-emit.
+	if got := computeEventLabelsWithState(s, cold("2026-06-03 00:00:11.000")); hasLabel(got, want) {
+		t.Fatalf("cleared row must not emit %s: %v", want, got)
+	}
+	if got := computeEventLabelsWithState(s, hot("2026-06-03 00:00:45.000")); !hasLabel(got, want) {
+		t.Fatalf("recurrence after cooldown should re-emit %s: %v", want, got)
 	}
 }
 
