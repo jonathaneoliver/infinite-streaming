@@ -174,6 +174,7 @@ const baseSeries: SeriesSpec[] = [
   {
     label: 'mbps_shaper_rate',
     color: '#0f766e',
+    hidden: true,
     accessor: (p: PlayerRecord) => p.server_metrics?.mbps_shaper_rate ?? null,
     stepped: true,
   },
@@ -185,11 +186,13 @@ const baseSeries: SeriesSpec[] = [
   {
     label: 'mbps_transfer_rate',
     color: '#f97316',
+    hidden: true,
     accessor: (p: PlayerRecord) => p.server_metrics?.mbps_transfer_rate ?? null,
   },
   {
     label: 'mbps_transfer_complete',
     color: '#dc2626',
+    hidden: true,
     accessor: (p: PlayerRecord) => p.server_metrics?.mbps_transfer_complete ?? null,
     stepped: true,
   },
@@ -274,11 +277,13 @@ const baseSeries: SeriesSpec[] = [
   {
     label: 'Player network_bitrate',
     color: '#059669',
+    hidden: true,
     accessor: (p: PlayerRecord) => p.player_metrics?.network_bitrate_mbps ?? null,
   },
   {
     label: 'Serving Variant',
     color: '#b45309',
+    hidden: true,
     accessor: (p: PlayerRecord) => p.server_metrics?.rendition_mbps ?? null,
     stepped: true,
   },
