@@ -793,34 +793,11 @@ const windowedFull = computed<Row[]>(() => {
   return allRows.value.filter((row) => row.ts >= r.min && row.ts <= r.max);
 });
 
-/** Max rows actually rendered to the DOM. With fields collapsed to a
- *  single compact string per row (~8 nodes/row instead of ~100), the
- *  window can render far more rows cheaply, so this cap is now just a
- *  safety bound against pathological windows. Narrow the focus bar (or
- *  pan) to inspect rows beyond it. A virtualized list remains the proper
- *  long-term fix. */
-const MAX_RENDER_ROWS = 1500;
-const windowedRows = computed<Row[]>(() => {
-  const rows = windowedFull.value;
-  if (rows.length <= MAX_RENDER_ROWS) return rows;
-  const sorted = rows.slice().sort((a, b) => a.ts - b.ts);
-  // When an event is selected, center the cap window on it so the
-  // highlighted row is actually rendered — otherwise the latest-N slice
-  // clips a selection that's further back than MAX_RENDER_ROWS rows (the
-  // log merges 4 sources, so a long play overflows fast). No selection →
-  // keep the most-recent N (the live tail operators watch).
-  const cur = cursorRowTs.value;
-  if (cur != null) {
-    let idx = sorted.findIndex((r) => r.ts >= cur);
-    if (idx < 0) idx = sorted.length - 1;
-    let start = idx - Math.floor(MAX_RENDER_ROWS / 2);
-    start = Math.max(0, Math.min(start, sorted.length - MAX_RENDER_ROWS));
-    return sorted.slice(start, start + MAX_RENDER_ROWS);
-  }
-  return sorted.slice(-MAX_RENDER_ROWS);
-});
-/** True when rows were dropped from the rendered set (shown in the bar). */
-const renderCapped = computed(() => windowedFull.value.length > MAX_RENDER_ROWS);
+// Render every row in the focus window — no cap. The focus window already
+// bounds the row count, each row collapses to ~8 DOM nodes, and this matches
+// NetworkLog (uncapped), so a selected event never gets clipped. If a very
+// wide window ever janks, virtualize the list rather than re-introduce a cap.
+const windowedRows = computed<Row[]>(() => windowedFull.value);
 
 /** Highlight the row matching the synchronized "selected event" cursor
  *  (coord.state.cursorMs) — same coordination NetworkLog uses, so picking
@@ -1058,7 +1035,6 @@ function onRowsWheel(e: WheelEvent) {
       <label v-if="hasAVMetrics" class="opt" title="iOS 18 AVMetrics raw events (issue #486 spike). Parallel observation stream from AVFoundation — compare side-by-side against today's heartbeat-derived Events."><input type="checkbox" v-model="showAVMetrics" /> AVMetrics ({{ counts.avm }})</label>
       <label class="opt"><input type="checkbox" v-model="showRaw" /> Raw</label>
       <span class="count">{{ counts.total }} row{{ counts.total === 1 ? '' : 's' }}</span>
-      <span v-if="renderCapped" class="count" :title="cursorRowTs != null ? 'Rendering a window around the selected event; narrow the focus bar to see the rest' : 'Only the most recent rows are rendered for performance; narrow the focus bar to see older rows'">(showing {{ MAX_RENDER_ROWS }} of {{ windowedFull.length }}{{ cursorRowTs != null ? ' around selection' : '' }})</span>
       <button
         type="button"
         class="btn live-toggle"
