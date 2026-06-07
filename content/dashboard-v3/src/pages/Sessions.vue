@@ -1433,21 +1433,21 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                     <span v-if="flagChips(r).length === 0" class="dash">—</span>
                   </td>
                   <td class="cell-labels">
-                    <template v-if="visibleCauseChips(r).length">
-                      <span class="label-group-tag" title="Operator / harness injected (faults, shaping, patterns)">inj</span>
-                      <span
-                        v-for="chip in visibleCauseChips(r)"
-                        :key="'c-' + chip.label"
-                        class="label-chip"
-                        :class="'label-' + chip.cls"
-                        :title="chip.label"
-                      >{{ chip.count }}× {{ chip.name }}</span>
-                    </template>
                     <template v-if="visibleEffectChips(r).length">
                       <span class="label-group-tag" title="Player reaction (QoE, stalls, shifts, breaches)">plyr</span>
                       <span
                         v-for="chip in visibleEffectChips(r)"
                         :key="'e-' + chip.label"
+                        class="label-chip"
+                        :class="'label-' + chip.cls"
+                        :title="chip.label"
+                      >{{ chip.count }}× {{ chip.name }}</span>
+                    </template>
+                    <template v-if="visibleCauseChips(r).length">
+                      <span class="label-group-tag" title="Operator / harness injected (faults, shaping, patterns)">inj</span>
+                      <span
+                        v-for="chip in visibleCauseChips(r)"
+                        :key="'c-' + chip.label"
                         class="label-chip"
                         :class="'label-' + chip.cls"
                         :title="chip.label"
