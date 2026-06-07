@@ -968,8 +968,21 @@ type PlayDetail struct {
 	ResolutionChanges *int               `json:"resolution_changes,omitempty"`
 
 	// RestartCount Mid-play player-recovery restarts.
-	RestartCount    *int `json:"restart_count,omitempty"`
-	SegmentFailures *int `json:"segment_failures,omitempty"`
+	RestartCount *int `json:"restart_count,omitempty"`
+
+	// Scenario Run IDENTITY of a play — "what it IS" (test, platform, device,
+	// versions), as distinct from the event labels which are "what
+	// HAPPENED during it". Issue #678 promoted this off the dashboard
+	// (it was assembled client-side in Sessions.vue) into the API so the
+	// Sessions list, Session Viewer header, and chat tools share one shape.
+	//
+	// Hybrid-sourced: device/player/app/os/content from the authoritative
+	// typed summary columns; test/platform/run_id from the `testing=`
+	// label tier (no typed column exists for those). Every field is
+	// optional — a play absent all of them omits the whole object rather
+	// than emitting `{}`.
+	Scenario        *Scenario `json:"scenario,omitempty"`
+	SegmentFailures *int      `json:"segment_failures,omitempty"`
 
 	// SegmentStallCount Stalls waiting on a segment fetch.
 	SegmentStallCount *int `json:"segment_stall_count,omitempty"`
@@ -1115,8 +1128,21 @@ type PlaySummary struct {
 	ResolutionChanges *int               `json:"resolution_changes,omitempty"`
 
 	// RestartCount Mid-play player-recovery restarts.
-	RestartCount    *int `json:"restart_count,omitempty"`
-	SegmentFailures *int `json:"segment_failures,omitempty"`
+	RestartCount *int `json:"restart_count,omitempty"`
+
+	// Scenario Run IDENTITY of a play — "what it IS" (test, platform, device,
+	// versions), as distinct from the event labels which are "what
+	// HAPPENED during it". Issue #678 promoted this off the dashboard
+	// (it was assembled client-side in Sessions.vue) into the API so the
+	// Sessions list, Session Viewer header, and chat tools share one shape.
+	//
+	// Hybrid-sourced: device/player/app/os/content from the authoritative
+	// typed summary columns; test/platform/run_id from the `testing=`
+	// label tier (no typed column exists for those). Every field is
+	// optional — a play absent all of them omits the whole object rather
+	// than emitting `{}`.
+	Scenario        *Scenario `json:"scenario,omitempty"`
+	SegmentFailures *int      `json:"segment_failures,omitempty"`
 
 	// SegmentStallCount Stalls waiting on a segment fetch.
 	SegmentStallCount *int `json:"segment_stall_count,omitempty"`
@@ -1211,6 +1237,46 @@ type SampleRow struct {
 	// Ts ms-precision DateTime64
 	Ts                   time.Time              `json:"ts"`
 	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// Scenario Run IDENTITY of a play — "what it IS" (test, platform, device,
+// versions), as distinct from the event labels which are "what
+// HAPPENED during it". Issue #678 promoted this off the dashboard
+// (it was assembled client-side in Sessions.vue) into the API so the
+// Sessions list, Session Viewer header, and chat tools share one shape.
+//
+// Hybrid-sourced: device/player/app/os/content from the authoritative
+// typed summary columns; test/platform/run_id from the `testing=`
+// label tier (no typed column exists for those). Every field is
+// optional — a play absent all of them omits the whole object rather
+// than emitting `{}`.
+type Scenario struct {
+	// AppVersion Client app version. From the typed column.
+	AppVersion *string `json:"app_version,omitempty"`
+
+	// ContentId Content identifier — duplicated here so the object is self-contained for the viewer header.
+	ContentId *string `json:"content_id,omitempty"`
+
+	// DeviceClass Device taxonomy class (phone|tablet|tv|…). From the typed column (#550 Phase 4).
+	DeviceClass *string `json:"device_class,omitempty"`
+
+	// DeviceModel Device model identifier (e.g. 'iPhone15,2'). From the typed column.
+	DeviceModel *string `json:"device_model,omitempty"`
+
+	// OsVersion OS version, 'major.minor' (or just 'major'), joined from os_version_major/os_version_minor.
+	OsVersion *string `json:"os_version,omitempty"`
+
+	// Platform Harness-stamped platform, from testing=platform_* (e.g. 'ipad-sim'). Distinct from device_* below. Harness runs only.
+	Platform *string `json:"platform,omitempty"`
+
+	// PlayerTech Player technology (e.g. 'AVPlayer'). From the typed column.
+	PlayerTech *string `json:"player_tech,omitempty"`
+
+	// RunId Characterization run id, from testing=run_id_* (compact UTC, e.g. '20260524T070148Z'). Groups plays into a run. Harness runs only.
+	RunId *string `json:"run_id,omitempty"`
+
+	// Test Characterization test mode, from testing=test_* (e.g. 'rampup'). Harness runs only.
+	Test *string `json:"test,omitempty"`
 }
 
 // StreamErrorEvent Emitted on transport / CH failures after the initial `meta`

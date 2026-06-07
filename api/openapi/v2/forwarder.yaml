@@ -993,6 +993,9 @@ components:
               oneOf:
                 - { type: string,  description: "label, e.g. 'warning=*manifest_failure'" }
                 - { type: integer, description: "occurrence count for this play" }
+        # ---- run identity (issue #678) ----
+        scenario:
+          $ref: '#/components/schemas/Scenario'
         # ---- tiered retention class ----
         classification:
           type: string
@@ -1008,6 +1011,31 @@ components:
             fault-induced | abandoned`) described in DESIGN.md are
             blocked on the `play_summaries` rollup table — they'll
             land here when that lands.
+
+    Scenario:
+      description: |
+        Run IDENTITY of a play — "what it IS" (test, platform, device,
+        versions), as distinct from the event labels which are "what
+        HAPPENED during it". Issue #678 promoted this off the dashboard
+        (it was assembled client-side in Sessions.vue) into the API so the
+        Sessions list, Session Viewer header, and chat tools share one shape.
+
+        Hybrid-sourced: device/player/app/os/content from the authoritative
+        typed summary columns; test/platform/run_id from the `testing=`
+        label tier (no typed column exists for those). Every field is
+        optional — a play absent all of them omits the whole object rather
+        than emitting `{}`.
+      type: object
+      properties:
+        test:         { type: string, description: "Characterization test mode, from testing=test_* (e.g. 'rampup'). Harness runs only." }
+        platform:     { type: string, description: "Harness-stamped platform, from testing=platform_* (e.g. 'ipad-sim'). Distinct from device_* below. Harness runs only." }
+        run_id:       { type: string, description: "Characterization run id, from testing=run_id_* (compact UTC, e.g. '20260524T070148Z'). Groups plays into a run. Harness runs only." }
+        device_class: { type: string, description: "Device taxonomy class (phone|tablet|tv|…). From the typed column (#550 Phase 4)." }
+        device_model: { type: string, description: "Device model identifier (e.g. 'iPhone15,2'). From the typed column." }
+        player_tech:  { type: string, description: "Player technology (e.g. 'AVPlayer'). From the typed column." }
+        app_version:  { type: string, description: "Client app version. From the typed column." }
+        os_version:   { type: string, description: "OS version, 'major.minor' (or just 'major'), joined from os_version_major/os_version_minor." }
+        content_id:   { type: string, description: "Content identifier — duplicated here so the object is self-contained for the viewer header." }
 
     PlaySummaryPage:
       type: object
