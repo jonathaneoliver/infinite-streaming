@@ -412,6 +412,42 @@ func TestQoERateCapBreach(t *testing.T) {
 	}
 }
 
+func TestQoEDownshiftOvershoot(t *testing.T) {
+	want := qoeLabel(SevWarning, "qoe_downshift_overshoot")
+	// 3-rung ladder: 1 / 5 / 8 Mbps. Cap 8 ⇒ ceiling = rung 2 (8 Mbps).
+	ladder := `[{"bandwidth":1000000},{"bandwidth":5000000},{"bandwidth":8000000}]`
+	mk := func(cap, sel float64) *row {
+		return &row{
+			Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress",
+			ManifestVariants: ladder, EffectiveRateLimitMbps: float32(cap), VideoBitrateMbps: float32(sel),
+		}
+	}
+	// cap 8 (ceiling rung 2), playing rung 0 (1 Mbps) → 2 rungs below → fire.
+	if got := evalQoE(mk(8, 1)); !hasLabel(got, want) {
+		t.Fatalf("2-rung overshoot (cap 8, on 1) should fire: %v", got)
+	}
+	// cap 8 (ceiling rung 2), playing rung 1 (5 Mbps) → 1 rung below → no fire (normal conservative).
+	if got := evalQoE(mk(8, 5)); hasLabel(got, want) {
+		t.Fatalf("1-rung below ceiling is normal, must not fire: %v", got)
+	}
+	// cap 8, playing rung 2 (8 Mbps) → at ceiling → no fire.
+	if got := evalQoE(mk(8, 8)); hasLabel(got, want) {
+		t.Fatalf("at-ceiling selection must not fire: %v", got)
+	}
+	// cap 5 (ceiling rung 1), playing rung 0 (1 Mbps) → 1 rung below → no fire.
+	if got := evalQoE(mk(5, 1)); hasLabel(got, want) {
+		t.Fatalf("cap lowers the ceiling — 1 rung below it must not fire: %v", got)
+	}
+	// No cap → undefined ceiling → no fire even sitting on the floor.
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", ManifestVariants: ladder, VideoBitrateMbps: 1}); hasLabel(got, want) {
+		t.Fatalf("no cap should not fire overshoot: %v", got)
+	}
+	// No ladder → can't define rungs → no fire.
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", EffectiveRateLimitMbps: 8, VideoBitrateMbps: 1}); hasLabel(got, want) {
+		t.Fatalf("no ladder should not fire overshoot: %v", got)
+	}
+}
+
 func TestQoECMCDMTPDrift(t *testing.T) {
 	want := qoeLabel(SevWarning, "qoe_cmcd_mtp_drift")
 	// measured 10 vs actual 4 → 150% > 50% → drift.

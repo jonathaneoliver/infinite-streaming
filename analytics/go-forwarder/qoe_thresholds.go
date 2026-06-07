@@ -100,6 +100,10 @@ type QoEThresholds struct {
 		// rung under high throughput is expected, not a defect — so those
 		// labels are suppressed to avoid startup false positives. #595.
 		StartupGraceMs uint32 `json:"startup_grace_ms"`
+		// Selected variant sitting ≥ this many rungs below the rung the
+		// applied cap supports ⇒ qoe_downshift_overshoot (#669). 1 rung
+		// below is normal conservative ABR; 2+ is over-correction.
+		DownshiftOvershootRungs int `json:"downshift_overshoot_rungs"`
 	} `json:"abr"`
 
 	// Live-edge label thresholds (#553). Margins are seconds BEYOND the
@@ -137,8 +141,9 @@ func qoeDefaults() *QoEThresholds {
 	t.ABR.DownshiftStormThreshold = 3
 	t.ABR.DownshiftStormWindowS = 30
 	t.ABR.MinVariantStuckS = 30
-	t.ABR.FPSDipRatio = 0.2      // displayed fps < 80% of nominal
-	t.ABR.StartupGraceMs = 10000 // suppress abr/throughput labels for the first 10s of playback
+	t.ABR.FPSDipRatio = 0.2           // displayed fps < 80% of nominal
+	t.ABR.StartupGraceMs = 10000      // suppress abr/throughput labels for the first 10s of playback
+	t.ABR.DownshiftOvershootRungs = 2 // ≥2 rungs below the cap-supported ceiling ⇒ overshoot (#669)
 	t.Live.OffsetConcerningMarginS = 3
 	t.Live.OffsetBreachMarginS = 10
 	t.Live.HoldbackDeviationS = 2
