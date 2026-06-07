@@ -32,6 +32,15 @@ import (
 type QoEThresholds struct {
 	Version string `json:"version"`
 
+	// RefireCooldownS — a level/sticky qoe_* label that has fired won't
+	// re-fire until its condition has stayed FALSE for at least this many
+	// seconds. Edge-triggering alone (#595) still re-chips on every rising
+	// edge, so a noisy condition that flaps above/below its threshold (e.g.
+	// the AVPlayer bitrate over-read crossing the cap repeatedly) produces
+	// dozens of chips for ONE episode. The cooldown collapses a flapping
+	// episode into a single label. 0 disables (pure edge-trigger). #657.
+	RefireCooldownS uint32 `json:"refire_cooldown_s"`
+
 	Outcomes struct {
 		// EBVSThresholdMs — wait (in ms) before an in-progress
 		// startup session is classified as abandoned_start (EBVS).
@@ -115,6 +124,7 @@ type QoEThresholds struct {
 // Override values in qoe_thresholds.json or via env var.
 func qoeDefaults() *QoEThresholds {
 	t := &QoEThresholds{Version: "1.0"}
+	t.RefireCooldownS = 30                        // one chip per episode; re-fire only after 30s clear
 	t.Outcomes.EBVSThresholdMs = 10000            // Conviva "good"
 	t.Outcomes.UserStoppedAfterThresholdMs = 5000 // 5s = substantial-watch threshold
 	t.Startup.VSTConcerningMs = 5000              // Conviva "best"
@@ -175,6 +185,9 @@ func loadQoEThresholds(path string) *QoEThresholds {
 		log.Printf("[QoE] override version mismatch (got %q, expected %q) — using compiled defaults", override.Version, cfg.Version)
 		logQoEResolved(cfg)
 		return cfg
+	}
+	if override.RefireCooldownS != 0 {
+		cfg.RefireCooldownS = override.RefireCooldownS
 	}
 	if override.Outcomes.EBVSThresholdMs != 0 {
 		cfg.Outcomes.EBVSThresholdMs = override.Outcomes.EBVSThresholdMs
@@ -263,6 +276,7 @@ func loadQoEThresholds(path string) *QoEThresholds {
 }
 
 func logQoEResolved(cfg *QoEThresholds) {
+	log.Printf("[QoE]   refire_cooldown_s=%d", cfg.RefireCooldownS)
 	log.Printf("[QoE]   outcomes.ebvs_threshold_ms=%d", cfg.Outcomes.EBVSThresholdMs)
 	log.Printf("[QoE]   outcomes.user_stopped_after_threshold_ms=%d", cfg.Outcomes.UserStoppedAfterThresholdMs)
 	log.Printf("[QoE]   startup.vst_concerning_ms=%d vst_breach_ms=%d", cfg.Startup.VSTConcerningMs, cfg.Startup.VSTBreachMs)

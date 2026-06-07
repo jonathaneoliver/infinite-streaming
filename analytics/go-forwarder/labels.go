@@ -135,6 +135,12 @@ type playLabelState struct {
 	// The terminal row force-emits the still-true set so the summary +
 	// qoe_tier_* reflect end state. nil until first use.
 	qoeActive map[string]struct{}
+	// #657 — clear-cooldown re-arm. qoeLastOn records the last row-time each
+	// qoe label was TRUE. A rising edge re-fires only if the label has been
+	// off for ≥ RefireCooldownS since that time, so a condition that flaps
+	// above/below its threshold within the cooldown counts as one episode
+	// (one chip) instead of re-chipping on every re-crossing. nil until use.
+	qoeLastOn map[string]time.Time
 	// LRU touch for GC.
 	seen time.Time
 }
