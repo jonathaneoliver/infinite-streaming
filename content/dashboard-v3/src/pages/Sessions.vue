@@ -864,11 +864,39 @@ function labelChips(r: SessionRow): LabelChip[] {
       : 'info';
     out.push({ label, name, count, cls });
   }
+  // #653: rank by severity tier first (so real errors lead, not the
+  // high-frequency info churn), then count-desc within a tier.
+  const sevRank: Record<LabelChip['cls'], number> = {
+    critical: 0, error: 1, warning: 2, info: 3, testing: 4,
+  };
   out.sort((a, b) =>
-    b.count - a.count
+    sevRank[a.cls] - sevRank[b.cls]
+    || b.count - a.count
     || a.label.localeCompare(b.label),
   );
   return out;
+}
+
+// #653: how many label chips to show before collapsing the rest behind a
+// "+N more" toggle. Severity-ranked above, so the visible head is the
+// highest-signal chips.
+const LABEL_CHIP_CAP = 8;
+
+// Per-row "show all labels" state, keyed by play_id. Collapsed by default.
+const expandedLabelRows = ref<Set<string>>(new Set());
+function toggleLabelRow(playId: string) {
+  const s = new Set(expandedLabelRows.value);
+  if (s.has(playId)) s.delete(playId); else s.add(playId);
+  expandedLabelRows.value = s;
+}
+// Chips to actually render for a row: all when expanded, else the capped head.
+function visibleLabelChips(r: SessionRow): LabelChip[] {
+  const all = labelChips(r);
+  if (expandedLabelRows.value.has(String(r.play_id))) return all;
+  return all.slice(0, LABEL_CHIP_CAP);
+}
+function hiddenLabelCount(r: SessionRow): number {
+  return Math.max(0, labelChips(r).length - LABEL_CHIP_CAP);
 }
 
 // #563 — human-readable "how did this play end?" from the Phase 2
@@ -1359,12 +1387,26 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                   </td>
                   <td class="cell-labels">
                     <span
-                      v-for="chip in labelChips(r)"
+                      v-for="chip in visibleLabelChips(r)"
                       :key="chip.label"
                       class="label-chip"
                       :class="'label-' + chip.cls"
                       :title="chip.label"
                     >{{ chip.count }}× {{ chip.name }}</span>
+                    <button
+                      v-if="hiddenLabelCount(r) > 0 && !expandedLabelRows.has(String(r.play_id))"
+                      type="button"
+                      class="label-more"
+                      title="Show all labels"
+                      @click="toggleLabelRow(String(r.play_id))"
+                    >+{{ hiddenLabelCount(r) }} more</button>
+                    <button
+                      v-else-if="expandedLabelRows.has(String(r.play_id))"
+                      type="button"
+                      class="label-more"
+                      title="Show fewer"
+                      @click="toggleLabelRow(String(r.play_id))"
+                    >show less</button>
                     <span v-if="labelChips(r).length === 0" class="dash">—</span>
                   </td>
                   <td>
@@ -1655,6 +1697,21 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 .label-critical { background: #fee2e2; color: #7f1d1d; border-color: #fca5a5; }
 .label-error    { background: #ffedd5; color: #7c2d12; border-color: #fdba74; }
 .label-testing  { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
+/* #653: "+N more" / "show less" toggle for the capped label list. */
+.label-more {
+  display: inline-block;
+  padding: 1px 6px;
+  margin: 0 3px 2px 0;
+  border-radius: 10px;
+  font: 600 11px system-ui;
+  line-height: 1.4;
+  white-space: nowrap;
+  background: #eef2ff;
+  color: #4338ca;
+  border: 1px solid #c7d2fe;
+  cursor: pointer;
+}
+.label-more:hover { background: #e0e7ff; }
 
 /* Hierarchical labels filter — mirrors SessionDisplay's Focus Window
  * event-filter accordion. One row per severity tier with a clickable
