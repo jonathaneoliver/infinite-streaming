@@ -269,10 +269,15 @@ func cmdQueryEvents(client *api.Client, args []string, asJSON bool) error {
 // shortcut that expands to `--label-has info=*pattern_step_<mode>`
 // (the densest pattern-locality signal — one row per step advance).
 func cmdQueryControl(client *api.Client, args []string, asJSON bool) error {
-	if len(args) < 1 {
-		return errors.New("usage: harness query control <play_id> [--source S] [--event E] [--mode M] [--label-has L ...] [--label-not L ...] [--limit N]")
+	// play_id is an OPTIONAL leading positional — omit it to query global /
+	// session-less events (e.g. server_start) by --event or --label-has. A
+	// leading token starting with '-' is a flag, not a play_id.
+	var playID string
+	flagArgs := args
+	if len(args) >= 1 && !strings.HasPrefix(args[0], "-") {
+		playID = args[0]
+		flagArgs = args[1:]
 	}
-	playID := args[0]
 	fs := flag.NewFlagSet("query control", flag.ContinueOnError)
 	source := fs.String("source", "", "filter to one source (harness|proxy|auto)")
 	var events arrayFlag
@@ -282,15 +287,20 @@ func cmdQueryControl(client *api.Client, args []string, asJSON bool) error {
 	fs.Var(&labelHas, "label-has", "row must have this label (repeatable; AND semantics)")
 	fs.Var(&labelNot, "label-not", "row must NOT have this label (repeatable; AND semantics)")
 	limit := fs.Int("limit", 0, "max rows")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(flagArgs); err != nil {
 		return err
+	}
+	if playID == "" && len(events) == 0 && len(labelHas) == 0 && *mode == "" {
+		return errors.New("usage: harness query control [<play_id>] [--event E] [--label-has L] [--source S] [--mode M] [--label-not L] [--limit N]\n  a play_id, --event, --label-has, or --mode is required")
 	}
 	params := &forwarder.GetApiV2ControlEventsParams{}
-	pid, err := parsePlayID(playID)
-	if err != nil {
-		return err
+	if playID != "" {
+		pid, err := parsePlayID(playID)
+		if err != nil {
+			return err
+		}
+		params.PlayId = &pid
 	}
-	params.PlayId = &pid
 	if *source != "" {
 		s := forwarder.GetApiV2ControlEventsParamsSource(*source)
 		if !s.Valid() {

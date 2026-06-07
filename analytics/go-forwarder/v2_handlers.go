@@ -84,26 +84,49 @@ func v2ControlEventsHandler(w http.ResponseWriter, r *http.Request, cfg config) 
 	// why this matters. An operator who curls the endpoint with
 	// an uppercase UUID would otherwise get an empty page.
 	playerID := canonicalV2ID(q.Get("player_id"))
-	if playerID == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"player_id required"}`))
-		return
-	}
 	playID := canonicalV2ID(q.Get("play_id"))
+	// `event` is repeatable. An event filter lets a global / session-less
+	// event (e.g. server_start, which has no player_id, #671) be listed
+	// without one — the read path no longer hard-requires player_id.
+	var events []string
+	for _, ev := range q["event"] {
+		if ev = strings.TrimSpace(ev); ev != "" {
+			events = append(events, ev)
+		}
+	}
 	from := q.Get("from")
 	to := q.Get("to")
 	limit := q.Get("limit")
 	if limit == "" {
 		limit = "1000"
 	}
-	params := map[string]string{
-		"player_id": playerID,
-		"limit":     limit,
+	// Tristate label filter — see label_filter.go.
+	labelHas, labelNot := readLabelFilters(q)
+	// Require at least one discriminating predicate so we never scan the
+	// whole control_events table.
+	if playerID == "" && playID == "" && len(events) == 0 && len(labelHas) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"one of player_id, play_id, event, or label_has required"}`))
+		return
 	}
-	where := []string{"player_id = {player_id:String}"}
+	params := map[string]string{"limit": limit}
+	var where []string
+	if playerID != "" {
+		params["player_id"] = playerID
+		where = append(where, "player_id = {player_id:String}")
+	}
 	if playID != "" {
 		params["play_id"] = playID
 		where = append(where, "play_id = {play_id:String}")
+	}
+	if len(events) > 0 {
+		names := make([]string, len(events))
+		for i, ev := range events {
+			key := "event_" + itoa(i)
+			params[key] = ev
+			names[i] = "{" + key + ":String}"
+		}
+		where = append(where, "event IN ("+strings.Join(names, ", ")+")")
 	}
 	if from != "" {
 		params["from"] = from
@@ -113,8 +136,6 @@ func v2ControlEventsHandler(w http.ResponseWriter, r *http.Request, cfg config) 
 		params["to"] = to
 		where = append(where, "ts <= parseDateTime64BestEffortOrNull({to:String}, 3)")
 	}
-	// Tristate label filter — see label_filter.go.
-	labelHas, labelNot := readLabelFilters(q)
 	where, params = applyLabelFilters(where, params, "labels", labelHas, labelNot)
 	query := "SELECT ts, player_id, play_id, attempt_id, session_id, source, event, info, labels, event_fingerprint, classification " +
 		"FROM " + cfg.chDatabase + ".control_events WHERE " +
