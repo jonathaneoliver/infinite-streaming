@@ -1737,12 +1737,16 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   border-left: 4px solid transparent;
 }
 .picker-table tbody tr:hover { background: var(--bg-hover, #f9fafb); }
-/* #659: tint the left border by re-based health band (rate + breach). */
-.picker-table tbody tr.row-health-ok   { border-left-color: #16a34a; }
-.picker-table tbody tr.row-health-warn { border-left-color: #d97706; }
-.picker-table tbody tr.row-health-bad  { border-left-color: #dc2626; }
+/* #659: full-row wash + left bar by re-based health band (rate + breach).
+   ok is kept very faint so healthy rows stay calm and warn/bad pop. */
+.picker-table tbody tr.row-health-ok   { border-left-color: #16a34a; background: #f3faf5; }
+.picker-table tbody tr.row-health-warn { border-left-color: #d97706; background: #fef6e7; }
+.picker-table tbody tr.row-health-bad  { border-left-color: #dc2626; background: #fdeeee; }
+.picker-table tbody tr.row-health-ok:hover   { background: #e8f5ec; }
+.picker-table tbody tr.row-health-warn:hover { background: #fdeed2; }
+.picker-table tbody tr.row-health-bad:hover  { background: #fbe2e2; }
 .picker-table tbody tr.row-critical { border-left: 4px solid #dc2626; }
-.picker-table tbody tr.row-critical:hover { background: #fef2f2; }
+.picker-table tbody tr.row-critical:hover { background: #fbe2e2; }
 .empty {
   padding: 16px;
   text-align: center;
