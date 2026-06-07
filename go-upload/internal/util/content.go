@@ -33,9 +33,26 @@ type ContentInfo struct {
 	ThumbnailURLSmall string  `json:"thumbnail_url_small,omitempty"`
 	// 1280 px wide — Continue Watching hero / large surfaces.
 	ThumbnailURLLarge string  `json:"thumbnail_url_large,omitempty"`
-	SegmentDuration   *int    `json:"segment_duration"`
-	MaxResolution     *string `json:"max_resolution"`
-	MaxHeight         *int    `json:"max_height"`
+	// Native segment length (seconds) the source was encoded at, as
+	// detected from the on-disk playlists. Kept for display / upload
+	// config / forwarder Chromecast discovery. NOT the set of lengths the
+	// clip is *playable* at — see SegmentDurations.
+	SegmentDuration *int `json:"segment_duration"`
+	// All segment lengths (seconds) go-live can actually serve this clip
+	// at. go-live synthesizes both a 2s and a 6s master playlist on the
+	// fly from ANY HLS source master (RangeHLSGenerator composes virtual
+	// segment windows from the stored segments), so segment length is a
+	// presentation choice — every HLS clip is browsable at 2s AND 6s
+	// regardless of its native SegmentDuration. LL is reported separately
+	// via HasLL because it additionally needs on-disk partial info.
+	SegmentDurations []int `json:"segment_durations,omitempty"`
+	// True when the source carries the partial-segment info LL-HLS needs
+	// (#EXT-X-PART tags, or a .byteranges sidecar fallback) — the
+	// prerequisite for go-live to generate the low-latency master. 2s/6s
+	// never need partials; LL always does.
+	HasLL         bool    `json:"has_ll"`
+	MaxResolution *string `json:"max_resolution"`
+	MaxHeight     *int    `json:"max_height"`
 
 	// Internal — used for newest-wins dedup. Lowercase so encoding/json
 	// skips it. Set during ListContent from the encode-timestamp suffix
@@ -119,6 +136,8 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 			thumbnailURLLarge = base + "/thumbnail-large.jpg"
 		}
 		segmentDuration := detectSegmentDuration(itemPath)
+		segmentDurations := availableSegmentDurations(itemPath, hasHls, segmentDuration)
+		hasLL := hasHls && contentHasPartials(itemPath)
 		maxResolution, maxHeight := detectMaxResolution(itemPath)
 		clipID, codec, ts := splitClipIDAndCodec(name)
 		// If the name didn't carry an encode timestamp (older content),
@@ -141,6 +160,8 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 			ThumbnailURLSmall: thumbnailURLSmall,
 			ThumbnailURLLarge: thumbnailURLLarge,
 			SegmentDuration:   segmentDuration,
+			SegmentDurations:  segmentDurations,
+			HasLL:             hasLL,
 			MaxResolution:     maxResolution,
 			MaxHeight:         maxHeight,
 			encodeTS:          ts,
@@ -195,6 +216,80 @@ func detectSegmentDuration(contentPath string) *int {
 	}
 
 	return nil
+}
+
+// availableSegmentDurations reports the integer segment lengths go-live can
+// serve this clip at. go-live composes both a 2s and a 6s virtual master from
+// any HLS source master, so any HLS clip is available at both regardless of
+// its native encode. The natively-detected duration is folded in too so a
+// DASH-only clip (no HLS synthesis) still advertises something. LL is not an
+// integer length — it's reported separately via HasLL.
+func availableSegmentDurations(contentPath string, hasHls bool, native *int) []int {
+	set := map[int]bool{}
+	if hasHls {
+		set[2] = true
+		set[6] = true
+	}
+	if native != nil {
+		set[*native] = true
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(set))
+	for d := range set {
+		out = append(out, d)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// contentHasPartials reports whether the source carries the partial-segment
+// info LL-HLS needs. Mirrors go-live's LoadPlaylistInfoWithByteranges fallback
+// chain (parser/playlist.go, parser/byterange.go) so the catalogue's LL flag
+// matches what go-live can actually generate: prefer #EXT-X-PART tags in a
+// variant playlist, fall back to a sibling .byteranges file next to the media
+// segments. 2s/6s never need this; LL always does.
+func contentHasPartials(contentPath string) bool {
+	resDirs := []string{"1080p", "720p", "540p", "360p"}
+	for _, dir := range resDirs {
+		resPath := filepath.Join(contentPath, dir)
+		if playlistHasPartTags(filepath.Join(resPath, "playlist.m3u8")) {
+			return true
+		}
+		if dirHasByteranges(resPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func playlistHasPartTags(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if strings.HasPrefix(strings.TrimSpace(scanner.Text()), "#EXT-X-PART") {
+			return true
+		}
+	}
+	return false
+}
+
+func dirHasByteranges(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".byteranges") {
+			return true
+		}
+	}
+	return false
 }
 
 func parseHlsPlaylistDuration(path string) *int {

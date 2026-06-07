@@ -575,6 +575,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     codec = o.optString("codec", ""),
                     segmentDuration = if (o.isNull("segmentDuration")) null
                                       else o.optInt("segmentDuration", -1).takeIf { it >= 0 },
+                    segmentDurations = o.optJSONArray("segmentDurations")?.let { ja ->
+                        (0 until ja.length()).map { ja.getInt(it) }
+                    },
+                    hasLL = if (o.has("hasLL")) o.optBoolean("hasLL") else null,
                     thumbnailPath = o.optString("thumbnailPath", "").ifEmpty { null },
                     thumbnailPathSmall = o.optString("thumbnailPathSmall", "").ifEmpty { null },
                     thumbnailPathLarge = o.optString("thumbnailPathLarge", "").ifEmpty { null },
@@ -593,6 +597,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 put("clipId", c.clipId)
                 put("codec", c.codec)
                 if (c.segmentDuration != null) put("segmentDuration", c.segmentDuration)
+                c.segmentDurations?.let { put("segmentDurations", JSONArray(it)) }
+                c.hasLL?.let { put("hasLL", it) }
                 c.thumbnailPath?.let { put("thumbnailPath", it) }
                 c.thumbnailPathSmall?.let { put("thumbnailPathSmall", it) }
                 c.thumbnailPathLarge?.let { put("thumbnailPathLarge", it) }
@@ -643,6 +649,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                         codec = o.optString("codec", "").lowercase(),
                         segmentDuration = if (o.isNull("segment_duration")) null
                                           else o.optInt("segment_duration", -1).takeIf { it >= 0 },
+                        segmentDurations = o.optJSONArray("segment_durations")?.let { ja ->
+                            (0 until ja.length()).map { ja.getInt(it) }
+                        },
+                        hasLL = if (o.has("has_ll")) o.optBoolean("has_ll") else null,
                         thumbnailPath = o.optString("thumbnail_url", "").ifEmpty { null },
                         thumbnailPathSmall = o.optString("thumbnail_url_small", "").ifEmpty { null },
                         thumbnailPathLarge = o.optString("thumbnail_url_large", "").ifEmpty { null },
