@@ -436,7 +436,26 @@ test-deploy-all: test-deploy-compose test-deploy-ghcr test-deploy-registry
 # appears INSTANTLY inside the container — nginx serves the new
 # bundle on the next request, no docker cp / docker exec / reload
 # needed.
-test-deploy-frontend:
+# _ff-guard: before any deploy that ships the LOCAL working tree, ensure the
+# current branch is at its origin HEAD. Clean + behind → fast-forward and
+# proceed; dirty/diverged → abort, so a stale tree never ships (the way
+# #652's chart swap shipped pre-merge on 2026-06-07). No upstream → no-op.
+.PHONY: _ff-guard
+_ff-guard:
+	@git fetch origin --quiet
+	@behind=$$(git rev-list --count HEAD..@{u} 2>/dev/null || echo 0); \
+	if [ "$$behind" -gt 0 ]; then \
+		if git diff --quiet && git diff --cached --quiet && git merge --ff-only @{u}; then \
+			echo "↑ fast-forwarded $$behind commit(s) from origin before deploy"; \
+		else \
+			echo "✗ branch is $$behind behind origin and can't auto fast-forward (uncommitted changes or diverged) — resolve, then re-run"; \
+			exit 1; \
+		fi; \
+	else \
+		echo "✓ up to date with origin"; \
+	fi
+
+test-deploy-frontend: _ff-guard
 	@echo "=== Frontend-only hot deploy (no container recreate) ==="
 	@if [ ! -f content/dashboard-v3/package.json ]; then \
 		echo "dashboard-v3 not present — nothing to deploy"; exit 1; \
@@ -448,7 +467,7 @@ test-deploy-frontend:
 	rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev/content/dashboard/v3/
 	@echo "✓ test-dev frontend updated; sessions untouched."
 
-test-deploy-dev:
+test-deploy-dev: _ff-guard
 	@echo "=== Dev: local working tree (port 21000) ==="
 	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev'
 	@echo "Syncing local working tree (excluding .git and .gitignore matches)..."
