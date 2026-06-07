@@ -574,9 +574,9 @@ final class PlayerViewModel: ObservableObject {
             case .dash: guard item.hasDash else { return false }
             }
             switch segment {
-            case .ll: return true
-            case .s2: return item.segmentDuration == 2 || item.segmentDuration == nil
-            case .s6: return item.segmentDuration == 6 || item.segmentDuration == nil
+            case .ll: return item.supportsLL
+            case .s2: return item.supportsSegment(2)
+            case .s6: return item.supportsSegment(6)
             }
         }
     }
@@ -598,9 +598,9 @@ final class PlayerViewModel: ObservableObject {
             case .dash: guard item.hasDash else { return false }
             }
             switch segment {
-            case .ll: return true
-            case .s2: return item.segmentDuration == 2 || item.segmentDuration == nil
-            case .s6: return item.segmentDuration == 6 || item.segmentDuration == nil
+            case .ll: return item.supportsLL
+            case .s2: return item.supportsSegment(2)
+            case .s6: return item.supportsSegment(6)
             }
         }
         // Dedupe by clipId. When multiple codec encodings exist for the
@@ -3110,6 +3110,8 @@ extension ContentItem: Encodable {
         try c.encode(clipId, forKey: .clipId)
         try c.encode(codec, forKey: .codec)
         try c.encodeIfPresent(segmentDuration, forKey: .segmentDuration)
+        try c.encodeIfPresent(segmentDurations, forKey: .segmentDurations)
+        try c.encodeIfPresent(hasLL, forKey: .hasLL)
         try c.encodeIfPresent(thumbnailPath, forKey: .thumbnailPath)
         try c.encodeIfPresent(thumbnailPathSmall, forKey: .thumbnailPathSmall)
         try c.encodeIfPresent(thumbnailPathLarge, forKey: .thumbnailPathLarge)
