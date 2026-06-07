@@ -41,6 +41,11 @@ type AppiumLauncher struct {
 	// BundleIDs maps Platform → app bundle id. Same defaults as
 	// CLILauncher; override for TestFlight / local-dev builds.
 	BundleIDs map[Platform]string
+	// closeBeat — pause after each close tap / back press so the app
+	// can navigate and fire its terminal metrics POST before the next
+	// probe (and before session teardown). 800ms in production; tests
+	// shrink it. #627/#660.
+	closeBeat time.Duration
 
 	mu       sync.Mutex
 	sessions map[string]string // device UDID → Appium session id
@@ -56,6 +61,7 @@ func NewAppiumLauncher() *AppiumLauncher {
 	return &AppiumLauncher{
 		URL:              url,
 		HeartbeatTimeout: 90 * time.Second,
+		closeBeat:        800 * time.Millisecond,
 		BundleIDs: map[Platform]string{
 			PlatformIPhone:    "com.jeoliver.InfiniteStreamPlayer",
 			PlatformIPad:      "com.jeoliver.InfiniteStreamPlayer",
@@ -277,25 +283,53 @@ func (a *AppiumLauncher) ClosePlaybackViaUI(ctx context.Context, d Device) error
 	if sessID == "" {
 		return nil // never launched; nothing to close
 	}
-	var err error
 	switch d.Platform {
 	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
 		// The iOS playback overlay's back chevron — the same element
 		// LaunchToHome taps — invokes vm.endSessionForUserBack() before
 		// navigating home, which is what emits play_end.
-		err = a.tapByAccessibilityID(ctx, sessID, "playback-back-button")
+		//
+		// #660 — tap-verify-retry: the chevron stays FINDABLE in the AX
+		// tree while the controls overlay is auto-hidden, so a click can
+		// "succeed" yet only reveal the overlay instead of activating
+		// the button (observed at the end of a 36-min pyramid run; the
+		// play kept streaming and dangled in_progress). The chevron does
+		// NOT exist on the home screen, so find-fails is the reliable
+		// "screen closed" probe — the same property LaunchToHome's
+		// best-effort tap relies on. Tap, give the app a beat, re-probe;
+		// still findable means the previous tap only woke the overlay,
+		// so tap again (now hittable). Surface an error if the screen
+		// never closes so the cleanup logs instead of silently no-opping.
+		const maxCloseAttempts = 3
+		for attempt := 1; attempt <= maxCloseAttempts; attempt++ {
+			elementID, ferr := a.findByAccessibilityID(ctx, sessID, "playback-back-button")
+			if ferr != nil {
+				// Chevron not in the tree: already on home (first probe)
+				// or the previous tap closed the screen. Either way the
+				// post-tap beat below has already let the terminal
+				// metrics POST fire.
+				return nil
+			}
+			if cerr := a.clickElement(ctx, sessID, elementID); cerr != nil {
+				return fmt.Errorf("close playback: click attempt %d: %w", attempt, cerr)
+			}
+			// Give the app a beat to navigate + fire its terminal metrics
+			// POST before the re-probe (and before the caller tears the
+			// Appium session and the app's network path down).
+			time.Sleep(a.closeBeat)
+		}
+		return fmt.Errorf("close playback: screen still open after %d back taps (hidden-controls overlay?)", maxCloseAttempts)
 	case PlatformAndroidTV:
 		// Android has no visible back button; the playback screen's
 		// Compose BackHandler calls endSessionForUserBack() on system
 		// Back, so drive the W3C/UiAutomator2 back press.
-		err = a.pressBack(ctx, sessID)
+		err := a.pressBack(ctx, sessID)
+		// Same post-close beat as iOS — terminal POST before teardown.
+		time.Sleep(a.closeBeat)
+		return err
 	default:
 		return nil // tvOS (onExitCommand) / web not driven here yet
 	}
-	// Give the app a beat to fire its terminal metrics POST before the
-	// caller tears the Appium session (and the app's network path) down.
-	time.Sleep(800 * time.Millisecond)
-	return err
 }
 
 // pressBack issues the W3C "back" navigation (Android system Back) on the
@@ -505,6 +539,20 @@ func (a *AppiumLauncher) ReadPlayerID(ctx context.Context, sess *Session) (strin
 // caller decides whether that's fatal). Used by Launch to drive the
 // app's UI from playback → home → playback for a clean per-test state.
 func (a *AppiumLauncher) tapByAccessibilityID(ctx context.Context, sessID, id string) error {
+	elementID, err := a.findByAccessibilityID(ctx, sessID, id)
+	if err != nil {
+		return err
+	}
+	if err := a.clickElement(ctx, sessID, elementID); err != nil {
+		return fmt.Errorf("click element %q: %w", id, err)
+	}
+	return nil
+}
+
+// findByAccessibilityID resolves an accessibility id to a W3C element id.
+// Errors when the element is not in the AX tree — which doubles as the
+// "screen not showing this element" probe (#660).
+func (a *AppiumLauncher) findByAccessibilityID(ctx context.Context, sessID, id string) (string, error) {
 	// POST /session/{id}/element — find the element
 	findBody := map[string]any{
 		"using": "accessibility id",
@@ -512,13 +560,13 @@ func (a *AppiumLauncher) tapByAccessibilityID(ctx context.Context, sessID, id st
 	}
 	raw, err := a.doRequest(ctx, "POST", "/session/"+sessID+"/element", findBody)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var findResp struct {
 		Value map[string]string `json:"value"`
 	}
 	if err := json.Unmarshal(raw, &findResp); err != nil {
-		return fmt.Errorf("decode find element %q: %w", id, err)
+		return "", fmt.Errorf("decode find element %q: %w", id, err)
 	}
 	// W3C WebDriver returns the element under key "element-6066-11e4-a52e-4f735466cecf".
 	var elementID string
@@ -527,15 +575,16 @@ func (a *AppiumLauncher) tapByAccessibilityID(ctx context.Context, sessID, id st
 		break
 	}
 	if elementID == "" {
-		return fmt.Errorf("find element %q returned no id", id)
+		return "", fmt.Errorf("find element %q returned no id", id)
 	}
-	// POST /session/{id}/element/{el}/click
-	_, err = a.doRequest(ctx, "POST",
+	return elementID, nil
+}
+
+// clickElement issues the W3C click on a previously-found element.
+func (a *AppiumLauncher) clickElement(ctx context.Context, sessID, elementID string) error {
+	_, err := a.doRequest(ctx, "POST",
 		fmt.Sprintf("/session/%s/element/%s/click", sessID, elementID), map[string]any{})
-	if err != nil {
-		return fmt.Errorf("click element %q: %w", id, err)
-	}
-	return nil
+	return err
 }
 
 // --- WebDriver protocol plumbing -------------------------------------------

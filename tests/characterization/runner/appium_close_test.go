@@ -7,24 +7,40 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
-// #627: ClosePlaybackViaUI must drive the app's OWN UI close so the app
-// emits its real client play_end — iOS taps the playback-back-button
-// element (find + click), Android presses system Back. This pins the
-// WebDriver call sequence per platform against a mock Appium server.
+// #627/#660: ClosePlaybackViaUI must drive the app's OWN UI close so the
+// app emits its real client play_end — iOS taps the playback-back-button
+// element and VERIFIES the screen closed (the chevron stays findable while
+// the controls overlay is auto-hidden, so a click can "succeed" yet only
+// reveal the overlay; find-fails is the closed-screen probe). Android
+// presses system Back. Pins the WebDriver call sequence per platform
+// against a mock Appium server whose find-element responses are scripted.
 func TestClosePlaybackViaUI(t *testing.T) {
 	var mu sync.Mutex
 	var paths []string
+	// findFound scripts the find-element responses, one bool per call:
+	// true → element id returned; false → W3C no-such-element error.
+	// Finds past the end of the script report not-found.
+	var findFound []bool
+	var findCalls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		paths = append(paths, r.Method+" "+r.URL.Path)
-		mu.Unlock()
-		// find-element returns a W3C element id; everything else returns null.
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/element") {
-			_, _ = w.Write([]byte(`{"value":{"element-6066-11e4-a52e-4f735466cecf":"elem-1"}}`))
+			found := findCalls < len(findFound) && findFound[findCalls]
+			findCalls++
+			mu.Unlock()
+			if found {
+				_, _ = w.Write([]byte(`{"value":{"element-6066-11e4-a52e-4f735466cecf":"elem-1"}}`))
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"value":{"error":"no such element","message":"not located"}}`))
+			}
 			return
 		}
+		mu.Unlock()
 		_, _ = w.Write([]byte(`{"value":null}`))
 	}))
 	defer srv.Close()
@@ -33,25 +49,83 @@ func TestClosePlaybackViaUI(t *testing.T) {
 		l := NewAppiumLauncher()
 		l.URL = srv.URL
 		l.hc = srv.Client()
+		l.closeBeat = time.Millisecond
 		l.sessions = map[string]string{"udid-1": "sess-1"}
 		return l
 	}
-	reset := func() { mu.Lock(); paths = nil; mu.Unlock() }
+	reset := func(script ...bool) {
+		mu.Lock()
+		paths = nil
+		findFound = script
+		findCalls = 0
+		mu.Unlock()
+	}
 	got := func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), paths...) }
+	wantSeq := func(t *testing.T, want []string) {
+		t.Helper()
+		g := got()
+		if len(g) != len(want) {
+			t.Fatalf("close hit %v, want %v", g, want)
+		}
+		for i := range want {
+			if g[i] != want[i] {
+				t.Fatalf("close hit %v, want %v", g, want)
+			}
+		}
+	}
 
-	t.Run("iOS taps back button", func(t *testing.T) {
-		reset()
+	t.Run("iOS taps back button and verifies closed", func(t *testing.T) {
+		reset(true, false) // chevron present; gone after one tap
 		l := newL()
 		d := Device{Platform: PlatformIPhone, UDID: "udid-1"}
 		if err := l.ClosePlaybackViaUI(context.Background(), d); err != nil {
 			t.Fatalf("ClosePlaybackViaUI: %v", err)
 		}
-		want := []string{
+		wantSeq(t, []string{
 			"POST /session/sess-1/element",              // find playback-back-button
 			"POST /session/sess-1/element/elem-1/click", // tap it
+			"POST /session/sess-1/element",              // probe: gone → closed
+		})
+	})
+
+	t.Run("iOS hidden-controls overlay needs a second tap (#660)", func(t *testing.T) {
+		// First tap lands on the hidden-overlay surface and only reveals
+		// the controls: chevron still findable. Second tap closes.
+		reset(true, true, false)
+		l := newL()
+		d := Device{Platform: PlatformIPhone, UDID: "udid-1"}
+		if err := l.ClosePlaybackViaUI(context.Background(), d); err != nil {
+			t.Fatalf("ClosePlaybackViaUI: %v", err)
 		}
-		if g := got(); len(g) != 2 || g[0] != want[0] || g[1] != want[1] {
-			t.Errorf("iOS close hit %v, want %v", g, want)
+		wantSeq(t, []string{
+			"POST /session/sess-1/element",              // find
+			"POST /session/sess-1/element/elem-1/click", // tap (only reveals overlay)
+			"POST /session/sess-1/element",              // probe: still open
+			"POST /session/sess-1/element/elem-1/click", // tap again (hits)
+			"POST /session/sess-1/element",              // probe: gone → closed
+		})
+	})
+
+	t.Run("iOS already on home is a no-op", func(t *testing.T) {
+		reset(false) // chevron never present
+		l := newL()
+		d := Device{Platform: PlatformIPhone, UDID: "udid-1"}
+		if err := l.ClosePlaybackViaUI(context.Background(), d); err != nil {
+			t.Fatalf("expected nil when already on home, got %v", err)
+		}
+		wantSeq(t, []string{"POST /session/sess-1/element"}) // single probe, no click
+	})
+
+	t.Run("iOS errors loudly when the screen never closes (#660)", func(t *testing.T) {
+		reset(true, true, true, true) // chevron survives every tap
+		l := newL()
+		d := Device{Platform: PlatformIPhone, UDID: "udid-1"}
+		err := l.ClosePlaybackViaUI(context.Background(), d)
+		if err == nil {
+			t.Fatal("expected an error when the playback screen never closes")
+		}
+		if !strings.Contains(err.Error(), "still open") {
+			t.Fatalf("error %q should name the still-open screen", err)
 		}
 	})
 
