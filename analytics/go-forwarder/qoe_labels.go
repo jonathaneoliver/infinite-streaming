@@ -160,6 +160,9 @@ func computeQoEEventLabels(cfg *QoEThresholds, ps *playLabelState, r *row, now t
 	if l := rateCapBreachLabel(cfg, r); l != "" {
 		current = append(current, l)
 	}
+	if l := downshiftOvershootLabel(cfg, r); l != "" {
+		current = append(current, l)
+	}
 	if l := cmcdMTPDriftLabel(cfg, r); l != "" {
 		current = append(current, l)
 	}
@@ -384,6 +387,55 @@ func rateCapBreachLabel(cfg *QoEThresholds, r *row) string {
 	}
 	if float64(r.NetworkBitrateMbps) > limit*cfg.Network.RateCapBreachFactor {
 		return qoeLabel(SevWarning, "qoe_rate_cap_breach")
+	}
+	return ""
+}
+
+// downshiftOvershootLabel fires when the SELECTED variant sits
+// DownshiftOvershootRungs or more rungs below the rung the applied cap
+// actually supports — i.e. the player over-corrected downward (#669).
+// One rung below the ceiling is normal conservative ABR; two or more is
+// the overshoot we want flagged on rampdown / pyramid-descent runs.
+//
+// All inputs are on the row: EffectiveRateLimitMbps (applied cap),
+// parseVariantLadder(ManifestVariants) (ascending rung rates),
+// VideoBitrateMbps (selected). With no cap or no parseable ladder we
+// can't define a ceiling, so we stay silent. A selection AT or ABOVE
+// the ceiling is fine here (an above-ceiling rate is qoe_rate_cap_breach's
+// concern, not this).
+func downshiftOvershootLabel(cfg *QoEThresholds, r *row) string {
+	cap := float64(r.EffectiveRateLimitMbps)
+	if cap <= 0 {
+		return ""
+	}
+	cur := float64(r.VideoBitrateMbps)
+	if cur <= 0 {
+		return ""
+	}
+	ladder := parseVariantLadder(r.ManifestVariants)
+	if len(ladder) < 2 {
+		return "" // need ≥2 rungs for "rungs below" to mean anything
+	}
+	// ceilingIdx: highest rung whose rate ≤ cap (the rung the cap
+	// supports). If even rung 0 exceeds the cap, the ceiling is rung 0 —
+	// the player has nowhere lower to go, so it can't overshoot.
+	ceilingIdx := 0
+	for i, m := range ladder { // ascending
+		if m <= cap*1.001 {
+			ceilingIdx = i
+		} else {
+			break
+		}
+	}
+	// curIdx: rung nearest the selected bitrate.
+	curIdx, best := 0, math.Abs(ladder[0]-cur)
+	for i, m := range ladder {
+		if d := math.Abs(m - cur); d < best {
+			curIdx, best = i, d
+		}
+	}
+	if ceilingIdx-curIdx >= cfg.ABR.DownshiftOvershootRungs {
+		return qoeLabel(SevWarning, "qoe_downshift_overshoot")
 	}
 	return ""
 }
