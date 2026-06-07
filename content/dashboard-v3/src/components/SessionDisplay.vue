@@ -1489,8 +1489,8 @@ function skipToEnd() {
       <BitrateChartPanelToolbar :player-id="archivePlayerId" />
       <div class="chart-stack">
         <BandwidthChart :player-id="archivePlayerId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" />
-        <RTTChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
         <BufferChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
+        <RTTChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
         <FPSChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
       </div>
     </CollapsibleSection>
