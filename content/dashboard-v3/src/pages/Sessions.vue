@@ -2022,12 +2022,18 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 /* Tighten the ⊘ glyph — many fonts render it overly wide. */
 .lf-label-row.state-exclude .lf-label-check { letter-spacing: -1px; }
 .lf-label-name {
+  /* min-width:0 lets the 1fr grid track shrink below the (nowrap) label
+     width so it ellipsizes instead of overflowing the panel and pushing the
+     count column off the right edge. */
+  min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font: 500 12px ui-monospace, Menlo, monospace;
 }
 .lf-label-count {
   font: 600 11px ui-monospace, Menlo, monospace;
   opacity: 0.85;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .rel-recent { color: #16a34a; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
