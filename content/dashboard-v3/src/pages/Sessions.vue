@@ -236,6 +236,8 @@ const SCENARIO_FIELDS: { src: keyof Scenario; key: string; label: string }[] = [
   { src: 'player_tech',  key: 'player',   label: 'player' },
   { src: 'app_version',  key: 'app',      label: 'app' },
   { src: 'os_version',   key: 'os',       label: 'os' },
+  { src: 'manifest_variant', key: 'variant', label: 'variant' }, // #679
+  { src: 'server_build', key: 'build',    label: 'build' },      // #679
   { src: 'run_id',       key: 'run',      label: 'run' },
 ];
 // Build the render model from a typed Scenario object (server-supplied, #678).

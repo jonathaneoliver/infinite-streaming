@@ -15,16 +15,19 @@ RUN npm run gen-types && npm run build
 FROM golang:1.26-alpine AS go-builder
 RUN apk add git
 WORKDIR /build
+# #679: stamp the build into go-live so its X-Served-By header carries it and
+# the forwarder can record which build served each play. Same VERSION arg
+# go-proxy already uses (the release string from the VERSION file).
+ARG VERSION=unknown
 COPY go-live /build/go-live
 RUN cd /build/go-live && \
-    go build -o /out/go-live cmd/server/main.go
+    go build -ldflags "-X main.Version=${VERSION}" -o /out/go-live cmd/server/main.go
 
 COPY go-upload /build/go-upload
 RUN cd /build/go-upload && \
     go mod download && \
     go build -o /out/go-upload ./cmd/server
 
-ARG VERSION=unknown
 COPY go-proxy /build/go-proxy
 RUN cd /build/go-proxy && \
     go build -ldflags "-X main.versionString=${VERSION}" -o /out/go-proxy ./cmd/server

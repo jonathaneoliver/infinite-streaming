@@ -77,3 +77,50 @@ func TestEnrichScenario_DeviceFromClassOnly(t *testing.T) {
 		t.Errorf("device_model should be absent: %#v", sc)
 	}
 }
+
+func TestEnrichScenario_ServerSideFields(t *testing.T) {
+	rows := []map[string]any{{
+		"master_manifest_url": "http://h/go-live/bbb/2s/master.m3u8",
+		"served_by":           "go-live/v2.0.0",
+	}}
+	enrichScenario(rows)
+	sc := rows[0]["scenario"].(map[string]any)
+	if got, _ := sc["manifest_variant"].(string); got != "2s" {
+		t.Errorf("manifest_variant = %q, want 2s", got)
+	}
+	if got, _ := sc["server_build"].(string); got != "v2.0.0" {
+		t.Errorf("server_build = %q, want v2.0.0", got)
+	}
+}
+
+func TestManifestVariant(t *testing.T) {
+	cases := map[string]string{
+		"":                                       "",
+		"http://h/go-live/c/master.m3u8":         "ll",
+		"http://h/go-live/c/2s/master.m3u8":      "2s",
+		"http://h/go-live/c/master_2s.m3u8":      "2s",
+		"http://h/go-live/c/6s/master.m3u8":      "6s",
+		"http://h/go-live/c/master_6s.m3u8":      "6s",
+		"http://h/go-live/c/1080p/index.m3u8":    "ll",
+	}
+	for url, want := range cases {
+		if got := manifestVariant(url); got != want {
+			t.Errorf("manifestVariant(%q) = %q, want %q", url, got, want)
+		}
+	}
+}
+
+func TestServerBuild(t *testing.T) {
+	cases := map[string]string{
+		"go-live/v2.0.0": "v2.0.0",
+		"go-live/abc123": "abc123",
+		"go-live":        "", // dev build, no ldflags — no build info
+		"":               "",
+		"nginx":          "",
+	}
+	for hdr, want := range cases {
+		if got := serverBuild(hdr); got != want {
+			t.Errorf("serverBuild(%q) = %q, want %q", hdr, got, want)
+		}
+	}
+}

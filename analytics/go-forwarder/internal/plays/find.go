@@ -136,7 +136,7 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		WITH base AS (
 		  SELECT
 		    session_id, play_id, attempt_id, ts,
-		    player_id, group_id, content_id,
+		    player_id, group_id, content_id, master_manifest_url,
 		    player_state, player_error, last_event,
 		    stall_count, frames_dropped, frames_displayed,
 		    video_bitrate_mbps, video_resolution, video_quality_pct,
@@ -176,6 +176,24 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		         countIf(faulted = 1)  AS net_faults
 		  FROM %s.network_requests
 		  %s
+		  GROUP BY play_id
+		),
+		-- #679: the go-live build that served this play, read from the
+		-- X-Served-By response header the proxy already captures into
+		-- response_headers (a JSON array of {name,value}). go-live emits
+		-- "go-live/<build>" once it's built with -ldflags; the forwarder
+		-- strips the prefix. anyIf(non-empty) since it's constant per play.
+		server_builds AS (
+		  SELECT play_id, anyIf(sb, sb != '') AS served_by
+		  FROM (
+		    SELECT play_id,
+		           JSONExtractString(
+		             arrayFirst(h -> JSONExtractString(h, 'name') = 'X-Served-By',
+		                        JSONExtractArrayRaw(response_headers)),
+		             'value') AS sb
+		    FROM %s.network_requests
+		    %s
+		  )
 		  GROUP BY play_id
 		),
 		-- Per-play label histogram across all three source tables.
@@ -223,6 +241,10 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		    any(player_id) AS player_id,
 		    any(group_id) AS group_id,
 		    any(content_id) AS content_id,
+		    -- #679: the master manifest the player loaded — non-empty only on
+		    -- master-playlist fetches, so pick any non-empty value (constant
+		    -- per play). The forwarder derives the LL/2s/6s variant from it.
+		    anyIf(master_manifest_url, master_manifest_url != '') AS master_manifest_url,
 		    min(ts) AS started_at,
 		    max(ts) AS last_seen_at,
 		    count() AS metric_events,
@@ -310,6 +332,10 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		  agg.device_class, agg.device_model, agg.player_tech,
 		  agg.app_version, agg.os_version_major, agg.os_version_minor,
 		  agg.classification,
+		  -- #679: scenario sources — master manifest URL (variant derived in
+		  -- the forwarder) + go-live build from the captured X-Served-By header.
+		  agg.master_manifest_url,
+		  ifNull(server_builds.served_by, '') AS served_by,
 		  ifNull(net_counts.net_rows,   0) AS net_events,
 		  ifNull(net_counts.net_errors, 0) AS net_errors,
 		  ifNull(net_counts.net_faults, 0) AS net_faults,
@@ -318,13 +344,15 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		  ifNull(labels_agg.label_pairs,           []) AS label_histogram
 		FROM agg
 		LEFT JOIN net_counts ON agg.play_id = net_counts.play_id
+		LEFT JOIN server_builds ON agg.play_id = server_builds.play_id
 		LEFT JOIN labels_agg ON lowerUTF8(agg.play_id) = labels_agg.play_id
 		%s
 		ORDER BY agg.started_at DESC
 		LIMIT %d
 		FORMAT JSONEachRow`,
 		b.Database, b.EventsTable, where,
-		b.Database, netWhere,
+		b.Database, netWhere, // net_counts
+		b.Database, netWhere, // #679 server_builds
 		b.Database, b.EventsTable, where,
 		b.Database, netWhere,
 		b.Database, netWhere,

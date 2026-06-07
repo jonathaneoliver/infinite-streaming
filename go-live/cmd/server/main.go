@@ -33,8 +33,21 @@ func requestLogger(next http.Handler) http.Handler {
 	})
 }
 
+// Version is the build identifier, injected via -ldflags "-X main.Version=<sha>".
+// Empty on a plain `go build`. #679: handed to the api package so it rides the
+// X-Served-By header.
+var Version string
+
+func buildLabel() string {
+	if Version == "" {
+		return "dev"
+	}
+	return Version
+}
+
 func main() {
-	fmt.Println("Starting go-live LL-HLS server...")
+	api.BuildVersion = Version
+	fmt.Printf("Starting go-live LL-HLS server (build %q)...\n", buildLabel())
 	mgr := manager.NewProcessManager()
 	tracker := api.NewStreamTracker()
 	h := &api.Handler{Manager: mgr, Tracker: tracker}

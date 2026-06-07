@@ -1036,6 +1036,8 @@ components:
         app_version:  { type: string, description: "Client app version. From the typed column." }
         os_version:   { type: string, description: "OS version, 'major.minor' (or just 'major'), joined from os_version_major/os_version_minor." }
         content_id:   { type: string, description: "Content identifier — duplicated here so the object is self-contained for the viewer header." }
+        manifest_variant: { type: string, enum: ['ll', '2s', '6s'], description: "Manifest the player loaded, derived from the master URL: 'll' (low-latency), '2s', or '6s'. Issue #679." }
+        server_build:     { type: string, description: "go-live build that served the play, from the X-Served-By response header (the build the proxy captured). Empty for dev builds with no -ldflags stamp. Issue #679." }
 
     PlaySummaryPage:
       type: object
