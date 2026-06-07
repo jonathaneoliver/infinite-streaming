@@ -263,16 +263,8 @@ function deriveHealth(r: SessionRow): void {
     upshifts, player_error: r.last_player_error || '',
   };
 
-  const deductStalls = stalls * 2;
-  const deductErrors = errors * 25;
-  const deductFaults = Math.min(faults * 1, 10);
-  const deductDrops = Math.min(dropBlocks, 20);
-  const deductShifts = downshifts * 1;
-  r.health_score = Math.max(0, 100 - (deductStalls + deductErrors + deductFaults + deductDrops + deductShifts));
-  r.health_breakdown = {
-    stalls: deductStalls, errors: deductErrors,
-    faults: deductFaults, drops: deductDrops, downshifts: deductShifts,
-  };
+  // #659: health_score is computed below, AFTER the normalized rates — it's
+  // re-based on those (length-unbiased) + a breach penalty, not raw counts.
 
   // #563 — derived QoE rate metrics, normalised against playing time
   // (Conviva-style). undefined when the denominator is zero so cells
@@ -305,6 +297,50 @@ function deriveHealth(r: SessionRow): void {
   r.shifts_per_min = rateOk ? n('bitrate_shifts') / playingMin : undefined;
   r.downshifts_per_min = rateOk ? downshifts / playingMin : undefined;
   r.errors_per_hr = rateOk ? n('error_count') / playingHrs : undefined;
+
+  // #659: health from normalized QoE rates (length-unbiased) + a hard
+  // penalty for critical/error QoE labels, replacing the raw-count formula.
+  // Below the rate sample floor a play has no trustworthy rates, so it's
+  // scored on hard-failure presence instead of rate noise.
+  const breach = breachHealthPenalty(r);
+  if (rateOk) {
+    const rebufPct = (r.rebuffer_ratio ?? 0) * 100;
+    const dropPct = (r.drop_ratio ?? 0) * 100;
+    const dRebuf = Math.min(rebufPct * 4, 50);
+    const dStalls = Math.min((r.stalls_per_hr ?? 0) * 3, 20);
+    const dDown = Math.min((r.downshifts_per_min ?? 0) * 5, 15);
+    const dDrop = Math.min(dropPct * 2, 15);
+    const dErr = Math.min((r.errors_per_hr ?? 0) * 5, 20);
+    r.health_score = Math.max(0, 100 - (dRebuf + dStalls + dDown + dDrop + dErr + breach));
+    r.health_breakdown = {
+      rebuffer_pct: Math.round(rebufPct * 10) / 10,
+      stalls_per_hr: Math.round((r.stalls_per_hr ?? 0) * 10) / 10,
+      downshifts_per_min: Math.round((r.downshifts_per_min ?? 0) * 10) / 10,
+      drop_pct: Math.round(dropPct * 100) / 100,
+      errors_per_hr: Math.round((r.errors_per_hr ?? 0) * 10) / 10,
+      breach,
+    };
+  } else {
+    const hardFail = errors > 0 || faults > 0 || n('frozen_count') > 0;
+    r.health_score = Math.max(0, 100 - (hardFail ? 40 : 0) - breach);
+    r.health_breakdown = { short_play: true, hard_failure: hardFail, breach };
+  }
+}
+
+// #659: health penalty for the worst QoE labels — critical (×20) and error
+// (×10) tiers (the *_breach family etc.), capped at 40. Makes a real breach
+// dent the score that the raw-count formula ignored.
+function breachHealthPenalty(r: SessionRow): number {
+  const pairs = Array.isArray(r.labels) ? r.labels : [];
+  let p = 0;
+  for (const pr of pairs) {
+    const label = String((pr as any)[0] ?? '');
+    const eq = label.indexOf('=');
+    const sev = eq > 0 ? label.slice(0, eq) : '';
+    if (sev === 'critical') p += 20;
+    else if (sev === 'error') p += 10;
+  }
+  return Math.min(p, 40);
 }
 
 // Normalise one PlaySummary into a SessionRow: aliases v2 field
@@ -781,7 +817,9 @@ function fmtHealthBadge(r: SessionRow): HealthBadge {
   const s = Number(r.health_score) || 0;
   const cls: HealthBadge['cls'] = s >= 90 ? 'ok' : s >= 70 ? 'warn' : 'bad';
   const b = r.health_breakdown || {};
-  const tip = `100 − stalls:${b.stalls || 0} − errors:${b.errors || 0} − faults:${b.faults || 0} − drops:${b.drops || 0} − downshifts:${b.downshifts || 0}`;
+  const tip = b.short_play
+    ? `short play — ${b.hard_failure ? 'hard failure' : 'no failures'}${b.breach ? `, breach −${b.breach}` : ''}`
+    : `rebuffer ${b.rebuffer_pct ?? 0}% · stalls ${b.stalls_per_hr ?? 0}/hr · downshift ${b.downshifts_per_min ?? 0}/min · drop ${b.drop_pct ?? 0}% · err ${b.errors_per_hr ?? 0}/hr${b.breach ? ` · breach −${b.breach}` : ''}`;
   return { score: s, cls, tip };
 }
 interface CountCell { n: number; color: string; bold: boolean }
@@ -1382,7 +1420,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                 <tr
                   v-for="r in sorted"
                   :key="r.session_id + ':' + (r.play_id ?? '')"
-                  :class="{ 'row-critical': r.is_critical }"
+                  :class="[{ 'row-critical': r.is_critical }, 'row-health-' + fmtHealthBadge(r).cls]"
                   @click="onRowClick(r, $event)"
                 >
                   <td class="cell-star">
@@ -1674,7 +1712,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   z-index: 3;
 }
 .picker-table th {
-  padding: 8px 10px;
+  padding: 5px 10px;
   text-align: left;
   border-bottom: 1px solid var(--border-color, #e5e7eb);
   font-weight: 600;
@@ -1684,8 +1722,11 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 }
 .picker-table th.sortable { cursor: pointer; }
 .sort-idle { color: #9ca3af; }
+/* #659: compact rows — tighter vertical padding + line-height so more rows
+   are visible (the #654 label cap already shrank cell height). */
 .picker-table td {
-  padding: 5px 8px;
+  padding: 2px 8px;
+  line-height: 1.25;
   border-bottom: 1px solid var(--border-color, #f3f4f6);
   position: relative;
 }
@@ -1694,6 +1735,10 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   border-left: 4px solid transparent;
 }
 .picker-table tbody tr:hover { background: var(--bg-hover, #f9fafb); }
+/* #659: tint the left border by re-based health band (rate + breach). */
+.picker-table tbody tr.row-health-ok   { border-left-color: #16a34a; }
+.picker-table tbody tr.row-health-warn { border-left-color: #d97706; }
+.picker-table tbody tr.row-health-bad  { border-left-color: #dc2626; }
 .picker-table tbody tr.row-critical { border-left: 4px solid #dc2626; }
 .picker-table tbody tr.row-critical:hover { background: #fef2f2; }
 .empty {
