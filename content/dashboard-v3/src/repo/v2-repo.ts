@@ -326,6 +326,9 @@ export interface Scenario {
   app_version?: string;
   os_version?: string;
   content_id?: string;
+  // #679 — server-side run identity.
+  manifest_variant?: string; // 'll' | '2s' | '6s'
+  server_build?: string;
 }
 
 export interface ListPlaysParams {

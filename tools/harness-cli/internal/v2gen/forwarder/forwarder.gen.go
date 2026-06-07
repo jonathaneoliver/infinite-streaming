@@ -278,6 +278,27 @@ func (e PlaySummaryClassification) Valid() bool {
 	}
 }
 
+// Defines values for ScenarioManifestVariant.
+const (
+	Ll  ScenarioManifestVariant = "ll"
+	N2s ScenarioManifestVariant = "2s"
+	N6s ScenarioManifestVariant = "6s"
+)
+
+// Valid indicates whether the value is a known member of the ScenarioManifestVariant enum.
+func (e ScenarioManifestVariant) Valid() bool {
+	switch e {
+	case Ll:
+		return true
+	case N2s:
+		return true
+	case N6s:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for Classification.
 const (
 	ClassificationFavourite   Classification = "favourite"
@@ -1263,6 +1284,9 @@ type Scenario struct {
 	// DeviceModel Device model identifier (e.g. 'iPhone15,2'). From the typed column.
 	DeviceModel *string `json:"device_model,omitempty"`
 
+	// ManifestVariant Manifest the player loaded, derived from the master URL: 'll' (low-latency), '2s', or '6s'. Issue #679.
+	ManifestVariant *ScenarioManifestVariant `json:"manifest_variant,omitempty"`
+
 	// OsVersion OS version, 'major.minor' (or just 'major'), joined from os_version_major/os_version_minor.
 	OsVersion *string `json:"os_version,omitempty"`
 
@@ -1275,9 +1299,15 @@ type Scenario struct {
 	// RunId Characterization run id, from testing=run_id_* (compact UTC, e.g. '20260524T070148Z'). Groups plays into a run. Harness runs only.
 	RunId *string `json:"run_id,omitempty"`
 
+	// ServerBuild go-live build that served the play, from the X-Served-By response header (the build the proxy captured). Empty for dev builds with no -ldflags stamp. Issue #679.
+	ServerBuild *string `json:"server_build,omitempty"`
+
 	// Test Characterization test mode, from testing=test_* (e.g. 'rampup'). Harness runs only.
 	Test *string `json:"test,omitempty"`
 }
+
+// ScenarioManifestVariant Manifest the player loaded, derived from the master URL: 'll' (low-latency), '2s', or '6s'. Issue #679.
+type ScenarioManifestVariant string
 
 // StreamErrorEvent Emitted on transport / CH failures after the initial `meta`
 // frame. The connection closes shortly after; the client may

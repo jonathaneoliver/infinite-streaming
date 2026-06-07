@@ -38,12 +38,51 @@ func enrichScenario(rows []map[string]any) {
 		putIfStr(sc, "test", test)
 		putIfStr(sc, "platform", platform)
 		putIfStr(sc, "run_id", runID)
+		// #679 — server-side identity: manifest variant (derived from the
+		// master manifest the player loaded) + the go-live build that served
+		// the play (from the X-Served-By header the proxy captured).
+		if v := manifestVariant(asString(row["master_manifest_url"])); v != "" {
+			sc["manifest_variant"] = v
+		}
+		if b := serverBuild(asString(row["served_by"])); b != "" {
+			sc["server_build"] = b
+		}
 
 		if len(sc) == 0 {
 			continue
 		}
 		row["scenario"] = sc
 	}
+}
+
+// manifestVariant classifies the LL / 2s / 6s manifest from the master
+// playlist URL the player loaded. go-live names the slower variants with a
+// "2s"/"6s" path segment or filename suffix (e.g. .../2s/master.m3u8 or
+// .../master_6s.m3u8); the low-latency variant has neither marker. Empty
+// when no master URL was captured (can't tell).
+func manifestVariant(masterURL string) string {
+	if masterURL == "" {
+		return ""
+	}
+	switch {
+	case strings.Contains(masterURL, "/2s/") || strings.Contains(masterURL, "_2s"):
+		return "2s"
+	case strings.Contains(masterURL, "/6s/") || strings.Contains(masterURL, "_6s"):
+		return "6s"
+	default:
+		return "ll"
+	}
+}
+
+// serverBuild extracts the build tag from the X-Served-By header value.
+// go-live emits "go-live/<build>" once compiled with -ldflags; a plain
+// "go-live" (dev build, no ldflags) carries no build info, so returns "".
+func serverBuild(servedBy string) string {
+	const prefix = "go-live/"
+	if strings.HasPrefix(servedBy, prefix) {
+		return strings.TrimPrefix(servedBy, prefix)
+	}
+	return ""
 }
 
 // scenarioLabelTails pulls the test / platform / run_id values out of the

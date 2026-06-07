@@ -28,6 +28,22 @@ var (
 	goLiveDir          = getEnv("GO_LIVE_OUTPUT_DIR", filepath.Join(infiniteContentDir, "go-live"))
 )
 
+// BuildVersion is the go-live build identifier (git SHA), injected at compile
+// time via -ldflags "-X .../internal/api.BuildVersion=<sha>". Empty on a
+// plain `go build` (local dev). #679: it rides the X-Served-By response
+// header so the proxy captures it and the forwarder can stamp each play's
+// scenario.server_build with the build that served it.
+var BuildVersion string
+
+// servedBy is the X-Served-By header value: "go-live" for an un-stamped dev
+// build, "go-live/<build>" once compiled with the ldflags above.
+func servedBy() string {
+	if BuildVersion == "" {
+		return "go-live"
+	}
+	return "go-live/" + BuildVersion
+}
+
 var llhlsGen = &generator.LLHLSGenerator{}
 
 type dashCacheEntry struct {
@@ -166,7 +182,7 @@ type Handler struct {
 }
 
 func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	w.Write([]byte("go-live OK"))
 }
 
@@ -212,7 +228,7 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -229,7 +245,7 @@ func (h *Handler) TickStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	json.NewEncoder(w).Encode(stats)
 }
 
@@ -251,7 +267,7 @@ func (h *Handler) DashTickStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	json.NewEncoder(w).Encode(stats)
 }
 
@@ -1028,7 +1044,7 @@ func (h *Handler) ServeSegment(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	http.ServeFile(w, r, segmentPath)
 }
 
@@ -1095,7 +1111,7 @@ func (h *Handler) OnDemandDashManifest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(cached)))
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	w.Write(cached)
 }
 
@@ -1341,7 +1357,7 @@ func (h *Handler) ServeDashSegment(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	http.ServeFile(w, r, segmentPath)
 }
 
@@ -1393,7 +1409,7 @@ func (h *Handler) OnDemandMasterPlaylist(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	w.Write(data)
 }
 
@@ -1449,7 +1465,7 @@ func (h *Handler) OnDemandMasterPlaylistDuration(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	w.Write(data)
 }
 
@@ -1515,7 +1531,7 @@ func (h *Handler) OnDemandVariantPlaylist(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	w.Write(data)
 }
 
@@ -1548,7 +1564,7 @@ func (h *Handler) OnDemandVariantPlaylistDuration(w http.ResponseWriter, r *http
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	w.Write(data)
 }
 
