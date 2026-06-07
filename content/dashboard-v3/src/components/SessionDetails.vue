@@ -84,6 +84,10 @@ const fields = computed(() => {
   const labels: Record<string, string> = (p as any).labels ?? {};
   const testLabel = typeof labels.test === 'string' ? labels.test : '';
   const runIDLabel = typeof labels.run_id === 'string' ? labels.run_id : '';
+  // #678 — platform completes the harness-identity trio (test / platform /
+  // run_id) so the viewer surfaces the same run-identity set as the Sessions
+  // list Scenario cell. Device/app/OS below already cover the typed half.
+  const platformLabel = typeof labels.platform === 'string' ? labels.platform : '';
   // Master URL is the manifest entry the player loaded; the legacy
   // page also showed the "Last Request URL" (the most-recent network
   // log entry's URL); we don't track that here yet so omit it.
@@ -157,6 +161,7 @@ const fields = computed(() => {
   // identifiers off-screen on narrow viewports, but still surface
   // when present.
   if (testLabel) out.push({ label: 'Test', value: testLabel });
+  if (platformLabel) out.push({ label: 'Platform', value: platformLabel });
   if (runIDLabel) out.push({ label: 'Run ID', value: runIDLabel });
   return out;
 });

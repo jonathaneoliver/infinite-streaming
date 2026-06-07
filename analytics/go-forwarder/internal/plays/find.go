@@ -41,7 +41,15 @@ func FindPlays(ctx context.Context, b Backend, f PlayFilter) ([]map[string]any, 
 		limit = maxPlaysLimit
 	}
 
-	return runPlaysQuery(ctx, b, clauses, params, post, limit)
+	rows, err := runPlaysQuery(ctx, b, clauses, params, post, limit)
+	if err != nil {
+		return nil, err
+	}
+	// #678 — attach the typed scenario (run-identity) object built from the
+	// summary columns + testing= label tails. Single chokepoint: both the
+	// list and the single-play GetPlaySummary path flow through here.
+	enrichScenario(rows)
+	return rows, nil
 }
 
 // GetPlaySummary returns the single PlaySummary for play_id, or nil

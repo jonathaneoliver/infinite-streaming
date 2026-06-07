@@ -12,7 +12,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
 import ChatPanel from '@/components/chat/ChatPanel.vue';
 import { sessionViewerURL } from '@/composables/urlTimeFormat';
-import { listPlays, patchPlayClassification, type PlaySummary } from '@/repo/v2-repo';
+import { listPlays, patchPlayClassification, type PlaySummary, type Scenario } from '@/repo/v2-repo';
 
 interface SessionRow {
   session_id: string;
@@ -31,6 +31,10 @@ interface SessionRow {
   app_version?: string;
   os_version_major?: number | string;
   os_version_minor?: number | string;
+  // #678 — typed run-identity object from /api/v2/plays (built server-side
+  // from the columns above + testing= label tails). Preferred by scenario();
+  // the loose columns remain for the rollout fallback.
+  scenario?: Scenario;
   started?: string;
   last_seen?: string;
   classification?: string;
@@ -187,7 +191,13 @@ function findLabelTail(r: SessionRow, key: string): string | null {
 function harnessRunId(r: SessionRow): string | null { return findLabelTail(r, 'run_id_'); }
 function harnessPlatform(r: SessionRow): string | null { return findLabelTail(r, 'platform_'); }
 function harnessTest(r: SessionRow): string | null { return findLabelTail(r, 'test_'); }
-function isHarnessRow(r: SessionRow): boolean { return harnessRunId(r) !== null; }
+function isHarnessRow(r: SessionRow): boolean { return rowRunId(r) !== ''; }
+// #678 — scenario-aware accessors: prefer the server `scenario` object, fall
+// back to the testing= label tails. Used by the Platform/Test facets so they
+// agree with the Scenario cell regardless of which source populated it.
+function rowTest(r: SessionRow): string { return r.scenario?.test ?? harnessTest(r) ?? ''; }
+function rowPlatform(r: SessionRow): string { return r.scenario?.platform ?? harnessPlatform(r) ?? ''; }
+function rowRunId(r: SessionRow): string { return r.scenario?.run_id ?? harnessRunId(r) ?? ''; }
 
 // Pretty-print the UTC compact run_id (20260524T070148Z) as local
 // hh:mm. Falls back to the raw string if it doesn't match the
@@ -205,41 +215,66 @@ function shortRunId(runID: string | null): string {
   return utc.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-// #673 — Scenario (run-identity) cell. A play's *dimensions* — what it IS
-// (test, platform, device, content versions) — as opposed to the event
+// #673/#678 — Scenario (run-identity) cell. A play's *dimensions* — what it
+// IS (test, platform, device, content versions) — as opposed to the event
 // labels, which are what HAPPENED during it (stalls, faults, breaches, with
-// counts). They were intermingled in the testing= label tier; this pulls
-// the identity fields into one structured cell.
+// counts). They were intermingled in the testing= label tier; this surfaces
+// the identity fields as their own structured cell.
 //
-// Sourced as a HYBRID, deliberately:
-//   - typed columns (device/app/player/os) — authoritative, already on the
-//     summary, not lossy the way sanitized LowCardinality labels are.
-//   - testing= label tails (test/platform/run_id) — no typed column exists.
-// Content has its own column, so it's intentionally not duplicated here.
+// #678 moved the assembly server-side (forwarder /api/v2/plays now returns a
+// typed `scenario` object). We prefer that; scenarioFromRow() is the rollout
+// fallback for when the frontend ships ahead of the forwarder (separate
+// deploys) or for cached rows predating the field. Both paths feed the same
+// renderer, scenarioView(). Content has its own column, so content_id from
+// the object is intentionally not shown here.
 interface ScenarioField { key: string; label: string; value: string }
-function scenario(r: SessionRow): { fields: ScenarioField[]; tooltip: string } | null {
+// Render order + display labels, keyed by the typed Scenario field name.
+const SCENARIO_FIELDS: { src: keyof Scenario; key: string; label: string }[] = [
+  { src: 'test',         key: 'test',     label: 'test' },
+  { src: 'platform',     key: 'platform', label: 'platform' },
+  { src: 'device_model', key: 'device',   label: 'device' },
+  { src: 'player_tech',  key: 'player',   label: 'player' },
+  { src: 'app_version',  key: 'app',      label: 'app' },
+  { src: 'os_version',   key: 'os',       label: 'os' },
+  { src: 'run_id',       key: 'run',      label: 'run' },
+];
+// Build the render model from a typed Scenario object (server-supplied, #678).
+function scenarioView(sc: Scenario): { fields: ScenarioField[]; tooltip: string } | null {
+  const fields: ScenarioField[] = [];
+  for (const f of SCENARIO_FIELDS) {
+    let value = String(sc[f.src] ?? '');
+    if (!value && f.src === 'device_model') value = String(sc.device_class ?? '');
+    if (f.src === 'run_id' && value) value = shortRunId(value);
+    if (value) fields.push({ key: f.key, label: f.label, value });
+  }
+  if (fields.length === 0) return null;
+  const tooltip = fields.map((f) => `${f.label}: ${f.value}`).join('\n')
+    + (sc.run_id ? `\nrun_id: ${sc.run_id}` : '');
+  return { fields, tooltip };
+}
+// Rollout fallback: assemble a Scenario from the raw row (typed columns +
+// testing= label tails) the way #673 did client-side, for rows the forwarder
+// hasn't enriched yet.
+function scenarioFromRow(r: SessionRow): Scenario {
   const col = (k: string) => {
     const v = (r as any)[k];
     return v === undefined || v === null || v === '' ? '' : String(v);
   };
   const osMaj = col('os_version_major');
   const osMin = col('os_version_minor');
-  const runID = harnessRunId(r);
-  const candidates: ScenarioField[] = [
-    { key: 'test',     label: 'test',     value: harnessTest(r) ?? '' },
-    { key: 'platform', label: 'platform', value: harnessPlatform(r) ?? '' },
-    { key: 'device',   label: 'device',   value: col('device_model') || col('device_class') },
-    { key: 'player',   label: 'player',   value: col('player_tech') },
-    { key: 'app',      label: 'app',      value: col('app_version') },
-    { key: 'os',       label: 'os',       value: osMaj ? (osMin ? `${osMaj}.${osMin}` : osMaj) : '' },
-    { key: 'run',      label: 'run',      value: shortRunId(runID) },
-  ];
-  const fields = candidates.filter((f) => f.value);
-  if (fields.length === 0) return null;
-  const tooltip = fields
-    .map((f) => `${f.label}: ${f.value}`)
-    .join('\n') + (runID ? `\nrun_id: ${runID}` : '');
-  return { fields, tooltip };
+  return {
+    test: harnessTest(r) ?? '',
+    platform: harnessPlatform(r) ?? '',
+    run_id: harnessRunId(r) ?? '',
+    device_class: col('device_class'),
+    device_model: col('device_model'),
+    player_tech: col('player_tech'),
+    app_version: col('app_version'),
+    os_version: osMaj ? (osMin ? `${osMaj}.${osMin}` : osMaj) : '',
+  };
+}
+function scenario(r: SessionRow): { fields: ScenarioField[]; tooltip: string } | null {
+  return scenarioView(r.scenario ?? scenarioFromRow(r));
 }
 
 // rows / loading / error are computeds backed by playsQuery; declared
@@ -490,8 +525,8 @@ function matches(r: SessionRow): boolean {
     && (!f.group_id || r.group_id === f.group_id)
     && (!f.content_id || r.content_id === f.content_id)
     && (!f.play_id || r.play_id === f.play_id)
-    && (!f.platform || harnessPlatform(r) === f.platform)
-    && (!f.test || harnessTest(r) === f.test)
+    && (!f.platform || rowPlatform(r) === f.platform)
+    && (!f.test || rowTest(r) === f.test)
     && matchesClassification(r)
     && matchesHarness(r)
     && matchesLabels(r);
@@ -708,9 +743,9 @@ const playOptions = computed(() => distinctFor('play_id'));
 // can't build them; map each row through the harness label-tail readers and
 // dedupe. Independent of the four id selects — a platform spans many plays.
 const platformOptions = computed(() =>
-  Array.from(new Set(rows.value.map((r) => harnessPlatform(r)).filter(Boolean) as string[])).sort());
+  Array.from(new Set(rows.value.map((r) => rowPlatform(r)).filter(Boolean))).sort());
 const testOptions = computed(() =>
-  Array.from(new Set(rows.value.map((r) => harnessTest(r)).filter(Boolean) as string[])).sort());
+  Array.from(new Set(rows.value.map((r) => rowTest(r)).filter(Boolean))).sort());
 
 // When a parent filter narrows enough that the current value is no
 // longer in the visible set, clear it. Mirrors `fillSelect` in the
