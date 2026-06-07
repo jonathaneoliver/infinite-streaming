@@ -263,16 +263,8 @@ function deriveHealth(r: SessionRow): void {
     upshifts, player_error: r.last_player_error || '',
   };
 
-  const deductStalls = stalls * 2;
-  const deductErrors = errors * 25;
-  const deductFaults = Math.min(faults * 1, 10);
-  const deductDrops = Math.min(dropBlocks, 20);
-  const deductShifts = downshifts * 1;
-  r.health_score = Math.max(0, 100 - (deductStalls + deductErrors + deductFaults + deductDrops + deductShifts));
-  r.health_breakdown = {
-    stalls: deductStalls, errors: deductErrors,
-    faults: deductFaults, drops: deductDrops, downshifts: deductShifts,
-  };
+  // #659: health_score is computed below, AFTER the normalized rates — it's
+  // re-based on those (length-unbiased) + a breach penalty, not raw counts.
 
   // #563 — derived QoE rate metrics, normalised against playing time
   // (Conviva-style). undefined when the denominator is zero so cells
@@ -305,6 +297,51 @@ function deriveHealth(r: SessionRow): void {
   r.shifts_per_min = rateOk ? n('bitrate_shifts') / playingMin : undefined;
   r.downshifts_per_min = rateOk ? downshifts / playingMin : undefined;
   r.errors_per_hr = rateOk ? n('error_count') / playingHrs : undefined;
+
+  // #659: health from normalized QoE rates (length-unbiased) + a hard
+  // penalty for critical/error QoE labels, replacing the raw-count formula.
+  // Below the rate sample floor a play has no trustworthy rates, so it's
+  // scored on hard-failure presence instead of rate noise.
+  const breach = breachHealthPenalty(r);
+  if (rateOk) {
+    const rebufPct = (r.rebuffer_ratio ?? 0) * 100;
+    const dropPct = (r.drop_ratio ?? 0) * 100;
+    const dRebuf = Math.min(rebufPct * 4, 50);
+    const dStalls = Math.min((r.stalls_per_hr ?? 0) * 3, 20);
+    const dDown = Math.min((r.downshifts_per_min ?? 0) * 5, 15);
+    const dDrop = Math.min(dropPct * 2, 15);
+    const dErr = Math.min((r.errors_per_hr ?? 0) * 5, 20);
+    r.health_score = Math.max(0, 100 - (dRebuf + dStalls + dDown + dDrop + dErr + breach));
+    const r3 = (x: number) => Math.round(x * 1000) / 1000;
+    r.health_breakdown = {
+      rebuffer_pct: r3(rebufPct),
+      stalls_per_hr: r3(r.stalls_per_hr ?? 0),
+      downshifts_per_min: r3(r.downshifts_per_min ?? 0),
+      drop_pct: r3(dropPct),
+      errors_per_hr: r3(r.errors_per_hr ?? 0),
+      breach,
+    };
+  } else {
+    const hardFail = errors > 0 || faults > 0 || n('frozen_count') > 0;
+    r.health_score = Math.max(0, 100 - (hardFail ? 40 : 0) - breach);
+    r.health_breakdown = { short_play: true, hard_failure: hardFail, breach };
+  }
+}
+
+// #659: health penalty for the worst QoE labels — critical (×20) and error
+// (×10) tiers (the *_breach family etc.), capped at 40. Makes a real breach
+// dent the score that the raw-count formula ignored.
+function breachHealthPenalty(r: SessionRow): number {
+  const pairs = Array.isArray(r.labels) ? r.labels : [];
+  let p = 0;
+  for (const pr of pairs) {
+    const label = String((pr as any)[0] ?? '');
+    const eq = label.indexOf('=');
+    const sev = eq > 0 ? label.slice(0, eq) : '';
+    if (sev === 'critical') p += 20;
+    else if (sev === 'error') p += 10;
+  }
+  return Math.min(p, 40);
 }
 
 // Normalise one PlaySummary into a SessionRow: aliases v2 field
@@ -778,10 +815,13 @@ function fmtIssuesBadge(r: SessionRow): IssueBadge {
 }
 interface HealthBadge { score: number; cls: 'ok' | 'warn' | 'bad'; tip: string }
 function fmtHealthBadge(r: SessionRow): HealthBadge {
-  const s = Number(r.health_score) || 0;
-  const cls: HealthBadge['cls'] = s >= 90 ? 'ok' : s >= 70 ? 'warn' : 'bad';
+  const raw = Number(r.health_score) || 0;
+  const s = Math.round(raw * 100) / 100; // #659: 2dp display
+  const cls: HealthBadge['cls'] = raw >= 90 ? 'ok' : raw >= 70 ? 'warn' : 'bad';
   const b = r.health_breakdown || {};
-  const tip = `100 − stalls:${b.stalls || 0} − errors:${b.errors || 0} − faults:${b.faults || 0} − drops:${b.drops || 0} − downshifts:${b.downshifts || 0}`;
+  const tip = b.short_play
+    ? `short play — ${b.hard_failure ? 'hard failure' : 'no failures'}${b.breach ? `, breach −${b.breach}` : ''}`
+    : `rebuffer ${b.rebuffer_pct ?? 0}% · stalls ${b.stalls_per_hr ?? 0}/hr · downshift ${b.downshifts_per_min ?? 0}/min · drop ${b.drop_pct ?? 0}% · err ${b.errors_per_hr ?? 0}/hr${b.breach ? ` · breach −${b.breach}` : ''}`;
   return { score: s, cls, tip };
 }
 interface CountCell { n: number; color: string; bold: boolean }
@@ -812,14 +852,14 @@ function fmtRatioPct(v: number | undefined, warn: number, bad: number): PctCell 
   let color = '#065f46';
   if (v >= bad) color = '#991b1b';
   else if (v >= warn) color = '#92400e';
-  return { label: `${pct.toFixed(pct < 10 ? 2 : 1)}%`, color };
+  return { label: `${pct.toFixed(3)}%`, color };
 }
 function fmtRate(v: number | undefined, warn: number, bad: number): PctCell {
   if (v === undefined || !Number.isFinite(v)) return { label: '—', color: '#9ca3af' };
   let color = '#065f46';
   if (v >= bad) color = '#991b1b';
   else if (v >= warn) color = '#92400e';
-  return { label: v.toFixed(1), color };
+  return { label: v.toFixed(3), color };
 }
 function fmtMsDur(v: number | undefined): PctCell {
   if (v === undefined || !Number.isFinite(v) || v <= 0) return { label: '—', color: '#9ca3af' };
@@ -846,7 +886,10 @@ interface LabelChip {
   count: number;
   cls: 'info' | 'warning' | 'critical' | 'error' | 'testing';
 }
-function labelChips(r: SessionRow): LabelChip[] {
+// All chips for a row, incl. the testing tier — severity-ranked. Internal;
+// the column uses labelChips() (testing filtered out) and the Test-meta pill
+// uses testingMeta().
+function allLabelChips(r: SessionRow): LabelChip[] {
   const pairs = Array.isArray(r.labels) ? r.labels : [];
   const out: LabelChip[] = [];
   for (const p of pairs) {
@@ -864,11 +907,83 @@ function labelChips(r: SessionRow): LabelChip[] {
       : 'info';
     out.push({ label, name, count, cls });
   }
+  // #653: rank by severity tier first (so real errors lead, not the
+  // high-frequency info churn), then count-desc within a tier.
+  const sevRank: Record<LabelChip['cls'], number> = {
+    critical: 0, error: 1, warning: 2, info: 3, testing: 4,
+  };
   out.sort((a, b) =>
-    b.count - a.count
+    sevRank[a.cls] - sevRank[b.cls]
+    || b.count - a.count
     || a.label.localeCompare(b.label),
   );
   return out;
+}
+
+// Playback-signal chips for the Labels column. #658: the testing= KV tier is
+// structured run metadata, not events — pulled out into a separate Test-meta
+// pill (testingMeta) so it stops competing with error/warning chips.
+function labelChips(r: SessionRow): LabelChip[] {
+  return allLabelChips(r).filter((c) => c.cls !== 'testing');
+}
+
+// #658: collapse the testing= labels into one pill — a headline (test ·
+// platform when present) with the full set available on hover — instead of
+// a dozen chips. Returns null when the play carries no testing metadata.
+function testingMeta(r: SessionRow): { headline: string; all: string[] } | null {
+  const all: string[] = [];
+  let test = '', platform = '';
+  for (const c of allLabelChips(r)) {
+    if (c.cls !== 'testing') continue;
+    all.push(c.name);
+    if (c.name.startsWith('test_')) test = c.name.slice('test_'.length);
+    else if (c.name.startsWith('platform_')) platform = c.name.slice('platform_'.length);
+  }
+  if (all.length === 0) return null;
+  const headline = [test, platform].filter(Boolean).join(' · ') || 'test run';
+  return { headline, all: all.sort() };
+}
+
+// #656: cause/effect split. CAUSE = things the operator/harness deliberately
+// injected (fault toggles, shaper/pattern edits, lifecycle); EFFECT =
+// everything else, i.e. how the player reacted (qoe_*, stalls, downshifts,
+// breaches, transport/segment failures). Classify by label family; the
+// `*` synthMark prefix is stripped first.
+const CAUSE_RE = /^(fault|pattern|shaper_config|timeouts_changed|loop_server|session_start|session_end|content_changed|label_changed|control_change)/;
+function isCauseLabel(name: string): boolean {
+  const n = name.startsWith('*') ? name.slice(1) : name;
+  return CAUSE_RE.test(n);
+}
+function causeChips(r: SessionRow): LabelChip[] {
+  return labelChips(r).filter((c) => isCauseLabel(c.name));
+}
+function effectChips(r: SessionRow): LabelChip[] {
+  return labelChips(r).filter((c) => !isCauseLabel(c.name));
+}
+
+// #653/#656: per-group cap before the "+N more" toggle collapses the tail.
+const LABEL_CHIP_CAP = 6;
+
+// Per-row "show all labels" state, keyed by play_id. Collapsed by default.
+const expandedLabelRows = ref<Set<string>>(new Set());
+function toggleLabelRow(playId: string) {
+  const s = new Set(expandedLabelRows.value);
+  if (s.has(playId)) s.delete(playId); else s.add(playId);
+  expandedLabelRows.value = s;
+}
+// Visible head of each group: all when expanded, else the capped head.
+function visibleCauseChips(r: SessionRow): LabelChip[] {
+  const all = causeChips(r);
+  return expandedLabelRows.value.has(String(r.play_id)) ? all : all.slice(0, LABEL_CHIP_CAP);
+}
+function visibleEffectChips(r: SessionRow): LabelChip[] {
+  const all = effectChips(r);
+  return expandedLabelRows.value.has(String(r.play_id)) ? all : all.slice(0, LABEL_CHIP_CAP);
+}
+// Combined hidden count across both groups (drives the "+N more" label).
+function hiddenLabelCount(r: SessionRow): number {
+  return Math.max(0, causeChips(r).length - LABEL_CHIP_CAP)
+    + Math.max(0, effectChips(r).length - LABEL_CHIP_CAP);
 }
 
 // #563 — human-readable "how did this play end?" from the Phase 2
@@ -1307,7 +1422,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                 <tr
                   v-for="r in sorted"
                   :key="r.session_id + ':' + (r.play_id ?? '')"
-                  :class="{ 'row-critical': r.is_critical }"
+                  :class="[{ 'row-critical': r.is_critical }, 'row-health-' + fmtHealthBadge(r).cls]"
                   @click="onRowClick(r, $event)"
                 >
                   <td class="cell-star">
@@ -1358,14 +1473,46 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                     <span v-if="flagChips(r).length === 0" class="dash">—</span>
                   </td>
                   <td class="cell-labels">
+                    <template v-if="visibleEffectChips(r).length">
+                      <span class="label-group-tag" title="Player reaction (QoE, stalls, shifts, breaches)">plyr</span>
+                      <span
+                        v-for="chip in visibleEffectChips(r)"
+                        :key="'e-' + chip.label"
+                        class="label-chip"
+                        :class="'label-' + chip.cls"
+                        :title="chip.label"
+                      >{{ chip.count }}× {{ chip.name }}</span>
+                    </template>
+                    <template v-if="visibleCauseChips(r).length">
+                      <span class="label-group-tag" title="Operator / harness injected (faults, shaping, patterns)">inj</span>
+                      <span
+                        v-for="chip in visibleCauseChips(r)"
+                        :key="'c-' + chip.label"
+                        class="label-chip"
+                        :class="'label-' + chip.cls"
+                        :title="chip.label"
+                      >{{ chip.count }}× {{ chip.name }}</span>
+                    </template>
+                    <button
+                      v-if="hiddenLabelCount(r) > 0 && !expandedLabelRows.has(String(r.play_id))"
+                      type="button"
+                      class="label-more"
+                      title="Show all labels"
+                      @click.stop="toggleLabelRow(String(r.play_id))"
+                    >+{{ hiddenLabelCount(r) }} more</button>
+                    <button
+                      v-else-if="expandedLabelRows.has(String(r.play_id))"
+                      type="button"
+                      class="label-more"
+                      title="Show fewer"
+                      @click.stop="toggleLabelRow(String(r.play_id))"
+                    >show less</button>
                     <span
-                      v-for="chip in labelChips(r)"
-                      :key="chip.label"
-                      class="label-chip"
-                      :class="'label-' + chip.cls"
-                      :title="chip.label"
-                    >{{ chip.count }}× {{ chip.name }}</span>
-                    <span v-if="labelChips(r).length === 0" class="dash">—</span>
+                      v-if="testingMeta(r)"
+                      class="label-test-meta"
+                      :title="(testingMeta(r)?.all || []).join(', ')"
+                    >🧪 {{ testingMeta(r)?.headline }}</span>
+                    <span v-if="labelChips(r).length === 0 && !testingMeta(r)" class="dash">—</span>
                   </td>
                   <td>
                     <span class="health-badge" :class="'issue-' + fmtHealthBadge(r).cls" :title="fmtHealthBadge(r).tip">{{ fmtHealthBadge(r).score }}</span>
@@ -1567,7 +1714,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   z-index: 3;
 }
 .picker-table th {
-  padding: 8px 10px;
+  padding: 5px 10px;
   text-align: left;
   border-bottom: 1px solid var(--border-color, #e5e7eb);
   font-weight: 600;
@@ -1577,8 +1724,11 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 }
 .picker-table th.sortable { cursor: pointer; }
 .sort-idle { color: #9ca3af; }
+/* #659: compact rows — tighter vertical padding + line-height so more rows
+   are visible (the #654 label cap already shrank cell height). */
 .picker-table td {
-  padding: 5px 8px;
+  padding: 2px 8px;
+  line-height: 1.25;
   border-bottom: 1px solid var(--border-color, #f3f4f6);
   position: relative;
 }
@@ -1587,8 +1737,16 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   border-left: 4px solid transparent;
 }
 .picker-table tbody tr:hover { background: var(--bg-hover, #f9fafb); }
+/* #659: full-row wash + left bar by re-based health band (rate + breach).
+   ok is kept very faint so healthy rows stay calm and warn/bad pop. */
+.picker-table tbody tr.row-health-ok   { border-left-color: #16a34a; background: #f3faf5; }
+.picker-table tbody tr.row-health-warn { border-left-color: #d97706; background: #fef6e7; }
+.picker-table tbody tr.row-health-bad  { border-left-color: #dc2626; background: #fdeeee; }
+.picker-table tbody tr.row-health-ok:hover   { background: #e8f5ec; }
+.picker-table tbody tr.row-health-warn:hover { background: #fdeed2; }
+.picker-table tbody tr.row-health-bad:hover  { background: #fbe2e2; }
 .picker-table tbody tr.row-critical { border-left: 4px solid #dc2626; }
-.picker-table tbody tr.row-critical:hover { background: #fef2f2; }
+.picker-table tbody tr.row-critical:hover { background: #fbe2e2; }
 .empty {
   padding: 16px;
   text-align: center;
@@ -1655,6 +1813,47 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 .label-critical { background: #fee2e2; color: #7f1d1d; border-color: #fca5a5; }
 .label-error    { background: #ffedd5; color: #7c2d12; border-color: #fdba74; }
 .label-testing  { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
+/* #653: "+N more" / "show less" toggle for the capped label list. */
+.label-more {
+  display: inline-block;
+  padding: 1px 6px;
+  margin: 0 3px 2px 0;
+  border-radius: 10px;
+  font: 600 11px system-ui;
+  line-height: 1.4;
+  white-space: nowrap;
+  background: #eef2ff;
+  color: #4338ca;
+  border: 1px solid #c7d2fe;
+  cursor: pointer;
+}
+.label-more:hover { background: #e0e7ff; }
+/* #656: tiny uppercase divider tag preceding the injected / player chip
+   groups, so cause vs effect read as distinct clusters. */
+.label-group-tag {
+  display: inline-block;
+  margin: 0 4px 2px 0;
+  font: 700 9px system-ui;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  vertical-align: middle;
+}
+/* #658: compact pill for the testing= run metadata (test · platform), full
+   set on hover — keeps the structured KV facts out of the playback chips. */
+.label-test-meta {
+  display: inline-block;
+  padding: 1px 6px;
+  margin: 0 3px 2px 0;
+  border-radius: 10px;
+  font: 600 11px system-ui;
+  line-height: 1.4;
+  white-space: nowrap;
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #cbd5e1;
+  cursor: default;
+}
 
 /* Hierarchical labels filter — mirrors SessionDisplay's Focus Window
  * event-filter accordion. One row per severity tier with a clickable
@@ -1793,8 +1992,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   padding: 4px 4px 2px 26px;     /* indent under the chevron */
 }
 .lf-label-row {
-  display: grid;
-  grid-template-columns: 18px 1fr auto;
+  display: flex;
   gap: 6px;
   align-items: center;
   padding: 2px 8px;
@@ -1825,16 +2023,22 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   text-decoration-thickness: 1.5px;
   text-decoration-color: var(--tier-color);
 }
-.lf-label-check { font-weight: 700; }
+.lf-label-check { font-weight: 700; flex: none; }
 /* Tighten the ⊘ glyph — many fonts render it overly wide. */
 .lf-label-row.state-exclude .lf-label-check { letter-spacing: -1px; }
 .lf-label-name {
+  /* flex item that shrinks (min-width:0 + ellipsis) so the count sits right
+     after the name rather than being pushed to the far edge. */
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font: 500 12px ui-monospace, Menlo, monospace;
 }
 .lf-label-count {
+  flex: none;
   font: 600 11px ui-monospace, Menlo, monospace;
-  opacity: 0.85;
+  opacity: 0.7;
+  white-space: nowrap;
 }
 
 .rel-recent { color: #16a34a; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }

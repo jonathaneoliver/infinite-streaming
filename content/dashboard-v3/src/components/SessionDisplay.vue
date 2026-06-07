@@ -1940,8 +1940,14 @@ function skipToEnd() {
 }
 .type-name-btn-row:hover { background: #f9fafb; }
 .type-row.active .type-name-btn-row { font-weight: 700; color: var(--tier-color); }
-.type-name { flex: 1; }
-.type-count { font-variant-numeric: tabular-nums; color: #6b7280; font-size: 10.5px; }
+/* count hugs the name instead of being pushed to the far edge by flex:1
+   (mirrors the Sessions label-filter fix). */
+.type-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.type-count { flex: none; font-variant-numeric: tabular-nums; color: #6b7280; font-size: 10.5px; }
 .type-row.active .type-count { color: var(--tier-color); }
 
 .instances {

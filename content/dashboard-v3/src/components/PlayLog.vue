@@ -793,21 +793,51 @@ const windowedFull = computed<Row[]>(() => {
   return allRows.value.filter((row) => row.ts >= r.min && row.ts <= r.max);
 });
 
-/** Max rows actually rendered to the DOM. With fields collapsed to a
- *  single compact string per row (~8 nodes/row instead of ~100), the
- *  window can render far more rows cheaply, so this cap is now just a
- *  safety bound against pathological windows. Narrow the focus bar (or
- *  pan) to inspect rows beyond it. A virtualized list remains the proper
- *  long-term fix. */
-const MAX_RENDER_ROWS = 1500;
-const windowedRows = computed<Row[]>(() => {
-  const rows = windowedFull.value;
-  if (rows.length <= MAX_RENDER_ROWS) return rows;
-  // Keep the most recent N by ts (the live tail operators watch).
-  return rows.slice().sort((a, b) => a.ts - b.ts).slice(-MAX_RENDER_ROWS);
+// Render every row in the focus window — no cap. The focus window already
+// bounds the row count, each row collapses to ~8 DOM nodes, and this matches
+// NetworkLog (uncapped), so a selected event never gets clipped. If a very
+// wide window ever janks, virtualize the list rather than re-introduce a cap.
+const windowedRows = computed<Row[]>(() => windowedFull.value);
+
+/** Highlight the row matching the synchronized "selected event" cursor
+ *  (coord.state.cursorMs) — same coordination NetworkLog uses, so picking
+ *  an event lights up the corresponding Play Log line too. Rows are point
+ *  events, so we light the containing/predecessor row: the latest row at or
+ *  before the cursor (successor if the cursor precedes the first row).
+ *  Rows sharing that ts all highlight. */
+const cursorRowTs = computed<number | null>(() => {
+  const ms = coord.state.cursorMs;
+  if (ms == null || !Number.isFinite(ms)) return null;
+  let pred = -Infinity, succ = Infinity;
+  for (const r of windowedFull.value) {
+    if (r.ts <= ms) { if (r.ts > pred) pred = r.ts; }
+    else if (r.ts < succ) succ = r.ts;
+  }
+  if (pred !== -Infinity) return pred;
+  if (succ !== Infinity) return succ;
+  return null;
 });
-/** True when rows were dropped from the rendered set (shown in the bar). */
-const renderCapped = computed(() => windowedFull.value.length > MAX_RENDER_ROWS);
+
+// Scroll the highlighted row into view inside the inner container only (no
+// outer page scroll), mirroring NetworkLog's cursor follow.
+watch(
+  () => coord.state.cursorMs,
+  () => {
+    if (cursorRowTs.value == null) return;
+    nextTick(() => {
+      const el = rowsScrollRef.value;
+      if (!el) return;
+      const target = el.querySelector('.row.cursor-current') as HTMLElement | null;
+      if (!target) return;
+      const top = el.scrollTop;
+      const bottom = top + el.clientHeight;
+      const rTop = target.offsetTop;
+      const rBottom = rTop + target.offsetHeight;
+      if (rTop < top) el.scrollTop = rTop;
+      else if (rBottom > bottom) el.scrollTop = rBottom - el.clientHeight;
+    });
+  },
+);
 
 const rowsWithFields = computed<RowWithFields[]>(() => {
   // Build chronological copy so the diff against the previous
@@ -1005,7 +1035,6 @@ function onRowsWheel(e: WheelEvent) {
       <label v-if="hasAVMetrics" class="opt" title="iOS 18 AVMetrics raw events (issue #486 spike). Parallel observation stream from AVFoundation — compare side-by-side against today's heartbeat-derived Events."><input type="checkbox" v-model="showAVMetrics" /> AVMetrics ({{ counts.avm }})</label>
       <label class="opt"><input type="checkbox" v-model="showRaw" /> Raw</label>
       <span class="count">{{ counts.total }} row{{ counts.total === 1 ? '' : 's' }}</span>
-      <span v-if="renderCapped" class="count" title="Only the most recent rows are rendered for performance; narrow the focus bar to see older rows">(showing last {{ MAX_RENDER_ROWS }})</span>
       <button
         type="button"
         class="btn live-toggle"
@@ -1064,7 +1093,7 @@ function onRowsWheel(e: WheelEvent) {
           v-for="(r, i) in sortedRows"
           :key="i"
           class="row"
-          :class="[`src-${r.source}`, rowSeverityClass(r)]"
+          :class="[`src-${r.source}`, rowSeverityClass(r), { 'cursor-current': cursorRowTs !== null && r.ts === cursorRowTs }]"
           :title="rowTooltip(r)"
         >
           <div class="cell c-time">{{ fmtTime(r.ts) }}</div>
@@ -1272,11 +1301,24 @@ function onRowsWheel(e: WheelEvent) {
 }
 
 .rows {
+  /* position:relative makes this the offsetParent so the cursor
+     auto-scroll's target.offsetTop is measured against THIS container. */
+  position: relative;
   max-height: 480px;
   overflow-y: auto;
 }
 
 .row:hover { background: #f9fafb; }
+/* Synchronized "selected event" cursor — mirrors NetworkLog so picking an
+   event highlights the matching Play Log line. The .rows ancestor lifts
+   specificity above the .row.src-* tints defined below. */
+.rows .row.cursor-current {
+  background: rgba(29, 78, 216, 0.14);
+  border-top: 2px dashed #1d4ed8;
+  border-bottom: 2px dashed #1d4ed8;
+  box-shadow: inset 4px 0 0 #1d4ed8;
+}
+.rows .row.cursor-current:hover { background: rgba(29, 78, 216, 0.20); }
 
 .row.src-event { background: #fafafa; }
 .row.src-event:hover { background: #f3f4f6; }
