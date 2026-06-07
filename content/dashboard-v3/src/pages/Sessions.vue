@@ -735,10 +735,28 @@ function parseChIsoMs(v: string | null | undefined): number {
  *  Threshold is generous (60 s) so a heartbeat that's a few seconds
  *  late doesn't kick us into archive mode. */
 const LIVE_TAIL_MS = 60_000;
+
+/** A play is "still live" — viewer follows the live edge instead of
+ *  pinning to a fixed end_time — only if its last_seen is within
+ *  LIVE_TAIL_MS of now AND it has not reached a terminal outcome.
+ *  A play_end (any non-in_progress playback_status) means the play is
+ *  OVER: clamp to [from,to] no matter how recently it ended, otherwise
+ *  a just-finished archive opens following live (the 60 s tail alone
+ *  misclassifies it for its first minute). Mirrors endOutcome's
+ *  in_progress test. */
+function isTerminal(r: SessionRow): boolean {
+  const status = String(r.playback_status ?? '').trim();
+  return status !== '' && status !== 'in_progress';
+}
+function isStillLive(r: SessionRow): boolean {
+  if (isTerminal(r)) return false;
+  const lastSeen = parseChIsoMs(r.last_seen);
+  return Number.isFinite(lastSeen) && (Date.now() - lastSeen) < LIVE_TAIL_MS;
+}
 function endTimeFor(r: SessionRow): string {
   const lastSeen = parseChIsoMs(r.last_seen);
   if (!Number.isFinite(lastSeen)) return 'live';
-  if (Date.now() - lastSeen < LIVE_TAIL_MS) return 'live';
+  if (isStillLive(r)) return 'live';
   return new Date(lastSeen).toISOString();
 }
 
@@ -750,7 +768,7 @@ function viewerHref(r: SessionRow): string {
   // the upper bound and follows the live edge.
   const startMs = r.started ? parseChIsoMs(r.started) : NaN;
   const lastSeen = r.last_seen ? parseChIsoMs(r.last_seen) : NaN;
-  const stillLive = Number.isFinite(lastSeen) && (Date.now() - lastSeen) < LIVE_TAIL_MS;
+  const stillLive = isStillLive(r);
   return sessionViewerURL({
     playerId: r.player_id,
     playId: r.play_id && r.play_id !== '—' ? r.play_id : undefined,
