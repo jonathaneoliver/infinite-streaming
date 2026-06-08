@@ -45,6 +45,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Icon
 import androidx.tv.material3.Text
@@ -152,6 +156,18 @@ fun HomeScreen(
             .fillMaxSize()
             .background(Tokens.bg)
     ) {
+        // Harness hook — exposes player_id to Appium (accessibility id =
+        // content-desc "home-player-id"; the value is the node's text). The
+        // characterization rig reads it pre-playback to bind the shape cap
+        // to the right player. Mirrors iOS HomeScreen's hidden node.
+        Box(
+            modifier = Modifier
+                .size(1.dp)
+                .semantics {
+                    contentDescription = "home-player-id"
+                    text = AnnotatedString(vm.playerId)
+                },
+        )
         Column(modifier = Modifier.fillMaxSize().padding(Space.s7)) {
             // Header — big serif brand + monospace active-server label
             // on the left, a focusable gear on the right that opens
@@ -345,7 +361,14 @@ private fun Hero(
                 )
             }
             Row {
-                PrimaryButton("Resume", onClick = onResume, accent = true)
+                // contentDescription = Appium accessibility id on Android;
+                // ResumePlayback finds + clicks this to start the play.
+                PrimaryButton(
+                    "Resume",
+                    onClick = onResume,
+                    accent = true,
+                    modifier = Modifier.semantics { contentDescription = "home-continue-watching" },
+                )
             }
         }
     }

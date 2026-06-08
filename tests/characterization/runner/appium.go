@@ -194,12 +194,14 @@ func (a *AppiumLauncher) ResumePlayback(ctx context.Context, d Device) error {
 		return errors.New("ResumePlayback: no active appium session for device")
 	}
 	switch d.Platform {
-	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
-		// Wait for the continue-watching tile to render before tapping —
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim, PlatformAndroidTV:
+		// Wait for the continue-watching control to render before tapping —
 		// the catalogue fetch is async, so a just-forced-to-Home screen
 		// can show an empty content row for a few seconds (observed after
 		// a fresh launch / segment-forced launch); tapping immediately
-		// 404s on the not-yet-rendered tile.
+		// 404s on the not-yet-rendered tile. On Android the id is the
+		// content-desc on the hero's Resume button — same "accessibility
+		// id" locator (UiAutomator2 maps it to content-desc).
 		elID, err := a.waitForAccessibilityID(ctx, sessID, "home-continue-watching", 30*time.Second)
 		if err != nil {
 			return fmt.Errorf("wait for home-continue-watching: %w", err)
@@ -454,7 +456,7 @@ func (a *AppiumLauncher) Close() error {
 // returns its `value` attribute. Used to read out the persistent
 // player_id from the iOS app's home screen BEFORE tapping into
 // playback — see ReadPlayerID below.
-func (a *AppiumLauncher) readAccessibilityValue(ctx context.Context, sessID, id string) (string, error) {
+func (a *AppiumLauncher) readAccessibilityValue(ctx context.Context, sessID, id, attr string) (string, error) {
 	findBody := map[string]any{"using": "accessibility id", "value": id}
 	raw, err := a.doRequest(ctx, "POST", "/session/"+sessID+"/element", findBody)
 	if err != nil {
@@ -474,8 +476,11 @@ func (a *AppiumLauncher) readAccessibilityValue(ctx context.Context, sessID, id 
 	if elementID == "" {
 		return "", fmt.Errorf("find element %q returned no id", id)
 	}
+	// Which attribute carries the value differs by driver: XCUITest exposes
+	// the iOS accessibilityValue under "value"; UiAutomator2 exposes the
+	// Compose node's text under "text".
 	raw, err = a.doRequest(ctx, "GET",
-		fmt.Sprintf("/session/%s/element/%s/attribute/value", sessID, elementID), nil)
+		fmt.Sprintf("/session/%s/element/%s/attribute/%s", sessID, elementID, attr), nil)
 	if err != nil {
 		return "", fmt.Errorf("read value %q: %w", id, err)
 	}
@@ -556,7 +561,13 @@ func (a *AppiumLauncher) ReadPlayerID(ctx context.Context, sess *Session) (strin
 	if sessID == "" {
 		return "", errors.New("ReadPlayerID: no active appium session for device")
 	}
-	pid, err := a.readAccessibilityValue(ctx, sessID, "home-player-id")
+	// XCUITest carries the value under "value"; UiAutomator2 (Android)
+	// exposes the Compose node's text under "text".
+	attr := "value"
+	if sess.Device.Platform == PlatformAndroidTV {
+		attr = "text"
+	}
+	pid, err := a.readAccessibilityValue(ctx, sessID, "home-player-id", attr)
 	if err != nil {
 		return "", err
 	}
@@ -776,9 +787,13 @@ func appiumCapabilities(d Device, bundleID string) map[string]any {
 		caps["platformName"] = "Android"
 		caps["appium:automationName"] = "UiAutomator2"
 		caps["appium:appPackage"] = bundleID
-		// Android's session needs an activity too; LAUNCHER is the
-		// portable choice that matches our CLI launcher's `monkey -c LAUNCHER`.
-		caps["appium:appActivity"] = "android.intent.category.LAUNCHER"
+		// The real launcher activity (matches the deploy's
+		// `am start -n <pkg>/.MainActivity`). An intent CATEGORY is not a
+		// valid appActivity — UiAutomator2 fails to start the app with it.
+		caps["appium:appActivity"] = ".MainActivity"
+		// Don't block session creation on a specific post-launch activity
+		// (splash → home transitions vary); any activity in our package is fine.
+		caps["appium:appWaitActivity"] = "*"
 	}
 	return caps
 }
