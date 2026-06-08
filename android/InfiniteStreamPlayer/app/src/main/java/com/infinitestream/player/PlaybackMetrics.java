@@ -1018,6 +1018,7 @@ public final class PlaybackMetrics {
             p.put("player_metrics_device_class", DeviceInfo.deviceClass(ctx));
             p.put("player_metrics_device_model", DeviceInfo.deviceModel());
             p.put("player_metrics_player_tech", DeviceInfo.playerTech());
+            p.put("player_metrics_player_tech_version", DeviceInfo.playerTechVersion());
             // device_resolution supersedes the trio of screen_width_px /
             // screen_height_px / screen_density. Single tile, orientation-
             // aware. Mirrors iOS DeviceInfo.deviceResolution() — same

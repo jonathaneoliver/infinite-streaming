@@ -323,6 +323,7 @@ export interface Scenario {
   device_class?: string;
   device_model?: string;
   player_tech?: string;
+  player_tech_version?: string;
   app_version?: string;
   os_version?: string;
   content_id?: string;

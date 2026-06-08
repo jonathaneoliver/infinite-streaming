@@ -5,6 +5,8 @@ import android.content.res.Configuration;
 import android.os.Build;
 import android.util.DisplayMetrics;
 
+import androidx.media3.common.MediaLibraryInfo;
+
 // #550 Phase 4 — device / platform / version taxonomy.
 //
 // Android counterpart to the Swift DeviceInfo in the Apple build.
@@ -68,6 +70,19 @@ public final class DeviceInfo {
      *  Media3-based build. */
     public static String playerTech() {
         return "ExoPlayer";
+    }
+
+    /** Playback engine VERSION — the Media3/ExoPlayer library version,
+     *  e.g. "1.2.1". Read at runtime from MediaLibraryInfo so it tracks
+     *  the bundled dependency automatically (no hardcoding, survives a
+     *  gradle bump). Crucially this is INDEPENDENT of the OS version:
+     *  ExoPlayer is an app-bundled library, so two devices on the same
+     *  Android release can run different player versions. (Contrast iOS,
+     *  where AVPlayer IS the OS and the OS version is its version.)
+     *  Pairs with player_tech for per-engine-version A/B + regression
+     *  attribution. */
+    public static String playerTechVersion() {
+        return MediaLibraryInfo.VERSION == null ? "" : MediaLibraryInfo.VERSION;
     }
 
     /** Orientation-aware physical pixels of the device screen, "WxH".

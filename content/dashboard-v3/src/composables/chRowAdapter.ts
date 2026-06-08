@@ -163,6 +163,7 @@ export function chRowToPlayerRecord(
     device_class: typeof row.device_class === 'string' ? row.device_class : '',
     device_model: typeof row.device_model === 'string' ? row.device_model : '',
     player_tech: typeof row.player_tech === 'string' ? row.player_tech : '',
+    player_tech_version: typeof row.player_tech_version === 'string' ? row.player_tech_version : '',
     // Orientation-aware "WxH"; supersedes screen_width_px / _height_px / _density.
     device_resolution: typeof row.device_resolution === 'string' ? row.device_resolution : '',
     // panel_v1 bundle additions — populated only when the request

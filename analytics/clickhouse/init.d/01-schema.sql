@@ -193,6 +193,7 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.session_events
     device_class            LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
     device_model            String                 DEFAULT ''            CODEC(ZSTD(1)),
     player_tech             LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    player_tech_version     LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
     -- Orientation-aware physical-pixel resolution, formatted "WxH" to
     -- match video_resolution / display_resolution. Supersedes
     -- screen_width_px / screen_height_px / screen_density (dropped
@@ -490,6 +491,7 @@ ALTER TABLE infinite_streaming.session_events
     ADD COLUMN IF NOT EXISTS device_class            LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS device_model            String                 DEFAULT ''            CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS player_tech             LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS player_tech_version     LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),
     -- device_resolution supersedes screen_width_px / screen_height_px /
     -- screen_density (2026-05-30 cleanup).
     ADD COLUMN IF NOT EXISTS device_resolution       LowCardinality(String) DEFAULT ''            CODEC(ZSTD(1)),

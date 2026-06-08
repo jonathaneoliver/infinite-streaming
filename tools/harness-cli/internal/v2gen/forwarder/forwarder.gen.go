@@ -1363,6 +1363,9 @@ type Scenario struct {
 	// PlayerTech Player technology (e.g. 'AVPlayer'). From the typed column.
 	PlayerTech *string `json:"player_tech,omitempty"`
 
+	// PlayerTechVersion Player engine version, paired with player_tech (Media3/ExoPlayer lib version on Android; OS version on iOS). From the typed column.
+	PlayerTechVersion *string `json:"player_tech_version,omitempty"`
+
 	// RunId Characterization run id, from testing=run_id_* (compact UTC, e.g. '20260524T070148Z'). Groups plays into a run. Harness runs only.
 	RunId *string `json:"run_id,omitempty"`
 

@@ -154,7 +154,7 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		    error_count, error_code, error_domain,
 		    terminal_error_code, terminal_error_domain,
 		    playback_status, playback_reason,
-		    device_class, device_model, player_tech,
+		    device_class, device_model, player_tech, player_tech_version,
 		    app_version, os_version_major, os_version_minor,
 		    -- #634: tie-break key for the outcome argMaxes below. A
 		    -- play-terminal row that shares its ts with the final
@@ -301,6 +301,7 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		    argMax(device_class, ts) AS device_class,
 		    argMax(device_model, ts) AS device_model,
 		    argMax(player_tech, ts)  AS player_tech,
+		    argMax(player_tech_version, ts) AS player_tech_version,
 		    argMax(app_version, ts)  AS app_version,
 		    argMax(os_version_major, ts) AS os_version_major,
 		    argMax(os_version_minor, ts) AS os_version_minor
@@ -329,7 +330,7 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		  agg.playback_status, agg.playback_reason,
 		  agg.terminal_error_code, agg.terminal_error_domain,
 		  agg.last_error_code, agg.last_error_domain, agg.error_count,
-		  agg.device_class, agg.device_model, agg.player_tech,
+		  agg.device_class, agg.device_model, agg.player_tech, agg.player_tech_version,
 		  agg.app_version, agg.os_version_major, agg.os_version_minor,
 		  agg.classification,
 		  -- #679: scenario sources — master manifest URL (variant derived in

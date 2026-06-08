@@ -1068,6 +1068,7 @@ components:
         device_class: { type: string, description: "Device taxonomy class (phone|tablet|tv|…). From the typed column (#550 Phase 4)." }
         device_model: { type: string, description: "Device model identifier (e.g. 'iPhone15,2'). From the typed column." }
         player_tech:  { type: string, description: "Player technology (e.g. 'AVPlayer'). From the typed column." }
+        player_tech_version: { type: string, description: "Player engine version, paired with player_tech (Media3/ExoPlayer lib version on Android; OS version on iOS). From the typed column." }
         app_version:  { type: string, description: "Client app version. From the typed column." }
         os_version:   { type: string, description: "OS version, 'major.minor' (or just 'major'), joined from os_version_major/os_version_minor." }
         content_id:   { type: string, description: "Content identifier — duplicated here so the object is self-contained for the viewer header." }

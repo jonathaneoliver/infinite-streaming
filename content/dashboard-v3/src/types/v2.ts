@@ -2131,6 +2131,8 @@ export interface components {
             device_model?: string | null;
             /** @description #550 Phase 4: playback engine: `AVPlayer` / `hls.js` / `shaka` / `native-roku` / `vlc` / `ffmpeg`. */
             player_tech?: string | null;
+            /** @description Playback engine version, paired with player_tech. Android: Media3/ExoPlayer library version (app-bundled, independent of the OS). iOS: OS version (AVPlayer is part of the OS). */
+            player_tech_version?: string | null;
             /** @description Physical-pixel resolution of the device's current orientation, formatted `"WxH"` to match video_resolution / display_resolution. Swaps integers on iPad rotation; static on Apple TV / orientation-locked clients. Supersedes screen_width_px / screen_height_px / screen_density (dropped 2026-05-30). */
             device_resolution?: string | null;
         };

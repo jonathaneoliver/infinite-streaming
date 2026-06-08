@@ -1334,6 +1334,9 @@ type PlayerMetrics struct {
 	// PlayerTech #550 Phase 4: playback engine: `AVPlayer` / `hls.js` / `shaka` / `native-roku` / `vlc` / `ffmpeg`.
 	PlayerTech *string `json:"player_tech,omitempty"`
 
+	// PlayerTechVersion Playback engine version, paired with player_tech. Android: Media3/ExoPlayer library version (app-bundled, independent of the OS). iOS: OS version (AVPlayer is part of the OS).
+	PlayerTechVersion *string `json:"player_tech_version,omitempty"`
+
 	// PlayheadWallclockMs Player-encoded PDT (milliseconds since Unix epoch) for the current playhead. Used by the chart engine to compute live offset against the server clock.
 	PlayheadWallclockMs *int `json:"playhead_wallclock_ms,omitempty"`
 

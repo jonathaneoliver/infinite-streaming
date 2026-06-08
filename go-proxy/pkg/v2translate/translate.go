@@ -249,6 +249,7 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		{"player_metrics_device_class", &pm.DeviceClass},
 		{"player_metrics_device_model", &pm.DeviceModel},
 		{"player_metrics_player_tech", &pm.PlayerTech},
+		{"player_metrics_player_tech_version", &pm.PlayerTechVersion},
 		// Per-variant dwell map — iOS emits as JSON-string for compactness.
 		// Dashboard parses on the client side via JSON.parse.
 		{"player_metrics_time_per_variant_s", &pm.TimePerVariantS},

@@ -109,6 +109,7 @@ const fields = computed(() => {
   const osMajor = typeof pm.os_version_major === 'number' ? pm.os_version_major : null;
   const osMinor = typeof pm.os_version_minor === 'number' ? pm.os_version_minor : null;
   const playerTech = typeof pm.player_tech === 'string' ? pm.player_tech : '';
+  const playerTechVersion = typeof pm.player_tech_version === 'string' ? pm.player_tech_version : '';
   const out: { label: string; value: string }[] = [
     { label: 'Player ID', value: p.id ?? '—' },
     { label: 'Display ID', value: String(p.display_id ?? '—') },
@@ -150,6 +151,7 @@ const fields = computed(() => {
     { label: 'Device Class', value: deviceClass || '—' },
     { label: 'Device Model', value: deviceModel || '—' },
     { label: 'Player Tech', value: playerTech || '—' },
+    { label: 'Player Version', value: playerTechVersion || '—' },
     { label: 'OS Version', value: (osMajor != null || osMinor != null) ? `${osMajor ?? 0}.${osMinor ?? 0}` : '—' },
     { label: 'App Version', value: appVersion || '—' },
   ];
