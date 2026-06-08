@@ -646,10 +646,39 @@ type ContentManipulation struct {
 
 	// StripResolution Remove RESOLUTION attribute from EXT-X-STREAM-INF lines. Apple HLS validator rejects this; AVPlayer plays but variant.video.size becomes empty (issue #486).
 	StripResolution *bool `json:"strip_resolution,omitempty"`
+
+	// VariantOrder Re-sort the video EXT-X-STREAM-INF entries by BANDWIDTH to probe whether master-playlist order biases AVPlayer's initial-variant pick (#682).
+	VariantOrder *ContentManipulationVariantOrder `json:"variant_order,omitempty"`
 }
 
 // ContentManipulationLiveOffset Live edge offset window in seconds. 0 = no offset.
 type ContentManipulationLiveOffset int
+
+// ContentManipulationVariantOrder Re-sort the video EXT-X-STREAM-INF entries by BANDWIDTH to probe whether master-playlist order biases AVPlayer's initial-variant pick (#682).
+type ContentManipulationVariantOrder string
+
+// Defines values for ContentManipulationVariantOrder.
+const (
+	ContentManipulationVariantOrderAscending  ContentManipulationVariantOrder = "ascending"
+	ContentManipulationVariantOrderDefault    ContentManipulationVariantOrder = "default"
+	ContentManipulationVariantOrderDescending ContentManipulationVariantOrder = "descending"
+	ContentManipulationVariantOrderFirst4mbps ContentManipulationVariantOrder = "first_4mbps"
+)
+
+// Valid indicates whether the value is a known member of the ContentManipulationVariantOrder enum.
+func (e ContentManipulationVariantOrder) Valid() bool {
+	switch e {
+	case ContentManipulationVariantOrderAscending:
+		return true
+	case ContentManipulationVariantOrderDefault:
+		return true
+	case ContentManipulationVariantOrderDescending:
+		return true
+	case ContentManipulationVariantOrderFirst4mbps:
+		return true
+	}
+	return false
+}
 
 // FaultCounters Read-only. Server-maintained; never appears in PATCH bodies.
 type FaultCounters map[string]int

@@ -1900,6 +1900,12 @@ export interface components {
             /** @description When non-empty, only the listed variant URIs are kept in the master playlist. */
             allowed_variants?: string[];
             /**
+             * @description Re-sort the video EXT-X-STREAM-INF entries by BANDWIDTH to probe whether master-playlist order biases AVPlayer's initial-variant pick (#682). ascending = lowest first (our authoring); descending = highest first; first_4mbps = promote the variant nearest 4 Mbps to first-listed, rest ascending (initial-variant probe); default = passthrough. EXT-X-MEDIA audio/subtitle renditions are left untouched.
+             * @default default
+             * @enum {string}
+             */
+            variant_order?: "default" | "ascending" | "descending" | "first_4mbps";
+            /**
              * @description Live edge offset window in seconds. 0 = no offset.
              * @default 0
              * @enum {integer}

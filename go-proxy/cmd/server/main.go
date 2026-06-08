@@ -6190,6 +6190,9 @@ func shouldApplyContentManipulation(session SessionData) bool {
 	if len(allowedVariants) > 0 {
 		return true
 	}
+	if vo := getString(session, "content_variant_order"); vo != "" && vo != "default" {
+		return true
+	}
 	return false
 }
 
@@ -6201,10 +6204,11 @@ func (a *App) applyContentManipulation(body []byte, session SessionData, content
 	overstateBandwidth := getBool(session, "content_overstate_bandwidth")
 	liveOffset := getInt(session, "content_live_offset")
 	allowedVariants := getStringSlice(session, "content_allowed_variants")
+	variantOrder := getString(session, "content_variant_order")
 
 	// Handle HLS master playlists
 	if strings.Contains(strings.ToLower(contentType), "mpegurl") || strings.Contains(strings.ToLower(contentType), "m3u8") {
-		result, err := manipulateHLSMaster(body, stripCodecs, stripAvgBandwidth, stripResolution, overstateBandwidth, liveOffset, allowedVariants)
+		result, err := manipulateHLSMaster(body, stripCodecs, stripAvgBandwidth, stripResolution, overstateBandwidth, liveOffset, allowedVariants, variantOrder)
 		if err != nil {
 			return nil, err
 		}
@@ -6228,7 +6232,7 @@ func (a *App) applyContentManipulation(body []byte, session SessionData, content
 }
 
 // manipulateHLSMaster modifies an HLS master playlist
-func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, stripResolution bool, overstateBandwidth bool, liveOffset int, allowedVariants []string) ([]byte, error) {
+func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, stripResolution bool, overstateBandwidth bool, liveOffset int, allowedVariants []string, variantOrder string) ([]byte, error) {
 	playlist, listType, err := m3u8.DecodeFrom(bufio.NewReader(bytes.NewReader(body)), true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode HLS playlist: %w", err)
@@ -6319,6 +6323,27 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 		}
 	}
 
+	// Reorder video variants by BANDWIDTH (issue #682). Probes whether
+	// the master-playlist order biases AVPlayer's initial-variant pick —
+	// the pre-iOS-13 / startsOnFirstEligibleVariant path keys off
+	// first-listed. Re-sorts master.Variants in place; the m3u8 encoder
+	// emits EXT-X-STREAM-INF lines in slice order. EXT-X-MEDIA audio/
+	// subtitle renditions travel on each variant's Alternatives and stay
+	// glued to their owning variant, so they are unaffected.
+	switch variantOrder {
+	case "ascending":
+		sortVariantsByBandwidth(master.Variants, true)
+		modified = true
+	case "descending":
+		sortVariantsByBandwidth(master.Variants, false)
+		modified = true
+	case "first_4mbps":
+		// Promote the variant nearest 4 Mbps to first-listed (rest ascending)
+		// to force a mid-tier initial pick on the first-eligible-variant path.
+		promoteVariantNearestBandwidth(master.Variants, 4_000_000)
+		modified = true
+	}
+
 	// Inject #EXT-X-START with negative offset for live edge positioning
 	if liveOffset > 0 {
 		modified = true
@@ -6369,6 +6394,57 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	}
 
 	return buf.Bytes(), nil
+}
+
+// variantBandwidth returns a variant's BANDWIDTH (peak) as the sort key,
+// 0 for a nil variant.
+func variantBandwidth(v *m3u8.Variant) uint32 {
+	if v == nil {
+		return 0
+	}
+	return v.Bandwidth
+}
+
+// sortVariantsByBandwidth re-sorts the variants in place by BANDWIDTH,
+// ascending (lowest first) or descending. Stable so equal-bandwidth
+// variants keep their authored relative order.
+func sortVariantsByBandwidth(vs []*m3u8.Variant, ascending bool) {
+	sort.SliceStable(vs, func(i, j int) bool {
+		if ascending {
+			return variantBandwidth(vs[i]) < variantBandwidth(vs[j])
+		}
+		return variantBandwidth(vs[i]) > variantBandwidth(vs[j])
+	})
+}
+
+// promoteVariantNearestBandwidth orders the variants ascending, then moves
+// the one whose BANDWIDTH is closest to target to the front — leaving a
+// master playlist whose first-listed variant is the ~target-bitrate rendition.
+// Used by the "first_4mbps" probe (#682).
+func promoteVariantNearestBandwidth(vs []*m3u8.Variant, target uint32) {
+	if len(vs) < 2 {
+		return
+	}
+	sortVariantsByBandwidth(vs, true)
+	best, bestDelta := 0, absDiffUint32(variantBandwidth(vs[0]), target)
+	for i := 1; i < len(vs); i++ {
+		if d := absDiffUint32(variantBandwidth(vs[i]), target); d < bestDelta {
+			best, bestDelta = i, d
+		}
+	}
+	if best == 0 {
+		return
+	}
+	chosen := vs[best]
+	copy(vs[1:best+1], vs[0:best])
+	vs[0] = chosen
+}
+
+func absDiffUint32(a, b uint32) uint32 {
+	if a > b {
+		return a - b
+	}
+	return b - a
 }
 
 // rewriteVariantLiveOffsetTags updates HOLD-BACK inside EXT-X-SERVER-CONTROL
