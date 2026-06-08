@@ -47,6 +47,14 @@ type AppiumLauncher struct {
 	// shrink it. #627/#660.
 	closeBeat time.Duration
 
+	// launchArgs — process arguments passed to the app on launch
+	// (XCUITest `appium:processArguments`). iOS maps `-key value` args
+	// into UserDefaults' NSArgumentDomain (highest precedence), so the
+	// segment axis forces e.g. `-is.segment s2` for a single, deterministic
+	// cold launch on that segment — no UI pre-set, no second session.
+	// Set via SetLaunchArgs before the launch. #segments.
+	launchArgs []string
+
 	mu       sync.Mutex
 	sessions map[string]string // device UDID → Appium session id
 	hc       *http.Client
@@ -129,6 +137,15 @@ func (a *AppiumLauncher) Launch(ctx context.Context, d Device) (*Session, error)
 // Use case: rampup / pyramid where the test wants to ApplyRate(floor)
 // BEFORE the first segment fetch, so playback starts cold under the
 // constraint instead of cliff-diving from "no cap" to a low cap.
+// SetLaunchArgs sets process arguments applied to every subsequent app
+// launch (see the launchArgs field). Pass nil to clear. #segments uses
+// this to force the segment via `-is.segment <rawValue>` on cold launch.
+func (a *AppiumLauncher) SetLaunchArgs(args []string) {
+	a.mu.Lock()
+	a.launchArgs = args
+	a.mu.Unlock()
+}
+
 func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, error) {
 	bundleID := a.BundleIDs[d.Platform]
 	if bundleID == "" {
@@ -138,6 +155,12 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 		return nil, fmt.Errorf("appium server not reachable at %s: %w (start with `appium`, or unset LAUNCH_MODE=appium)", a.URL, err)
 	}
 	caps := appiumCapabilities(d, bundleID)
+	if len(a.launchArgs) > 0 {
+		// XCUITest passes these to the app on launch; iOS folds `-key value`
+		// pairs into UserDefaults (NSArgumentDomain). #segments forces the
+		// segment this way so a single cold launch lands on it.
+		caps["appium:processArguments"] = map[string]any{"args": a.launchArgs}
+	}
 	sessID, err := a.createSession(ctx, caps)
 	if err != nil {
 		return nil, fmt.Errorf("appium create session: %w", err)
@@ -172,7 +195,16 @@ func (a *AppiumLauncher) ResumePlayback(ctx context.Context, d Device) error {
 	}
 	switch d.Platform {
 	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
-		if err := a.tapByAccessibilityID(ctx, sessID, "home-continue-watching"); err != nil {
+		// Wait for the continue-watching tile to render before tapping —
+		// the catalogue fetch is async, so a just-forced-to-Home screen
+		// can show an empty content row for a few seconds (observed after
+		// a fresh launch / segment-forced launch); tapping immediately
+		// 404s on the not-yet-rendered tile.
+		elID, err := a.waitForAccessibilityID(ctx, sessID, "home-continue-watching", 30*time.Second)
+		if err != nil {
+			return fmt.Errorf("wait for home-continue-watching: %w", err)
+		}
+		if err := a.clickElement(ctx, sessID, elID); err != nil {
 			return fmt.Errorf("tap home-continue-watching: %w", err)
 		}
 	}
@@ -585,6 +617,32 @@ func (a *AppiumLauncher) clickElement(ctx context.Context, sessID, elementID str
 	_, err := a.doRequest(ctx, "POST",
 		fmt.Sprintf("/session/%s/element/%s/click", sessID, elementID), map[string]any{})
 	return err
+}
+
+// waitForAccessibilityID polls for an element by accessibility id until
+// it appears or the deadline passes, then returns its element id. Rides
+// out async UI population — e.g. the Home content row renders its
+// continue-watching tile only after the catalogue fetch completes, so a
+// freshly-launched Home can be empty for a few seconds; tapping into it
+// immediately 404s. Poll instead of racing.
+func (a *AppiumLauncher) waitForAccessibilityID(ctx context.Context, sessID, id string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		elID, err := a.findByAccessibilityID(ctx, sessID, id)
+		if err == nil {
+			return elID, nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("element %q not present after %s: %w", id, timeout, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 // --- WebDriver protocol plumbing -------------------------------------------

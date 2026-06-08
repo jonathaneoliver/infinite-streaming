@@ -114,6 +114,30 @@ func runPyramid(t *testing.T, p runner.Platform) {
 	coldStart := isAppium && preFloor > 0
 	conservativeStart := isAppium && !coldStart
 
+	// #segments — force the segment via a launch argument so the single
+	// cold launch below lands on it deterministically. iOS folds
+	// `-is.segment <rawValue>` into UserDefaults (NSArgumentDomain,
+	// highest precedence); loadFlags reads `is.segment` at init, so the
+	// player cold-starts on this segment from frame 1 — bottom rung under
+	// the floor cap, no UI pre-set, no second Appium session, no warm-
+	// switch starvation. CHAR_SEGMENT is the label form (2s|6s|ll); the
+	// enum rawValue is s2|s6|ll. Appium iOS only. Run both segments as
+	// two invocations (CHAR_SEGMENT=6s then =2s); each cold-starts clean.
+	segment := strings.TrimSpace(os.Getenv("CHAR_SEGMENT"))
+	if segment != "" {
+		if isAppium {
+			raw := map[string]string{"2s": "s2", "6s": "s6", "ll": "ll"}[segment]
+			if raw == "" {
+				t.Fatalf("CHAR_SEGMENT must be one of 2s|6s|ll (got %q)", segment)
+			}
+			appium.SetLaunchArgs([]string{"-is.segment", raw})
+			t.Logf("forcing segment=%s via launch arg -is.segment %s — cold start lands on it", segment, raw)
+		} else {
+			t.Logf("CHAR_SEGMENT=%s ignored — requires the Appium launcher", segment)
+			segment = ""
+		}
+	}
+
 	var sess *runner.Session
 	switch {
 	case coldStart:
@@ -193,6 +217,9 @@ func runPyramid(t *testing.T, p runner.Platform) {
 		"platform": string(p),
 		"run_id":   runID,
 	}
+	if segment != "" {
+		startLabels["segment"] = segment
+	}
 	if err := sess.LabelPlay(context.Background(), startLabels); err != nil {
 		t.Logf("label play (start): %v (test continues)", err)
 	} else {
@@ -235,6 +262,25 @@ func runPyramid(t *testing.T, p runner.Platform) {
 	rec, err := sess.PlayerState(ctx)
 	if err != nil {
 		t.Fatalf("PlayerState: %v", err)
+	}
+	// #segments — assert the cold start actually landed on the requested
+	// segment. master_2s.m3u8 / master_6s.m3u8 / master.m3u8 (ll). If the
+	// segment didn't persist across the relaunch we'd silently sweep the
+	// wrong segment — fail loudly instead.
+	if segment != "" && rec.CurrentPlay != nil {
+		master := rec.CurrentPlay.Manifest.MasterURL
+		var want string
+		switch segment {
+		case "ll":
+			want = "master.m3u8"
+		default:
+			want = "master_" + segment + "."
+		}
+		if !strings.Contains(master, want) {
+			t.Fatalf("requested segment %q but cold-started on %q (expected master to contain %q) — did the segment persist across relaunch?",
+				segment, master, want)
+		}
+		t.Logf("confirmed cold start on segment=%s (master=%s)", segment, master)
 	}
 	desc, err := runner.StandardLadderRates(rec)
 	if err != nil {
@@ -306,11 +352,15 @@ func runPyramid(t *testing.T, p runner.Platform) {
 	if len(playerShort) > 8 {
 		playerShort = playerShort[:8]
 	}
+	segTag := ""
+	if segment != "" {
+		segTag = "-" + segment
+	}
 	var last *runner.Report
 	for ri, report := range reports {
 		cyc := ri + 1
 		last = report
-		base := fmt.Sprintf("pyramid-%s-%s-%s-cyc%d", p, playerShort, runID, cyc)
+		base := fmt.Sprintf("pyramid-%s-%s%s-%s-cyc%d", p, playerShort, segTag, runID, cyc)
 		jsonPath, err := runner.WriteReport(out, base, report)
 		if err != nil {
 			t.Fatalf("cyc%d write report: %v", cyc, err)

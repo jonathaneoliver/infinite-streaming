@@ -499,6 +499,14 @@ final class PlayerViewModel: ObservableObject {
     }
     func setSegment(_ s: SegmentLength) {
         segment = s
+        // Persist like every other Advanced setting (loadFlags restores
+        // `is.segment` at launch, persistFlags writes it) — setSegment
+        // was the lone setter that skipped persistence, so a segment
+        // choice silently reverted on relaunch. The characterization
+        // rig's relaunch-per-segment cold start depends on this: the
+        // segment must survive the cold-launch so the player starts on
+        // the chosen segment from frame 1.
+        persistFlags()
         buildURLAndLoad()
     }
     func setCodec(_ c: CodecFilter) {
