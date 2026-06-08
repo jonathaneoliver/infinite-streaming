@@ -74,6 +74,17 @@ enum DeviceInfo {
     /// it to "hls.js" / "shaka" / "native-roku" etc.
     static let playerTech: String = "AVPlayer"
 
+    /// Playback engine VERSION. On Apple platforms AVPlayer IS part of
+    /// the OS — unlike Android's app-bundled ExoPlayer (Media3), which
+    /// is versioned independently of the OS — so AVPlayer's version is
+    /// the OS version. Reported as "major.minor.patch" to pair with
+    /// player_tech for per-engine-version attribution; mirrors the
+    /// Android DeviceInfo.playerTechVersion() (the Media3 library version).
+    static let playerTechVersion: String = {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        return "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
+    }()
+
     /// Physical-pixel resolution of the device's current orientation,
     /// formatted as `"WxH"` to match `video_resolution` /
     /// `display_resolution` for side-by-side comparison. On iPad this

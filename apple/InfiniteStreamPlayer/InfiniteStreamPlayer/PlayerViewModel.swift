@@ -2642,6 +2642,7 @@ extension PlayerViewModel {
             "player_metrics_device_class": DeviceInfo.deviceClass,
             "player_metrics_device_model": DeviceInfo.deviceModel,
             "player_metrics_player_tech": DeviceInfo.playerTech,
+            "player_metrics_player_tech_version": DeviceInfo.playerTechVersion,
             // Orientation-aware physical pixels — replaces the prior
             // screen_width_px / screen_height_px / screen_density
             // taxonomy fields (which were static portrait-only).

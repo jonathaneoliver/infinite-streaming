@@ -1657,6 +1657,7 @@ components:
         device_class:           { type: string,  nullable: true, description: '#550 Phase 4: form-factor enum: `phone` / `tablet` / `tv` / `desktop` / `unknown`.' }
         device_model:           { type: string,  nullable: true, description: '#550 Phase 4: hardware model identifier (e.g. iPhone15,3) via sysctl hw.machine.' }
         player_tech:            { type: string,  nullable: true, description: '#550 Phase 4: playback engine: `AVPlayer` / `hls.js` / `shaka` / `native-roku` / `vlc` / `ffmpeg`.' }
+        player_tech_version:    { type: string,  nullable: true, description: 'Playback engine version, paired with player_tech. Android: Media3/ExoPlayer library version (app-bundled, independent of the OS). iOS: OS version (AVPlayer is part of the OS).' }
         device_resolution:      { type: string,  nullable: true, description: 'Physical-pixel resolution of the device''s current orientation, formatted `"WxH"` to match video_resolution / display_resolution. Swaps integers on iPad rotation; static on Apple TV / orientation-locked clients. Supersedes screen_width_px / screen_height_px / screen_density (dropped 2026-05-30).' }
 
     ServerMetrics:

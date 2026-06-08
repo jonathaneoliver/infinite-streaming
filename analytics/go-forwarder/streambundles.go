@@ -289,7 +289,7 @@ var bundleRegistry = map[string]bundleDef{
 			// fields. SessionDetails.vue renders them alongside
 			// identity tiles. Costs are minimal: LowCardinality
 			// columns compress repeats to near-nothing.
-			"device_class", "device_model", "player_tech",
+			"device_class", "device_model", "player_tech", "player_tech_version",
 			"app_version", "os_version_major", "os_version_minor",
 		},
 	},

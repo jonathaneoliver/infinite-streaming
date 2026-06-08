@@ -28,6 +28,7 @@ func enrichScenario(rows []map[string]any) {
 		putIfStr(sc, "device_class", row["device_class"])
 		putIfStr(sc, "device_model", row["device_model"])
 		putIfStr(sc, "player_tech", row["player_tech"])
+		putIfStr(sc, "player_tech_version", row["player_tech_version"])
 		putIfStr(sc, "app_version", row["app_version"])
 		putIfStr(sc, "content_id", row["content_id"])
 		if os := joinOSVersion(row["os_version_major"], row["os_version_minor"]); os != "" {

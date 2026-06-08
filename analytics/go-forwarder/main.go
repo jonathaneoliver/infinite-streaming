@@ -307,6 +307,10 @@ type row struct {
 	DeviceClass              string  `json:"device_class"`
 	DeviceModel              string  `json:"device_model"`
 	PlayerTech               string  `json:"player_tech"`
+	// Playback engine version, paired with PlayerTech. Android: Media3/
+	// ExoPlayer library version (app-bundled, independent of the OS).
+	// iOS: OS version (AVPlayer is part of the OS).
+	PlayerTechVersion        string  `json:"player_tech_version"`
 	// Orientation-aware "WxH" — supersedes the three screen_* fields
 	// dropped on 2026-05-30.
 	DeviceResolution         string  `json:"device_resolution"`
@@ -843,6 +847,7 @@ func toRow(ts string, revision uint64, sessionID string, s map[string]interface{
 		DeviceClass:              getStr(s, "player_metrics_device_class"),
 		DeviceModel:              getStr(s, "player_metrics_device_model"),
 		PlayerTech:                getStr(s, "player_metrics_player_tech"),
+		PlayerTechVersion:         getStr(s, "player_metrics_player_tech_version"),
 		DeviceResolution:          getStr(s, "player_metrics_device_resolution"),
 		PositionS:                getF32(s, "player_metrics_position_s"),
 		LiveEdgeS:                getF32(s, "player_metrics_live_edge_s"),

@@ -86,6 +86,7 @@ type PMExt = NonNullable<typeof pm.value> & {
   device_class?: string | null;
   device_model?: string | null;
   player_tech?: string | null;
+  player_tech_version?: string | null;
   // Orientation-aware physical-pixel resolution (e.g. "2752x2064").
   // Replaces the prior screen_width_px / _height_px / _density tile.
   device_resolution?: string | null;
