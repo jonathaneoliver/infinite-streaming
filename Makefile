@@ -436,12 +436,31 @@ test-deploy-all: test-deploy-compose test-deploy-ghcr test-deploy-registry
 # appears INSTANTLY inside the container — nginx serves the new
 # bundle on the next request, no docker cp / docker exec / reload
 # needed.
-# _ff-guard: before any deploy that ships the LOCAL working tree, ensure the
-# current branch is at its origin HEAD. Clean + behind → fast-forward and
-# proceed; dirty/diverged → abort, so a stale tree never ships (the way
-# #652's chart swap shipped pre-merge on 2026-06-07). No upstream → no-op.
+# _ff-guard: before any deploy that ships the LOCAL working tree to the shared
+# test-dev box, ensure (1) we're on the deploy branch and (2) it's at its
+# origin HEAD. Clean + behind → fast-forward and proceed; dirty/diverged →
+# abort, so a stale tree never ships (the way #652's chart swap shipped
+# pre-merge on 2026-06-07). No upstream → no-op.
+#
+# (1) is the branch check: the old guard only verified the CURRENT branch was
+# current with ITS OWN upstream, so a feature branch that's up to date with
+# its own origin sailed through and shipped code stale-vs-dev. That reverted
+# the forwarder + dashboard + harness on test-dev on 2026-06-08 (a deploy from
+# the feat/scenario-typed-api-678 branch served pre-#697/#699 code). Now a
+# non-DEPLOY_BRANCH deploy aborts unless you opt in with ALLOW_BRANCH_DEPLOY=1.
+#
+# DEPLOY_BRANCH — the branch a shared-box deploy is expected to ship (dev).
+DEPLOY_BRANCH ?= dev
 .PHONY: _ff-guard
 _ff-guard:
+	@cur=$$(git symbolic-ref --short -q HEAD || echo DETACHED); \
+	if [ "$$cur" != "$(DEPLOY_BRANCH)" ] && [ -z "$(ALLOW_BRANCH_DEPLOY)" ]; then \
+		echo "✗ deploy expects branch '$(DEPLOY_BRANCH)' but HEAD is '$$cur'."; \
+		echo "  A deploy from a stale feature branch silently reverted test-dev on 2026-06-08"; \
+		echo "  (forwarder + dashboard + harness all served pre-merge code)."; \
+		echo "  → 'git switch $(DEPLOY_BRANCH)' to ship $(DEPLOY_BRANCH), or set ALLOW_BRANCH_DEPLOY=1 to deploy '$$cur' on purpose."; \
+		exit 1; \
+	fi
 	@git fetch origin --quiet
 	@behind=$$(git rev-list --count HEAD..@{u} 2>/dev/null || echo 0); \
 	if [ "$$behind" -gt 0 ]; then \
@@ -543,7 +562,7 @@ analytics-update:
 # keep flowing live (go-server is untouched); archival pauses for ~1s
 # while the forwarder restarts. --no-deps prevents docker compose from
 # pulling go-server into the recreate.
-analytics-rebuild-forwarder:
+analytics-rebuild-forwarder: _ff-guard
 	@echo "=== Rebuilding forwarder on test-dev (no go-server restart) ==="
 	ssh $(TEST_SSH) 'mkdir -p ~/test-dev/analytics/go-forwarder ~/test-dev/go-proxy'
 	rsync -az --delete \
