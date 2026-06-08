@@ -44,12 +44,18 @@ final class PlayerViewModel: ObservableObject {
     @Published var developerMode: Bool = false
     /// Allow renditions above 1080p. Off → cap at 1080p.
     @Published var allow4K: Bool = true
-    /// Cap AVPlayer's selectable peak bitrate, in Mbps. 0 = no cap
-    /// (Apple's default). Maps to `AVPlayerItem.preferredPeakBitRate`,
-    /// which removes higher variants from ABR selection *including the
-    /// startup pick* — Apple's recommended lever for a deterministic
-    /// initial variant. Pairs with the Content variant-reorder probe
-    /// (#682) for the order × ceiling startup experiment (#683).
+    /// Startup peak-bitrate clamp, in Mbps. 0 = no clamp (Apple's
+    /// default). Maps to `AVPlayerItem.preferredPeakBitRate`, which
+    /// removes higher variants from ABR selection *including the startup
+    /// pick* — Apple's recommended lever for a deterministic initial
+    /// variant. It is NOT a permanent ceiling: it's applied to each fresh
+    /// item (in `apply4kPreference`, every start/restart/rebuild) and then
+    /// **auto-released** (set back to 0) a few seconds after that item
+    /// pulls its first segment data, once the startup variant has been
+    /// chosen under the clamp — so playback presets its startup variant
+    /// and then adapts freely. Pairs with the Content variant-reorder probe
+    /// (#682) for the order × ceiling startup experiment (#683). For a
+    /// genuinely permanent ceiling, shape the network (tc rate) instead.
     @Published var preferredPeakBitRateMbps: Int = 0
     /// Force AVPlayer's startup variant to be the first-listed master
     /// entry (`AVPlayerItem.startsOnFirstEligibleVariant`, iOS/tvOS 14+)
@@ -269,6 +275,17 @@ final class PlayerViewModel: ObservableObject {
     private var videoPlayingTimeSeconds: Double?
     private var firstFrameReported: Bool = false
     private var playingReported: Bool = false
+    /// In-flight startup peak-bitrate-clamp release (see
+    /// `scheduleStartupPeakCapRelease`). Cancelled + nilled on each item
+    /// build and on a manual cap change; non-nil means "already armed for
+    /// the current item" (per-item one-shot dedup).
+    private var peakCapReleaseTask: Task<Void, Never>?
+    /// Delay after first frame before the startup peak-bitrate clamp is
+    /// released. First frame already guarantees a video segment was
+    /// downloaded + decoded (so AVPlayer's throughput estimate is
+    /// representative, not a playlist-fetch artefact); this extra settle
+    /// lets a couple more segments land before ABR may climb past the clamp.
+    private static let startupPeakCapReleaseDelay: TimeInterval = 3
     // #603 — set by a restart (manual retry / auto-recovery) before it
     // re-issues loadStream. startPlayback reads it to PRESERVE the play's
     // startup measurement (video_start_time / first frame) and fold the
@@ -464,12 +481,38 @@ final class PlayerViewModel: ObservableObject {
     func setPreferredPeakBitRateMbps(_ mbps: Int) {
         preferredPeakBitRateMbps = max(0, mbps)
         persistFlags()
+        // A manual change is an explicit operator action — cancel any
+        // pending startup-clamp release so it doesn't overwrite this value
+        // a few seconds later. Stays nil (no new first frame fires from a
+        // mid-play setter), so the manual value sticks until the next item.
+        peakCapReleaseTask?.cancel()
+        peakCapReleaseTask = nil
         // preferredPeakBitRate is mutable mid-play — apply to the current
-        // item immediately so a characterization run can change the ceiling
+        // item immediately so a characterization run can change the clamp
         // without a reload; AVPlayer re-evaluates ABR against it on the next
-        // segment. New items pick it up via apply4kPreference.
+        // segment. New items pick it up via apply4kPreference, which also
+        // schedules the post-first-frame release.
         if let item = player.currentItem {
             item.preferredPeakBitRate = preferredPeakBitRateBps
+        }
+    }
+
+    /// Schedule the startup peak-bitrate clamp to release a few seconds
+    /// after first frame (#683). The clamp (`apply4kPreference`) presets a
+    /// conservative startup variant; releasing it once the player has
+    /// pulled segments lets ABR climb naturally — "preset the start, then
+    /// adapt." No-op when no clamp is set. Targets the exact item that
+    /// rendered first frame, so a play that starts in the meantime keeps
+    /// its own clamp.
+    private func scheduleStartupPeakCapRelease(for item: AVPlayerItem) {
+        peakCapReleaseTask?.cancel()
+        guard preferredPeakBitRateMbps > 0 else { return }
+        let mbps = preferredPeakBitRateMbps
+        peakCapReleaseTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.startupPeakCapReleaseDelay * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            item.preferredPeakBitRate = 0
+            self.log("Released startup peak-bitrate clamp (\(mbps) Mbps) — ABR now free to climb")
         }
     }
     func setStartsOnFirstEligibleVariant(_ on: Bool) {
@@ -1155,9 +1198,17 @@ final class PlayerViewModel: ObservableObject {
     }
 
     private func apply4kPreference(to item: AVPlayerItem) {
-        // 0 = no cap (Apple default); otherwise the user-chosen Mbps ceiling
-        // from Advanced settings (#683). Applied to every fresh item.
+        // 0 = no cap (Apple default); otherwise the user-chosen Mbps clamp
+        // from Advanced settings (#683). Applied to EVERY fresh item — cold
+        // start, restart/recovery, segment switch, content swap, proxy
+        // toggle — since this is the universal item-build chokepoint. The
+        // clamp is then released a few seconds after this item's first
+        // frame (armed in markFirstFrameRendered). Drop any pending release
+        // from the prior item and re-arm at nil so the next first frame
+        // schedules a fresh one.
         item.preferredPeakBitRate = preferredPeakBitRateBps
+        peakCapReleaseTask?.cancel()
+        peakCapReleaseTask = nil
         // Deterministic startup variant (#683) — forces the first-listed
         // master entry instead of AVPlayer's throughput heuristic. iOS/tvOS
         // 14+; on older OSes the toggle is simply inert.
@@ -1507,6 +1558,20 @@ final class PlayerViewModel: ObservableObject {
     /// viewCount bookkeeping AND fires the `video_first_frame` metric
     /// event with the flip-instant timestamp.
     func markFirstFrameRendered(at firstFrameAt: Date) {
+        // Arm the startup peak-bitrate-clamp release (#683) BEFORE the
+        // per-play `firstFrameReported` latch below — that latch only
+        // suppresses the metric emit, but PlayerView still calls this on
+        // EVERY item's first frame (the layer re-flips isReadyForDisplay on
+        // replaceCurrentItem), so arming here covers restart/recovery/
+        // rebuilds too, not just cold start. First frame guarantees a video
+        // segment was downloaded + decoded, so the player's own throughput
+        // estimate is representative (not a playlist-fetch artefact) when
+        // the clamp lifts. `peakCapReleaseTask == nil` dedups repeat
+        // first-frame deliveries within one item (apply4kPreference nils it
+        // per build).
+        if peakCapReleaseTask == nil, preferredPeakBitRateMbps > 0, let item = player.currentItem {
+            scheduleStartupPeakCapRelease(for: item)
+        }
         // Idempotent: PlayerView re-installs its KVO observer on player
         // swap and the layer's `isReadyForDisplay` flips back to false
         // on item replace, but a single playback flip may still surface
