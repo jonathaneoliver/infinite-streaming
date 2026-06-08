@@ -493,6 +493,7 @@ func applyContentPatch(s map[string]any, c any) {
 		s["content_overstate_bandwidth"] = false
 		s["content_live_offset"] = 0
 		s["content_allowed_variants"] = []any{}
+		s["content_variant_order"] = "default"
 		return
 	}
 	m, ok := c.(map[string]any)
@@ -519,6 +520,13 @@ func applyContentPatch(s map[string]any, c any) {
 			s["content_allowed_variants"] = []any{}
 		} else if arr, ok := v.([]any); ok {
 			s["content_allowed_variants"] = arr
+		}
+	}
+	if v, present := m["variant_order"]; present {
+		if v == nil {
+			s["content_variant_order"] = "default"
+		} else if str, ok := v.(string); ok {
+			s["content_variant_order"] = str
 		}
 	}
 }
