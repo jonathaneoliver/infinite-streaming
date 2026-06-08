@@ -44,6 +44,19 @@ final class PlayerViewModel: ObservableObject {
     @Published var developerMode: Bool = false
     /// Allow renditions above 1080p. Off → cap at 1080p.
     @Published var allow4K: Bool = true
+    /// Cap AVPlayer's selectable peak bitrate, in Mbps. 0 = no cap
+    /// (Apple's default). Maps to `AVPlayerItem.preferredPeakBitRate`,
+    /// which removes higher variants from ABR selection *including the
+    /// startup pick* — Apple's recommended lever for a deterministic
+    /// initial variant. Pairs with the Content variant-reorder probe
+    /// (#682) for the order × ceiling startup experiment (#683).
+    @Published var preferredPeakBitRateMbps: Int = 0
+    /// Force AVPlayer's startup variant to be the first-listed master
+    /// entry (`AVPlayerItem.startsOnFirstEligibleVariant`, iOS/tvOS 14+)
+    /// instead of its opaque throughput heuristic. Off → native heuristic.
+    /// Makes the startup pick deterministic, the primary lever for the
+    /// order × forced-first-variant experiment (#683, pairs with #682).
+    @Published var startsOnFirstEligibleVariant: Bool = false
     /// Stream URL goes through the per-session go-proxy port. Off → API port.
     @Published var localProxy: Bool = true
     /// Auto-retry the current stream on non-codec player errors.
@@ -448,6 +461,24 @@ final class PlayerViewModel: ObservableObject {
 
     func setDeveloperMode(_ on: Bool) { developerMode = on; persistFlags() }
     func setAllow4K(_ on: Bool) { allow4K = on; persistFlags() }
+    func setPreferredPeakBitRateMbps(_ mbps: Int) {
+        preferredPeakBitRateMbps = max(0, mbps)
+        persistFlags()
+        // preferredPeakBitRate is mutable mid-play — apply to the current
+        // item immediately so a characterization run can change the ceiling
+        // without a reload; AVPlayer re-evaluates ABR against it on the next
+        // segment. New items pick it up via apply4kPreference.
+        if let item = player.currentItem {
+            item.preferredPeakBitRate = preferredPeakBitRateBps
+        }
+    }
+    func setStartsOnFirstEligibleVariant(_ on: Bool) {
+        startsOnFirstEligibleVariant = on
+        persistFlags()
+        // Only affects the *initial* variant selection, so it's applied
+        // when the next AVPlayerItem is built (apply4kPreference) — setting
+        // it on an already-playing item has no retroactive effect.
+    }
     func setLocalProxy(_ on: Bool) {
         localProxy = on
         persistFlags()
@@ -1117,8 +1148,22 @@ final class PlayerViewModel: ObservableObject {
     /// is gone — sim now honours `allow4K`. If a particular host can't
     /// decode, AVPlayer surfaces `decodeFailedNotification` and the
     /// existing recovery pipeline kicks in (same path real devices use).
+    /// `preferredPeakBitRateMbps` expressed in bits/sec for
+    /// `AVPlayerItem.preferredPeakBitRate` (0 stays 0 = "no cap").
+    private var preferredPeakBitRateBps: Double {
+        preferredPeakBitRateMbps <= 0 ? 0 : Double(preferredPeakBitRateMbps) * 1_000_000
+    }
+
     private func apply4kPreference(to item: AVPlayerItem) {
-        item.preferredPeakBitRate = 0
+        // 0 = no cap (Apple default); otherwise the user-chosen Mbps ceiling
+        // from Advanced settings (#683). Applied to every fresh item.
+        item.preferredPeakBitRate = preferredPeakBitRateBps
+        // Deterministic startup variant (#683) — forces the first-listed
+        // master entry instead of AVPlayer's throughput heuristic. iOS/tvOS
+        // 14+; on older OSes the toggle is simply inert.
+        if #available(iOS 14.0, tvOS 14.0, *) {
+            item.startsOnFirstEligibleVariant = startsOnFirstEligibleVariant
+        }
         guard #available(iOS 15.0, tvOS 15.0, *) else { return }
         if allow4K {
             item.preferredMaximumResolution = CGSize(width: 3840, height: 2160)
@@ -1599,6 +1644,8 @@ final class PlayerViewModel: ObservableObject {
     private static let flagLiveOffset = "is.flag.live_offset_s"
     private static let flagPlayIdRotation = "is.flag.play_id_rotation_s"
     private static let flagPreviewVideoSlots = "is.flag.preview_video_slots"
+    private static let flagPeakBitrate = "is.flag.peak_bitrate_mbps"
+    private static let flagStartsFirstVariant = "is.flag.starts_first_variant"
     private static let lastPlayedKey = "is.lastPlayed"
     private static let viewCountsKey = "is.viewCounts"
     private static let codecKey = "is.codec"
@@ -1642,6 +1689,8 @@ final class PlayerViewModel: ObservableObject {
         isMuted = d.bool(forKey: Self.flagMuted)
         liveOffsetSeconds = d.object(forKey: Self.flagLiveOffset) as? Double ?? 0
         playIdRotationSeconds = max(0, d.object(forKey: Self.flagPlayIdRotation) as? Int ?? 0)
+        preferredPeakBitRateMbps = max(0, d.object(forKey: Self.flagPeakBitrate) as? Int ?? 0)
+        startsOnFirstEligibleVariant = d.bool(forKey: Self.flagStartsFirstVariant)
         // First launch: no key yet → use the device's hardware cap so
         // the user starts with the richest preview their hardware can
         // run. After that, persist whatever they've chosen.
@@ -1677,6 +1726,8 @@ final class PlayerViewModel: ObservableObject {
         d.set(liveOffsetSeconds, forKey: Self.flagLiveOffset)
         d.set(playIdRotationSeconds, forKey: Self.flagPlayIdRotation)
         d.set(previewVideoSlots, forKey: Self.flagPreviewVideoSlots)
+        d.set(preferredPeakBitRateMbps, forKey: Self.flagPeakBitrate)
+        d.set(startsOnFirstEligibleVariant, forKey: Self.flagStartsFirstVariant)
         d.set(codec.rawValue, forKey: Self.codecKey)
         d.set(segment.rawValue, forKey: Self.segmentKey)
         d.set(streamProtocol.rawValue, forKey: Self.protocolKey)
