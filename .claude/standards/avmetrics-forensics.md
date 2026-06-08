@@ -1,39 +1,101 @@
-# AVMetrics forensics (iOS 18+)
+# AVMetrics feed — detailed failure timings
 
-The iOS `AVMetricEvent` feed (`ios_avmetric_events`) is the highest-resolution failure-timing telemetry we have. The heartbeat/sample feed is **blind** to it — when a play "stalled, cause unknown," this is the evidence that decides it.
+The iOS app (iOS 18+) subscribes to Apple's `AVMetrics` streams on the
+AVPlayerItem and POSTs them to `/api/session/{id}/avmetrics`; the forwarder
+writes them to ClickHouse `ios_avmetric_events`. This is a **second,
+higher-resolution telemetry channel** alongside the polled heartbeat/sample
+feed — and for failure forensics it routinely shows what the heartbeat feed
+**cannot**.
+
+## Why reach for it
+
+The heartbeat/sample feed is polled (~1s) and summarised. It misses
+sub-second events and, critically, **CoreMedia errors**: in the rampup
+sudden-drop wedge, `query play` reported `error_count=0` while the AVMetrics
+feed carried **6 distinct CoreMedia errors** plus the variant-switch that
+failed. If a play "stalled / unexpected_end" with no obvious cause, the
+AVMetrics feed is where the cause lives.
 
 ## How to pull it
 
-- `harness query avmetrics <play_id> [--event-type T] [--from --to] [--limit N]` — bounded read, **closes on its own** (no `curl --max-time` SSE hack). Returns `event_type, ts, event_ts_ms, raw_json, classification`.
-- `harness ts <player> --streams avmetrics` — live SSE tail; rows render `A <ts> <event_type> <raw preview>`.
-- Session-less / cross-play sweep: `harness query avmetrics --event-type ErrorEvent --from <ISO> --to <ISO>` (no play_id needed).
-- iOS-only. Android/ExoPlayer and Roku emit nothing here.
+First-class harness surface (#693) — bounded, closes on its own:
 
-## What each event type tells you
+```sh
+# Returns event_type, ts, event_ts_ms, raw_json, labels, classification.
+harness --insecure --json query avmetrics <play_id> [--event-type T] [--from ISO] [--to ISO] [--limit N]
+# Sweep error-bearing events across a window with no play_id:
+harness --insecure --json query avmetrics --event-type AVMetricErrorEvent --from <ISO> --to <ISO>
+# Live tail (renders 'A <ts> <event_type> <raw preview>'):
+harness --insecure ts <player> --streams avmetrics
+```
 
-- **ErrorEvent** — carries the CoreMedia error code in `raw_json`. The single most decisive field on a wedge (see the code key below).
-- **`VariantSwitchStartEvent` WITHOUT a matching complete** — the player *tried* to downshift and **couldn't**. This is the fingerprint of the sudden-drop wedge: heartbeats show `error_count=0` and a frozen rendition, AVMetrics shows the attempted-but-stuck switch.
-- **HLSPlaylistRequestEvent / HLSMediaSegmentRequestEvent** — per-request timing for playlists vs media segments, separately. A playlist request that never completes ≠ a segment request that stalls.
-- **ContentKeyRequestEvent** — DRM/key fetch timing (rarely the cause in our test rig, but rules it in/out).
+Raw/SSE fallback (same rows via the timeseries multiplexer — needs a
+`--max-time`/`limit` because the SSE doesn't close):
 
-## CoreMedia error-code key (from `raw_json`)
+```sh
+curl -sk "https://$TEST_HOST:21000/analytics/api/v2/timeseries?streams=avmetrics&player_id=<PLR>&play_id=<PLY>&limit=4000"
+```
 
-The split here is literally "wedges permanently" vs "ugly-but-recovers" — read the code, don't guess from the stall:
+`player_id`/`play_id` must be **lowercase** (forwarder canonicalises; iOS
+emits uppercase — see case_sensitivity_ids).
 
-- **`-12880`** "cannot proceed after removing variants" → **wedges permanently.** The player exhausted the ladder and gave up.
-- **`-16839`** "unable to get playlist" → ugly **but usually recovers** once the playlist fetch succeeds.
-- **`-12889`** "no response in 2s" / **`-16830`** "media not received in 5s" → transient delivery stalls; recover if delivery resumes.
-- `-12174` is documented sim-only noise (#145), not a real error — don't attribute a wedge to it.
+## Event types that carry timing/cause
 
-## Common mistakes
+- `AVMetricErrorEvent` — `raw_json.error` is the full `NSError`. **The error
+  string names the failing resource and the timeout.** `NSURL=` is the
+  *parent playlist* (e.g. `playlist_2s_audio.m3u8`), but the message says
+  what actually failed: `map` (EXT-X-MAP init segment) / `media file`
+  (media segment) — i.e. **segments, not the playlist**. Classify
+  audio-vs-video from the NSURL (`playlist_2s_audio` vs `playlist_2s_2160p`).
+- `AVMetricHLSMediaSegmentRequestEvent` / `…PlaylistRequestEvent` — per-request
+  client-side timings: `derived_ttfb_ms`, `derived_mbps`, `derived_bytes`.
+  This is the **client's** view of delivery (vs the proxy network-request
+  view, which is the proxy→client send time).
+- `AVMetricPlayerItemVariantSwitchStartEvent` / `…VariantSwitchEvent` — a
+  switch has a **Start** and a **complete** (`…VariantSwitchEvent`). A
+  `Start` with **no matching complete** = a **failed ABR switch** (the
+  player tried to downshift and couldn't). `fromVariant`/`toVariant` give
+  the rungs (e.g. `2160p → 360p`).
+- `AVMetricPlayerItemStallEvent`, `…RateChangeEvent`,
+  `…LikelyToKeepUpEvent` — playback-engine state transitions.
 
-- **`metrics(forType:)` is exact-type, not is-a.** You must subscribe to each subclass individually (`HLSMediaSegmentRequestEvent`, `HLSPlaylistRequestEvent`, `ContentKeyRequestEvent`, …) — subscribing to the base type yields **zero** events. (`[[reference_avmetric_exact_type_filter]]`)
-- **`byteRange.length` is 0 for non-ranged GETs.** Use `networkTransactionMetrics.countOfResponseBodyBytesReceived` + response start/end dates for actual bytes & duration. (`[[reference_avmetric_byterange_zero]]`)
-- **Stream-level TTFB ≠ network RTT.** `responseStart - requestEnd` on an HTTP/2 keep-alive connection is sub-ms while real TCP RTT is ~100ms — label client series as TTFB, not RTT. (`[[reference_ttfb_vs_rtt_http2]]`)
-- **`total_stalls` under-counts these wedges** — a "fetching-but-frozen" degradation never emits `stall_frozen`, so the heartbeat stall count reads 0. Trust AVMetrics over the stall counter on iOS wedges.
+## CoreMedia error glossary (observed; Apple does not document these)
+
+| code | message | meaning |
+|------|---------|---------|
+| -12889 | "No response for map/media file in 2s" | segment fetch timed out — **live-edge timeout, scales with segment duration** (2s segments → "in 2s") |
+| -16830 | "Media file not received in 5s" | segment hard timeout (~2.5× segment duration) |
+| -16839 | "Unable to get playlist before long downshift" | couldn't reach a usable playlist state before a big switch |
+| -12880 | "Can not proceed after removing variants" | enough renditions marked unplayable that the switch can't complete → wedge. With a **single audio track**, the audio rendition's removal is fatal. |
+| -15628 | (generic) | seen alongside the above |
+| -12174 | content not updated | sim-only noise (#145), not a real error |
+
+Live-edge timeouts are **far shorter** than the ~30s VOD segment-fetch
+timeout in fault-injection-wire-contract.md — they track segment duration,
+so 2s content is much less tolerant of a slow/dead link than 6s.
+
+## Forensic recipe (sudden-drop wedge)
+
+1. Find the dead window in the **network-request view** (proxy→client
+   delivery): a gap where nothing is delivered = the link went away
+   (`transport_disconnect`).
+2. Overlay the **AVMetrics** errors on that window: segment timeouts
+   (`-12889`/`-16830`) → failed `VariantSwitchStart` (no complete) →
+   `-12880` → `StallEvent`.
+3. Read NSURL to confirm which segments (audio vs video) starved.
+
+## Caveat — batched over the same connection
+
+AVMetrics are **batched** before POST and travel the **same connection** as
+the heartbeats. A wedge that kills the connection can drop the **final
+batch** — so the very last events (e.g. the app-side `frozen` detection that
+would yield `stall_frozen`) may never land. Absence near the end is not
+proof of absence; corroborate with the proxy-side network/control feeds.
 
 ## See also
 
-- `.claude/standards/avplayer-quirks.md` — the rest of the AVPlayer reporting gaps.
-- `.claude/standards/abr-decision-model.md` — why a downshift attempt happens (and stalls).
-- `forensics` skill — gathers `/tmp/forensics-avm-<t>.jsonl` as a first-class evidence file.
+- `avplayer-quirks.md`, `abr-decision-model.md` — player behaviour these
+  events expose.
+- `data-fields.md` — heartbeat/sample schema (the lower-resolution feed).
+- memory: `reference_avmetric_exact_type_filter`, `reference_avmetric_byterange_zero`,
+  `reference_avplayer_stale_connection_localproxy`.

@@ -114,29 +114,18 @@ func runPyramid(t *testing.T, p runner.Platform) {
 	coldStart := isAppium && preFloor > 0
 	conservativeStart := isAppium && !coldStart
 
-	// #segments — force the segment via a launch argument so the single
-	// cold launch below lands on it deterministically. iOS folds
-	// `-is.segment <rawValue>` into UserDefaults (NSArgumentDomain,
-	// highest precedence); loadFlags reads `is.segment` at init, so the
-	// player cold-starts on this segment from frame 1 — bottom rung under
-	// the floor cap, no UI pre-set, no second Appium session, no warm-
-	// switch starvation. CHAR_SEGMENT is the label form (2s|6s|ll); the
-	// enum rawValue is s2|s6|ll. Appium iOS only. Run both segments as
-	// two invocations (CHAR_SEGMENT=6s then =2s); each cold-starts clean.
-	segment := strings.TrimSpace(os.Getenv("CHAR_SEGMENT"))
-	if segment != "" {
-		if isAppium {
-			raw := map[string]string{"2s": "s2", "6s": "s6", "ll": "ll"}[segment]
-			if raw == "" {
-				t.Fatalf("CHAR_SEGMENT must be one of 2s|6s|ll (got %q)", segment)
-			}
-			appium.SetLaunchArgs([]string{"-is.segment", raw})
-			t.Logf("forcing segment=%s via launch arg -is.segment %s — cold start lands on it", segment, raw)
-		} else {
-			t.Logf("CHAR_SEGMENT=%s ignored — requires the Appium launcher", segment)
-			segment = ""
-		}
+	// #config — read the per-run configuration axes (segment, LocalProxy,
+	// transfer-timeout) and force the launch-arg ones (segment via
+	// -is.segment, LocalProxy via -is.flag.local_proxy) on the single cold
+	// launch below so the player starts on them from frame 1. iOS folds
+	// these into UserDefaults (NSArgumentDomain, highest precedence). The
+	// transfer-timeout axis is applied server-side after the player binds.
+	cfg := readRunConfig(t, isAppium)
+	if args := cfg.launchArgs(); len(args) > 0 {
+		appium.SetLaunchArgs(args)
+		t.Logf("forcing run config via launch args %v — cold start lands on it", args)
 	}
+	segment := cfg.segment
 
 	var sess *runner.Session
 	switch {
@@ -210,6 +199,28 @@ func runPyramid(t *testing.T, p runner.Platform) {
 		sess = OpenSession(t, p)
 	}
 
+	// #config — arm the server-side active transfer timeout for this run
+	// (CHAR_TRANSFER_TIMEOUT, default 20s; 0 clears). The proxy then cuts
+	// any segment still in flight past the window so the player downshifts
+	// instead of stalling — notably at the cyc→floor cap slam. Player is
+	// bound + heartbeating here. Cleared at teardown.
+	{
+		tctx, tcancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := cfg.applyServerSide(tctx, sess); err != nil {
+			t.Logf("set transfer timeout: %v (test continues)", err)
+		} else {
+			t.Logf("transfer timeout: %s on segments", cfg.labels()["xfer_timeout"])
+		}
+		tcancel()
+		t.Cleanup(func() {
+			cctx, c := context.WithTimeout(context.Background(), 10*time.Second)
+			defer c()
+			if err := sess.SetSegmentTimeout(cctx, 0); err != nil {
+				t.Logf("clear transfer timeout: %v", err)
+			}
+		})
+	}
+
 	// --- labels + play_id ---------------------------------------
 	runID := time.Now().UTC().Format("20060102T150405Z")
 	startLabels := map[string]string{
@@ -217,8 +228,8 @@ func runPyramid(t *testing.T, p runner.Platform) {
 		"platform": string(p),
 		"run_id":   runID,
 	}
-	if segment != "" {
-		startLabels["segment"] = segment
+	for k, v := range cfg.labels() {
+		startLabels[k] = v
 	}
 	if err := sess.LabelPlay(context.Background(), startLabels); err != nil {
 		t.Logf("label play (start): %v (test continues)", err)
