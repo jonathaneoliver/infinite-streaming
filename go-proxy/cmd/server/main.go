@@ -8357,6 +8357,14 @@ func (a *App) removeInactiveSessions() {
 	active := make([]SessionData, 0, len(sessions))
 	now := time.Now()
 	removedPorts := map[int]struct{}{}
+	// A player that makes no request for this long is treated as gone and
+	// its session synthesized to a terminal inactive_timeout. Kept generous
+	// (5m) so a *legitimately rebuffering* play isn't evicted mid-stream: a
+	// characterization sweep that slams the cap from a 4K rung back to the
+	// ~2 Mbps floor between cycles can stall ~50s+ while AVPlayer drains a
+	// stranded 4K segment — well under any real abandonment but over the old
+	// 60s window, which killed the play (and orphaned later cycles).
+	const inactiveWindow = 5 * time.Minute
 	for _, session := range sessions {
 		lastRequest := getString(session, "last_request")
 		if lastRequest == "" {
@@ -8366,7 +8374,7 @@ func (a *App) removeInactiveSessions() {
 		if err != nil {
 			continue
 		}
-		if now.Sub(lastTime) < 60*time.Second {
+		if now.Sub(lastTime) < inactiveWindow {
 			active = append(active, session)
 		} else {
 			a.recordSessionEnd(session, "inactive_timeout")
