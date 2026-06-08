@@ -73,7 +73,88 @@ func mountV2Handlers(mux *http.ServeMux, cfg config) {
 		v2ControlEventsHandler(w, r, cfg)
 	})
 
+	// /api/v2/avmetric_events — issue #693. Bounded read of the iOS 18
+	// AVMetrics feed (ios_avmetric_events), the highest-resolution
+	// failure-timing telemetry we have. Mirrors control_events' shape +
+	// discriminator guard; `event_type` is the AVMetric subclass filter.
+	mux.HandleFunc("/api/v2/avmetric_events", func(w http.ResponseWriter, r *http.Request) {
+		v2AVMetricEventsHandler(w, r, cfg)
+	})
+
 	mountV2PlaysHandlers(mux, cfg)
+}
+
+// v2AVMetricEventsHandler returns ios_avmetric_events rows as NDJSON
+// keyed by ?player_id=, ?play_id=, ?event_type= (repeatable), ?from=,
+// ?to=, ?limit=, plus label_has/label_not. Bounded (LIMIT) so it closes
+// — unlike the timeseries SSE. Issue #693.
+func v2AVMetricEventsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
+	q := r.URL.Query()
+	playerID := canonicalV2ID(q.Get("player_id"))
+	playID := canonicalV2ID(q.Get("play_id"))
+	// event_type is repeatable (the AVMetric subclass name, e.g.
+	// HLSPlaylistRequestEvent). Filtering by it lets an operator pull just
+	// the error-bearing events without a player_id.
+	var eventTypes []string
+	for _, et := range q["event_type"] {
+		if et = strings.TrimSpace(et); et != "" {
+			eventTypes = append(eventTypes, et)
+		}
+	}
+	from := q.Get("from")
+	to := q.Get("to")
+	limit := q.Get("limit")
+	if limit == "" {
+		limit = "1000"
+	}
+	labelHas, labelNot := readLabelFilters(q)
+	// Require at least one discriminating predicate so we never scan the
+	// whole ios_avmetric_events table.
+	if playerID == "" && playID == "" && len(eventTypes) == 0 && len(labelHas) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"one of player_id, play_id, event_type, or label_has required"}`))
+		return
+	}
+	params := map[string]string{"limit": limit}
+	var where []string
+	if playerID != "" {
+		params["player_id"] = playerID
+		where = append(where, "player_id = {player_id:String}")
+	}
+	if playID != "" {
+		params["play_id"] = playID
+		where = append(where, "play_id = {play_id:String}")
+	}
+	if len(eventTypes) > 0 {
+		names := make([]string, len(eventTypes))
+		for i, et := range eventTypes {
+			key := "event_type_" + itoa(i)
+			params[key] = et
+			names[i] = "{" + key + ":String}"
+		}
+		where = append(where, "event_type IN ("+strings.Join(names, ", ")+")")
+	}
+	if from != "" {
+		params["from"] = from
+		where = append(where, "ts >= parseDateTime64BestEffortOrNull({from:String}, 3)")
+	}
+	if to != "" {
+		params["to"] = to
+		where = append(where, "ts <= parseDateTime64BestEffortOrNull({to:String}, 3)")
+	}
+	where, params = applyLabelFilters(where, params, "labels", labelHas, labelNot)
+	query := "SELECT ts, player_id, play_id, attempt_id, session_id, event_type, event_ts_ms, raw_json, labels, event_fingerprint, classification " +
+		"FROM " + cfg.chDatabase + ".ios_avmetric_events WHERE " +
+		strings.Join(where, " AND ") +
+		" ORDER BY ts ASC LIMIT {limit:UInt32} FORMAT JSONEachRow"
+	body, err := chQueryBytes(r.Context(), cfg, query, params)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"upstream query failed"}`))
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	_, _ = w.Write(body)
 }
 
 // v2ControlEventsHandler returns control_events rows as NDJSON keyed

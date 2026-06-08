@@ -2,14 +2,14 @@
 // (internal/v2gen/{proxy,forwarder}). It exists because oapi-codegen
 // produces verbose method names + raw *http.Response returns:
 //
-//   resp, err := c.proxy.GetApiV2Players(ctx, nil)
-//   defer resp.Body.Close()
-//   var out []proxy.PlayerRecord
-//   json.NewDecoder(resp.Body).Decode(&out)
+//	resp, err := c.proxy.GetApiV2Players(ctx, nil)
+//	defer resp.Body.Close()
+//	var out []proxy.PlayerRecord
+//	json.NewDecoder(resp.Body).Decode(&out)
 //
 // vs what callers want:
 //
-//   players, err := c.Players(ctx)
+//	players, err := c.Players(ctx)
 //
 // The facade also owns:
 //   - the HTTP client (timeouts, optional self-signed-cert tolerance)
@@ -789,6 +789,15 @@ func (c *Client) ArchiveControlEvents(ctx context.Context, params *forwarder.Get
 	return c.archiveGET(func() (*http.Response, error) {
 		return c.forwarder.GetApiV2ControlEvents(ctx, params)
 	}, "GET /analytics/api/v2/control_events")
+}
+
+// ArchiveAVMetricEvents returns the iOS AVMetrics event log
+// (ios_avmetric_events) — the highest-resolution failure-timing feed.
+// Bounded read, so it closes (no SSE --max-time hack). Issue #693.
+func (c *Client) ArchiveAVMetricEvents(ctx context.Context, params *forwarder.GetApiV2AvmetricEventsParams) ([]byte, error) {
+	return c.archiveGET(func() (*http.Response, error) {
+		return c.forwarder.GetApiV2AvmetricEvents(ctx, params)
+	}, "GET /analytics/api/v2/avmetric_events")
 }
 
 // ArchiveSessionHeatmap returns the bucketed heatmap.

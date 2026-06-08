@@ -23,6 +23,27 @@ const (
 	BasicAuthScopes basicAuthContextKey = "basicAuth.Scopes"
 )
 
+// Defines values for AVMetricEventRowClassification.
+const (
+	AVMetricEventRowClassificationFavourite   AVMetricEventRowClassification = "favourite"
+	AVMetricEventRowClassificationInteresting AVMetricEventRowClassification = "interesting"
+	AVMetricEventRowClassificationOther       AVMetricEventRowClassification = "other"
+)
+
+// Valid indicates whether the value is a known member of the AVMetricEventRowClassification enum.
+func (e AVMetricEventRowClassification) Valid() bool {
+	switch e {
+	case AVMetricEventRowClassificationFavourite:
+		return true
+	case AVMetricEventRowClassificationInteresting:
+		return true
+	case AVMetricEventRowClassificationOther:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for BundleCatalogueStreamsStream.
 const (
 	BundleCatalogueStreamsStreamControl BundleCatalogueStreamsStream = "control"
@@ -451,27 +472,73 @@ func (e GetApiV2PlaysAggregateParamsClassification) Valid() bool {
 
 // Defines values for PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification.
 const (
-	PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationAuto        PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "auto"
-	PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationFavourite   PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "favourite"
-	PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationInteresting PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "interesting"
-	PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationOther       PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "other"
+	Auto        PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "auto"
+	Favourite   PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "favourite"
+	Interesting PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "interesting"
+	Other       PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "other"
 )
 
 // Valid indicates whether the value is a known member of the PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification enum.
 func (e PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification) Valid() bool {
 	switch e {
-	case PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationAuto:
+	case Auto:
 		return true
-	case PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationFavourite:
+	case Favourite:
 		return true
-	case PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationInteresting:
+	case Interesting:
 		return true
-	case PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassificationOther:
+	case Other:
 		return true
 	default:
 		return false
 	}
 }
+
+// AVMetricEventRow One archived `ios_avmetric_events` row — a single iOS 18 AVMetrics
+// event. Issue #693.
+type AVMetricEventRow struct {
+	// AttemptId Sticky per-attempt counter. 0 when unknown.
+	AttemptId *int64 `json:"attempt_id,omitempty"`
+
+	// Classification Retention tier — same lifecycle as the parent session.
+	Classification *AVMetricEventRowClassification `json:"classification,omitempty"`
+
+	// EventFingerprint FNV-64a hash over (session, event_ts_ms, event_type). Stable
+	// dedupe key for SSE reconnects.
+	EventFingerprint *string `json:"event_fingerprint,omitempty"`
+
+	// EventTsMs AVMetrics-side timeline stamp (ms), separate from `ts` so
+	// causality plots don't mix clocks. 0 when absent.
+	EventTsMs *int64 `json:"event_ts_ms,omitempty"`
+
+	// EventType AVMetric subclass name as published by AVFoundation —
+	// e.g. `HLSPlaylistRequestEvent`, `HLSMediaSegmentRequestEvent`,
+	// `VariantSwitchStartEvent`, `ContentKeyRequestEvent`.
+	EventType string `json:"event_type"`
+
+	// Labels Severity-tagged `<severity>=<event>` strings (same vocab as the
+	// other tables). Empty until an AVMetric classifier lands.
+	Labels *[]string `json:"labels,omitempty"`
+
+	// PlayId Owning play (empty when not yet stamped).
+	PlayId *string `json:"play_id,omitempty"`
+
+	// PlayerId Owning player.
+	PlayerId *openapi_types.UUID `json:"player_id,omitempty"`
+
+	// RawJson Unmodified SDK payload as a JSON string — parse client-side.
+	// Carries the CoreMedia error code, byte ranges, etc.
+	RawJson *string `json:"raw_json,omitempty"`
+
+	// SessionId Owning proxy session.
+	SessionId *string `json:"session_id,omitempty"`
+
+	// Ts Forwarder ingest time.
+	Ts time.Time `json:"ts"`
+}
+
+// AVMetricEventRowClassification Retention tier — same lifecycle as the parent session.
+type AVMetricEventRowClassification string
 
 // AggregateResult Group-by output. `groups` is one row per distinct combination of
 // the requested `group_by` keys; each group has the requested metrics
@@ -1401,6 +1468,41 @@ type Problem = ProblemDetails
 
 // basicAuthContextKey is the context key for basicAuth security scheme
 type basicAuthContextKey string
+
+// GetApiV2AvmetricEventsParams defines parameters for GetApiV2AvmetricEvents.
+type GetApiV2AvmetricEventsParams struct {
+	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
+
+	// PlayId Filter to one play. Player-supplied UUID; rotates only on
+	// content-selection / fresh app or page load. Stable across
+	// in-app restart events.
+	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
+
+	// From ISO 8601 lower bound on the row timestamp. Inclusive.
+	From *From `form:"from,omitempty" json:"from,omitempty"`
+
+	// To ISO 8601 upper bound on the row timestamp. Exclusive.
+	To *To `form:"to,omitempty" json:"to,omitempty"`
+
+	// EventType Filter to specific AVMetric subclass names. Multiple values OR'd.
+	// Examples: `event_type=HLSPlaylistRequestEvent&event_type=VariantSwitchStartEvent`.
+	EventType *[]string `form:"event_type,omitempty" json:"event_type,omitempty"`
+
+	// LabelHas Row-level label inclusion filter. Repeatable; every value
+	// must be present in the row's `labels[]` (AND-within-includes).
+	// Format `<severity>=<event>` (with `*` prefix for synthesized
+	// labels). Example:
+	// `?label_has=warning%3Dhttp_4xx&label_has=info%3D%2Apattern_step`.
+	LabelHas *LabelHasFilter `form:"label_has,omitempty" json:"label_has,omitempty"`
+
+	// LabelNot Row-level label exclusion filter. Repeatable; none of the
+	// values may be present in the row's `labels[]`
+	// (AND-within-excludes). Combine with `label_has` for queries
+	// like *"has http_4xx AND has-not fault_rule_enabled"*. Same
+	// format as `label_has`.
+	LabelNot *LabelNotFilter `form:"label_not,omitempty" json:"label_not,omitempty"`
+	Limit    *Limit          `form:"limit,omitempty" json:"limit,omitempty"`
+}
 
 // GetApiV2ControlEventsParams defines parameters for GetApiV2ControlEvents.
 type GetApiV2ControlEventsParams struct {
@@ -2777,6 +2879,9 @@ func WithRequestEditorFn(fn RequestEditorFn) ClientOption {
 
 // The interface specification for the client above.
 type ClientInterface interface {
+	// GetApiV2AvmetricEvents request
+	GetApiV2AvmetricEvents(ctx context.Context, params *GetApiV2AvmetricEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetBundles request
 	GetBundles(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -2817,6 +2922,18 @@ type ClientInterface interface {
 
 	// GetTimeseries request
 	GetTimeseries(ctx context.Context, params *GetTimeseriesParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+}
+
+func (c *Client) GetApiV2AvmetricEvents(ctx context.Context, params *GetApiV2AvmetricEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetApiV2AvmetricEventsRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
 }
 
 func (c *Client) GetBundles(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -2985,6 +3102,144 @@ func (c *Client) GetTimeseries(ctx context.Context, params *GetTimeseriesParams,
 		return nil, err
 	}
 	return c.Client.Do(req)
+}
+
+// NewGetApiV2AvmetricEventsRequest generates requests for GetApiV2AvmetricEvents
+func NewGetApiV2AvmetricEventsRequest(server string, params *GetApiV2AvmetricEventsParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v2/avmetric_events")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.PlayerId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "player_id", *params.PlayerId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.PlayId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "play_id", *params.PlayId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.From != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "from", *params.From, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.To != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "to", *params.To, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.EventType != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "event_type", *params.EventType, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.LabelHas != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_has", *params.LabelHas, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.LabelNot != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_not", *params.LabelNot, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
 }
 
 // NewGetBundlesRequest generates requests for GetBundles
@@ -4395,6 +4650,9 @@ func WithBaseURL(baseURL string) ClientOption {
 
 // ClientWithResponsesInterface is the interface specification for the client with responses above.
 type ClientWithResponsesInterface interface {
+	// GetApiV2AvmetricEventsWithResponse request
+	GetApiV2AvmetricEventsWithResponse(ctx context.Context, params *GetApiV2AvmetricEventsParams, reqEditors ...RequestEditorFn) (*GetApiV2AvmetricEventsResponse, error)
+
 	// GetBundlesWithResponse request
 	GetBundlesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetBundlesResponse, error)
 
@@ -4435,6 +4693,35 @@ type ClientWithResponsesInterface interface {
 
 	// GetTimeseriesWithResponse request
 	GetTimeseriesWithResponse(ctx context.Context, params *GetTimeseriesParams, reqEditors ...RequestEditorFn) (*GetTimeseriesResponse, error)
+}
+
+type GetApiV2AvmetricEventsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r GetApiV2AvmetricEventsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetApiV2AvmetricEventsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetApiV2AvmetricEventsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
 }
 
 type GetBundlesResponse struct {
@@ -4831,6 +5118,15 @@ func (r GetTimeseriesResponse) ContentType() string {
 	return ""
 }
 
+// GetApiV2AvmetricEventsWithResponse request returning *GetApiV2AvmetricEventsResponse
+func (c *ClientWithResponses) GetApiV2AvmetricEventsWithResponse(ctx context.Context, params *GetApiV2AvmetricEventsParams, reqEditors ...RequestEditorFn) (*GetApiV2AvmetricEventsResponse, error) {
+	rsp, err := c.GetApiV2AvmetricEvents(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetApiV2AvmetricEventsResponse(rsp)
+}
+
 // GetBundlesWithResponse request returning *GetBundlesResponse
 func (c *ClientWithResponses) GetBundlesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetBundlesResponse, error) {
 	rsp, err := c.GetBundles(ctx, reqEditors...)
@@ -4954,6 +5250,22 @@ func (c *ClientWithResponses) GetTimeseriesWithResponse(ctx context.Context, par
 		return nil, err
 	}
 	return ParseGetTimeseriesResponse(rsp)
+}
+
+// ParseGetApiV2AvmetricEventsResponse parses an HTTP response from a GetApiV2AvmetricEventsWithResponse call
+func ParseGetApiV2AvmetricEventsResponse(rsp *http.Response) (*GetApiV2AvmetricEventsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetApiV2AvmetricEventsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
 }
 
 // ParseGetBundlesResponse parses an HTTP response from a GetBundlesWithResponse call

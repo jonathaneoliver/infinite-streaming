@@ -23,7 +23,7 @@ These have all bitten real conversations; the operational reference is at [`.cla
 
 - **Label filters are `--label-has` / `--label-not`** (repeatable, AND semantics), NOT `--label`.
 - **No `harness archive …` subcommand exists.** Forwarder archive reads live under `harness query …` (alias `q`).
-- **`harness query control <play_id>` is broken in current main** — the underlying endpoint requires `player_id`. Workaround: `harness raw GET "/analytics/api/v2/control_events?player_id=<PLR>&play_id=<PLY>&limit=N"`.
+- **`harness query control <play_id>` works** (fixed in #684 — the endpoint now accepts any one of `player_id` / `play_id` / `event` / `label_has`, not just `player_id`). The session-less `server_start` marker is reachable via `harness query control --event server_start` (no play_id needed).
 - **Operator labels round-trip through encoding.** `harness labels set <player> test=foo` lands as `info=test_foo` on the play's `labels[]`. The filter form is `--label-has info=test_foo`, NOT `--label-has test=foo`.
 
 ## When to use this vs sibling skills
@@ -57,8 +57,14 @@ harness --insecure --json query plays \
 # One play's events + label histogram
 harness --insecure --json query play <play_id>
 
-# Tail combined SSE for one player
-harness --insecure ts <player> --streams events,network,control
+# Tail combined SSE for one player (add avmetrics for iOS failure timing)
+harness --insecure ts <player> --streams events,network,control,avmetrics
+
+# iOS AVMetrics — highest-resolution failure-timing feed (CoreMedia error
+# codes, variant-switch start/complete). Bounded query, closes on its own
+# (no SSE --max-time hack). #693; technique in standards/avmetrics-forensics.md
+harness --insecure --json query avmetrics <play_id> --limit 500
+harness --insecure --json query avmetrics --event-type ErrorEvent --from <ISO> --to <ISO>
 
 # Mutate (snapshot is automatic — undo replays the most recent)
 harness --insecure labels set <player> k=v
@@ -70,4 +76,5 @@ harness --insecure undo
 
 - [`tools/harness-cli/README.md`](../../../tools/harness-cli/README.md) — full subcommand surface + flags
 - [`.claude/standards/harness-cli.md`](../../standards/harness-cli.md) — canonical gotchas, single source of truth
+- [`.claude/standards/avmetrics-forensics.md`](../../standards/avmetrics-forensics.md) — reading the iOS AVMetrics feed (`query avmetrics` / `ts --streams avmetrics`): which event types carry which signal, the CoreMedia error-code key
 - [`.claude/skills/CONVENTIONS.md`](../CONVENTIONS.md) — first-token rule + no-guessing
