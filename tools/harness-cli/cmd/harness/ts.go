@@ -18,10 +18,12 @@ const tsUsage = `harness ts <target|all> [flags]
 
 Combined timeseries — samples + network — from /api/v2/timeseries.
 Network rows render like 'tail'; sample rows render the headline
-ABR/buffer/RTT/FPS values on a single line.
+ABR/buffer/RTT/FPS values on a single line; avmetric rows ('A ...')
+render the AVMetric subclass + a raw-payload preview.
 
 Flags:
-  --streams S      override default 'samples,network' (CSV)
+  --streams S      override default 'samples,network' (CSV). Tokens:
+                   samples,network,events,control,avmetrics
   --bundles B      override default per-stream bundles (CSV)
   --max-hz N       rate-limit live deltas (default 0 = uncapped)
   --raw            print raw frame JSON
@@ -30,24 +32,25 @@ Examples:
   harness ts ipad
   harness ts ipad --max-hz 10
   harness ts all --streams samples
+  harness ts ipad --streams samples,network,avmetrics
 `
 
 // tailSampleRow is the projection used when ts renders a sample
 // frame. Like tailNetworkRow, every variable-shape field is `any`
 // because CH JSONEachRow returns inconsistent JSON types per column.
 type tailSampleRow struct {
-	Ts                  string `json:"ts"`
-	PlayerID            string `json:"player_id"`
-	PlayID              string `json:"play_id"`
-	State               any    `json:"state,omitempty"`
-	BandwidthEstMbps    any    `json:"bandwidth_estimate_mbps,omitempty"`
-	BufferSeconds       any    `json:"buffer_seconds,omitempty"`
-	RttMs               any    `json:"rtt_ms,omitempty"`
-	RenditionMbps       any    `json:"rendition_mbps,omitempty"`
-	ShaperLimitMbps     any    `json:"shaper_limit_mbps,omitempty"`
-	FpsRunning          any    `json:"fps_running,omitempty"`
-	FramesDroppedDelta  any    `json:"frames_dropped_delta,omitempty"`
-	Downshifts          any    `json:"downshifts,omitempty"`
+	Ts                 string `json:"ts"`
+	PlayerID           string `json:"player_id"`
+	PlayID             string `json:"play_id"`
+	State              any    `json:"state,omitempty"`
+	BandwidthEstMbps   any    `json:"bandwidth_estimate_mbps,omitempty"`
+	BufferSeconds      any    `json:"buffer_seconds,omitempty"`
+	RttMs              any    `json:"rtt_ms,omitempty"`
+	RenditionMbps      any    `json:"rendition_mbps,omitempty"`
+	ShaperLimitMbps    any    `json:"shaper_limit_mbps,omitempty"`
+	FpsRunning         any    `json:"fps_running,omitempty"`
+	FramesDroppedDelta any    `json:"frames_dropped_delta,omitempty"`
+	Downshifts         any    `json:"downshifts,omitempty"`
 }
 
 func cmdTs(client *api.Client, args []string, asJSON bool) error {
@@ -85,6 +88,8 @@ func cmdTs(client *api.Client, args []string, asJSON bool) error {
 				bundlesList = append(bundlesList, "network")
 			case "events":
 				bundlesList = append(bundlesList, "events")
+			case "avmetrics":
+				bundlesList = append(bundlesList, "avmetrics")
 			}
 		}
 	}
@@ -121,6 +126,11 @@ func cmdTs(client *api.Client, args []string, asJSON bool) error {
 			if err := json.Unmarshal([]byte(f.Data), &row); err == nil {
 				fmt.Println("S " + formatSampleRow(row))
 			}
+		case "avmetric", "avmetrics":
+			var row tailAVMetricRow
+			if err := json.Unmarshal([]byte(f.Data), &row); err == nil {
+				fmt.Println("A " + formatAVMetricRow(row))
+			}
 		default:
 			preview := f.Data
 			if len(preview) > 140 {
@@ -130,6 +140,33 @@ func cmdTs(client *api.Client, args []string, asJSON bool) error {
 		}
 		return nil
 	})
+}
+
+// tailAVMetricRow is the projection used when ts renders an AVMetrics
+// frame (issue #693). raw_json carries the CoreMedia error code etc.;
+// we preview it rather than parse, matching the verbatim-passthrough
+// the rest of the pipeline uses.
+type tailAVMetricRow struct {
+	Ts             string `json:"ts"`
+	PlayID         string `json:"play_id"`
+	EventType      string `json:"event_type"`
+	EventTsMs      any    `json:"event_ts_ms,omitempty"`
+	RawJSON        string `json:"raw_json,omitempty"`
+	Classification string `json:"classification,omitempty"`
+}
+
+// formatAVMetricRow renders one AVMetrics event: ts, subclass name, and
+// a preview of the raw SDK payload (where the CoreMedia error code lives).
+func formatAVMetricRow(r tailAVMetricRow) string {
+	raw := strings.TrimSpace(r.RawJSON)
+	if len(raw) > 100 {
+		raw = raw[:97] + "..."
+	}
+	cls := ""
+	if r.Classification != "" && r.Classification != "other" {
+		cls = " [" + r.Classification + "]"
+	}
+	return fmt.Sprintf("%s  %-32s%s %s", formatTs(r.Ts), r.EventType, cls, raw)
 }
 
 // formatSampleRow renders one ABR/buffer/RTT/FPS sample. Empty cells

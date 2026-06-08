@@ -54,6 +54,12 @@ Subcommands:
   control  <play_id> [--source S] [--event E] [--mode M]
            [--label-has L ...] [--label-not L ...] [--limit N]
                                   proxy / harness action log
+  avmetrics [<play_id>] [--event-type T ...] [--from ISO] [--to ISO]
+           [--label-has L ...] [--label-not L ...] [--limit N]
+                                  iOS AVMetrics events (highest-resolution
+                                  failure-timing feed: CoreMedia error
+                                  codes, variant-switch start/complete).
+                                  Bounded read — closes (no SSE hack).
   heatmap  <play_id>
   bundle   <play_id> --out PATH   download play bundle ZIP
 
@@ -88,6 +94,8 @@ func cmdQuery(client *api.Client, args []string, asJSON bool) error {
 	// proxy/harness actions live on control_events.
 	case "control":
 		return cmdQueryControl(client, args[1:], asJSON)
+	case "avmetrics":
+		return cmdQueryAVMetrics(client, args[1:], asJSON)
 	case "heatmap":
 		return cmdQueryHeatmap(client, args[1:], asJSON)
 	case "bundle":
@@ -328,6 +336,78 @@ func cmdQueryControl(client *api.Client, args []string, asJSON bool) error {
 		params.LabelNot = &v
 	}
 	body, err := client.ArchiveControlEvents(context.Background(), params)
+	if err != nil {
+		return err
+	}
+	return printOrJSON(body, asJSON)
+}
+
+// cmdQueryAVMetrics queries the iOS AVMetrics event log (#693) — the
+// highest-resolution failure-timing feed. Mirrors cmdQueryControl: the
+// play_id positional is optional, so an operator can pull by --event-type
+// / --label-has alone (e.g. every error-bearing AVMetric in a window).
+// Bounded read, so it closes — no curl --max-time hack.
+func cmdQueryAVMetrics(client *api.Client, args []string, asJSON bool) error {
+	var playID string
+	flagArgs := args
+	if len(args) >= 1 && !strings.HasPrefix(args[0], "-") {
+		playID = args[0]
+		flagArgs = args[1:]
+	}
+	fs := flag.NewFlagSet("query avmetrics", flag.ContinueOnError)
+	var eventTypes arrayFlag
+	fs.Var(&eventTypes, "event-type", "filter to AVMetric subclass name, e.g. HLSPlaylistRequestEvent (repeatable; OR)")
+	from := fs.String("from", "", "ISO lower bound on ts (inclusive)")
+	to := fs.String("to", "", "ISO upper bound on ts (exclusive)")
+	var labelHas, labelNot arrayFlag
+	fs.Var(&labelHas, "label-has", "row must have this label (repeatable; AND semantics)")
+	fs.Var(&labelNot, "label-not", "row must NOT have this label (repeatable; AND semantics)")
+	limit := fs.Int("limit", 0, "max rows")
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	if playID == "" && len(eventTypes) == 0 && len(labelHas) == 0 {
+		return errors.New("usage: harness query avmetrics [<play_id>] [--event-type T] [--label-has L] [--from ISO] [--to ISO] [--label-not L] [--limit N]\n  a play_id, --event-type, or --label-has is required")
+	}
+	params := &forwarder.GetApiV2AvmetricEventsParams{}
+	if playID != "" {
+		pid, err := parsePlayID(playID)
+		if err != nil {
+			return err
+		}
+		params.PlayId = &pid
+	}
+	if len(eventTypes) > 0 {
+		et := []string(eventTypes)
+		params.EventType = &et
+	}
+	if *from != "" {
+		t, err := time.Parse(time.RFC3339, *from)
+		if err != nil {
+			return fmt.Errorf("invalid --from %q (need RFC3339, e.g. 2026-05-17T00:00:00Z): %w", *from, err)
+		}
+		params.From = &t
+	}
+	if *to != "" {
+		t, err := time.Parse(time.RFC3339, *to)
+		if err != nil {
+			return fmt.Errorf("invalid --to %q (need RFC3339): %w", *to, err)
+		}
+		params.To = &t
+	}
+	if *limit > 0 {
+		l := *limit
+		params.Limit = &l
+	}
+	if len(labelHas) > 0 {
+		v := forwarder.LabelHasFilter(labelHas)
+		params.LabelHas = &v
+	}
+	if len(labelNot) > 0 {
+		v := forwarder.LabelNotFilter(labelNot)
+		params.LabelNot = &v
+	}
+	body, err := client.ArchiveAVMetricEvents(context.Background(), params)
 	if err != nil {
 		return err
 	}

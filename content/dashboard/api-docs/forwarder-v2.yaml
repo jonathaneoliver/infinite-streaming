@@ -326,6 +326,41 @@ paths:
             application/x-ndjson:
               schema: { $ref: '#/components/schemas/ControlEventRow' }
 
+  /api/v2/avmetric_events:
+    get:
+      tags: [archive]
+      summary: iOS AVMetrics event log
+      description: |
+        One row per iOS 18 AVMetrics event (`ios_avmetric_events`) — the
+        highest-resolution failure-timing telemetry available (CoreMedia
+        error codes, variant-switch start/complete, playlist/segment request
+        events). Bounded read (LIMIT) so it closes, unlike the timeseries
+        SSE. Issue #693. Requires at least one of `player_id`, `play_id`,
+        `event_type`, or `label_has`.
+      parameters:
+        - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - in: query
+          name: event_type
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+          description: |
+            Filter to specific AVMetric subclass names. Multiple values OR'd.
+            Examples: `event_type=HLSPlaylistRequestEvent&event_type=VariantSwitchStartEvent`.
+        - $ref: '#/components/parameters/LabelHasFilter'
+        - $ref: '#/components/parameters/LabelNotFilter'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: AVMetric event rows (NDJSON)
+          content:
+            application/x-ndjson:
+              schema: { $ref: '#/components/schemas/AVMetricEventRow' }
+
   /api/v2/session_heatmap:
     get:
       tags: [archive]
@@ -622,9 +657,7 @@ components:
         Row-level label inclusion filter. Repeatable; every value
         must be present in the row's `labels[]` (AND-within-includes).
         Format `<severity>=<event>` (with `*` prefix for synthesized
-        labels). Severities: `critical|error|warning|info`, plus the
-        unranked `testing` tier for operator/test-harness KV metadata
-        (e.g. `testing=run_id_...`). Example:
+        labels). Example:
         `?label_has=warning%3Dhttp_4xx&label_has=info%3D%2Apattern_step`.
     LabelNotFilter:
       in: query
@@ -921,6 +954,7 @@ components:
         content_id:        { type: string }
         # ---- timing ----
         started_at:        { type: string, format: date-time }
+        start_time:        { type: string, format: date-time, nullable: true, description: "Client-supplied play start (ISO-8601 UTC), play-scoped — minted by the player with play_id and rotated with it. See PlayRecord.start_time in proxy.yaml. Null when the client didn't send it (web/Roku)." }
         last_seen_at:      { type: string, format: date-time }
         labels:
           type: object
@@ -994,6 +1028,9 @@ components:
               oneOf:
                 - { type: string,  description: "label, e.g. 'warning=*manifest_failure'" }
                 - { type: integer, description: "occurrence count for this play" }
+        # ---- run identity (issue #678) ----
+        scenario:
+          $ref: '#/components/schemas/Scenario'
         # ---- tiered retention class ----
         classification:
           type: string
@@ -1009,6 +1046,33 @@ components:
             fault-induced | abandoned`) described in DESIGN.md are
             blocked on the `play_summaries` rollup table — they'll
             land here when that lands.
+
+    Scenario:
+      description: |
+        Run IDENTITY of a play — "what it IS" (test, platform, device,
+        versions), as distinct from the event labels which are "what
+        HAPPENED during it". Issue #678 promoted this off the dashboard
+        (it was assembled client-side in Sessions.vue) into the API so the
+        Sessions list, Session Viewer header, and chat tools share one shape.
+
+        Hybrid-sourced: device/player/app/os/content from the authoritative
+        typed summary columns; test/platform/run_id from the `testing=`
+        label tier (no typed column exists for those). Every field is
+        optional — a play absent all of them omits the whole object rather
+        than emitting `{}`.
+      type: object
+      properties:
+        test:         { type: string, description: "Characterization test mode, from testing=test_* (e.g. 'rampup'). Harness runs only." }
+        platform:     { type: string, description: "Harness-stamped platform, from testing=platform_* (e.g. 'ipad-sim'). Distinct from device_* below. Harness runs only." }
+        run_id:       { type: string, description: "Characterization run id, from testing=run_id_* (compact UTC, e.g. '20260524T070148Z'). Groups plays into a run. Harness runs only." }
+        device_class: { type: string, description: "Device taxonomy class (phone|tablet|tv|…). From the typed column (#550 Phase 4)." }
+        device_model: { type: string, description: "Device model identifier (e.g. 'iPhone15,2'). From the typed column." }
+        player_tech:  { type: string, description: "Player technology (e.g. 'AVPlayer'). From the typed column." }
+        app_version:  { type: string, description: "Client app version. From the typed column." }
+        os_version:   { type: string, description: "OS version, 'major.minor' (or just 'major'), joined from os_version_major/os_version_minor." }
+        content_id:   { type: string, description: "Content identifier — duplicated here so the object is self-contained for the viewer header." }
+        manifest_variant: { type: string, enum: ['ll', '2s', '6s'], description: "Manifest the player loaded, derived from the master URL: 'll' (low-latency), '2s', or '6s'. Issue #679." }
+        server_build:     { type: string, description: "go-live build that served the play, from the X-Served-By response header (the build the proxy captured). Empty for dev builds with no -ldflags stamp. Issue #679." }
 
     PlaySummaryPage:
       type: object
@@ -1185,6 +1249,64 @@ components:
           description: |
             FNV-64a hash over (player, play, ts_ms, source, event, info).
             Stable dedupe key for SSE reconnects.
+        classification:
+          type: string
+          enum: [other, interesting, favourite]
+          description: Retention tier — same lifecycle as the parent session.
+
+    AVMetricEventRow:
+      description: |
+        One archived `ios_avmetric_events` row — a single iOS 18 AVMetrics
+        event. Issue #693.
+      type: object
+      required: [ts, event_type]
+      properties:
+        ts:
+          type: string
+          format: date-time
+          description: Forwarder ingest time.
+        player_id:
+          type: string
+          format: uuid
+          description: Owning player.
+        play_id:
+          type: string
+          description: Owning play (empty when not yet stamped).
+        attempt_id:
+          type: integer
+          format: int64
+          description: Sticky per-attempt counter. 0 when unknown.
+        session_id:
+          type: string
+          description: Owning proxy session.
+        event_type:
+          type: string
+          description: |
+            AVMetric subclass name as published by AVFoundation —
+            e.g. `HLSPlaylistRequestEvent`, `HLSMediaSegmentRequestEvent`,
+            `VariantSwitchStartEvent`, `ContentKeyRequestEvent`.
+        event_ts_ms:
+          type: integer
+          format: int64
+          description: |
+            AVMetrics-side timeline stamp (ms), separate from `ts` so
+            causality plots don't mix clocks. 0 when absent.
+        raw_json:
+          type: string
+          description: |
+            Unmodified SDK payload as a JSON string — parse client-side.
+            Carries the CoreMedia error code, byte ranges, etc.
+        labels:
+          type: array
+          items: { type: string }
+          description: |
+            Severity-tagged `<severity>=<event>` strings (same vocab as the
+            other tables). Empty until an AVMetric classifier lands.
+        event_fingerprint:
+          type: string
+          description: |
+            FNV-64a hash over (session, event_ts_ms, event_type). Stable
+            dedupe key for SSE reconnects.
         classification:
           type: string
           enum: [other, interesting, favourite]

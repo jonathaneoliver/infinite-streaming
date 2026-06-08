@@ -18,12 +18,22 @@ AVMetrics feed is where the cause lives.
 
 ## How to pull it
 
-Served via the timeseries multiplexer (stream token `avmetrics`):
+First-class harness surface (#693) — bounded, closes on its own:
+
+```sh
+# Returns event_type, ts, event_ts_ms, raw_json, labels, classification.
+harness --insecure --json query avmetrics <play_id> [--event-type T] [--from ISO] [--to ISO] [--limit N]
+# Sweep error-bearing events across a window with no play_id:
+harness --insecure --json query avmetrics --event-type AVMetricErrorEvent --from <ISO> --to <ISO>
+# Live tail (renders 'A <ts> <event_type> <raw preview>'):
+harness --insecure ts <player> --streams avmetrics
+```
+
+Raw/SSE fallback (same rows via the timeseries multiplexer — needs a
+`--max-time`/`limit` because the SSE doesn't close):
 
 ```sh
 curl -sk "https://$TEST_HOST:21000/analytics/api/v2/timeseries?streams=avmetrics&player_id=<PLR>&play_id=<PLY>&limit=4000"
-# SSE: each "data: {...}" line is one row; fields: event_type, ts,
-# event_ts_ms, raw_json (the full AVMetricEvent), labels, classification.
 ```
 
 `player_id`/`play_id` must be **lowercase** (forwarder canonicalises; iOS

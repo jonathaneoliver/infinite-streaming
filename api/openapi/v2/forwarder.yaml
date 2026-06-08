@@ -326,6 +326,41 @@ paths:
             application/x-ndjson:
               schema: { $ref: '#/components/schemas/ControlEventRow' }
 
+  /api/v2/avmetric_events:
+    get:
+      tags: [archive]
+      summary: iOS AVMetrics event log
+      description: |
+        One row per iOS 18 AVMetrics event (`ios_avmetric_events`) — the
+        highest-resolution failure-timing telemetry available (CoreMedia
+        error codes, variant-switch start/complete, playlist/segment request
+        events). Bounded read (LIMIT) so it closes, unlike the timeseries
+        SSE. Issue #693. Requires at least one of `player_id`, `play_id`,
+        `event_type`, or `label_has`.
+      parameters:
+        - $ref: '#/components/parameters/PlayerIdFilter'
+        - $ref: '#/components/parameters/PlayIdFilter'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - in: query
+          name: event_type
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+          description: |
+            Filter to specific AVMetric subclass names. Multiple values OR'd.
+            Examples: `event_type=HLSPlaylistRequestEvent&event_type=VariantSwitchStartEvent`.
+        - $ref: '#/components/parameters/LabelHasFilter'
+        - $ref: '#/components/parameters/LabelNotFilter'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: AVMetric event rows (NDJSON)
+          content:
+            application/x-ndjson:
+              schema: { $ref: '#/components/schemas/AVMetricEventRow' }
+
   /api/v2/session_heatmap:
     get:
       tags: [archive]
@@ -1214,6 +1249,64 @@ components:
           description: |
             FNV-64a hash over (player, play, ts_ms, source, event, info).
             Stable dedupe key for SSE reconnects.
+        classification:
+          type: string
+          enum: [other, interesting, favourite]
+          description: Retention tier — same lifecycle as the parent session.
+
+    AVMetricEventRow:
+      description: |
+        One archived `ios_avmetric_events` row — a single iOS 18 AVMetrics
+        event. Issue #693.
+      type: object
+      required: [ts, event_type]
+      properties:
+        ts:
+          type: string
+          format: date-time
+          description: Forwarder ingest time.
+        player_id:
+          type: string
+          format: uuid
+          description: Owning player.
+        play_id:
+          type: string
+          description: Owning play (empty when not yet stamped).
+        attempt_id:
+          type: integer
+          format: int64
+          description: Sticky per-attempt counter. 0 when unknown.
+        session_id:
+          type: string
+          description: Owning proxy session.
+        event_type:
+          type: string
+          description: |
+            AVMetric subclass name as published by AVFoundation —
+            e.g. `HLSPlaylistRequestEvent`, `HLSMediaSegmentRequestEvent`,
+            `VariantSwitchStartEvent`, `ContentKeyRequestEvent`.
+        event_ts_ms:
+          type: integer
+          format: int64
+          description: |
+            AVMetrics-side timeline stamp (ms), separate from `ts` so
+            causality plots don't mix clocks. 0 when absent.
+        raw_json:
+          type: string
+          description: |
+            Unmodified SDK payload as a JSON string — parse client-side.
+            Carries the CoreMedia error code, byte ranges, etc.
+        labels:
+          type: array
+          items: { type: string }
+          description: |
+            Severity-tagged `<severity>=<event>` strings (same vocab as the
+            other tables). Empty until an AVMetric classifier lands.
+        event_fingerprint:
+          type: string
+          description: |
+            FNV-64a hash over (session, event_ts_ms, event_type). Stable
+            dedupe key for SSE reconnects.
         classification:
           type: string
           enum: [other, interesting, favourite]
