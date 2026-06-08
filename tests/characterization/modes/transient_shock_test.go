@@ -11,20 +11,21 @@ import (
 	"github.com/jonathaneoliver/infinite-streaming/tests/characterization/runner"
 )
 
-// Transient-shock — variant-derived square wave: cold-start at the floor,
-// climb to the TOP variant, then slam the cap down to a sub-floor "shock"
-// and hold, then restore the top cap and watch recovery. Repeated
-// CHAR_SHOCK_REPS times (each a fresh shock on the same live play).
+// Transient-shock — graduated-drop staircase: cold-start at the floor,
+// then build a full 4K buffer under a high cap (headroom ABOVE the 4K peak)
+// and drop to a sequence of escalating depths — the peak cap (×1.05 TCP
+// overhead) of the published variant 3/4, 1/2, 1/4 up from the bottom, and
+// the bottom variant — returning to the high cap between drops so the
+// buffer refills. Finds WHERE the player breaks, not just the worst case.
 //
-// This is the purpose-built probe for the sudden-drop wedge: a hard
-// top→sub-floor drop while the player is warm on 4K is exactly the
-// transition that strands AVPlayer (segment fetches time out at the live-
-// edge 2s/5s limits, the connection can go dead for ~10s, the player
-// attempts a big downshift and can hit CoreMedia -12880 "Can not proceed
-// after removing variants"). Pair the run with the network-request view
-// (proxy→client delivery + the dead window) and the AVMetrics feed
-// (CoreMedia errors + variant-switch start/complete) to see whether the
-// link survives the drop and whether the player recovers.
+// This is the purpose-built probe for the sudden-drop wedge: a hard drop
+// while the player is warm on 4K is exactly the transition that strands
+// AVPlayer (segment fetches time out at the live-edge 2s/5s limits, the
+// connection can go dead, the player attempts a big downshift and can hit
+// CoreMedia -12880 "Can not proceed after removing variants"). Pair the run
+// with the network-request view (proxy→client delivery + the dead window)
+// and the AVMetrics feed (CoreMedia errors + variant-switch start/complete)
+// to see whether the link survives the drop and whether the player recovers.
 //
 // Shares all of rampup's machinery: cold-start bootstrap, the run-config
 // axes (CHAR_SEGMENT / CHAR_LOCAL_PROXY / CHAR_TRANSFER_TIMEOUT) forced at
@@ -33,11 +34,10 @@ import (
 // Env axes (in addition to the shared CHAR_SEGMENT / CHAR_LOCAL_PROXY /
 // CHAR_TRANSFER_TIMEOUT):
 //
-//	CHAR_SHOCK_REPS        number of dips (default 2)
-//	CHAR_SHOCK_LOW_MBPS    the shock floor (default: the rampup floor)
-//	CHAR_SHOCK_HIGH_HOLD_S hold at the top cap, warm + recovery (default 120)
-//	CHAR_SHOCK_DIP_HOLD_S  hold at the shock floor (default 90; must outlast
-//	                       the buffer coast + wedge-cycle to see the outcome)
+//	CHAR_SHOCK_HIGH_MBPS   build/recover cap, headroom above 4K peak (default 60)
+//	CHAR_SHOCK_HIGH_HOLD_S hold at the high cap, build + recovery (default 120)
+//	CHAR_SHOCK_DIP_HOLD_S  hold at each drop (default 90; must outlast the
+//	                       buffer coast + wedge-cycle to see the outcome)
 
 func TestTransientShockIPadSim(t *testing.T)   { runTransientShock(t, runner.PlatformIPadSim) }
 func TestTransientShockIPhone(t *testing.T)    { runTransientShock(t, runner.PlatformIPhone) }
@@ -96,7 +96,11 @@ func runTransientShock(t *testing.T, p runner.Platform) {
 	}
 
 	appium, isAppium := launcher.(*runner.AppiumLauncher)
-	coldStart := isAppium && preFloor > 0
+	// Android generates a fresh player_id per launch (UUID.randomUUID, not
+	// persisted like iOS), so the pre-launch id is stale after the
+	// forceAppLaunch relaunch. Route Android through conservativeStart,
+	// which reads the NEW player_id post-launch via the home-player-id node.
+	coldStart := isAppium && preFloor > 0 && picked.Platform != runner.PlatformAndroidTV
 	conservativeStart := isAppium && !coldStart
 
 	// #config — read the per-run configuration axes (segment, LocalProxy,
@@ -147,7 +151,9 @@ func runTransientShock(t *testing.T, p runner.Platform) {
 			}
 		})
 	case conservativeStart:
-		setupCtx, setupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		// Generous budget — Android adds a catalogue-load settle plus
+		// resume retries on top of the launch.
+		setupCtx, setupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer setupCancel()
 		s, lerr := appium.LaunchToHome(setupCtx, *picked)
 		if lerr != nil {
@@ -155,19 +161,34 @@ func runTransientShock(t *testing.T, p runner.Platform) {
 		}
 		pid, perr := appium.ReadPlayerID(setupCtx, s)
 		if perr != nil {
-			t.Fatalf("ReadPlayerID: %v (iOS app may predate the home-player-id AX node; rebuild app in Xcode)", perr)
+			t.Fatalf("ReadPlayerID: %v (app may predate the home-player-id AX node; rebuild + redeploy)", perr)
 		}
 		s.PlayerID = pid
 		t.Logf("parked on home — discovered player_id %s via AX node", pid)
 		if aerr := s.ApplyRate(setupCtx, conservativeWarmupCap); aerr != nil {
-			t.Fatalf("apply conservative cap: %v", aerr)
+			// Non-fatal: Android's per-launch player_id isn't bound to a
+			// proxy port until the first media fetch, so a pre-resume cap
+			// can't resolve yet. The shock's first step caps it anyway.
+			t.Logf("pre-resume cap skipped: %v (player not bound until playback)", aerr)
 		}
-		time.Sleep(2 * time.Second)
-		if rerr := appium.ResumePlayback(setupCtx, *picked); rerr != nil {
-			t.Fatalf("ResumePlayback: %v", rerr)
+		time.Sleep(2 * time.Second) // let tc engage if the cap did apply
+		// Survive transient content-startup: right after a cold launch the
+		// catalogue can be briefly empty ("No content available"), so the
+		// hero has no featured clip and tapping Resume starts nothing. Let
+		// it settle, then retry resume → heartbeat until the play comes up.
+		time.Sleep(8 * time.Second)
+		var herr error
+		for attempt := 1; attempt <= 3; attempt++ {
+			if rerr := appium.ResumePlayback(setupCtx, *picked); rerr != nil {
+				t.Logf("resume attempt %d: %v", attempt, rerr)
+			}
+			if herr = s.WaitForHeartbeat(setupCtx, 50*time.Second); herr == nil {
+				break
+			}
+			t.Logf("no heartbeat after resume attempt %d — content may still be loading; retrying", attempt)
 		}
-		if herr := s.WaitForHeartbeat(setupCtx, 90*time.Second); herr != nil {
-			t.Fatalf("WaitForHeartbeat: %v", herr)
+		if herr != nil {
+			t.Fatalf("WaitForHeartbeat after resume retries: %v", herr)
 		}
 		sess = s
 		t.Cleanup(func() {
@@ -277,42 +298,42 @@ func runTransientShock(t *testing.T, p runner.Platform) {
 		t.Fatal("StandardLadderRates returned no entries")
 	}
 
-	// --- square-wave step list ----------------------------------
-	// high = the TOP variant cap (desc is descending, so desc[0]). low =
-	// the shock floor: CHAR_SHOCK_LOW_MBPS if set, else the rampup floor
-	// (the exact top→floor drop we dissected). The player warms to the top
-	// under `high`, then each rep slams to `low` (the shock) and restores
-	// `high` (recovery window).
-	top := desc[0]
-	bottom := desc[len(desc)-1]
-	high := top.CapMbps
-	low := envFloat("CHAR_SHOCK_LOW_MBPS", rampupFloorFrom(desc))
+	// --- graduated-drop staircase -------------------------------
+	// `high` is a cap with headroom ABOVE the top variant's peak (default
+	// 60 Mbps) so the player builds a FULL forward buffer at 4K before each
+	// drop — at exactly the 4K peak there's no spare bandwidth to buffer
+	// ahead. Then we drop to a sequence of escalating depths, returning to
+	// `high` between each so the buffer refills.
+	high := envFloat("CHAR_SHOCK_HIGH_MBPS", 60.0)
 	highHold := time.Duration(envInt("CHAR_SHOCK_HIGH_HOLD_S", 120)) * time.Second
-	// The dip must outlast the buffer coast (~20s on a 4K buffer, during
-	// which the player just plays out buffered high-variant content and
-	// isn't yet operating at the low rate) PLUS the wedge-or-recover
-	// resolution (a wedge held position frozen ~54s before the player
-	// reset). 90s ≈ buffer-coast + wedge-cycle + margin, so we capture the
-	// full outcome — reset, or a downshift that sustains at the low variant.
+	// The dip must outlast the buffer coast (the player plays out its
+	// buffered high-variant content before it's really at the low rate)
+	// PLUS the wedge-or-recover resolution (~54s). 90s captures the full
+	// outcome — reset, or a downshift that sustains.
 	dipHold := time.Duration(envInt("CHAR_SHOCK_DIP_HOLD_S", 90)) * time.Second
-	reps := envInt("CHAR_SHOCK_REPS", 2)
-	if reps < 1 {
-		reps = 1
-	}
 
-	// [warm-high] + reps × [dip-low, recover-high]
-	steps := make([]runner.Step, 0, 1+2*reps)
-	hi := top
-	lo := bottom
-	steps = append(steps, runner.Step{RateMbps: high, Hold: highHold, Variant: &hi})
-	for i := 0; i < reps; i++ {
+	// Drop targets are PUBLISHED-VARIANT peak caps (peak × the standard 5%
+	// TCP-overhead bump — the StandardLadder "peak" rung's CapMbps), picked
+	// by position in the ladder: the variant 3/4, 1/2, 1/4 up from the
+	// bottom, and the bottom variant. Escalating downshift depth to real
+	// renditions finds WHERE the player breaks.
+	peaks := variantPeakCapsAsc(desc)
+	if len(peaks) == 0 {
+		t.Fatal("no published-variant peak rungs in the ladder")
+	}
+	drops := pickVariantFractions(peaks, []float64{0.75, 0.5, 0.25, 0.0})
+
+	// build → drop → build → drop → ... → build (final recover)
+	steps := make([]runner.Step, 0, 2*len(drops)+1)
+	for _, d := range drops {
 		steps = append(steps,
-			runner.Step{RateMbps: low, Hold: dipHold, Variant: &lo},
-			runner.Step{RateMbps: high, Hold: highHold, Variant: &hi})
+			runner.Step{RateMbps: high, Hold: highHold},
+			runner.Step{RateMbps: d, Hold: dipHold})
 	}
+	steps = append(steps, runner.Step{RateMbps: high, Hold: highHold})
 
-	t.Logf("square wave: warm→%.3f Mbps (%s), then %d × [shock→%.3f Mbps (%s) → recover→%.3f Mbps (%s)]",
-		high, highHold, reps, low, dipHold, high, highHold)
+	t.Logf("staircase: build@%.1f Mbps (%s); drops (variant peaks ×1.05, 3/4·1/2·1/4·bottom)=%.3f Mbps (hold %s each)",
+		high, highHold, drops, dipHold)
 
 	report := RunSweep(ctx, t, sess, "transient-shock", steps, time.Second)
 	report.Variants = unionRungs(desc)
@@ -352,7 +373,7 @@ func runTransientShock(t *testing.T, p runner.Platform) {
 	if last := report; last != nil {
 		endLabels := map[string]string{
 			"completed":      time.Now().UTC().Format("20060102T150405Z"),
-			"shocks":         fmt.Sprintf("%d", reps),
+			"drops":          fmt.Sprintf("%d", len(drops)),
 			"total_stalls":   fmt.Sprintf("%d", report.Summary.TotalStalls),
 			"profile_shifts": fmt.Sprintf("%d", report.Summary.ProfileShifts),
 		}
@@ -360,4 +381,42 @@ func runTransientShock(t *testing.T, p runner.Platform) {
 			t.Logf("label play (end): %v", err)
 		}
 	}
+}
+
+// variantPeakCapsAsc returns each PUBLISHED variant's peak cap — the
+// StandardLadder "peak" rung's CapMbps, which is the variant's peak
+// bandwidth × the standard 5% TCP-overhead bump — ordered bottom→top.
+// `desc` is top→bottom, so we walk it in reverse and keep one cap per
+// variant (the peak rung).
+func variantPeakCapsAsc(desc []runner.VariantRate) []float64 {
+	var peaks []float64
+	for i := len(desc) - 1; i >= 0; i-- {
+		if desc[i].Source == "peak" {
+			peaks = append(peaks, desc[i].CapMbps)
+		}
+	}
+	return peaks
+}
+
+// pickVariantFractions selects the cap of the variant at each fraction `f`
+// of the way up from the bottom (0 = bottom, 1 = top): idx = round(f·(N-1)).
+// e.g. fracs {0.75, 0.5, 0.25, 0} → the variant 3/4, 1/2, 1/4 up, and the
+// bottom variant.
+func pickVariantFractions(peaksAsc, fracs []float64) []float64 {
+	n := len(peaksAsc)
+	out := make([]float64, 0, len(fracs))
+	if n == 0 {
+		return out
+	}
+	for _, f := range fracs {
+		idx := int(f*float64(n-1) + 0.5)
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= n {
+			idx = n - 1
+		}
+		out = append(out, peaksAsc[idx])
+	}
+	return out
 }
