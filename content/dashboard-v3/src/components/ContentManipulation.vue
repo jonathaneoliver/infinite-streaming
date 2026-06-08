@@ -23,6 +23,16 @@ const variants = computed(() => {
 const LIVE_OFFSET_CHOICES = [0, 6, 18, 24] as const;
 type LiveOffset = (typeof LIVE_OFFSET_CHOICES)[number];
 
+const VARIANT_ORDER_CHOICES = [
+  { value: 'default', label: 'Default' },
+  { value: 'ascending', label: 'Ascending' },
+  { value: 'descending', label: 'Descending' },
+  { value: 'first_4mbps', label: '4 Mbps first' },
+] as const;
+type VariantOrder = (typeof VARIANT_ORDER_CHOICES)[number]['value'];
+
+const variantOrder = computed<VariantOrder>(() => content.value?.variant_order ?? 'default');
+
 function onBoolChange(field: 'strip_codecs' | 'strip_average_bandwidth' | 'strip_resolution' | 'overstate_bandwidth', e: Event) {
   const v = (e.target as HTMLInputElement).checked;
   setContent({ [field]: v } as Partial<Content>);
@@ -30,6 +40,10 @@ function onBoolChange(field: 'strip_codecs' | 'strip_average_bandwidth' | 'strip
 
 function onLiveOffsetChange(value: LiveOffset) {
   setContent({ live_offset: value } as Partial<Content>);
+}
+
+function onVariantOrderChange(value: VariantOrder) {
+  setContent({ variant_order: value } as Partial<Content>);
 }
 
 /** Empty allowed_variants list means "all allowed" — `allChecked = true`
@@ -155,6 +169,31 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
       Pairs well with `delay_ms` to surface live-offset-driven stalls.
     </p>
 
+    <div class="order-row" data-testid="content-variant-order">
+      <span class="label">Variant order</span>
+      <div class="segmented" role="radiogroup" aria-label="Master playlist variant order">
+        <button
+          v-for="opt in VARIANT_ORDER_CHOICES"
+          :key="opt.value"
+          type="button"
+          role="radio"
+          class="seg"
+          :class="{ active: variantOrder === opt.value }"
+          :aria-checked="variantOrder === opt.value"
+          :data-testid="`content-variant-order-${opt.value}`"
+          @click="onVariantOrderChange(opt.value)"
+        >
+          {{ opt.label }}
+        </button>
+      </div>
+    </div>
+    <p class="note">
+      Re-sorts the master playlist's video variants by BANDWIDTH to probe how
+      AVPlayer picks its initial variant (#682). <strong>4 Mbps first</strong>
+      promotes the variant nearest 4 Mbps to first-listed. Audio/subtitle
+      renditions are untouched. Takes effect on the next master fetch.
+    </p>
+
     <div class="variants">
       <span class="label">Allowed variants <span class="muted">(All checked = allow every variant)</span></span>
       <div v-if="!variants.length" class="muted">Play content once to populate variant list.</div>
@@ -225,13 +264,37 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
   line-height: 1.4;
 }
 
-.offset-row {
+.offset-row,
+.order-row {
   display: flex;
   flex-wrap: wrap;
   gap: 16px;
   align-items: center;
   font-size: 13px;
   color: #374151;
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.seg {
+  border: none;
+  border-left: 1px solid #d1d5db;
+  background: #fff;
+  color: #374151;
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.seg:first-child {
+  border-left: none;
+}
+.seg.active {
+  background: #2563eb;
+  color: #fff;
 }
 
 .label {

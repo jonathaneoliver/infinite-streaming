@@ -191,7 +191,9 @@ func contentManipulationFromSession(s map[string]any) *oapigen.ContentManipulati
 	} else if raw, ok := s["content_allowed_variants"].([]string); ok {
 		allowed = append([]string{}, raw...)
 	}
-	if !stripCodecs && !stripAvgBw && !stripResolution && !overstate && offset == 0 && len(allowed) == 0 {
+	variantOrder, _ := s["content_variant_order"].(string)
+	hasVariantOrder := variantOrder != "" && variantOrder != "default"
+	if !stripCodecs && !stripAvgBw && !stripResolution && !overstate && offset == 0 && len(allowed) == 0 && !hasVariantOrder {
 		return nil
 	}
 	off := oapigen.ContentManipulationLiveOffset(offset)
@@ -204,6 +206,10 @@ func contentManipulationFromSession(s map[string]any) *oapigen.ContentManipulati
 	}
 	if allowed != nil {
 		out.AllowedVariants = &allowed
+	}
+	if hasVariantOrder {
+		vo := oapigen.ContentManipulationVariantOrder(variantOrder)
+		out.VariantOrder = &vo
 	}
 	return &out
 }
