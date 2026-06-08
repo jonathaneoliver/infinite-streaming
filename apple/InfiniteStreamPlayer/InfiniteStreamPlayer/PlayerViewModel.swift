@@ -1817,6 +1817,27 @@ extension PlayerViewModel {
                 }
             }
             .store(in: &cancellables)
+
+        // #703 — application wedge detector. A CoreMedia -12880 followed by
+        // sustained no-progress (PlaybackDiagnostics.wedgeConfirmSeconds, def
+        // 120s) is a hard wedge that won't self-heal — distinct from the
+        // frozen/segment-stall watchdogs. When auto-recovery is on, restart
+        // playback tagged `wedge_auto_recovery` (same retry() path, so the
+        // wedge + recovery stay on one play_id); otherwise just capture it.
+        diagnostics.$wedgeDetected
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] wedged in
+                guard let self, wedged else { return }
+                let payload = self.buildMetricsPayload(event: "wedge_detected", at: Date())
+                Task { await self.sendPlayerMetrics(payload: payload) }
+                if self.autoRecovery {
+                    self.scheduleAutoRecoveryRestart(reason: "wedge_auto_recovery")
+                } else {
+                    Task { await self.requestHARSnapshot(reason: "wedge_detected") }
+                }
+            }
+            .store(in: &cancellables)
     }
 
     fileprivate func bindMetricsReporting() {

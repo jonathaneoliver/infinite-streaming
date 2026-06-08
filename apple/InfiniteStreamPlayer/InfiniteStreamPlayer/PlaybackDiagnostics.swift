@@ -197,6 +197,23 @@ final class PlaybackDiagnostics: ObservableObject {
 
     @Published var frozenDetected: Bool = false
     @Published var segmentStallDetected: Bool = false
+    /// #703 — application wedge detector. Flips true when a CoreMedia
+    /// -12880 "Can not proceed after removing variants" was seen AND
+    /// playback then failed to advance for `wedgeConfirmSeconds`. That's
+    /// the hard-wedge signature characterized on 2026-06-08: -12880 +
+    /// sustained no-progress. A player that's merely recovering keeps
+    /// advancing and disarms it (AVPlayer's own `didRecover` flag is
+    /// unreliable — both wedged and recovered sessions reported
+    /// didRecover=1). Drives autoRecovery's `wedge_auto_recovery` restart.
+    @Published var wedgeDetected: Bool = false
+    /// Continuous no-progress (seconds) required AFTER a -12880 before
+    /// declaring a hard wedge — long enough to be sure AVPlayer won't
+    /// self-recover. Settable so the characterization harness can shorten
+    /// the confirm. Default 120s (also < the proxy's 5-min idle reaper, so
+    /// the app acts before the session is collected).
+    var wedgeConfirmSeconds: Double = 120
+    /// When the most recent -12880 was observed; nil = wedge watch disarmed.
+    private var wedgeArmedAt: Date?
 
     private var timeObserverToken: Any?
     /// The exact `AVPlayer` instance that vended `timeObserverToken`.
@@ -745,6 +762,8 @@ final class PlaybackDiagnostics: ObservableObject {
         lastVariantSummaryAt = nil
         lastAccessLogEventCount = 0
         segmentStallDetected = false
+        wedgeDetected = false
+        wedgeArmedAt = nil
         lastVariantDwellTotal = priorVariantDwellSeconds.values.reduce(0, +)
         lastVariantDwellChangeAt = nil
         // Don't clear: priorVariantDwellSeconds, priorDroppedVideoFrames,
@@ -1164,6 +1183,11 @@ final class PlaybackDiagnostics: ObservableObject {
             if frozenDetected {
                 frozenDetected = false
             }
+            // #703 — any advance proves the player is alive: a post-12880
+            // session that's actually recovering keeps progressing, so
+            // disarm the wedge watch and clear a prior detection.
+            wedgeArmedAt = nil
+            if wedgeDetected { wedgeDetected = false }
             return
         }
         guard state != "Idle" && state != "Paused" else {
@@ -1193,6 +1217,13 @@ final class PlaybackDiagnostics: ObservableObject {
                 frozenLoggedAt = now
                 print("[FROZEN] still frozen at time=\(String(format: "%.2f", time)) for \(String(format: "%.0fs", stalledFor)) state=\(state) rate=\(player?.rate ?? 0)")
             }
+        }
+        // #703 — hard wedge: armed by a -12880 AND no progress for
+        // wedgeConfirmSeconds. Distinct from frozenDetected (3s) — this is
+        // the "won't recover without help" threshold the wedge detector acts on.
+        if wedgeArmedAt != nil && stalledFor >= wedgeConfirmSeconds && !wedgeDetected {
+            wedgeDetected = true
+            print("[WEDGE] -12880 + no progress for \(String(format: "%.0fs", stalledFor)) — hard wedge (state=\(state))")
         }
     }
 
@@ -1431,6 +1462,12 @@ final class PlaybackDiagnostics: ObservableObject {
         lastErrorLog = parts.joined(separator: " ")
         if !lastErrorLog.isEmpty {
             print("Error log: \(lastErrorLog) \(playbackSnapshot())")
+        }
+        // #703 — arm the wedge watch on CoreMedia -12880 "Can not proceed
+        // after removing variants". If playback then fails to advance for
+        // wedgeConfirmSeconds, checkFrozenState() flips wedgeDetected.
+        if event.errorStatusCode == -12880 {
+            wedgeArmedAt = Date()
         }
 
         let comment = event.errorComment ?? ""
