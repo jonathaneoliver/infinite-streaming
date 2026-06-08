@@ -397,6 +397,15 @@ final class PlaybackDiagnostics: ObservableObject {
         bitrateSampleTimer?.invalidate()
         bitrateSampleTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             self?.emitBitrateSample()
+            // #703 fix — freeze/wedge detection MUST run on this wall-clock
+            // timer, not the periodic time observer. AVPlayer's periodic
+            // observer fires off the playback clock and goes silent the
+            // instant the playhead freezes — i.e. exactly when a frozen/
+            // wedge state begins — so a detector hung off it can never see
+            // the freeze (observed live 2026-06-08: frozen_count=0 and no
+            // wedge_detected across a 5-min hard wedge). This timer ticks
+            // on wall-clock regardless of playback progress.
+            self?.checkFrozenState()
         }
     }
 
@@ -1063,7 +1072,10 @@ final class PlaybackDiagnostics: ObservableObject {
             self.currentTime = time.seconds
             self.updateBufferMetrics()
             self.updateItemState()
-            self.checkFrozenState()
+            // checkFrozenState() is driven by the wall-clock bitrateSampleTimer
+            // (see startBitrateSampleTimer) — NOT here. This observer stops
+            // firing when the playhead freezes, which would blind the freeze/
+            // wedge detector to the very state it exists to catch (#703).
             self.periodicVariantSummary()
             self.maybeLogOffsetHeartbeat()
         }
@@ -1190,7 +1202,13 @@ final class PlaybackDiagnostics: ObservableObject {
             if wedgeDetected { wedgeDetected = false }
             return
         }
-        guard state != "Idle" && state != "Paused" else {
+        // States are lowercase ("idle"/"paused"/"stalled"/"buffering"/
+        // "playing"). A genuine pause/idle is not a freeze — reset the
+        // stall clock so neither the frozen nor the wedge detector fires
+        // on it. A hard wedge presents as "stalled"/"buffering", which
+        // passes this guard. (Previously compared against capitalized
+        // "Idle"/"Paused", so it never matched — dead code, #703.)
+        guard state != "idle" && state != "paused" else {
             lastAdvancingAt = now
             return
         }
