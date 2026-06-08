@@ -484,6 +484,13 @@ const timeRange = computed<{ min: number; max: number } | null>(() => {
   let min = ar?.min ?? 0;
   if (haveStart && (min === 0 || (playStart as number) < min)) min = playStart as number;
   let max = Math.max(ar?.max ?? 0, live);
+  // Archived view (explicit upper bound, not following live): clamp the
+  // rail's right edge to `to` — draw it from→to, not all the way to now.
+  // Without this, `live` (coord.lastSampleMs) can be a stale ~now value
+  // left in the per-player coord by a PRIOR live session on this same
+  // player_id, stretching an empty gap from `to` to now.
+  const upper = tsToMs.value;
+  if (!props.followLive && upper != null && upper > 0) max = upper;
   if (!min) min = max;
   if (!max) max = min;
   if (!min && !max) return null;

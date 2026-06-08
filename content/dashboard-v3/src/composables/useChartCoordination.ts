@@ -215,23 +215,18 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
    *  prev/next navigator); use `setCursorMs` from callers that only
    *  know the timestamp. Issue #486. */
   function setCursor(ms: number | null, label: string | null) {
+    // Set the highlighted-event cursor only. Does NOT touch the live/pinned
+    // range: user event-navigation pins the window via recenterOnNav()
+    // (setRange) — that is what keeps a *user-selected* row on screen (#662).
+    // Previously (#663) setCursor itself dropped out of Live whenever ms was
+    // set while live; but the navigator AUTO-advances to each new event on a
+    // live view, so that fired on every incoming event and made the page
+    // unable to stay in Live (testing.html + in-progress session-viewer both
+    // snapped to a 10-min window around the oldest event). Auto-advance must
+    // not drop live; only explicit navigation (recenterOnNav) pins.
     const s = cur();
     s.cursorMs = ms;
     s.cursorLabel = ms == null ? null : label;
-    // #662: selecting an event means the operator is inspecting history, so
-    // drop out of Live — otherwise follow-latest keeps snapping the logs and
-    // charts back to the live tail and the highlighted row never stays on
-    // screen. Pin a window: keep the current one if it already contains the
-    // event (no jump), else center on the event so it's visible. The Live
-    // toggle resumes following. Only acts on a real selection (ms != null)
-    // while currently live; hover paths use setCursorMs and are unaffected.
-    if (ms != null && s.range === null) {
-      const end = s.lastSampleMs || Date.now();
-      const win = { min: end - s.liveSpan, max: end };
-      s.range = (ms >= win.min && ms <= win.max)
-        ? win
-        : { min: ms - s.liveSpan / 2, max: ms + s.liveSpan / 2 };
-    }
   }
 
   return {
