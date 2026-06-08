@@ -91,7 +91,7 @@ harness --insecure --json query avmetrics <PLAY> --from <FROM_ISO> --to <TO_ISO>
   | jq -c 'select(.ts >= "<FROM>" and .ts <= "<TO>")' \
   > /tmp/forensics-avm-<t>.jsonl
 # (No play scoped? Pull error-bearing events across the window instead:
-#  harness --insecure --json query avmetrics --event-type ErrorEvent --from <FROM_ISO> --to <TO_ISO>)
+#  harness --insecure --json query avmetrics --event-type AVMetricErrorEvent --from <FROM_ISO> --to <TO_ISO>)
 ```
 
 (Same SSE-bleed-through guard as `investigate` — always filter ts in jq.

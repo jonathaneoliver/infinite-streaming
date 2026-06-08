@@ -64,7 +64,7 @@ harness --insecure ts <player> --streams events,network,control,avmetrics
 # codes, variant-switch start/complete). Bounded query, closes on its own
 # (no SSE --max-time hack). #693; technique in standards/avmetrics-forensics.md
 harness --insecure --json query avmetrics <play_id> --limit 500
-harness --insecure --json query avmetrics --event-type ErrorEvent --from <ISO> --to <ISO>
+harness --insecure --json query avmetrics --event-type AVMetricErrorEvent --from <ISO> --to <ISO>
 
 # Mutate (snapshot is automatic — undo replays the most recent)
 harness --insecure labels set <player> k=v
