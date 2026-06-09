@@ -25,6 +25,24 @@ import com.infinitestream.player.ui.screen.SettingsOverlay
 import com.infinitestream.player.ui.theme.InfiniteStreamTheme
 import com.infinitestream.player.ui.theme.Tokens
 
+/**
+ * Process-global launch configuration captured from the launch Intent before
+ * the PlayerViewModel is constructed. #714 config-on-connect: the test harness
+ * mints a player_id, pre-configures the proxy session for it via a bootstrap
+ * curl, and passes it as an intent extra (`--es is.player_id <uuid>`) so the
+ * app inherits that already-configured session instead of minting its own
+ * per-launch id. Mirrors how iOS reads `-is.player_id` from NSArgumentDomain.
+ */
+object LaunchConfig {
+    @Volatile
+    var playerId: String? = null
+
+    // #714 Approach B: raw proxy.* query fragment appended to the bootstrap
+    // URL (e.g. "proxy.shape.rate_mbps=2.5"), captured from the launch intent.
+    @Volatile
+    var proxyQuery: String? = null
+}
+
 class MainActivity : ComponentActivity() {
     private val tStart = android.os.SystemClock.uptimeMillis()
     private fun tag(s: String) = android.util.Log.i(
@@ -35,6 +53,23 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         tag("MainActivity onCreate begin")
         super.onCreate(savedInstanceState)
+        // #714 config-on-connect: capture a harness-provided player_id from the
+        // launch intent BEFORE the PlayerViewModel is created (via viewModels()
+        // below), so the VM's playerId picks it up instead of minting its own.
+        intent?.getStringExtra("is.player_id")?.let { raw ->
+            if (runCatching { java.util.UUID.fromString(raw) }.isSuccess) {
+                LaunchConfig.playerId = raw
+                tag("launch-arg player_id=$raw")
+            }
+        }
+        // #714 Approach B: capture a raw proxy.* query fragment to append to
+        // the bootstrap URL (config-on-connect driven by the player).
+        intent?.getStringExtra("is.proxy_query")?.let { raw ->
+            if (raw.isNotEmpty()) {
+                LaunchConfig.proxyQuery = raw
+                tag("launch-arg proxy_query=$raw")
+            }
+        }
         // Keep the screen on while playback is active — release in onStop.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         tag("MainActivity onCreate setContent")

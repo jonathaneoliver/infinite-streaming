@@ -65,6 +65,23 @@ func (s *Session) CloseViaUI(ctx context.Context) error {
 	return c.ClosePlaybackViaUI(ctx, s.Device)
 }
 
+// Release deletes the proxy session for this player so its slot frees
+// immediately instead of lingering until the 5-min idle reaper.
+//
+// CRITICAL under config-on-connect: every run mints a fresh player_id, so
+// without an explicit release a handful of back-to-back runs exhausts the
+// small session pool (4 slots) and the next run 503s "session limit reached".
+// The delete also clears the port's transport-fault loop and records the
+// session end (the ClickHouse archive is unaffected — it streams independently).
+// Best-effort; call in a test's cleanup after CloseViaUI, before Launcher.Close().
+func (s *Session) Release(ctx context.Context) error {
+	if s == nil || s.PlayerID == "" {
+		return nil
+	}
+	_, err := runHarness(ctx, "players", "rm", "--yes", s.PlayerID)
+	return err
+}
+
 // ReleaseDevice fully releases the device after a run — e.g. terminating
 // WebDriverAgent so iOS's "Automation Running" overlay clears. Opt-in:
 // runs only when CHAR_RELEASE_DEVICE=1, because Appium keeps WDA resident

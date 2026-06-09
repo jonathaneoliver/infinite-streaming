@@ -128,6 +128,17 @@ final class PlayerViewModel: ObservableObject {
     /// iterating on the binary.
     let playerId: String = {
         let d = UserDefaults.standard
+        // #714 config-on-connect: a launch-arg player_id lets the test harness
+        // MINT the id, pre-configure the session via a bootstrap curl, then
+        // launch the app to inherit that already-configured session. The
+        // `-is.player_id <uuid>` process arg lands in NSArgumentDomain (highest
+        // precedence). Deliberately NOT persisted to `isPlayerId` — it must not
+        // clobber the device's stable, persisted id (a real launch never passes
+        // it; only the harness does, per run).
+        if let injected = d.string(forKey: "is.player_id"),
+           UUID(uuidString: injected) != nil {
+            return injected
+        }
         if let stored = d.string(forKey: "isPlayerId"),
            UUID(uuidString: stored) != nil {
             return stored

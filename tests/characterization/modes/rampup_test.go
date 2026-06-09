@@ -30,15 +30,6 @@ import (
 // go"). Rampup tests "given a constrained start, when does the player
 // climb?" — the floor for that is the second-from-bottom variant's
 // lowest surviving cap in the filled ladder.
-//
-// conservativeWarmupCap is the rate cap we apply when bootstrap can't
-// find a previous heartbeating player (typically right after a wedge
-// purged the proxy's player record). 1.5 Mbps is well above any
-// realistic 360p variant rate and below most 540p rates — the player
-// will pick the bottom variant on cold start, fetch the manifest, then
-// we adjust to the real floor before the sweep.
-const conservativeWarmupCap = 1.5
-
 func TestRampupIPadSim(t *testing.T)   { runRampup(t, runner.PlatformIPadSim) }
 func TestRampupIPhone(t *testing.T)    { runRampup(t, runner.PlatformIPhone) }
 func TestRampupAppleTV(t *testing.T)   { runRampup(t, runner.PlatformAppleTV) }
@@ -111,96 +102,35 @@ func runRampup(t *testing.T, p runner.Platform) {
 	//   (3) Non-Appium → fall back to OpenSession + 100 Mbps warmup.
 	//       Cliff at sweep step 1 is inevitable; logged loudly.
 	appium, isAppium := launcher.(*runner.AppiumLauncher)
-	coldStart := isAppium && preFloor > 0
-	conservativeStart := isAppium && !coldStart
 
 	// #config — read the per-run configuration axes (segment, LocalProxy,
-	// transfer-timeout) and force the launch-arg ones (segment via
-	// -is.segment, LocalProxy via -is.flag.local_proxy) on the single cold
-	// launch below so the player starts on them from frame 1. iOS folds
-	// these into UserDefaults (NSArgumentDomain, highest precedence). The
-	// transfer-timeout axis is applied server-side after the player binds.
+	// transfer-timeout). The launch-arg ones (segment via -is.segment,
+	// LocalProxy via -is.flag.local_proxy) plus the minted -is.player_id are
+	// forced on the single cold launch in the Appium block below, so the
+	// player starts on them from frame 1; iOS folds them into UserDefaults
+	// (NSArgumentDomain). The transfer-timeout axis is applied server-side.
 	cfg := readRunConfig(t, isAppium)
-	if args := cfg.launchArgs(); len(args) > 0 {
-		appium.SetLaunchArgs(args)
-		t.Logf("forcing run config via launch args %v — cold start lands on it", args)
-	}
 	segment := cfg.segment
 
 	var sess *runner.Session
-	switch {
-	case coldStart:
+	if isAppium {
+		// #714 config-on-connect: mint the player_id, resolve the cold-start
+		// floor (prior manifest → master parse → conservative), and wire the
+		// driver (default = harness pre-configures via a curl, so the variant
+		// ladder is known up front; CHAR_PROXY_CONFIG=app → the player emits
+		// proxy.* on its own bootstrap URL). Replaces the old coldStart /
+		// conservativeStart dance — the app streams under the cap from segment 0.
+		pid := runner.NewPlayerID()
 		setupCtx, setupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer setupCancel()
-		s, err := appium.LaunchToHome(setupCtx, *picked)
-		if err != nil {
-			t.Fatalf("LaunchToHome: %v", err)
-		}
-		s.PlayerID = preRec.ID
-		t.Logf("parked on home; applying floor %.3f Mbps before resuming playback", preFloor)
-		if err := s.ApplyRate(setupCtx, preFloor); err != nil {
-			t.Fatalf("apply floor pre-resume: %v", err)
-		}
-		// Settle gap: PATCH /shape returns 200 OK once the proxy accepts
-		// the change, but tc rule installation happens slightly later.
-		// Without this, ResumePlayback can fire before tc has engaged.
-		time.Sleep(2 * time.Second)
-		if err := appium.ResumePlayback(setupCtx, *picked); err != nil {
-			t.Fatalf("ResumePlayback: %v", err)
-		}
-		if err := s.WaitForHeartbeat(setupCtx, 90*time.Second); err != nil {
-			t.Fatalf("WaitForHeartbeat: %v", err)
-		}
-		sess = s
-		t.Cleanup(func() {
-			cleanCtx, c := context.WithTimeout(context.Background(), 15*time.Second)
-			defer c()
-			if err := sess.ClearShape(cleanCtx); err != nil {
-				t.Logf("clear shape: %v", err)
-			}
-			// #627: close the play via the app's own UI so it emits a real
-			// client play_end (cleanly ended in the sessions view), before
-			// Close() tears the Appium session down.
-			if err := sess.CloseViaUI(cleanCtx); err != nil {
-				t.Logf("close playback via UI: %v", err)
-			}
-			if err := launcher.Close(); err != nil {
-				t.Logf("close launcher: %v", err)
-			}
-			// #627: opt-in device release (CHAR_RELEASE_DEVICE=1) — clears
-			// the iOS "Automation Running" overlay by terminating WDA.
-			if err := sess.ReleaseDevice(cleanCtx); err != nil {
-				t.Logf("release device: %v", err)
-			}
-		})
+		floor := resolveFloor(setupCtx, t, preFloor, rampupFloorFrom)
+		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor)
 
-	case conservativeStart:
-		// Cold-start at a fixed-conservative cap so the player picks the
-		// bottom variant from segment 1. The iOS app surfaces its
-		// persistent player_id on the Home screen via an accessibility
-		// node (home-player-id) — we read it BEFORE tapping Continue
-		// Watching and apply the cap pre-playback. That closes the
-		// race that wedged step 1 under the old WaitForBind-then-apply
-		// flow. See plan: ~/.claude/plans/cold-start-shape-cap-race-fix.md.
-		setupCtx, setupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer setupCancel()
 		s, err := appium.LaunchToHome(setupCtx, *picked)
 		if err != nil {
 			t.Fatalf("LaunchToHome: %v", err)
-		}
-		pid, err := appium.ReadPlayerID(setupCtx, s)
-		if err != nil {
-			t.Fatalf("ReadPlayerID: %v (iOS app may predate the home-player-id AX node; rebuild app in Xcode)", err)
 		}
 		s.PlayerID = pid
-		t.Logf("parked on home — discovered player_id %s via AX node", pid)
-		if err := s.ApplyRate(setupCtx, conservativeWarmupCap); err != nil {
-			t.Fatalf("apply conservative cap: %v", err)
-		}
-		t.Logf("applied conservative %.3f Mbps cap BEFORE resume playback", conservativeWarmupCap)
-		// Settle gap so the kernel tc/nftables rule is installed before
-		// the first manifest fetch — matches the coldStart branch.
-		time.Sleep(2 * time.Second)
 		if err := appium.ResumePlayback(setupCtx, *picked); err != nil {
 			t.Fatalf("ResumePlayback: %v", err)
 		}
@@ -220,6 +150,12 @@ func runRampup(t *testing.T, p runner.Platform) {
 			if err := sess.CloseViaUI(cleanCtx); err != nil {
 				t.Logf("close playback via UI: %v", err)
 			}
+			// #714: free the session slot immediately (don't wait for the 5-min
+			// reaper) — config-on-connect mints a fresh player_id per run, so a
+			// few back-to-back runs would otherwise exhaust the small pool.
+			if err := sess.Release(cleanCtx); err != nil {
+				t.Logf("release session: %v", err)
+			}
 			if err := launcher.Close(); err != nil {
 				t.Logf("close launcher: %v", err)
 			}
@@ -229,11 +165,11 @@ func runRampup(t *testing.T, p runner.Platform) {
 				t.Logf("release device: %v", err)
 			}
 		})
-
-	default:
-		// Non-Appium fallback: OpenSession + legacy 100 Mbps warmup,
-		// step 1 will cliff.
-		t.Logf("cold-start unavailable (non-Appium launcher) — using legacy warmup path (rampup step 1 will cliff)")
+	} else {
+		// Non-Appium fallback: legacy warmup path (step 1 cliffs).
+		// config-on-connect needs a launch-arg player_id, which only the
+		// Appium launch path forces onto the app.
+		t.Logf("config-on-connect unavailable (non-Appium launcher) — legacy warmup path (rampup step 1 will cliff)")
 		sess = OpenSession(t, p)
 	}
 
@@ -287,21 +223,16 @@ func runRampup(t *testing.T, p runner.Platform) {
 	defer cancel()
 
 	// --- variant ladder (post-launch — definitive) --------------
-	// coldStart: we already have preDesc; re-read for confirmation.
-	// conservativeStart: player just came up under 1.5 Mbps cap, manifest
-	//                    is being fetched; brief wait then read.
-	// default (non-Appium): legacy 100 Mbps warmup so manifest fetches.
-	switch {
-	case conservativeStart:
-		// Player is running under the conservative cap. Give the
-		// manifest a moment to land in the player's session record.
-		t.Logf("waiting %s for manifest to populate under conservative cap", rampdownWarmupHold)
+	// Appium: the player just came up under the config-on-connect cap; give
+	// the manifest a moment to land in the session record before reading the
+	// ladder. Non-Appium: legacy 100 Mbps warmup so the manifest fetches
+	// fresh (step 1 will cliff afterward).
+	if isAppium {
+		t.Logf("waiting %s for manifest to populate under config-on-connect cap", rampdownWarmupHold)
 		if err := holdContext(ctx, rampdownWarmupHold); err != nil {
 			t.Fatalf("manifest-fetch hold: %v", err)
 		}
-	case !coldStart:
-		// Legacy fallback (non-Appium): 100 Mbps warmup so the player
-		// fetches the manifest fresh. Step 1 will cliff afterward.
+	} else {
 		if err := sess.ApplyRate(ctx, rampdownWarmupMbps); err != nil {
 			t.Fatalf("warmup apply: %v", err)
 		}

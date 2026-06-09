@@ -352,23 +352,26 @@ func runStartupCycle(
 			t.Logf("[%d] Kill: %v (continuing — app may already be killed)", idx, err)
 		}
 		time.Sleep(1 * time.Second)
+		// #714: release the prior cycle's session before allocating a fresh
+		// one, so reps × caps cold launches don't exhaust the 4-slot pool.
+		if sess.PlayerID != "" {
+			if rerr := sess.Release(ctx); rerr != nil {
+				t.Logf("[%d] release prior session: %v", idx, rerr)
+			}
+		}
+		// #714 config-on-connect (default = harness pre-configures via a curl;
+		// CHAR_PROXY_CONFIG=app → player emits proxy.* on its own bootstrap
+		// URL): mint a fresh id and cap the session at capMbps before the
+		// first byte — replaces ReadPlayerID + post-launch ApplyRate + tc-settle.
+		pid := runner.NewPlayerID()
+		wireConfigOnConnect(ctx, t, appium, nil, pid, capMbps)
 		s, err := appium.LaunchToHome(ctx, dev)
 		if err != nil {
 			t.Fatalf("[%d] LaunchToHome: %v", idx, err)
 		}
-		pid, err := appium.ReadPlayerID(ctx, s)
-		if err != nil {
-			t.Fatalf("[%d] ReadPlayerID: %v (rebuild iOS app — needs home-player-id AX node)", idx, err)
-		}
 		s.PlayerID = pid
 		result.PlayerID = pid
 		sess.PlayerID = pid
-		if err := s.ApplyRate(ctx, capMbps); err != nil {
-			t.Fatalf("[%d] ApplyRate %.2f: %v", idx, capMbps, err)
-		}
-		// tc-settle gap — the proxy needs ~1-2s for kernel rules to
-		// actually engage after the HTTP PATCH returns.
-		time.Sleep(2 * time.Second)
 		result.StartedAt = time.Now()
 		// Land on the SAME target_clip every time (not Continue
 		// Watching, which would be path-dependent on the last play).

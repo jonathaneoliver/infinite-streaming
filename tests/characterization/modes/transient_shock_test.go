@@ -96,87 +96,36 @@ func runTransientShock(t *testing.T, p runner.Platform) {
 	}
 
 	appium, isAppium := launcher.(*runner.AppiumLauncher)
-	// Android generates a fresh player_id per launch (UUID.randomUUID, not
-	// persisted like iOS), so the pre-launch id is stale after the
-	// forceAppLaunch relaunch. Route Android through conservativeStart,
-	// which reads the NEW player_id post-launch via the home-player-id node.
-	coldStart := isAppium && preFloor > 0 && picked.Platform != runner.PlatformAndroidTV
-	conservativeStart := isAppium && !coldStart
 
 	// #config — read the per-run configuration axes (segment, LocalProxy,
-	// transfer-timeout) and force the launch-arg ones on the cold launch.
+	// transfer-timeout). The launch-arg ones plus the minted -is.player_id are
+	// forced on the cold launch in the Appium block below.
 	cfg := readRunConfig(t, isAppium)
-	if args := cfg.launchArgs(); len(args) > 0 {
-		appium.SetLaunchArgs(args)
-		t.Logf("forcing run config via launch args %v — cold start lands on it", args)
-	}
 	segment := cfg.segment
 
 	var sess *runner.Session
-	switch {
-	case coldStart:
-		setupCtx, setupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer setupCancel()
-		s, lerr := appium.LaunchToHome(setupCtx, *picked)
-		if lerr != nil {
-			t.Fatalf("LaunchToHome: %v", lerr)
-		}
-		s.PlayerID = preRec.ID
-		t.Logf("parked on home; applying floor %.3f Mbps before resuming playback", preFloor)
-		if aerr := s.ApplyRate(setupCtx, preFloor); aerr != nil {
-			t.Fatalf("apply floor pre-resume: %v", aerr)
-		}
-		time.Sleep(2 * time.Second) // let tc engage before the first fetch
-		if rerr := appium.ResumePlayback(setupCtx, *picked); rerr != nil {
-			t.Fatalf("ResumePlayback: %v", rerr)
-		}
-		if herr := s.WaitForHeartbeat(setupCtx, 90*time.Second); herr != nil {
-			t.Fatalf("WaitForHeartbeat: %v", herr)
-		}
-		sess = s
-		t.Cleanup(func() {
-			cleanCtx, c := context.WithTimeout(context.Background(), 15*time.Second)
-			defer c()
-			if cerr := sess.ClearShape(cleanCtx); cerr != nil {
-				t.Logf("clear shape: %v", cerr)
-			}
-			if cerr := sess.CloseViaUI(cleanCtx); cerr != nil {
-				t.Logf("close playback via UI: %v", cerr)
-			}
-			if cerr := launcher.Close(); cerr != nil {
-				t.Logf("close launcher: %v", cerr)
-			}
-			if cerr := sess.ReleaseDevice(cleanCtx); cerr != nil {
-				t.Logf("release device: %v", cerr)
-			}
-		})
-	case conservativeStart:
-		// Generous budget — Android adds a catalogue-load settle plus
-		// resume retries on top of the launch.
+	if isAppium {
+		// #714 config-on-connect: mint the player_id, resolve the cold-start
+		// floor, and wire the driver (default = harness pre-configures via a
+		// curl, so the variant ladder is known up front; CHAR_PROXY_CONFIG=app →
+		// the player emits proxy.* on its own bootstrap URL). Replaces the old
+		// coldStart / conservativeStart split — the Android special-casing is
+		// gone now that Android honors the launch arg.
+		pid := runner.NewPlayerID()
+		// Generous budget — Android adds a catalogue-load settle on top of launch.
 		setupCtx, setupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer setupCancel()
+		floor := resolveFloor(setupCtx, t, preFloor, rampupFloorFrom)
+		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor)
+
 		s, lerr := appium.LaunchToHome(setupCtx, *picked)
 		if lerr != nil {
 			t.Fatalf("LaunchToHome: %v", lerr)
 		}
-		pid, perr := appium.ReadPlayerID(setupCtx, s)
-		if perr != nil {
-			t.Fatalf("ReadPlayerID: %v (app may predate the home-player-id AX node; rebuild + redeploy)", perr)
-		}
 		s.PlayerID = pid
-		t.Logf("parked on home — discovered player_id %s via AX node", pid)
-		if aerr := s.ApplyRate(setupCtx, conservativeWarmupCap); aerr != nil {
-			// Non-fatal: Android's per-launch player_id isn't bound to a
-			// proxy port until the first media fetch, so a pre-resume cap
-			// can't resolve yet. The shock's first step caps it anyway.
-			t.Logf("pre-resume cap skipped: %v (player not bound until playback)", aerr)
-		}
-		time.Sleep(2 * time.Second) // let tc engage if the cap did apply
 		// Survive transient content-startup: right after a cold launch the
-		// catalogue can be briefly empty ("No content available"), so the
-		// hero has no featured clip and tapping Resume starts nothing. Let
-		// it settle, then retry resume → heartbeat until the play comes up.
-		time.Sleep(8 * time.Second)
+		// catalogue can be briefly empty ("No content available"), so tapping
+		// Resume starts nothing. Retry resume → heartbeat until the play comes up.
 		var herr error
 		for attempt := 1; attempt <= 3; attempt++ {
 			if rerr := appium.ResumePlayback(setupCtx, *picked); rerr != nil {
@@ -200,6 +149,11 @@ func runTransientShock(t *testing.T, p runner.Platform) {
 			if cerr := sess.CloseViaUI(cleanCtx); cerr != nil {
 				t.Logf("close playback via UI: %v", cerr)
 			}
+			// #714: free the session slot immediately (don't wait for the 5-min
+			// reaper) — config-on-connect mints a fresh player_id per run.
+			if cerr := sess.Release(cleanCtx); cerr != nil {
+				t.Logf("release session: %v", cerr)
+			}
 			if cerr := launcher.Close(); cerr != nil {
 				t.Logf("close launcher: %v", cerr)
 			}
@@ -207,8 +161,8 @@ func runTransientShock(t *testing.T, p runner.Platform) {
 				t.Logf("release device: %v", cerr)
 			}
 		})
-	default:
-		t.Logf("cold-start unavailable (non-Appium launcher) — legacy warmup path")
+	} else {
+		t.Logf("config-on-connect unavailable (non-Appium launcher) — legacy warmup path")
 		sess = OpenSession(t, p)
 	}
 
@@ -258,13 +212,12 @@ func runTransientShock(t *testing.T, p runner.Platform) {
 	defer cancel()
 
 	// --- variant ladder (post-launch — definitive) --------------
-	switch {
-	case conservativeStart:
-		t.Logf("waiting %s for manifest to populate under conservative cap", rampdownWarmupHold)
+	if isAppium {
+		t.Logf("waiting %s for manifest to populate under config-on-connect cap", rampdownWarmupHold)
 		if err := holdContext(ctx, rampdownWarmupHold); err != nil {
 			t.Fatalf("manifest-fetch hold: %v", err)
 		}
-	case !coldStart:
+	} else {
 		if err := sess.ApplyRate(ctx, rampdownWarmupMbps); err != nil {
 			t.Fatalf("warmup apply: %v", err)
 		}
