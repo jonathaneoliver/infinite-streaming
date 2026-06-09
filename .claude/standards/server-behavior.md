@@ -425,6 +425,32 @@ failure surfaces as a decode error, not a truncated transfer.
 
 ---
 
+## 1.11 Config-on-connect (#712)
+
+`sb_config_on_connect_test.go` — `TestConfigOnConnect_Shape` /
+`TestConfigOnConnect_FaultRule`.
+
+Instead of bootstrap → PATCH, the bootstrap manifest URL itself carries the
+session config as `proxy.*` args. The base-port handler materializes the config
+atomically, then 302s to the session port with the args **stripped**:
+
+```
+GET …:30081/go-live/<content>/master_6s.m3u8
+      ?player_id=<uuid>&proxy.shape.rate_mbps=2.5&proxy.labels.test=cfg712
+  → 302 …:301N1/go-live/<content>/master_6s.m3u8?player_id=<uuid>   # proxy.* gone
+```
+
+The tests assert (a) the redirected URL carries no `proxy.*`, (b) the session
+record on `/api/sessions` already reflects the config (`nftables_bandwidth_mbps`,
+`segment_failure_type`, …) **before any PATCH**. Full vocabulary + tier
+precedence + the "segment length is the filename, not an arg" rule live in
+[`api/openapi/v2/DESIGN.md` § 5b](../../api/openapi/v2/DESIGN.md). Config-on-
+connect rides the **same** v2→v1 translator as PATCH, so it accepts exactly the
+PATCH-supported field set (no `filter.variant`/`.codec` yet) and rejects the
+rest with 400.
+
+---
+
 ## 2. Future server-behavior tests (proposed)
 
 Each row below is an as-yet-unwritten test in `tests/server_behavior/`.

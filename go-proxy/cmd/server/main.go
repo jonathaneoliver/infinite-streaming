@@ -5300,13 +5300,28 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				// content. Plain HTTP requests redirect to http://.
 				scheme := requestScheme(r)
 				newURL := fmt.Sprintf("%s://%s:%s/%s", scheme, host, newPort, escapedPath)
-				if r.URL.RawQuery != "" {
-					newURL = newURL + "?" + r.URL.RawQuery
+				// #712: drop any proxy.* config args on reattach — config is
+				// materialized once on first bind; a loop/auto-recovery restart
+				// re-hitting the base port must never re-apply or leak proxy.*
+				// onto the session port.
+				if stripped := stripProxyArgs(r.URL.RawQuery); stripped != "" {
+					newURL = newURL + "?" + stripped
 				}
 				log.Printf("Redirecting to existing session URL: %s %s -> %s", newURL, externalPort, newPort)
 				http.Redirect(w, r, newURL, http.StatusFound)
 				return
 			}
+		}
+		// #712 config-on-connect: parse proxy.* args before allocating a
+		// session so a malformed config is a 400 that consumes no session
+		// slot. Reattach (existing-session) requests already redirected above
+		// and never reach here, so config is materialized exactly once — on
+		// the player's first bind.
+		configPatch, hasConfig, cfgErr := parseProxyArgs(r.URL.Query())
+		if cfgErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]interface{}{"error": "invalid proxy config args", "detail": cfgErr.Error()})
+			return
 		}
 		if isExternalIP(requesterIP) {
 			activeForRequester := countActiveSessionsForIP(sessionList, requesterIP)
@@ -5492,6 +5507,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// Issue #480.
 			"nftables_bandwidth_mbps":                  float64(0),
 		}
+		// #712: materialize proxy.* config onto the fresh SessionData before
+		// it's published. ApplyConfigPatch runs the SAME translator the PATCH
+		// API uses, so the URL-arg vocabulary can't drift from the API model.
+		// Translation only — the kernel is driven below, after the save.
+		if hasConfig {
+			if aerr := v2server.ApplyConfigPatch(sessionData, configPatch); aerr != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]interface{}{"error": "proxy config rejected", "detail": aerr.Error()})
+				return
+			}
+		}
 		a.resetServerLoopState(fmt.Sprintf("%d", allocated))
 		sessionList = append(sessionList, sessionData)
 		a.saveSessionList(sessionList)
@@ -5501,7 +5527,46 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// uncapped. effectiveRate(0) returns the baseline (or 0 on
 		// prod-style deployments). No-op when traffic is nil
 		// (non-Linux dev). Issue #480.
-		if a.defaultRateMbps > 0 && a.traffic != nil {
+		if hasConfig {
+			// #712: drive the kernel from the just-materialized config before
+			// the redirect fires — the client reconnects on the new port
+			// immediately and the first segment burst would otherwise run
+			// unshaped. applySessionShaping resolves the deployment baseline
+			// via effectiveRate, so the no-rate-override case (e.g. labels- or
+			// fault_rules-only config) still gets the baseline cap — this
+			// supersedes the plain baseline apply in the else branch.
+			if port, err := strconv.Atoi(assignedInternalPort); err == nil {
+				if steps := v2server.PatternStepsFromSession(sessionData); len(steps) > 0 {
+					v1steps := make([]NftShapeStep, 0, len(steps))
+					for _, s := range steps {
+						v1steps = append(v1steps, NftShapeStep{
+							RateMbps:        s.RateMbps,
+							DurationSeconds: s.DurationSeconds,
+							Enabled:         s.Enabled,
+						})
+					}
+					delayMs := getInt(sessionData, "nftables_delay_ms")
+					lossPct := getFloat(sessionData, "nftables_packet_loss")
+					if perr := a.applyShapePattern(port, v1steps, delayMs, lossPct); perr != nil {
+						log.Printf("config-on-connect pattern apply failed port=%d: %v", port, perr)
+					}
+				} else {
+					a.applySessionShaping(sessionData, port)
+				}
+				if ft := getString(sessionData, "transport_failure_type"); ft != "" && ft != "none" {
+					consec := getInt(sessionData, "transport_consecutive_failures")
+					if consec < 1 {
+						consec = 1
+					}
+					units := getString(sessionData, "transport_consecutive_units")
+					if units == "" {
+						units = "seconds"
+					}
+					freq := getInt(sessionData, "transport_failure_frequency")
+					a.armTransportFaultLoop(port, ft, consec, units, freq)
+				}
+			}
+		} else if a.defaultRateMbps > 0 && a.traffic != nil {
 			if internalPortInt, err := strconv.Atoi(assignedInternalPort); err == nil {
 				effective := a.effectiveRate(0)
 				if err := a.traffic.UpdateRateLimit(internalPortInt, effective); err != nil {
@@ -5519,8 +5584,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		host := hostWithoutPort(r.Host)
 		scheme := requestScheme(r)
 		newURL := fmt.Sprintf("%s://%s:%s/%s", scheme, host, assignedExternalPort, escapedPath)
-		if r.URL.RawQuery != "" {
-			newURL = newURL + "?" + r.URL.RawQuery
+		// #712: strip proxy.* config args from the redirect — config is already
+		// materialized on the session; the player follows this clean URL and
+		// resolves all child requests against it, so proxy.* never reach the
+		// session port or the child-request space.
+		if stripped := stripProxyArgs(r.URL.RawQuery); stripped != "" {
+			newURL = newURL + "?" + stripped
 		}
 		log.Printf("Redirecting to new URL with port: %s %s -> %s", newURL, externalPort, assignedExternalPort)
 		http.Redirect(w, r, newURL, http.StatusFound)
