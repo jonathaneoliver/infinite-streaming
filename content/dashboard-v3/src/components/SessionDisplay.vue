@@ -45,12 +45,17 @@ import { useChartCoordination } from '@/composables/useChartCoordination';
 // derives its event list from `labels[]` on rows across all three
 // streams (events / network / control_events) instead of a dedicated
 // markers table. See `sessionEvents` computed below.
+// Event category — replaces the old binary effect/cause axis. Four
+// causal roles keyed on stream + the proxy's fault_category. See
+// docs/EVENT_TAXONOMY.md for the model and the full mapping.
+type Category = 'action' | 'injected' | 'condition' | 'reaction';
+
 interface SessionEvent {
   ts?: string;
   event_time?: string;
   type?: string;
   info?: string;
-  kind?: 'effect' | 'cause';
+  category?: Category;
   priority?: 1 | 2 | 3 | 4;
   severity?: string;
   [k: string]: unknown;
@@ -147,13 +152,40 @@ const archivePlayerId = computed(() =>
 // useArchivedSessionMarkers fetch against the retired session_markers
 // table. One synthetic event per label; ts/severity/type come straight
 // from the row + label string.
+// Network-row → category, keyed on the proxy's fault_category (the same
+// signal that drives the waterfall's clock-vs-scissors glyph). A transfer
+// timeout is a guard firing on a real slow transfer, NOT an injected
+// fault — see docs/EVENT_TAXONOMY.md.
+function categoryForNetworkRow(r: Record<string, unknown>): Category {
+  const cat = String((r as { fault_category?: unknown }).fault_category ?? '').toLowerCase();
+  switch (cat) {
+    case 'http':
+    case 'corruption':
+    case 'socket':
+    case 'transport':
+      return 'injected';
+    case 'transfer_timeout':
+      return 'condition';
+    case 'client_disconnect':
+      return 'reaction';
+    default:
+      return hasDegradationLabel(r) ? 'condition' : 'reaction';
+  }
+}
+function hasDegradationLabel(r: Record<string, unknown>): boolean {
+  const labels = Array.isArray((r as { labels?: unknown }).labels)
+    ? ((r as { labels: unknown[] }).labels as string[])
+    : [];
+  return labels.some((l) => /=\*?(slow_|qoe_ttfb_breach|qoe_transfer_stall)/.test(l));
+}
+
 const sessionEvents = computed<SessionEvent[]>(() => {
   // Trigger reactivity on each stream's version ref.
   void timeseries.events.version.value;
   void timeseries.network.version.value;
   void timeseries.control.version.value;
   const out: SessionEvent[] = [];
-  function emit(row: Record<string, unknown>, kind: 'effect' | 'cause') {
+  function emit(row: Record<string, unknown>, category: Category) {
     const labels = Array.isArray((row as { labels?: unknown }).labels)
       ? ((row as { labels: unknown[] }).labels as string[])
       : null;
@@ -168,29 +200,86 @@ const sessionEvents = computed<SessionEvent[]>(() => {
       // filter UI treats `*manifest_failure` and `manifest_failure`
       // as the same bucket type.
       if (type.startsWith('*')) type = type.slice(1);
-      if (sev !== 'error' && sev !== 'critical' && sev !== 'warning' && sev !== 'info' && sev !== 'testing') continue;
-      out.push({ ts, type, severity: sev, kind });
+      // Off-axis: the `testing` tier is harness run metadata (run_id,
+      // total_stalls, …). It lives on the Characterization page + the
+      // session "Test run" chip, never in the event filter.
+      if (sev === 'testing') continue;
+      if (sev !== 'error' && sev !== 'critical' && sev !== 'warning' && sev !== 'info') continue;
+      out.push({ ts, type, severity: sev, category });
     }
   }
-  // Cause / effect axis (post-#474 redefinition):
-  //   - cause  = something the operator / proxy deliberately introduced
-  //              to provoke a reaction. Every control_events row counts
-  //              (fault enables, pattern toggles, shaper edits, the
-  //              pattern_step ticks themselves). On network rows, only
-  //              the proxy-flagged `faulted=1` responses count — those
-  //              are the 1-in-10 HTTP 4xx/5xx returned by the fault
-  //              rules. An organic upstream 5xx the proxy didn't fault
-  //              stays an effect.
-  //   - effect = the player's / network's reaction. All session_events
-  //              rows (stalls, restarts, ABR shifts, errors) and the
-  //              clean network rows.
-  for (const r of timeseries.events.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, 'effect');
-  for (const r of timeseries.network.inRange(0, Number.MAX_SAFE_INTEGER)) {
-    const faulted = Number((r as { faulted?: unknown }).faulted) || 0;
-    emit(r, faulted ? 'cause' : 'effect');
-  }
-  for (const r of timeseries.control.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, 'cause');
+  // Four-category axis — see docs/EVENT_TAXONOMY.md:
+  //   action    — operator/proxy/harness config + lifecycle (control_events)
+  //   injected  — proxy fabricated/destroyed a response (http / corruption /
+  //               socket / transport fault categories)
+  //   condition — a guard/threshold fired on a real degraded transfer
+  //               (transfer_timeout) or a clean-row slow_*/qoe_* breach
+  //   reaction  — player behaviour (session_events) + client_disconnect
+  for (const r of timeseries.events.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, 'reaction');
+  for (const r of timeseries.network.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, categoryForNetworkRow(r));
+  for (const r of timeseries.control.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, 'action');
   return out;
+});
+
+// "Test run" chip — harness run metadata is off the event axis (it isn't a
+// cause/effect), so it surfaces in the session header instead. Derived from
+// the same `testing=<key>_<value>` labels Characterization.vue reads. Null
+// when the play isn't part of a harness run. See docs/EVENT_TAXONOMY.md.
+const TEST_RUN_KEYS = ['run_id', 'test', 'platform', 'total_stalls', 'profile_shifts', 'shocks', 'completed'];
+const testRun = computed<Record<string, string> | null>(() => {
+  void timeseries.events.version.value;
+  void timeseries.network.version.value;
+  void timeseries.control.version.value;
+  const found: Record<string, string> = {};
+  const scan = (rows: Record<string, unknown>[]) => {
+    for (const r of rows) {
+      const labels = Array.isArray((r as { labels?: unknown }).labels)
+        ? ((r as { labels: unknown[] }).labels as string[])
+        : [];
+      for (const l of labels) {
+        if (!l.startsWith('testing=')) continue;
+        const body = l.slice('testing='.length);
+        for (const k of TEST_RUN_KEYS) {
+          if (found[k] === undefined && body.startsWith(k + '_')) {
+            found[k] = body.slice(k.length + 1);
+          }
+        }
+      }
+    }
+  };
+  scan(timeseries.events.inRange(0, Number.MAX_SAFE_INTEGER));
+  scan(timeseries.control.inRange(0, Number.MAX_SAFE_INTEGER));
+  scan(timeseries.network.inRange(0, Number.MAX_SAFE_INTEGER));
+  return found.run_id !== undefined ? found : null;
+});
+
+// Numeric run summaries, in display order, skipping any that are absent
+// (mid-run only run_id exists; summaries are stamped at run end).
+const testRunMetrics = computed<Array<{ label: string; value: string }>>(() => {
+  const tr = testRun.value;
+  if (!tr) return [];
+  const defs: Array<[string, string]> = [
+    ['total_stalls', 'stalls'],
+    ['profile_shifts', 'shifts'],
+    ['shocks', 'shocks'],
+  ];
+  return defs
+    .filter(([k]) => tr[k] !== undefined)
+    .map(([k, label]) => ({ label, value: tr[k] }));
+});
+
+// `completed` arrives as a compact basic-ISO stamp (20260608T175144Z);
+// render it in local time like every other timestamp on the page.
+function compactTsToMs(s: string): number {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(s);
+  if (!m) return NaN;
+  return Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`);
+}
+const testRunCompletedLabel = computed<string>(() => {
+  const c = testRun.value?.completed;
+  if (!c) return '';
+  const ms = compactTsToMs(c);
+  return Number.isFinite(ms) ? fmtTime(ms) : c;
 });
 
 // v3 unified time-series model. Single subscription per
@@ -520,11 +609,24 @@ function eventMs(ev: SessionEvent): number {
   return Number.isFinite(v) ? v : NaN;
 }
 
-// L0 — Kind toggle (orthogonal: effect vs cause)
-const enabledKind = ref<Record<'effect' | 'cause', boolean>>({
-  effect: true,
-  cause: false,
+// L0 — Category toggle (replaces the old effect/cause binary; see
+// docs/EVENT_TAXONOMY.md). The fault signal (injected / condition) and
+// player reactions default on; operator actions default off to keep the
+// config / pattern churn out of the way until asked for.
+const enabledKind = ref<Record<Category, boolean>>({
+  action: false,
+  injected: true,
+  condition: true,
+  reaction: true,
 });
+
+const CATEGORY_META: Record<Category, { label: string; title: string }> = {
+  action: { label: 'Actions', title: 'Actions — operator/proxy/harness configured something (faults, patterns, shaper, lifecycle)' },
+  injected: { label: 'Injected', title: 'Injected faults — the proxy fabricated or destroyed a response (404/5xx, corrupted, socket, transport)' },
+  condition: { label: 'Conditions', title: 'Conditions & results — a guard/threshold fired on a real degraded transfer (transfer timeout, slow segment)' },
+  reaction: { label: 'Reactions', title: 'Reactions — what the player did (stalls, ABR shifts, QoE breaches)' },
+};
+const CATEGORY_ORDER: Category[] = ['action', 'injected', 'condition', 'reaction'];
 
 // L1 — Severity tier (issue #473, replaces numeric Priority 1..4).
 // String tiers, worst-first. Same vocabulary the forwarder writes to
@@ -533,7 +635,9 @@ const enabledKind = ref<Record<'effect' | 'cause', boolean>>({
 // breakage like qoe_stall_severe_midplay / frozen / restart_auto_recovery); Error
 // sits next for system-detected error states (player_error).
 type Severity = 'error' | 'critical' | 'warning' | 'info' | 'testing';
-const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info', 'testing'];
+// `testing` is intentionally omitted — harness run metadata is off-axis
+// (Characterization page + session "Test run" chip), not an event tier.
+const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info'];
 const SEVERITY_META: Record<Severity, { label: string; color: string; bg: string; border: string }> = {
   // Critical wears the red palette (worst-looking — user-visible
   // playback breakage); Error wears the orange palette. Swapped
@@ -634,8 +738,8 @@ function eventSeverity(ev: SessionEvent): Severity {
   }
   return 'warning';
 }
-function eventKindCE(ev: SessionEvent): 'effect' | 'cause' {
-  return ev.kind === 'cause' ? 'cause' : 'effect';
+function eventCategory(ev: SessionEvent): Category {
+  return ev.category ?? 'reaction';
 }
 
 interface AnnotatedEvent extends SessionEvent {
@@ -645,7 +749,7 @@ interface AnnotatedEvent extends SessionEvent {
 
 const kindFilteredEvents = computed<AnnotatedEvent[]>(() =>
   sessionEvents.value
-    .filter((ev) => enabledKind.value[eventKindCE(ev)])
+    .filter((ev) => enabledKind.value[eventCategory(ev)])
     .map((ev) => ({ ...ev, _ts: eventMs(ev), _p: eventSeverity(ev) }))
     .filter((ev) => Number.isFinite(ev._ts))
     .sort((a, b) => a._ts - b._ts),
@@ -666,9 +770,9 @@ const tierCounts = computed<Record<Severity, number>>(() => {
   return c;
 });
 
-function kindCount(k: 'effect' | 'cause'): number {
+function kindCount(k: Category): number {
   let n = 0;
-  for (const ev of sessionEvents.value) if (eventKindCE(ev) === k) n++;
+  for (const ev of sessionEvents.value) if (eventCategory(ev) === k) n++;
   return n;
 }
 
@@ -806,7 +910,7 @@ const railMarkers = computed(() => {
     return {
       leftPct: pct,
       color: SEVERITY_META[ev._p].color,
-      opacity: eventKindCE(ev) === 'effect' ? 1 : 0.4,
+      opacity: eventCategory(ev) === 'reaction' ? 1 : 0.55,
       isCurrent,
       ts: ev._ts,
       ev,
@@ -1167,6 +1271,16 @@ function skipToEnd() {
 
 <template>
   <div class="session-display">
+    <!-- Test-run metadata — off the event axis (see docs/EVENT_TAXONOMY.md);
+         shown here so the viewer still says "this play was harness run X". -->
+    <div v-if="testRun" class="test-run-chip" :title="`Harness run ${testRun.run_id}`">
+      <span class="trc-icon">🧪</span>
+      <span class="trc-key">Test run</span>
+      <span v-if="testRun.test" class="trc-scenario">{{ testRun.test }}</span>
+      <span class="trc-run">run {{ testRun.run_id }}</span>
+      <span v-for="m in testRunMetrics" :key="m.label" class="trc-metric">{{ m.value }} {{ m.label }}</span>
+      <span v-if="testRunCompletedLabel" class="trc-metric">completed {{ testRunCompletedLabel }}</span>
+    </div>
     <!-- Brush + event filter + nav-bar live in a persistent fold so
          the operator can collapse them out of the way without losing
          the live view to a pause-state toggle. Pause-gated visibility
@@ -1274,22 +1388,15 @@ function skipToEnd() {
         <div class="kind-row">
           <span class="chips-label">Show:</span>
           <button
+            v-for="c in CATEGORY_ORDER"
+            :key="c"
             type="button"
-            class="kind-pill effect"
-            :class="{ off: !enabledKind.effect }"
-            @click="enabledKind.effect = !enabledKind.effect"
-            title="Effects — what the player or user saw"
+            class="kind-pill"
+            :class="[c, { off: !enabledKind[c] }]"
+            @click="enabledKind[c] = !enabledKind[c]"
+            :title="CATEGORY_META[c].title"
           >
-            {{ enabledKind.effect ? '✓' : '○' }} Effects · {{ kindCount('effect') }}
-          </button>
-          <button
-            type="button"
-            class="kind-pill cause"
-            :class="{ off: !enabledKind.cause }"
-            @click="enabledKind.cause = !enabledKind.cause"
-            title="Causes — proxy/system actions"
-          >
-            {{ enabledKind.cause ? '✓' : '○' }} Causes · {{ kindCount('cause') }}
+            {{ enabledKind[c] ? '✓' : '○' }} {{ CATEGORY_META[c].label }} · {{ kindCount(c) }}
           </button>
         </div>
 
@@ -1741,6 +1848,20 @@ function skipToEnd() {
 
 /* Event filter ─── L0 / L1 / L2 / L3 */
 .chips-label { font-size: 11px; color: #6b7280; font-weight: 500; margin-right: 2px; }
+.test-run-chip {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  font-size: 12px; color: #475569;
+  background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 6px;
+  padding: 5px 10px; margin: 0 0 10px;
+}
+.test-run-chip .trc-icon { font-size: 13px; }
+.test-run-chip .trc-key { font-weight: 600; color: #334155; }
+.test-run-chip .trc-scenario { font-weight: 600; color: #0f766e; }
+.test-run-chip .trc-run, .test-run-chip .trc-metric { color: #64748b; }
+.test-run-chip .trc-scenario::before,
+.test-run-chip .trc-run::before,
+.test-run-chip .trc-metric::before { content: '·'; margin-right: 6px; color: #cbd5e1; }
+
 .kind-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
 .kind-pill {
   display: inline-flex;
@@ -1754,9 +1875,11 @@ function skipToEnd() {
   cursor: pointer;
   line-height: 1.4;
 }
-.kind-pill.effect { background: #dbeafe; border-color: #93c5fd; color: #1d4ed8; }
-.kind-pill.cause  { background: #fed7aa; border-color: #fdba74; color: #7c2d12; }
-.kind-pill.off    { opacity: 0.4; background: #f3f4f6; border-color: #d1d5db; color: #6b7280; }
+.kind-pill.action    { background: #ede9fe; border-color: #c4b5fd; color: #5b21b6; }
+.kind-pill.injected  { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
+.kind-pill.condition { background: #fef3c7; border-color: #fcd34d; color: #92400e; }
+.kind-pill.reaction  { background: #dbeafe; border-color: #93c5fd; color: #1d4ed8; }
+.kind-pill.off       { opacity: 0.4; background: #f3f4f6; border-color: #d1d5db; color: #6b7280; }
 
 .event-filter {
   margin: 10px 0 0;

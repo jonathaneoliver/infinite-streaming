@@ -159,12 +159,16 @@ const filters = ref<{
   // like "has http_404 AND has-not fault_rule_enabled".
   labels: string[];
   labelsExclude: string[];
+  // 4-category facet (docs/EVENT_TAXONOMY.md). Empty = no constraint; else
+  // OR-semantics: keep plays that contain ≥1 label in any selected category.
+  categories: Category[];
 }>({
   player_id: '', group_id: '', content_id: '', play_id: '',
   classification: 'all',
   harness: 'all',
   platform: '', test: '',
   labels: [], labelsExclude: [],
+  categories: [],
 });
 
 // Test-harness label extraction. The characterization framework
@@ -521,6 +525,19 @@ function matchesHarness(r: SessionRow): boolean {
   }
 }
 
+// Category facet — OR-semantics: with any category selected, keep plays
+// that contain ≥1 label in any of them. Empty selection = no constraint.
+function matchesCategories(r: SessionRow): boolean {
+  const cats = filters.value.categories;
+  if (!cats.length) return true;
+  const byCat = chipsByCategory(r);
+  return cats.some((c) => byCat[c].length > 0);
+}
+function toggleCategoryFilter(c: Category) {
+  const cur = filters.value.categories;
+  filters.value.categories = cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c];
+}
+
 function matches(r: SessionRow): boolean {
   const f = filters.value;
   return (!f.player_id || r.player_id === f.player_id)
@@ -531,6 +548,7 @@ function matches(r: SessionRow): boolean {
     && (!f.test || rowTest(r) === f.test)
     && matchesClassification(r)
     && matchesHarness(r)
+    && matchesCategories(r)
     && matchesLabels(r);
 }
 
@@ -1035,21 +1053,48 @@ function labelChips(r: SessionRow): LabelChip[] {
   return allLabelChips(r).filter((c) => c.cls !== 'testing');
 }
 
-// #656: cause/effect split. CAUSE = things the operator/harness deliberately
-// injected (fault toggles, shaper/pattern edits, lifecycle); EFFECT =
-// everything else, i.e. how the player reacted (qoe_*, stalls, downshifts,
-// breaches, transport/segment failures). Classify by label family; the
-// `*` synthMark prefix is stripped first.
-const CAUSE_RE = /^(fault|pattern|shaper_config|timeouts_changed|loop_server|session_start|session_end|content_changed|label_changed|control_change)/;
-function isCauseLabel(name: string): boolean {
-  const n = name.startsWith('*') ? name.slice(1) : name;
-  return CAUSE_RE.test(n);
+// 4-category classification — mirrors the viewer's axis (see
+// docs/EVENT_TAXONOMY.md): Actions / Injected / Conditions / Reactions.
+// The list only has label strings (no per-row `fault_category`), so the
+// synthesized failure rollups (segment/manifest) are ambiguous; they're
+// disambiguated by a co-occurring unambiguous sibling on the same play
+// (every `*segment_failure` row also carries an http_*/timeout label,
+// and both land in the histogram). The `*` synthMark prefix is stripped.
+type Category = 'action' | 'injected' | 'condition' | 'reaction';
+const CAT_ACTION_RE    = /^(fault_on|fault_off|fault_rule|pattern_|shaper_|timeouts_changed|loop_server|session_start|session_end|server_start|content_changed|label_changed|control_change)/;
+const CAT_CONDITION_RE = /^(fault_timeout|transfer_active_timeout|transfer_idle_timeout|slow_request|slow_segment|qoe_ttfb_breach|qoe_transfer_stall)/;
+const CAT_INJECTED_RE  = /^(http_4xx|http_5xx|fault_other|fault_incomplete|corrupted|transport_socket)/;
+const CAT_AMBIGUOUS_RE = /^(segment_failure|manifest_failure|master_manifest_failure)/;
+function baseLabelName(name: string): string { return name.startsWith('*') ? name.slice(1) : name; }
+function labelCategory(name: string, playTypes: Set<string>): Category {
+  const n = baseLabelName(name);
+  if (CAT_ACTION_RE.test(n)) return 'action';
+  if (CAT_CONDITION_RE.test(n)) return 'condition';
+  if (CAT_INJECTED_RE.test(n)) return 'injected';
+  if (CAT_AMBIGUOUS_RE.test(n)) {
+    for (const t of playTypes) if (CAT_INJECTED_RE.test(t)) return 'injected';
+    for (const t of playTypes) if (CAT_CONDITION_RE.test(t)) return 'condition';
+    return 'injected'; // a failure with no disambiguating sibling
+  }
+  return 'reaction';
 }
-function causeChips(r: SessionRow): LabelChip[] {
-  return labelChips(r).filter((c) => isCauseLabel(c.name));
+const CATEGORY_ORDER: Category[] = ['action', 'injected', 'condition', 'reaction'];
+const CATEGORY_TAG: Record<Category, { tag: string; title: string }> = {
+  action:    { tag: 'act',  title: 'Actions — operator/proxy/harness config (faults, patterns, shaper, lifecycle)' },
+  injected:  { tag: 'inj',  title: 'Injected faults — fabricated/destroyed responses (4xx/5xx, corrupted, socket)' },
+  condition: { tag: 'cond', title: 'Conditions & results — transfer timeouts, slow segments, QoE network breaches' },
+  reaction:  { tag: 'rxn',  title: 'Reactions — player behaviour (QoE, stalls, shifts)' },
+};
+function playTypeSet(r: SessionRow): Set<string> {
+  const s = new Set<string>();
+  for (const c of labelChips(r)) s.add(baseLabelName(c.name));
+  return s;
 }
-function effectChips(r: SessionRow): LabelChip[] {
-  return labelChips(r).filter((c) => !isCauseLabel(c.name));
+function chipsByCategory(r: SessionRow): Record<Category, LabelChip[]> {
+  const types = playTypeSet(r);
+  const out: Record<Category, LabelChip[]> = { action: [], injected: [], condition: [], reaction: [] };
+  for (const c of labelChips(r)) out[labelCategory(c.name, types)].push(c);
+  return out;
 }
 
 // #653/#656: per-group cap before the "+N more" toggle collapses the tail.
@@ -1062,19 +1107,15 @@ function toggleLabelRow(playId: string) {
   if (s.has(playId)) s.delete(playId); else s.add(playId);
   expandedLabelRows.value = s;
 }
-// Visible head of each group: all when expanded, else the capped head.
-function visibleCauseChips(r: SessionRow): LabelChip[] {
-  const all = causeChips(r);
+// Visible head of one category group: all when expanded, else capped.
+function visibleCategoryChips(r: SessionRow, cat: Category): LabelChip[] {
+  const all = chipsByCategory(r)[cat];
   return expandedLabelRows.value.has(String(r.play_id)) ? all : all.slice(0, LABEL_CHIP_CAP);
 }
-function visibleEffectChips(r: SessionRow): LabelChip[] {
-  const all = effectChips(r);
-  return expandedLabelRows.value.has(String(r.play_id)) ? all : all.slice(0, LABEL_CHIP_CAP);
-}
-// Combined hidden count across both groups (drives the "+N more" label).
+// Combined hidden count across all category groups (drives "+N more").
 function hiddenLabelCount(r: SessionRow): number {
-  return Math.max(0, causeChips(r).length - LABEL_CHIP_CAP)
-    + Math.max(0, effectChips(r).length - LABEL_CHIP_CAP);
+  const byCat = chipsByCategory(r);
+  return CATEGORY_ORDER.reduce((sum, c) => sum + Math.max(0, byCat[c].length - LABEL_CHIP_CAP), 0);
 }
 
 // #563 — human-readable "how did this play end?" from the Phase 2
@@ -1375,6 +1416,19 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
               >{{ c.label }}</button>
             </div>
 
+            <div class="class-chip-wrap" title="Filter by event category (docs/EVENT_TAXONOMY.md). Multi-select; keeps plays containing ≥1 label in any selected category.">
+              <span class="ctrl-label-text">Category:</span>
+              <button
+                v-for="cat in CATEGORY_ORDER"
+                :key="cat"
+                type="button"
+                class="class-chip"
+                :class="['cat-chip-' + cat, { active: filters.categories.includes(cat) }]"
+                :title="CATEGORY_TAG[cat].title"
+                @click="toggleCategoryFilter(cat)"
+              >{{ CATEGORY_TAG[cat].tag }}</button>
+            </div>
+
             <!-- #673 — Scenario facets. Only rendered when the current rows
                  carry harness-stamped platform/test metadata, so manual-only
                  views aren't cluttered with empty selects. -->
@@ -1587,25 +1641,17 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                     <span v-if="flagChips(r).length === 0" class="dash">—</span>
                   </td>
                   <td class="cell-labels">
-                    <template v-if="visibleEffectChips(r).length">
-                      <span class="label-group-tag" title="Player reaction (QoE, stalls, shifts, breaches)">plyr</span>
-                      <span
-                        v-for="chip in visibleEffectChips(r)"
-                        :key="'e-' + chip.label"
-                        class="label-chip"
-                        :class="'label-' + chip.cls"
-                        :title="chip.label"
-                      >{{ chip.count }}× {{ chip.name }}</span>
-                    </template>
-                    <template v-if="visibleCauseChips(r).length">
-                      <span class="label-group-tag" title="Operator / harness injected (faults, shaping, patterns)">inj</span>
-                      <span
-                        v-for="chip in visibleCauseChips(r)"
-                        :key="'c-' + chip.label"
-                        class="label-chip"
-                        :class="'label-' + chip.cls"
-                        :title="chip.label"
-                      >{{ chip.count }}× {{ chip.name }}</span>
+                    <template v-for="cat in CATEGORY_ORDER" :key="cat">
+                      <template v-if="visibleCategoryChips(r, cat).length">
+                        <span class="label-group-tag" :class="'cat-tag-' + cat" :title="CATEGORY_TAG[cat].title">{{ CATEGORY_TAG[cat].tag }}</span>
+                        <span
+                          v-for="chip in visibleCategoryChips(r, cat)"
+                          :key="cat + '-' + chip.label"
+                          class="label-chip"
+                          :class="['label-' + chip.cls, 'cat-' + cat]"
+                          :title="chip.label"
+                        >{{ chip.count }}× {{ chip.name }}</span>
+                      </template>
                     </template>
                     <button
                       v-if="hiddenLabelCount(r) > 0 && !expandedLabelRows.has(String(r.play_id))"
@@ -1930,6 +1976,21 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 .label-critical { background: #fee2e2; color: #7f1d1d; border-color: #fca5a5; }
 .label-error    { background: #ffedd5; color: #7c2d12; border-color: #fdba74; }
 .label-testing  { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
+/* Category accent (docs/EVENT_TAXONOMY.md) — a left border tints each chip
+   by causal role while the background keeps the severity tint. The group
+   tags + filter facet chips share the same four accents. */
+.label-chip.cat-action    { border-left: 3px solid #8b5cf6; }
+.label-chip.cat-injected  { border-left: 3px solid #ef4444; }
+.label-chip.cat-condition { border-left: 3px solid #f59e0b; }
+.label-chip.cat-reaction  { border-left: 3px solid #3b82f6; }
+.cat-tag-action    { color: #7c3aed; }
+.cat-tag-injected  { color: #dc2626; }
+.cat-tag-condition { color: #d97706; }
+.cat-tag-reaction  { color: #2563eb; }
+.class-chip.cat-chip-action    { border-left: 3px solid #8b5cf6; }
+.class-chip.cat-chip-injected  { border-left: 3px solid #ef4444; }
+.class-chip.cat-chip-condition { border-left: 3px solid #f59e0b; }
+.class-chip.cat-chip-reaction  { border-left: 3px solid #3b82f6; }
 /* #653: "+N more" / "show less" toggle for the capped label list. */
 .label-more {
   display: inline-block;
