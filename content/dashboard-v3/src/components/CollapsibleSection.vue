@@ -26,6 +26,13 @@ const props = defineProps<{
    *  section folded — without this, opening the section after replay
    *  shows the chart with only the latest sample. */
   eager?: boolean;
+  /** External "default-collapse" signal (issue #579 compare mode). When
+   *  this transitions to true the section folds; when it returns to
+   *  false the section restores whatever open state it had before. The
+   *  operator can still toggle freely while it's active — this only sets
+   *  the default on each transition — and the auto-fold is NOT persisted,
+   *  so it never overwrites the operator's saved preference. */
+  forceCollapsed?: boolean;
 }>();
 
 const STORAGE_PREFIX = 'testing_session_collapse_';
@@ -108,6 +115,24 @@ onMounted(() => {
 watch(
   () => props.persistKey,
   () => { isOpen.value = resolveInitial(); },
+);
+
+// External default-collapse (issue #579). On false→true, remember the
+// current open state and fold; on true→false, restore it. The operator
+// can still toggle in between (toggle() writes isOpen + persists); the
+// auto-fold itself is deliberately NOT persisted.
+let savedOpenBeforeForce: boolean | null = null;
+watch(
+  () => props.forceCollapsed,
+  (v, old) => {
+    if (v && !old) {
+      savedOpenBeforeForce = isOpen.value;
+      isOpen.value = false;
+    } else if (!v && old) {
+      isOpen.value = savedOpenBeforeForce ?? resolveInitial();
+      savedOpenBeforeForce = null;
+    }
+  },
 );
 </script>
 
