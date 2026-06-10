@@ -37,7 +37,23 @@ final class PlayerViewModel: ObservableObject {
     @Published var codec: CodecFilter = .h264
 
     @Published private(set) var statusText: String = ""
+    /// The URL handed to the player at play start — the **bootstrap** URL.
+    /// Under the `app` config-on-connect driver (#714) this carries the
+    /// launch-arg `proxy.*` fragment so the proxy materializes the session
+    /// config on the first request. `reload()` rebuilds it from scratch via
+    /// `buildURLAndLoad`, so it always reflects the live bootstrap intent.
     @Published private(set) var currentURL: URL?
+    /// The **reattach** URL: `currentURL` with the one-shot `proxy.*`
+    /// bootstrap args stripped (the `player_id` is preserved). Replayed by
+    /// `retry()` so an auto-recovery restart re-attaches to the live shaping
+    /// session instead of re-materializing it. The distinction only matters
+    /// under `CHAR_PROXY_CONFIG=app`: if the session was reaped (e.g. a
+    /// >5-min wedge) and `retry()` replayed the `proxy.*`-bearing URL, the
+    /// proxy's new-session branch would rewind a mid-progression pattern to
+    /// step 0 instead of coming back honestly unconfigured. Under the
+    /// default `curl` driver the URL never carries `proxy.*`, so this equals
+    /// `currentURL`. Issue #719 (follow-up to #714/#703/#706).
+    private var reattachURL: URL?
 
     // -- Advanced flags (persisted alongside developer mode) -----------------
 
@@ -849,6 +865,9 @@ final class PlayerViewModel: ObservableObject {
         final = appendAttemptID(to: final)
         final = appendStartTime(to: final)
         self.currentURL = final
+        // Record the proxy.*-stripped reattach target for retry() (#719).
+        // No-op under the default curl driver (URL has no proxy.* args).
+        self.reattachURL = Self.removeProxyArgs(from: final)
         self.statusText = final.absoluteString
         loadStream(url: final)
         schedulePlayIdRotation()
@@ -895,6 +914,16 @@ final class PlayerViewModel: ObservableObject {
     private static func removePlayerId(from url: URL) -> URL {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
         components.queryItems = components.queryItems?.filter { $0.name != "player_id" }
+        if components.queryItems?.isEmpty == true { components.queryItems = nil }
+        return components.url ?? url
+    }
+
+    /// Strip the one-shot `proxy.*` config-on-connect bootstrap args (#714),
+    /// leaving every other query item — including `player_id` — intact.
+    /// Yields the reattach URL replayed by `retry()`. See `reattachURL`.
+    private static func removeProxyArgs(from url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        components.queryItems = components.queryItems?.filter { !$0.name.hasPrefix("proxy.") }
         if components.queryItems?.isEmpty == true { components.queryItems = nil }
         return components.url ?? url
     }
@@ -1282,6 +1311,7 @@ final class PlayerViewModel: ObservableObject {
     /// signals to applyContentFilter that we're not actively playing.
     func clearCurrentURL() {
         currentURL = nil
+        reattachURL = nil
         player.replaceCurrentItem(with: nil)
     }
 
@@ -1291,7 +1321,12 @@ final class PlayerViewModel: ObservableObject {
     /// codec-error handler and the auto-recovery branch make: replace
     /// the *same* URL on the *same* AVPlayer.
     func retry() {
-        guard let url = currentURL else { return }
+        // Replay the REATTACH URL (proxy.* stripped), not currentURL — a
+        // recovery restart must re-attach to the live shaping session, never
+        // re-materialize it. If the session was reaped it comes back honestly
+        // unconfigured rather than silently rewound to pattern step 0 (#719).
+        // Falls back to currentURL on the (unexpected) nil — same as before.
+        guard let url = reattachURL ?? currentURL else { return }
         // A retry is a recovery attempt within the SAME play. Counters
         // persist across the AVPlayerItem replacement: snapshotForRestart
         // copies the current dropped/displayed/variant-dwell totals
@@ -1499,7 +1534,13 @@ final class PlayerViewModel: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 // Re-prepare from the URL we had loaded before backgrounding.
-                guard let url = self?.currentURL else { return }
+                // A foreground resume is a reattach to the SAME play (no
+                // play_id rotation), so replay the proxy.*-stripped reattach
+                // URL — never re-bootstrap. If the session was reaped during
+                // a long background it comes back unconfigured instead of
+                // re-materializing the original shaping at pattern step 0
+                // (#719, same hazard as the auto-recovery restart paths).
+                guard let url = self?.reattachURL ?? self?.currentURL else { return }
                 self?.loadStream(url: url)
             }
         }
@@ -1645,7 +1686,10 @@ final class PlayerViewModel: ObservableObject {
         // auto-recovery flag. AndroidView counterpart's NO_MEMORY path
         // doesn't apply here.
         statusText = "Error: \(message)"
-        if autoRecovery, let url = currentURL {
+        // Auto-recovery is a reattach, not a fresh bootstrap: replay the
+        // proxy.*-stripped reattach URL so a reaped session comes back
+        // unconfigured rather than re-materialized at pattern step 0 (#719).
+        if autoRecovery, let url = reattachURL ?? currentURL {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 self?.loadStream(url: url)
@@ -1658,7 +1702,9 @@ final class PlayerViewModel: ObservableObject {
     }
 
     private func handleErrorRetry(reason: String) {
-        guard codecRetries < maxCodecRetries, let url = currentURL else {
+        // Reattach (proxy.* stripped), never re-bootstrap the shaping
+        // session — see retry()/handlePlayerError and #719.
+        guard codecRetries < maxCodecRetries, let url = reattachURL ?? currentURL else {
             // Retry budget exhausted → the play is dead. Distinguish
             // pre-vs-post-first-frame for the right Phase 2 status. No
             // NSError on this path (retry exhaustion, not a single fatal
