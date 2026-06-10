@@ -22,7 +22,8 @@ Slider mode (any subset; omitted fields are not modified):
 
 Pattern mode (generates a step list from the player's current variants):
   --pattern NAME     pyramid | ramp_up | ramp_down | square_wave | transient_shock | sliders
-  --step-seconds N   per-step duration: 6 | 12 | 18 | 24 (default 12)
+  --step-seconds N   per-step duration: 6 | 12 | 18 | 24 | 60 | 120 (default 12;
+                     60/120 give buffer-draining holds for transient_shock)
   --margin PCT       flat headroom above each variant rate: 0|5|10|25|50
                      (default 5; covers TCP/IP+TLS+HTTP framing; 0 is a
                      deliberate-stall footgun)
@@ -72,7 +73,7 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	delay := fs.Float64("delay", -1, "delay ms")
 	loss := fs.Float64("loss", -1, "loss %")
 	pattern := fs.String("pattern", "", "pattern template (pyramid|ramp_up|ramp_down|square_wave|transient_shock|sliders)")
-	stepSeconds := fs.Int("step-seconds", 12, "per-step duration: 6|12|18|24")
+	stepSeconds := fs.Int("step-seconds", 12, "per-step duration: 6|12|18|24|60|120")
 	margin := fs.Int("margin", 5, "headroom %% above variant rate: 0|5|10|25|50 (5 covers protocol overhead)")
 	maxStep := fs.Float64("max-step", ladder.DefaultMaxStep, "max ratio between consecutive caps before a geometric fill is inserted (default 1.15; raise to coarsen + shorten the pattern)")
 	topHeadroom := fs.Float64("top-headroom", ladder.DefaultTopHeadroomPct, "start the ladder this %% over the top variant's peak (default 50; 0 disables the headroom start rung)")
@@ -406,10 +407,10 @@ func parseTemplate(s string) (proxy.PatternTemplate, error) {
 
 func parseStepSeconds(n int) (proxy.PatternDefaultStepSeconds, error) {
 	switch n {
-	case 6, 12, 18, 24:
+	case 6, 12, 18, 24, 60, 120:
 		return proxy.PatternDefaultStepSeconds(n), nil
 	}
-	return 0, fmt.Errorf("invalid --step-seconds %d: must be 6|12|18|24", n)
+	return 0, fmt.Errorf("invalid --step-seconds %d: must be 6|12|18|24|60|120", n)
 }
 
 func parseMarginPct(n int) (proxy.PatternMarginPct, error) {

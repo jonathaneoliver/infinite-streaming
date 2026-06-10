@@ -53,7 +53,7 @@ const MARGIN_CHOICES = [0, 5, 10, 25, 50] as const;
 type Margin = (typeof MARGIN_CHOICES)[number];
 const DEFAULT_MARGIN_PCT: Margin = 5;
 
-const STEP_SECONDS_CHOICES = [6, 12, 18, 24] as const;
+const STEP_SECONDS_CHOICES = [6, 12, 18, 24, 60, 120] as const;
 type StepSeconds = (typeof STEP_SECONDS_CHOICES)[number];
 
 // #551 — fill density. The limit ladder carries BOTH a peak (BANDWIDTH)

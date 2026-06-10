@@ -187,10 +187,12 @@ func (e HeartbeatEventType) Valid() bool {
 
 // Defines values for PatternDefaultStepSeconds.
 const (
-	PatternDefaultStepSecondsN12 PatternDefaultStepSeconds = 12
-	PatternDefaultStepSecondsN18 PatternDefaultStepSeconds = 18
-	PatternDefaultStepSecondsN24 PatternDefaultStepSeconds = 24
-	PatternDefaultStepSecondsN6  PatternDefaultStepSeconds = 6
+	PatternDefaultStepSecondsN12  PatternDefaultStepSeconds = 12
+	PatternDefaultStepSecondsN18  PatternDefaultStepSeconds = 18
+	PatternDefaultStepSecondsN24  PatternDefaultStepSeconds = 24
+	PatternDefaultStepSecondsN6   PatternDefaultStepSeconds = 6
+	PatternDefaultStepSecondsN60  PatternDefaultStepSeconds = 60
+	PatternDefaultStepSecondsN120 PatternDefaultStepSeconds = 120
 )
 
 // Valid indicates whether the value is a known member of the PatternDefaultStepSeconds enum.
@@ -203,6 +205,10 @@ func (e PatternDefaultStepSeconds) Valid() bool {
 	case PatternDefaultStepSecondsN24:
 		return true
 	case PatternDefaultStepSecondsN6:
+		return true
+	case PatternDefaultStepSecondsN60:
+		return true
+	case PatternDefaultStepSecondsN120:
 		return true
 	default:
 		return false
