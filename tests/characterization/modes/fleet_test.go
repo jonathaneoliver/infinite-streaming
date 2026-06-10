@@ -244,19 +244,22 @@ func (b *fleetStartBarrier) giveUp() {
 	b.mu.Unlock()
 }
 
-// staggerFleetLaunch spreads parallel fleet launches out by fleet index so N
-// XCUITest sessions don't all cold-build WDA on one Appium server at the same
-// instant — the simultaneous peak is what pushed the 3rd/4th session-create
-// past its timeout in a 4-sim run. The fleetStartBarrier (above) re-synchronizes
-// the actual sweep start afterward, so this only affects bring-up order. Index 0
-// doesn't wait, so single-device runs are unaffected. Tunable via
-// CHAR_FLEET_STAGGER_SEC (default 30; 0 disables).
+// staggerFleetLaunch optionally spreads parallel fleet launches by fleet index
+// so N XCUITest sessions don't all cold-build WDA on one Appium server at once.
+// Default is 0 (no stagger): with the 180s Appium client timeout, Appium
+// serializes the session-creates internally and a 4-sim fleet binds fine
+// launching simultaneously (verified) — fastest bring-up, though all the WDA +
+// forceAppLaunch churn happens at the same instant (visually busy). Raise
+// CHAR_FLEET_STAGGER_SEC to smooth that out or to protect larger fleets / slower
+// machines where 4+ concurrent WDA builds might exceed the timeout. The
+// fleetStartBarrier re-synchronizes the actual playback/sweep start regardless,
+// so this only affects bring-up order. Index 0 never waits.
 func staggerFleetLaunch(t *testing.T, fleetIndex int) {
 	t.Helper()
 	if fleetIndex <= 0 {
 		return
 	}
-	per := envInt("CHAR_FLEET_STAGGER_SEC", 30)
+	per := envInt("CHAR_FLEET_STAGGER_SEC", 0)
 	if per <= 0 {
 		return
 	}
