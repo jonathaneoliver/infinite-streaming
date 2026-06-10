@@ -473,6 +473,9 @@ function laneClose(key: string, t: number) {
   if (!cur) return;
   cur.end = t;
   const dur = ((t - cur.ts0) / 1000).toFixed(1);
+  // `cur.content` was already HTML-escaped at laneOpen, so it is safe to
+  // interpolate into the tooltip verbatim (re-escaping would double-encode).
+  // Issue #625.
   cur.title = `${EVENT_LANES[key]?.label ?? key}: ${cur.content}\n${fmtTime(cur.ts0)} → ${fmtTime(t)} (${dur}s)`;
   itemsDS?.update(cur);
   openRanges[key] = null;
@@ -480,15 +483,18 @@ function laneClose(key: string, t: number) {
 
 function laneOpen(key: string, t: number, label: string, color: string) {
   const id = nextId++;
+  // `label` is session-derived; vis renders both `content` (bar text)
+  // and `title` (tooltip) as HTML, so escape once and reuse. Issue #625.
+  const safeLabel = escapeHTML(label);
   const item: TimelineRangeItem = {
     id,
     group: key,
-    content: label,
+    content: safeLabel,
     start: t,
     end: t + 1,
     ts0: t,
     type: 'range',
-    title: `${EVENT_LANES[key]?.label ?? key}: ${label}\n${fmtTime(t)}`,
+    title: `${EVENT_LANES[key]?.label ?? key}: ${safeLabel}\n${fmtTime(t)}`,
     style: `background-color: ${color}; border-color: ${color}; color: #fff;`,
   };
   openRanges[key] = item;
@@ -512,13 +518,19 @@ function ensureVariantLane(mbps: number, resolution: string) {
 
 function pushPoint(group: string, t: number, label: string, color: string, detail?: string) {
   const id = nextId++;
+  // The tooltip is HTML-rendered by vis. `label` is a static literal at
+  // every call site, but `detail` can carry session-derived data (e.g.
+  // `r.error`), so escape both — the embedded literal `\n` is untouched by
+  // escapeHTML and still renders as a line break. Issue #625.
+  const safeLabel = escapeHTML(label);
+  const safeDetail = detail ? escapeHTML(detail) : '';
   const item: TimelinePointItem = {
     id,
     group,
     content: '',
     start: t,
     type: 'point',
-    title: detail ? `${label}${detail}\n${fmtTime(t)}` : `${label}\n${fmtTime(t)}`,
+    title: detail ? `${safeLabel}${safeDetail}\n${fmtTime(t)}` : `${safeLabel}\n${fmtTime(t)}`,
     style: `background-color: ${color}; border-color: ${color};`,
   };
   items.push(item);
@@ -533,7 +545,9 @@ function rebuildGroups() {
   // reported `video_resolution` flickers during a switch.
   const variantGroups = variantOrder.map((v) => ({
     id: v.key,
-    content: variantLabel(v.mbps, v.resolution),
+    // vis renders group `content` as HTML; `v.resolution` is manifest-
+    // derived, so escape the rendered label. Issue #625.
+    content: escapeHTML(variantLabel(v.mbps, v.resolution)),
   }));
   const groups: any[] = [
     { id: 'PLAYER_SECTION', content: 'PLAYER', nestedGroups: [
@@ -607,6 +621,14 @@ async function ensureTimeline(): Promise<void> {
         // render as multi-line, vertically-spread fields. `overflowMethod`
         // flips the tooltip when it would clip the timeline edge.
         tooltip: { followMouse: true, overflowMethod: 'flip' },
+        // Disabling vis's built-in sanitizer is required so the styled,
+        // multi-line AVMetrics tooltip (`<div style=…>`/`<span>`) renders
+        // — vis's default XSS filter would strip the inline `style`/tags.
+        // This is safe because EVERY session-derived value that reaches an
+        // item `content`/`title` is HTML-escaped at source via escapeHTML
+        // (laneOpen, laneClose, pushPoint, coalesce, variant group labels,
+        // ingestAVMetric, formatAVMetricRawHTML). Only developer-authored
+        // formatting literals remain unescaped here. Issues #486, #625.
         xss: { disabled: true },
       });
       // Pause/live transitions come from the Live toggle button, the
@@ -878,15 +900,19 @@ function renderStatefulLanes(nowMs: number) {
       // bar stretches across the visible window.
       const end = j < seq.length ? seq[j].ts : nowMs;
       const durSec = ((end - start) / 1000).toFixed(1);
+      // `label` is session-derived (player state/reason, resolution,
+      // play_id); vis renders both `content` and `title` as HTML, so
+      // escape once and reuse. `type` is a static lane literal. Issue #625.
+      const safeLabel = escapeHTML(label);
       desired.push({
         id: statefulItemId(type, runIndex++) as any,
         group: lane,
-        content: label,
+        content: safeLabel,
         start,
         end: Math.max(end, start + 1),
         ts0: start,
         type: 'range',
-        title: `${type}: ${label}\n${fmtTime(start)} → ${fmtTime(end)} (${durSec}s)`,
+        title: `${type}: ${safeLabel}\n${fmtTime(start)} → ${fmtTime(end)} (${durSec}s)`,
         style: `background-color: ${color}; border-color: ${color}; color: #fff;`,
       });
       i = j;
@@ -1138,7 +1164,9 @@ function ingestAVMetric(row: Record<string, unknown>) {
   const item: TimelineRangeItem = {
     id,
     group: 'AVMETRICS',
-    content: short,
+    // `short` derives from the session's `event_type`; vis renders the bar
+    // `content` as HTML (the tooltip path already escapes). Issue #625.
+    content: escapeHTML(short),
     start: t,
     end: t + computeAVMetricsDurationMs(),
     ts0: t,
