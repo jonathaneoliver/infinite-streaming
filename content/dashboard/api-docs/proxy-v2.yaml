@@ -1483,8 +1483,8 @@ components:
           items: { $ref: '#/components/schemas/PatternStep' }
         default_step_seconds:
           type: integer
-          enum: [6, 12, 18, 24]
-          description: 'Default per-step duration the dashboard chose when generating the step list.'
+          enum: [6, 12, 18, 24, 60, 120]
+          description: 'Default per-step duration the dashboard chose when generating the step list. 60 / 120 give buffer-draining holds for transient_shock-style probes.'
         margin_pct:
           type: integer
           enum: [0, 5, 10, 25, 50]

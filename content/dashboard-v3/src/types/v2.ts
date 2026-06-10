@@ -1833,10 +1833,10 @@ export interface components {
             template?: "sliders" | "square" | "square_wave" | "ramp_up" | "ramp_down" | "pyramid" | "transient_shock";
             steps: components["schemas"]["PatternStep"][];
             /**
-             * @description Default per-step duration the dashboard chose when generating the step list.
+             * @description Default per-step duration the dashboard chose when generating the step list. 60 / 120 give buffer-draining holds for transient_shock-style probes.
              * @enum {integer}
              */
-            default_step_seconds?: 6 | 12 | 18 | 24;
+            default_step_seconds?: 6 | 12 | 18 | 24 | 60 | 120;
             /**
              * @description Headroom percent above the variant rate used when sizing template steps. 0 = exact (deliberate-stall footgun). 5 = default — covers TCP/IP + TLS 1.3 + HTTP/2 framing overhead on a LAN. 10 = real WiFi with retransmits. 25 / 50 = stress-test over-headroom.
              * @enum {integer}
