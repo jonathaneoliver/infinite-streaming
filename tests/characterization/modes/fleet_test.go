@@ -169,6 +169,25 @@ func fleetAutoboot() bool {
 	return strings.TrimSpace(os.Getenv("CHAR_FLEET_AUTOBOOT")) == "1"
 }
 
+// staggerFleetLaunch spreads parallel fleet launches out by fleet index so N
+// XCUITest sessions don't all cold-build WDA on one Appium server at the same
+// instant — the simultaneous peak is what pushed the 3rd/4th session-create
+// past its timeout in a 4-sim run. Index 0 doesn't wait, so single-device runs
+// are unaffected. Tunable via CHAR_FLEET_STAGGER_SEC (default 30; 0 disables).
+func staggerFleetLaunch(t *testing.T, fleetIndex int) {
+	t.Helper()
+	if fleetIndex <= 0 {
+		return
+	}
+	per := envInt("CHAR_FLEET_STAGGER_SEC", 30)
+	if per <= 0 {
+		return
+	}
+	d := time.Duration(fleetIndex*per) * time.Second
+	t.Logf("fleet[%d] staggering launch by %s (avoid simultaneous WDA cold-build)", fleetIndex, d)
+	time.Sleep(d)
+}
+
 // seedFleetServer writes the harness's server profile into a freshly-booted
 // sim's app UserDefaults so it skips the blocking ServerPickerScreen and
 // connects straight to HARNESS_BASE_URL. Best-effort: a failure is logged (the

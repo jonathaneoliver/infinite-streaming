@@ -101,6 +101,10 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device) {
 	picked := &dev
 	t.Logf("device: %s (fleet index %d)", picked, dev.FleetIndex)
 
+	// Spread parallel fleet launches so N sims don't cold-build WDA at once
+	// (no-op for index 0 / single-device runs).
+	staggerFleetLaunch(t, dev.FleetIndex)
+
 	// --- bootstrap: read the manifest BEFORE kill+launch so we can
 	// cold-start at the pyramid floor. #632: the ascent must BEGIN on the
 	// bottom variant, and the only stall-free way to get there is to apply

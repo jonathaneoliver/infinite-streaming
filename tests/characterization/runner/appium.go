@@ -72,7 +72,11 @@ func NewAppiumLauncher() *AppiumLauncher {
 		closeBeat:        800 * time.Millisecond,
 		BundleIDs:        cloneBundleIDs(),
 		sessions:         map[string]string{},
-		hc:               &http.Client{Timeout: 60 * time.Second},
+		// 180s, not 60s: a session-create cold-builds WDA on the sim, and an
+		// N-sim fleet queues N of those on one Appium server — the later ones
+		// blow past 60s. doRequest passes the caller's ctx (NewRequestWithContext)
+		// so per-call deadlines still apply; this is just the backstop ceiling.
+		hc: &http.Client{Timeout: 180 * time.Second},
 	}
 }
 
