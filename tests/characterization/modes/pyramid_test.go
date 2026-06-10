@@ -111,72 +111,35 @@ func runPyramid(t *testing.T, p runner.Platform) {
 	}
 
 	appium, isAppium := launcher.(*runner.AppiumLauncher)
-	coldStart := isAppium && preFloor > 0
-	conservativeStart := isAppium && !coldStart
 
 	// #config — read the per-run configuration axes (segment, LocalProxy,
-	// transfer-timeout) and force the launch-arg ones (segment via
-	// -is.segment, LocalProxy via -is.flag.local_proxy) on the single cold
-	// launch below so the player starts on them from frame 1. iOS folds
-	// these into UserDefaults (NSArgumentDomain, highest precedence). The
-	// transfer-timeout axis is applied server-side after the player binds.
+	// transfer-timeout). The launch-arg ones (segment via -is.segment,
+	// LocalProxy via -is.flag.local_proxy) plus the minted -is.player_id are
+	// forced on the single cold launch in the Appium block below, so the
+	// player starts on them from frame 1; iOS folds them into UserDefaults
+	// (NSArgumentDomain). The transfer-timeout axis is applied server-side.
 	cfg := readRunConfig(t, isAppium)
-	if args := cfg.launchArgs(); len(args) > 0 {
-		appium.SetLaunchArgs(args)
-		t.Logf("forcing run config via launch args %v — cold start lands on it", args)
-	}
 	segment := cfg.segment
 
 	var sess *runner.Session
-	switch {
-	case coldStart:
+	if isAppium {
+		// #714 config-on-connect: mint the player_id, resolve the cold-start
+		// floor (prior manifest → master parse → conservative), and wire the
+		// driver (default = harness pre-configures via a curl, so the variant
+		// ladder is known up front; CHAR_PROXY_CONFIG=app → the player emits
+		// proxy.* on its own bootstrap URL). Replaces the old coldStart /
+		// conservativeStart dance.
+		pid := runner.NewPlayerID()
 		setupCtx, setupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer setupCancel()
+		floor := resolveFloor(setupCtx, t, preFloor, pyramidFloorFrom)
+		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor)
+
 		s, lerr := appium.LaunchToHome(setupCtx, *picked)
 		if lerr != nil {
 			t.Fatalf("LaunchToHome: %v", lerr)
-		}
-		s.PlayerID = preRec.ID
-		t.Logf("parked on home; applying floor %.3f Mbps before resuming playback", preFloor)
-		if aerr := s.ApplyRate(setupCtx, preFloor); aerr != nil {
-			t.Fatalf("apply floor pre-resume: %v", aerr)
-		}
-		time.Sleep(2 * time.Second) // let tc engage before the first fetch
-		if rerr := appium.ResumePlayback(setupCtx, *picked); rerr != nil {
-			t.Fatalf("ResumePlayback: %v", rerr)
-		}
-		if herr := s.WaitForHeartbeat(setupCtx, 90*time.Second); herr != nil {
-			t.Fatalf("WaitForHeartbeat: %v", herr)
-		}
-		sess = s
-		t.Cleanup(func() {
-			cleanCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
-			defer c()
-			if cerr := sess.ClearShape(cleanCtx); cerr != nil {
-				t.Logf("clear shape: %v", cerr)
-			}
-			if cerr := launcher.Close(); cerr != nil {
-				t.Logf("close launcher: %v", cerr)
-			}
-		})
-	case conservativeStart:
-		setupCtx, setupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer setupCancel()
-		s, lerr := appium.LaunchToHome(setupCtx, *picked)
-		if lerr != nil {
-			t.Fatalf("LaunchToHome: %v", lerr)
-		}
-		pid, perr := appium.ReadPlayerID(setupCtx, s)
-		if perr != nil {
-			t.Fatalf("ReadPlayerID: %v (iOS app may predate the home-player-id AX node; rebuild app in Xcode)", perr)
 		}
 		s.PlayerID = pid
-		t.Logf("parked on home — discovered player_id %s via AX node", pid)
-		if aerr := s.ApplyRate(setupCtx, conservativeWarmupCap); aerr != nil {
-			t.Fatalf("apply conservative cap: %v", aerr)
-		}
-		t.Logf("applied conservative %.3f Mbps cap BEFORE resume playback", conservativeWarmupCap)
-		time.Sleep(2 * time.Second)
 		if rerr := appium.ResumePlayback(setupCtx, *picked); rerr != nil {
 			t.Fatalf("ResumePlayback: %v", rerr)
 		}
@@ -190,12 +153,17 @@ func runPyramid(t *testing.T, p runner.Platform) {
 			if cerr := sess.ClearShape(cleanCtx); cerr != nil {
 				t.Logf("clear shape: %v", cerr)
 			}
+			// #714: free the session slot immediately (config-on-connect mints a
+			// fresh player_id per run; don't wait for the 5-min reaper).
+			if cerr := sess.Release(cleanCtx); cerr != nil {
+				t.Logf("release session: %v", cerr)
+			}
 			if cerr := launcher.Close(); cerr != nil {
 				t.Logf("close launcher: %v", cerr)
 			}
 		})
-	default:
-		t.Logf("cold-start unavailable (non-Appium launcher) — using legacy warmup path (pyramid step 1 will cliff)")
+	} else {
+		t.Logf("config-on-connect unavailable (non-Appium launcher) — legacy warmup path (pyramid step 1 will cliff)")
 		sess = OpenSession(t, p)
 	}
 
@@ -250,15 +218,14 @@ func runPyramid(t *testing.T, p runner.Platform) {
 	defer cancel()
 
 	// --- variant ladder (post-launch — definitive) --------------
-	switch {
-	case conservativeStart:
-		// Player came up under the conservative cap; give the manifest a
-		// moment to land in the player's session record.
-		t.Logf("waiting %s for manifest to populate under conservative cap", rampdownWarmupHold)
+	if isAppium {
+		// Player came up under the config-on-connect cap; give the manifest a
+		// moment to land in the player's session record before reading the ladder.
+		t.Logf("waiting %s for manifest to populate under config-on-connect cap", rampdownWarmupHold)
 		if err := holdContext(ctx, rampdownWarmupHold); err != nil {
 			t.Fatalf("manifest-fetch hold: %v", err)
 		}
-	case !coldStart:
+	} else {
 		// Legacy fallback (non-Appium): 100 Mbps warmup so the manifest
 		// fetches; step 1 will cliff.
 		if err := sess.ApplyRate(ctx, rampdownWarmupMbps); err != nil {

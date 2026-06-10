@@ -68,7 +68,30 @@ func StandardLadderRates(rec *PlayerRecord) ([]VariantRate, error) {
 	if rec == nil || rec.CurrentPlay == nil {
 		return nil, errors.New("ladder: player has no current play")
 	}
-	variants := rec.CurrentPlay.Manifest.Variants
+	src := rec.CurrentPlay.Manifest.Variants
+	mv := make([]ManifestVariant, 0, len(src))
+	for _, v := range src {
+		mv = append(mv, ManifestVariant{Bandwidth: v.Bandwidth, AverageBandwidth: v.AverageBandwidth, Resolution: v.Resolution, URL: v.URL})
+	}
+	return LadderRatesFromVariants(mv)
+}
+
+// ManifestVariant is a master-playlist variant decoupled from PlayerRecord, so
+// the ladder can be built either from a bound player's reported manifest
+// (StandardLadderRates) or from a master parsed directly off the wire
+// (runner.MasterLadder, #714) — the latter removes the "play the content once
+// to learn its ladder" dependency.
+type ManifestVariant struct {
+	Bandwidth        int
+	AverageBandwidth int
+	Resolution       string
+	URL              string
+}
+
+// LadderRatesFromVariants builds the dual-rung + geometrically-filled limit
+// ladder from a raw variant list (the core of StandardLadderRates, shared with
+// the master-parse path).
+func LadderRatesFromVariants(variants []ManifestVariant) ([]VariantRate, error) {
 	if len(variants) == 0 {
 		return nil, errors.New("ladder: manifest has no variants (master playlist not fetched yet?)")
 	}

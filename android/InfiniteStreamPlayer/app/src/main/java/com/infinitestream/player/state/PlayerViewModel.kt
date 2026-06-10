@@ -52,7 +52,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
-    val playerId: String = UUID.randomUUID().toString()
+    // #714 config-on-connect: honor a harness-provided player_id (captured from
+    // the launch intent extra by MainActivity) so the app inherits the
+    // pre-configured proxy session; otherwise mint a fresh per-launch id.
+    val playerId: String =
+        com.infinitestream.player.LaunchConfig.playerId ?: UUID.randomUUID().toString()
 
     /**
      * `play_id` (issue #280) — a UUID regenerated at every fresh
@@ -711,7 +715,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // below once the player has been handed off.
         playIdMintedAt = System.currentTimeMillis()
         playIdLastActivityAt = 0L
-        val url = "${server.scheme}://${server.host}:$port/go-live/${s.selectedContent}/$manifest?player_id=$playerId&play_id=$currentPlayId&start_time=$currentStartTime"
+        var url = "${server.scheme}://${server.host}:$port/go-live/${s.selectedContent}/$manifest?player_id=$playerId&play_id=$currentPlayId&start_time=$currentStartTime"
+        // #714 Approach B (config-on-connect driven by the player): append a
+        // launch-provided raw proxy.* query fragment so the proxy materializes
+        // the session config on THIS bootstrap request — no pre-flight curl.
+        // Mirrors iOS Models.playbackURL; the 302 strips proxy.* for children.
+        com.infinitestream.player.LaunchConfig.proxyQuery?.let { pq ->
+            if (pq.isNotEmpty()) url += "&$pq"
+        }
         _state.update { it.copy(currentUrl = url, statusText = url) }
         loadStream(url)
         schedulePlayIdRotation()

@@ -146,6 +146,22 @@ func (a *AppiumLauncher) SetLaunchArgs(args []string) {
 	a.mu.Unlock()
 }
 
+// intentExtrasFromLaunchArgs converts `-is.X Y` launch-arg pairs into the
+// `--es is.X Y` form Android's appium:optionalIntentArguments expects (String
+// intent extras appended to the start intent). Values in the #714 vocab
+// (UUIDs, "s2", "0") are space-free, so no quoting is needed.
+func intentExtrasFromLaunchArgs(args []string) string {
+	var b strings.Builder
+	for i := 0; i+1 < len(args); i += 2 {
+		key := strings.TrimPrefix(args[i], "-")
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "--es %s %s", key, args[i+1])
+	}
+	return b.String()
+}
+
 func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, error) {
 	bundleID := a.BundleIDs[d.Platform]
 	if bundleID == "" {
@@ -156,10 +172,19 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 	}
 	caps := appiumCapabilities(d, bundleID)
 	if len(a.launchArgs) > 0 {
-		// XCUITest passes these to the app on launch; iOS folds `-key value`
-		// pairs into UserDefaults (NSArgumentDomain). #segments forces the
-		// segment this way so a single cold launch lands on it.
-		caps["appium:processArguments"] = map[string]any{"args": a.launchArgs}
+		if d.Platform == PlatformAndroidTV {
+			// UiAutomator2 ignores processArguments. Deliver the launch args
+			// as intent extras appended to the start intent: `-is.X Y` →
+			// `--es is.X Y`. The Android app reads `is.player_id` off the
+			// launch intent (config-on-connect, #714), mirroring how iOS reads
+			// it from NSArgumentDomain.
+			caps["appium:optionalIntentArguments"] = intentExtrasFromLaunchArgs(a.launchArgs)
+		} else {
+			// XCUITest passes these to the app on launch; iOS folds `-key value`
+			// pairs into UserDefaults (NSArgumentDomain). #segments forces the
+			// segment this way so a single cold launch lands on it.
+			caps["appium:processArguments"] = map[string]any{"args": a.launchArgs}
+		}
 	}
 	sessID, err := a.createSession(ctx, caps)
 	if err != nil {

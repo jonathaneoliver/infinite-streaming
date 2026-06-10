@@ -17,6 +17,66 @@ import (
 	"github.com/jonathaneoliver/infinite-streaming/tests/characterization/runner"
 )
 
+// conservativeWarmupCap is the cold-start cap used when neither a prior
+// heartbeating player nor a freshly-parsed master yields a floor. 1.5 Mbps is
+// well above any realistic 360p variant rate and below most 540p rates, so the
+// player picks the bottom variant on cold start regardless. Lives here (not a
+// _test.go file) so the non-test helpers above can reference it.
+const conservativeWarmupCap = 1.5
+
+// resolveFloor picks the cold-start cap for config-on-connect (#714):
+//  1. the prior play's manifest (preFloor) when a heartbeating player exists;
+//  2. else the master parsed directly off the wire — no prior play needed;
+//  3. else the conservative cap.
+//
+// floorFn maps a parsed ladder to the mode's floor (rampupFloorFrom /
+// pyramidFloorFrom).
+func resolveFloor(ctx context.Context, t *testing.T, preFloor float64, floorFn func([]runner.VariantRate) float64) float64 {
+	t.Helper()
+	if preFloor > 0 {
+		return preFloor
+	}
+	if rates, err := runner.MasterLadder(ctx, ""); err == nil {
+		if f := floorFn(rates); f > 0 {
+			t.Logf("floor %.3f Mbps parsed from master (no prior play needed)", f)
+			return f
+		}
+	} else {
+		t.Logf("master parse for floor failed: %v", err)
+	}
+	t.Logf("no prior floor and master parse failed — conservative %.3f Mbps cap", conservativeWarmupCap)
+	return conservativeWarmupCap
+}
+
+// wireConfigOnConnect selects the config-on-connect driver and sets the launch
+// args (+ runs the curl for Approach A) for a single cold launch (#714).
+//
+// Which side puts the proxy.* config on a URL is chosen by CHAR_PROXY_CONFIG:
+//
+//   - "curl" (default): the HARNESS pre-configures the session via a bootstrap
+//     curl (ConfigureOnConnect) and launches the app with a bare player_id.
+//     Preferred — the harness fetches + parses the master itself before the app
+//     streams a single segment, so it knows the variant ladder up front.
+//   - "app": the PLAYER puts proxy.shape.rate_mbps on its own bootstrap URL via
+//     the -is.proxy_query launch arg (no pre-flight curl).
+//
+// baseArgs are any other launch args (e.g. segment).
+func wireConfigOnConnect(ctx context.Context, t *testing.T, appium *runner.AppiumLauncher, baseArgs []string, pid string, capMbps float64) {
+	t.Helper()
+	launchArgs := append(append([]string{}, baseArgs...), "-is.player_id", pid)
+	if os.Getenv("CHAR_PROXY_CONFIG") == "app" {
+		launchArgs = append(launchArgs, "-is.proxy_query", fmt.Sprintf("proxy.shape.rate_mbps=%g", capMbps))
+		appium.SetLaunchArgs(launchArgs)
+		t.Logf("config-on-connect VIA APP URL: -is.proxy_query proxy.shape.rate_mbps=%.3f (no curl); player_id=%s", capMbps, pid)
+		return
+	}
+	appium.SetLaunchArgs(launchArgs)
+	if err := runner.ConfigureOnConnect(ctx, pid, runner.ShapeRateConfig(capMbps)); err != nil {
+		t.Fatalf("ConfigureOnConnect (player_id=%s cap=%.3f Mbps): %v", pid, capMbps, err)
+	}
+	t.Logf("config-on-connect VIA CURL (default): session %s pre-capped at %.3f Mbps before launch", pid, capMbps)
+}
+
 // OpenSession picks a launcher per $LAUNCH_MODE, discovers a device for
 // the requested platform, launches the player, and returns the bound
 // Session. Skips the test cleanly when:
@@ -91,6 +151,12 @@ func OpenSession(t *testing.T, platform runner.Platform) *runner.Session {
 		// Manual launchers. Must run before Close() tears the session down.
 		if err := sess.CloseViaUI(ctx); err != nil {
 			t.Logf("close playback via UI: %v", err)
+		}
+		// #714: free the session slot immediately (don't wait for the 5-min
+		// reaper) — config-on-connect mints a fresh player_id per run, so a few
+		// back-to-back runs would otherwise exhaust the small session pool.
+		if err := sess.Release(ctx); err != nil {
+			t.Logf("release session: %v", err)
 		}
 		if err := launcher.Close(); err != nil {
 			t.Logf("close launcher: %v", err)

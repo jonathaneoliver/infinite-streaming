@@ -307,8 +307,28 @@ enum StreamURLBuilder {
         let base = localProxy ? server.playbackURL : server.contentURL
         guard var components = URLComponents(string: base) else { return nil }
         components.path = "/go-live/\(contentName)/\(manifest)"
+        var items: [URLQueryItem] = []
         if !playerId.isEmpty {
-            components.queryItems = [URLQueryItem(name: "player_id", value: playerId)]
+            items.append(URLQueryItem(name: "player_id", value: playerId))
+        }
+        // #714 Approach B (config-on-connect driven by the player): if the
+        // launch provided a raw proxy.* query fragment via
+        // `-is.proxy_query "proxy.shape.rate_mbps=2.5&proxy.labels.test=x"`,
+        // append it verbatim so the proxy materializes the session config on
+        // THIS bootstrap request — no separate control-plane round-trip and no
+        // pre-flight curl. NSArgumentDomain → highest precedence; absent on a
+        // normal launch. The 302 to the session port strips proxy.*, so child
+        // requests never carry it.
+        if let raw = UserDefaults.standard.string(forKey: "is.proxy_query"), !raw.isEmpty {
+            for pair in raw.split(separator: "&") where !pair.isEmpty {
+                let kv = pair.split(separator: "=", maxSplits: 1)
+                let name = String(kv[0])
+                let value = kv.count > 1 ? String(kv[1]) : ""
+                items.append(URLQueryItem(name: name, value: value))
+            }
+        }
+        if !items.isEmpty {
+            components.queryItems = items
         }
         return components.url
     }
