@@ -5362,6 +5362,25 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			assignedInternalPort = replaceThirdFromLastDigit("30081", allocated)
 			log.Printf("PORT_MAP_DERIVE external=%s internal=%s allocated=%d", assignedExternalPort, assignedInternalPort, allocated)
 		}
+		// Sweep any leftover nftables transport fault (drop/reject) on the
+		// assigned internal port — the symmetric counterpart to the tc
+		// ClearPortShaping above (issue #716). Config-on-connect (#712)
+		// mints a fresh player_id per run, so tc state is well-isolated by
+		// the sweep above, but a transport fault left armed by a prior
+		// session whose teardown was skipped (crash / Ctrl-C / timeout
+		// before Session.Release fired) is the one kernel surface that can
+		// still carry over via port reuse inside the 5-min idle-reap window.
+		// armTransportFaultLoop(…, "none", …) is the same teardown used on
+		// session DELETE (above): it cancels any still-running fault-loop
+		// goroutine (which would otherwise re-arm the rule after a bare
+		// clear) AND deletes the leftover rule. Idempotent and quiet on a
+		// clean port. Unlike the tc sweep (which keys on port%1000), this
+		// must run *after* the external→internal mapping, because faults
+		// are armed on x_forwarded_port (the internal port) — see the arm
+		// calls keyed on x_forwarded_port elsewhere in this file.
+		if internalPortInt, err := strconv.Atoi(assignedInternalPort); err == nil {
+			a.armTransportFaultLoop(internalPortInt, "none", 1, transportUnitsSeconds, 0)
+		}
 		groupID := extractGroupId(playerID)
 		// Optional play_id from the client. iOS/tvOS/Roku don't mint one
 		// (the v2 read path derives a stable fallback), but the v3 web
