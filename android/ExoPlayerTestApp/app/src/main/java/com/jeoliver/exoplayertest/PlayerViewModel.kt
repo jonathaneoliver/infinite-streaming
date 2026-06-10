@@ -169,6 +169,13 @@ class PlayerViewModel : ViewModel() {
             bandwidthEstimate = appContext?.let { androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(it).bitrateEstimate } ?: 0L
         }
 
+        // ExoPlayer reports C.TIME_UNSET (Long.MIN_VALUE) / -1 for position &
+        // buffered before the timeline is ready, and bufferedPosition can dip
+        // below currentPosition during a seek/discontinuity. iOS reports
+        // 0 = "not measured yet"; match that here so gauges never go negative (#614).
+        val safePositionMs = positionMs.coerceAtLeast(0L)
+        val safeBufferedMs = bufferedMs.coerceAtLeast(0L)
+
         val state = when (playbackState) {
             Player.STATE_IDLE -> "idle"
             Player.STATE_BUFFERING -> "buffering"
@@ -184,10 +191,10 @@ class PlayerViewModel : ViewModel() {
             "player_metrics_trigger_type" to eventType,
             "player_metrics_event_time" to reporter.nowISO(),
             "player_metrics_state" to state,
-            "player_metrics_position_s" to round3(positionMs / 1000.0),
-            "player_metrics_playback_rate" to speed.toDouble(),
-            "player_metrics_buffer_depth_s" to round3((bufferedMs - positionMs) / 1000.0),
-            "player_metrics_buffer_end_s" to round3(bufferedMs / 1000.0),
+            "player_metrics_position_s" to round3(safePositionMs / 1000.0),
+            "player_metrics_playback_rate" to speed.toDouble().coerceAtLeast(0.0),
+            "player_metrics_buffer_depth_s" to round3(((safeBufferedMs - safePositionMs).coerceAtLeast(0L)) / 1000.0),
+            "player_metrics_buffer_end_s" to round3(safeBufferedMs / 1000.0),
             "player_metrics_video_bitrate_mbps" to videoFormat?.bitrate?.let { round3(it / 1_000_000.0) },
             "player_metrics_video_resolution" to videoFormat?.let { "${it.width}x${it.height}" },
             // ExoPlayer's DefaultBandwidthMeter.bitrateEstimate is an averaged
