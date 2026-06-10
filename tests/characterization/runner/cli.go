@@ -38,13 +38,7 @@ func NewCLILauncher() *CLILauncher {
 	return &CLILauncher{
 		Out:              os.Stderr,
 		HeartbeatTimeout: 60 * time.Second,
-		BundleIDs: map[Platform]string{
-			PlatformIPhone:    "com.jeoliver.InfiniteStreamPlayer",
-			PlatformIPad:      "com.jeoliver.InfiniteStreamPlayer",
-			PlatformIPadSim:   "com.jeoliver.InfiniteStreamPlayer",
-			PlatformAppleTV:   "com.jeoliver.InfiniteStreamPlayerTV",
-			PlatformAndroidTV: "com.infinitestream.player",
-		},
+		BundleIDs:        cloneBundleIDs(),
 	}
 }
 

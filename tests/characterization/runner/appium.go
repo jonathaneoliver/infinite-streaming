@@ -70,15 +70,9 @@ func NewAppiumLauncher() *AppiumLauncher {
 		URL:              url,
 		HeartbeatTimeout: 90 * time.Second,
 		closeBeat:        800 * time.Millisecond,
-		BundleIDs: map[Platform]string{
-			PlatformIPhone:    "com.jeoliver.InfiniteStreamPlayer",
-			PlatformIPad:      "com.jeoliver.InfiniteStreamPlayer",
-			PlatformIPadSim:   "com.jeoliver.InfiniteStreamPlayer",
-			PlatformAppleTV:   "com.jeoliver.InfiniteStreamPlayerTV",
-			PlatformAndroidTV: "com.infinitestream.player",
-		},
-		sessions: map[string]string{},
-		hc:       &http.Client{Timeout: 60 * time.Second},
+		BundleIDs:        cloneBundleIDs(),
+		sessions:         map[string]string{},
+		hc:               &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -193,6 +187,17 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 	a.mu.Lock()
 	a.sessions[d.UDID] = sessID
 	a.mu.Unlock()
+
+	// A freshly-installed/erased sim can come up on the blocking
+	// ServerPickerScreen (no saved server) instead of playback/home. Drive
+	// past it by adding the harness's server URL. No-op when a server is
+	// already saved (the seeded common path). iOS only.
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+		if err := a.navigateServerPickerIfPresent(ctx, sessID, bootstrapBaseURL()); err != nil {
+			return nil, fmt.Errorf("server picker navigation: %w", err)
+		}
+	}
 
 	// Drive the UI back to home. Best-effort — if we're already on
 	// home (skipHomeOnLaunch=false, or some other path) the back button
@@ -653,6 +658,48 @@ func (a *AppiumLauncher) clickElement(ctx context.Context, sessID, elementID str
 	_, err := a.doRequest(ctx, "POST",
 		fmt.Sprintf("/session/%s/element/%s/click", sessID, elementID), map[string]any{})
 	return err
+}
+
+// sendKeysToElement types text into a previously-found element (W3C
+// element/value). Clicks it first to focus the field.
+func (a *AppiumLauncher) sendKeysToElement(ctx context.Context, sessID, elementID, text string) error {
+	if err := a.clickElement(ctx, sessID, elementID); err != nil {
+		return fmt.Errorf("focus field: %w", err)
+	}
+	_, err := a.doRequest(ctx, "POST",
+		fmt.Sprintf("/session/%s/element/%s/value", sessID, elementID),
+		map[string]any{"text": text})
+	return err
+}
+
+// navigateServerPickerIfPresent drives the iOS ServerPickerScreen (#fleet)
+// when a freshly-installed/erased sim comes up on it instead of Home: tap
+// "Add by URL", type the harness base URL, tap "Add". No-op (returns nil) when
+// the picker isn't showing — the normal case where a server is already saved
+// (e.g. seeded via SeedServerProfile). Best-effort UI fallback to the
+// UserDefaults seed; requires the app to carry the server-* accessibility ids.
+func (a *AppiumLauncher) navigateServerPickerIfPresent(ctx context.Context, sessID, baseURL string) error {
+	// Short probe — if the picker root isn't in the AX tree we're already past
+	// it (on Home), so this is a cheap no-op on the common path.
+	if _, err := a.waitForAccessibilityID(ctx, sessID, "server-picker-screen", 4*time.Second); err != nil {
+		return nil
+	}
+	if err := a.tapByAccessibilityID(ctx, sessID, "server-add-by-url"); err != nil {
+		return fmt.Errorf("tap add-by-url: %w", err)
+	}
+	fieldID, err := a.waitForAccessibilityID(ctx, sessID, "server-url-field", 8*time.Second)
+	if err != nil {
+		return fmt.Errorf("wait url field: %w", err)
+	}
+	if err := a.sendKeysToElement(ctx, sessID, fieldID, baseURL); err != nil {
+		return fmt.Errorf("type server url: %w", err)
+	}
+	if err := a.tapByAccessibilityID(ctx, sessID, "server-url-add"); err != nil {
+		return fmt.Errorf("tap add: %w", err)
+	}
+	// Let the sheet dismiss and Home render before the caller's back-chevron tap.
+	time.Sleep(time.Second)
+	return nil
 }
 
 // waitForAccessibilityID polls for an element by accessibility id until

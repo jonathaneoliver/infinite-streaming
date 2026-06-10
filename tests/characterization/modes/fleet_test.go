@@ -117,6 +117,7 @@ func resolveFleetByCount(t *testing.T, p runner.Platform, n int) []runner.Device
 				t.Fatalf("boot fleet sim %d %q (%s): %v", i, d.Label, d.UDID, err)
 			}
 			t.Logf("fleet[%d] booted %s (%s)", i, d.Label, d.UDID)
+			seedFleetServer(ctx, t, d)
 		}
 		fleet = append(fleet, d)
 	}
@@ -157,6 +158,7 @@ func resolveFleetFromUDIDs(t *testing.T, p runner.Platform, udids []string) []ru
 				t.Fatalf("boot fleet sim %d (%s): %v", i, d.UDID, err)
 			}
 			t.Logf("fleet[%d] booted %s (%s)", i, d.Label, d.UDID)
+			seedFleetServer(ctx, t, d)
 		}
 		fleet = append(fleet, d)
 	}
@@ -165,6 +167,29 @@ func resolveFleetFromUDIDs(t *testing.T, p runner.Platform, udids []string) []ru
 
 func fleetAutoboot() bool {
 	return strings.TrimSpace(os.Getenv("CHAR_FLEET_AUTOBOOT")) == "1"
+}
+
+// seedFleetServer writes the harness's server profile into a freshly-booted
+// sim's app UserDefaults so it skips the blocking ServerPickerScreen and
+// connects straight to HARNESS_BASE_URL. Best-effort: a failure is logged (the
+// Appium launcher's in-app picker navigation is the fallback) and never fails
+// the run. Opt out with CHAR_FLEET_SEED_SERVER=0. Only sims have a reachable
+// data container, so non-sim platforms are skipped.
+func seedFleetServer(ctx context.Context, t *testing.T, d runner.Device) {
+	t.Helper()
+	if d.Platform != runner.PlatformIPadSim {
+		return
+	}
+	if strings.TrimSpace(os.Getenv("CHAR_FLEET_SEED_SERVER")) == "0" {
+		return
+	}
+	bundleID := runner.DefaultBundleID(d.Platform)
+	base := runner.HarnessBaseURL()
+	if err := runner.SeedServerProfile(ctx, d.UDID, bundleID, base); err != nil {
+		t.Logf("fleet[%d] seed server profile: %v (app will fall back to picker navigation)", d.FleetIndex, err)
+		return
+	}
+	t.Logf("fleet[%d] seeded server profile → %s", d.FleetIndex, base)
 }
 
 // splitFleetCSV splits a comma-separated UDID list, trimming whitespace and
