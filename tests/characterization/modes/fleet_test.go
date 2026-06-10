@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -169,11 +170,87 @@ func fleetAutoboot() bool {
 	return strings.TrimSpace(os.Getenv("CHAR_FLEET_AUTOBOOT")) == "1"
 }
 
+// fleetStartBarrier holds every fleet member after it finishes bring-up (bind
+// + cold-start warmup + ladder read) and releases them all to begin the actual
+// streaming + shaping sweep at the same instant. Sims take different amounts of
+// time to get "ready" (the launch stagger + per-sim WDA build), but the test
+// itself starts simultaneously across the fleet. A member that dies before
+// arriving can't hang the others past the caller's wait deadline.
+type fleetStartBarrier struct {
+	mu       sync.Mutex
+	target   int // members still expected to arrive (n minus those that gave up)
+	arrived  int
+	released bool
+	ch       chan struct{}
+}
+
+func newFleetStartBarrier(n int) *fleetStartBarrier {
+	return &fleetStartBarrier{target: n, ch: make(chan struct{})}
+}
+
+// fleetBarriers holds the two fleet sync points. `home` gates the simultaneous
+// playback start (every sim waits at the home screen, then all tap play at
+// once); `sweep` gates the simultaneous shaping start (every sim is warmed up
+// with its ladder read, then all begin the pyramid at once). nil for
+// single-device runs.
+type fleetBarriers struct {
+	home  *fleetStartBarrier
+	sweep *fleetStartBarrier
+}
+
+func newFleetBarriers(n int) *fleetBarriers {
+	return &fleetBarriers{home: newFleetStartBarrier(n), sweep: newFleetStartBarrier(n)}
+}
+
+// maybeRelease closes the gate once every still-in-the-race member has arrived.
+// Caller must hold b.mu.
+func (b *fleetStartBarrier) maybeRelease() {
+	if !b.released && b.arrived > 0 && b.arrived >= b.target {
+		b.released = true
+		close(b.ch)
+	}
+}
+
+// arriveAndWait records this member's arrival and blocks until every member
+// still in the race has arrived (everyone is released at the same instant) or
+// ctx is done (deadline fallback). Nil-safe so single-device runs are a no-op.
+func (b *fleetStartBarrier) arriveAndWait(ctx context.Context) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.arrived++
+	b.maybeRelease()
+	b.mu.Unlock()
+	select {
+	case <-b.ch:
+	case <-ctx.Done():
+	}
+}
+
+// giveUp drops this member from the expected set — call it when a sim fails
+// bring-up before reaching the barrier, so the survivors release together
+// instead of each waiting out its own timeout (which would re-stagger the
+// start). Nil-safe.
+func (b *fleetStartBarrier) giveUp() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	if b.target > 0 {
+		b.target--
+	}
+	b.maybeRelease()
+	b.mu.Unlock()
+}
+
 // staggerFleetLaunch spreads parallel fleet launches out by fleet index so N
 // XCUITest sessions don't all cold-build WDA on one Appium server at the same
 // instant — the simultaneous peak is what pushed the 3rd/4th session-create
-// past its timeout in a 4-sim run. Index 0 doesn't wait, so single-device runs
-// are unaffected. Tunable via CHAR_FLEET_STAGGER_SEC (default 30; 0 disables).
+// past its timeout in a 4-sim run. The fleetStartBarrier (above) re-synchronizes
+// the actual sweep start afterward, so this only affects bring-up order. Index 0
+// doesn't wait, so single-device runs are unaffected. Tunable via
+// CHAR_FLEET_STAGGER_SEC (default 30; 0 disables).
 func staggerFleetLaunch(t *testing.T, fleetIndex int) {
 	t.Helper()
 	if fleetIndex <= 0 {

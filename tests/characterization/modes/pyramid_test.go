@@ -63,11 +63,17 @@ func runPyramid(t *testing.T, p runner.Platform) {
 	case 0:
 		return // resolveFleet already issued a Skip
 	case 1:
-		runPyramidOnDevice(t, p, devs[0]) // today's single-device path, unchanged
+		runPyramidOnDevice(t, p, devs[0], nil) // today's single-device path, unchanged
 		return
 	}
 	// Fleet: run each sim as a parallel subtest. Each gets its own launcher
-	// (see runPyramidOnDevice) so the per-sim player_id can't race.
+	// (see runPyramidOnDevice) so the per-sim player_id can't race. Two sync
+	// points (sims get ready at different times; the test fires together):
+	//   - home  → every sim waits at the home screen, then all start playback
+	//             at the same instant.
+	//   - sweep → every sim is warmed up + ladder-read, then all begin the
+	//             pyramid shaping at the same instant.
+	bars := newFleetBarriers(len(devs))
 	for _, dev := range devs {
 		dev := dev
 		name := dev.Label
@@ -79,7 +85,7 @@ func runPyramid(t *testing.T, p runner.Platform) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			runPyramidOnDevice(t, p, dev)
+			runPyramidOnDevice(t, p, dev, bars)
 		})
 	}
 }
@@ -91,7 +97,7 @@ func runPyramid(t *testing.T, p runner.Platform) {
 // one sim clobber another's identity before createSession reads it.
 // dev.FleetIndex rides into appiumCapabilities to pin a distinct
 // wdaLocalPort/mjpegServerPort (default index 0 → 8100/9100, unchanged).
-func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device) {
+func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars *fleetBarriers) {
 	// --- pick launcher (own instance per subtest) ----------------
 	mode, launcher, err := runner.PickMode()
 	if err != nil {
@@ -100,6 +106,21 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device) {
 	t.Logf("launch mode: %s", mode)
 	picked := &dev
 	t.Logf("device: %s (fleet index %d)", picked, dev.FleetIndex)
+
+	// If this sim dies before reaching a barrier, drop it from that barrier's
+	// expected set so the survivors still release together instead of each
+	// timing out individually. Two flags = two sync points (home, sweep).
+	homeArrived, sweepArrived := false, false
+	if bars != nil {
+		defer func() {
+			if !homeArrived {
+				bars.home.giveUp()
+			}
+			if !sweepArrived {
+				bars.sweep.giveUp()
+			}
+		}()
+	}
 
 	// Spread parallel fleet launches so N sims don't cold-build WDA at once
 	// (no-op for index 0 / single-device runs).
@@ -147,7 +168,14 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device) {
 		// proxy.* on its own bootstrap URL). Replaces the old coldStart /
 		// conservativeStart dance.
 		pid := runner.NewPlayerID()
-		setupCtx, setupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		// Fleet runs need a generous setup window: a sim that reaches home
+		// early holds at the home barrier until the last (most-staggered) sim
+		// gets there, which can be a couple of minutes. Single runs keep 2m.
+		setupTimeout := 2 * time.Minute
+		if bars != nil {
+			setupTimeout = 12 * time.Minute
+		}
+		setupCtx, setupCancel := context.WithTimeout(context.Background(), setupTimeout)
 		defer setupCancel()
 		floor := resolveFloor(setupCtx, t, preFloor, pyramidFloorFrom)
 		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor)
@@ -157,6 +185,17 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device) {
 			t.Fatalf("LaunchToHome: %v", lerr)
 		}
 		s.PlayerID = pid
+
+		// Fleet sync #1 (home): this sim is at the home screen, not yet
+		// playing. Hold here until every sim is at home, then all tap play at
+		// the same instant — playback starts together across the fleet.
+		if bars != nil {
+			homeArrived = true
+			t.Logf("at home — waiting at fleet HOME barrier (playback starts together)")
+			bars.home.arriveAndWait(setupCtx)
+			t.Logf("HOME barrier released — starting playback")
+		}
+
 		if rerr := appium.ResumePlayback(setupCtx, *picked); rerr != nil {
 			t.Fatalf("ResumePlayback: %v", rerr)
 		}
@@ -330,6 +369,21 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device) {
 	for i, v := range pyramid {
 		v := v
 		steps[i] = runner.Step{RateMbps: v.CapMbps, Hold: rampdownMaxHold, Variant: &v}
+	}
+
+	// Fleet sync point: this sim is fully ready (bound, warmed up, ladder
+	// known). Hold here until every fleet member is ready too, so the actual
+	// streaming + shaping sweep starts on all sims at the same instant. Bounded
+	// so a sim that failed bring-up can't hang the rest. No-op for single runs.
+	// Fleet sync #2 (sweep): this sim is warmed up with its ladder read. Hold
+	// until every sim is here, then all begin the pyramid shaping at once.
+	if bars != nil {
+		sweepArrived = true
+		t.Logf("ready — waiting at fleet SWEEP barrier (shaping starts together across the fleet)")
+		bctx, bcancel := context.WithTimeout(ctx, 5*time.Minute)
+		bars.sweep.arriveAndWait(bctx)
+		bcancel()
+		t.Logf("SWEEP barrier released — beginning synchronized sweep")
 	}
 
 	// #cycles — run the full up-then-down pyramid REPS times on the SAME
