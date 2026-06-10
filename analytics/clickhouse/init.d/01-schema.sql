@@ -743,6 +743,16 @@ ALTER TABLE infinite_streaming.network_requests
 ALTER TABLE infinite_streaming.network_requests
     ADD COLUMN IF NOT EXISTS attempt_id UInt32 DEFAULT 0 CODEC(ZSTD(1));
 
+-- Issue #558 — per-row labels[] on HAR rows, same Array(LowCardinality)
+-- shape + `<severity>=<event>` vocab as session_events / control_events.
+-- The /api/v2/network_requests read API projects this column (forwarder
+-- #560), but this ALTER was never added — so a SELECT errors on a fresh
+-- ClickHouse host (the network chips are invisible / the endpoint 500s).
+-- Running clusters already ALTER'd it in by hand; IF NOT EXISTS makes this
+-- a no-op there.
+ALTER TABLE infinite_streaming.network_requests
+    ADD COLUMN IF NOT EXISTS labels Array(LowCardinality(String)) DEFAULT [] CODEC(ZSTD(1));
+
 -- session_markers retired in issue #474 Milestone C — replaced by
 -- per-row `labels[]` on session_events / network_requests and by
 -- discrete rows on control_events. The CREATE TABLE block previously
