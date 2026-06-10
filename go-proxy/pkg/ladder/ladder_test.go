@@ -163,6 +163,30 @@ func TestBuildPattern(t *testing.T) {
 	if len(sq) != 2 || sq[0].RateMbps != 0.833 || sq[1].RateMbps != 31.064 {
 		t.Errorf("square_wave = %v, want [0.833, 31.064]", sq)
 	}
+	// transient_shock: top + (n-1) deepening dips, each recovering to top →
+	// length 2n-1. Even indices are the top baseline; odd indices are the
+	// dips, deepening from the second-highest rung down to the bottom.
+	ts := BuildPattern(TransientShock, rungs, 12)
+	if len(ts) != 2*n-1 {
+		t.Errorf("transient_shock len %d, want %d (top + n-1 recover-to-top dips)", len(ts), 2*n-1)
+	}
+	top := down[0].RateMbps // ramp_down starts at the highest cap
+	for i := 0; i < len(ts); i += 2 {
+		if ts[i].RateMbps != top {
+			t.Errorf("transient_shock[%d] = %.3f, want top %.3f (recover-to-top between dips)", i, ts[i].RateMbps, top)
+		}
+	}
+	for i := 3; i < len(ts); i += 2 {
+		if ts[i].RateMbps >= ts[i-2].RateMbps {
+			t.Errorf("transient_shock dips not deepening at %d: %.3f then %.3f", i, ts[i-2].RateMbps, ts[i].RateMbps)
+		}
+	}
+	if ts[1].RateMbps != down[1].RateMbps {
+		t.Errorf("transient_shock first dip = %.3f, want second-highest rung %.3f", ts[1].RateMbps, down[1].RateMbps)
+	}
+	if ts[len(ts)-2].RateMbps != sq[0].RateMbps {
+		t.Errorf("transient_shock final dip = %.3f, want bottom %.3f", ts[len(ts)-2].RateMbps, sq[0].RateMbps)
+	}
 	if BuildPattern("sliders", rungs, 12) != nil {
 		t.Errorf("unknown template should return nil")
 	}

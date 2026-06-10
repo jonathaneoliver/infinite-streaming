@@ -1824,10 +1824,13 @@ export interface components {
              * @description Template that drove step-list generation. Stored verbatim
              *     so the dashboard can repaint the template radios. The kernel
              *     cycles through `steps` regardless of template; this field is
-             *     metadata, not a recompute trigger.
+             *     metadata, not a recompute trigger. `transient_shock` is the
+             *     deepening-drop staircase (hold top, dip to each lower rung in
+             *     turn, recover to top between dips) mirroring the transient_shock
+             *     characterization mode.
              * @enum {string}
              */
-            template?: "sliders" | "square" | "square_wave" | "ramp_up" | "ramp_down" | "pyramid";
+            template?: "sliders" | "square" | "square_wave" | "ramp_up" | "ramp_down" | "pyramid" | "transient_shock";
             steps: components["schemas"]["PatternStep"][];
             /**
              * @description Default per-step duration the dashboard chose when generating the step list.

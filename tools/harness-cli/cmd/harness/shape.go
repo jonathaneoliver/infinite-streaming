@@ -21,7 +21,7 @@ Slider mode (any subset; omitted fields are not modified):
   --loss FLOAT       packet loss %% (e.g. 0.5, range 0–100)
 
 Pattern mode (generates a step list from the player's current variants):
-  --pattern NAME     pyramid | ramp_up | ramp_down | square_wave | sliders
+  --pattern NAME     pyramid | ramp_up | ramp_down | square_wave | transient_shock | sliders
   --step-seconds N   per-step duration: 6 | 12 | 18 | 24 (default 12)
   --margin PCT       flat headroom above each variant rate: 0|5|10|25|50
                      (default 5; covers TCP/IP+TLS+HTTP framing; 0 is a
@@ -51,11 +51,13 @@ Examples:
   harness shape ipad --clear
 
 Pattern semantics:
-  pyramid       ascending variant rates, then descending (without apex dupe)
-  ramp_up       ascending rates, single sweep
-  ramp_down     descending rates, single sweep
-  square_wave   alternate lowest + highest variant
-  sliders       empty step list (kernel falls back to --rate)
+  pyramid          ascending variant rates, then descending (without apex dupe)
+  ramp_up          ascending rates, single sweep
+  ramp_down        descending rates, single sweep
+  square_wave      alternate lowest + highest variant
+  transient_shock  hold top, dip to each lower rung in turn (deepening),
+                   recovering to top between dips — the deepening-drop staircase
+  sliders          empty step list (kernel falls back to --rate)
 
 Every mutation is checkpointed to ~/.claude/state/harness/<repo>/.
 'harness undo' replays the prior shape verbatim.
@@ -69,7 +71,7 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	rate := fs.Float64("rate", -1, "rate cap Mbps")
 	delay := fs.Float64("delay", -1, "delay ms")
 	loss := fs.Float64("loss", -1, "loss %")
-	pattern := fs.String("pattern", "", "pattern template (pyramid|ramp_up|ramp_down|square_wave|sliders)")
+	pattern := fs.String("pattern", "", "pattern template (pyramid|ramp_up|ramp_down|square_wave|transient_shock|sliders)")
 	stepSeconds := fs.Int("step-seconds", 12, "per-step duration: 6|12|18|24")
 	margin := fs.Int("margin", 5, "headroom %% above variant rate: 0|5|10|25|50 (5 covers protocol overhead)")
 	maxStep := fs.Float64("max-step", ladder.DefaultMaxStep, "max ratio between consecutive caps before a geometric fill is inserted (default 1.15; raise to coarsen + shorten the pattern)")
@@ -394,10 +396,12 @@ func parseTemplate(s string) (proxy.PatternTemplate, error) {
 		return proxy.RampDown, nil
 	case "square_wave":
 		return proxy.SquareWave, nil
+	case "transient_shock":
+		return proxy.TransientShock, nil
 	case "sliders":
 		return proxy.Sliders, nil
 	}
-	return "", fmt.Errorf("invalid --pattern %q: pyramid|ramp_up|ramp_down|square_wave|sliders", s)
+	return "", fmt.Errorf("invalid --pattern %q: pyramid|ramp_up|ramp_down|square_wave|transient_shock|sliders", s)
 }
 
 func parseStepSeconds(n int) (proxy.PatternDefaultStepSeconds, error) {
