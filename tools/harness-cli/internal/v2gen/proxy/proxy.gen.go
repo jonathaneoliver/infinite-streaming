@@ -238,12 +238,13 @@ func (e PatternMarginPct) Valid() bool {
 
 // Defines values for PatternTemplate.
 const (
-	Pyramid    PatternTemplate = "pyramid"
-	RampDown   PatternTemplate = "ramp_down"
-	RampUp     PatternTemplate = "ramp_up"
-	Sliders    PatternTemplate = "sliders"
-	Square     PatternTemplate = "square"
-	SquareWave PatternTemplate = "square_wave"
+	Pyramid        PatternTemplate = "pyramid"
+	RampDown       PatternTemplate = "ramp_down"
+	RampUp         PatternTemplate = "ramp_up"
+	Sliders        PatternTemplate = "sliders"
+	Square         PatternTemplate = "square"
+	SquareWave     PatternTemplate = "square_wave"
+	TransientShock PatternTemplate = "transient_shock"
 )
 
 // Valid indicates whether the value is a known member of the PatternTemplate enum.
@@ -260,6 +261,8 @@ func (e PatternTemplate) Valid() bool {
 	case Square:
 		return true
 	case SquareWave:
+		return true
+	case TransientShock:
 		return true
 	default:
 		return false

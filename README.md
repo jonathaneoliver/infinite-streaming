@@ -231,7 +231,7 @@ Linux-only (macOS Docker Desktop can't do this).
 ### Network Shaping (per session)
 
 - **Delay / Loss / Throughput** sliders — steady-state shaping (0–250 ms, 0–10%, 0–50 Mbps). Throughput is disabled when a pattern is active.
-- **Pattern mode**: `sliders` (static), `square_wave`, `ramp_up`, `ramp_down`, `pyramid`. Non-`sliders` modes drive throughput through a scripted sequence of steps.
+- **Pattern mode**: `sliders` (static), `square_wave`, `ramp_up`, `ramp_down`, `pyramid`, `transient_shock` (hold the top cap, dip to each lower rung in turn — deepening — recovering to top between dips). Non-`sliders` modes drive throughput through a scripted sequence of steps.
 - **Step duration**: `6s` / `12s` / `18s` / `24s` — how long each pattern step holds.
 - **Margin**: `Exact` / `+10%` / `+25%` / `+50%` — headroom added on top of each ladder bitrate when picking preset rates.
 - **Throughput presets** are generated from the current manifest's variants (video + audio, deduped). Effective rate:

@@ -6,10 +6,11 @@ import "sort"
 // PatternTemplate enum in go-proxy's v2 OpenAPI surface and the
 // dashboard's NetworkShapingPattern.vue.
 const (
-	RampUp     = "ramp_up"
-	RampDown   = "ramp_down"
-	Pyramid    = "pyramid"
-	SquareWave = "square_wave"
+	RampUp         = "ramp_up"
+	RampDown       = "ramp_down"
+	Pyramid        = "pyramid"
+	SquareWave     = "square_wave"
+	TransientShock = "transient_shock"
 )
 
 // Step is one entry of a shape pattern: hold RateMbps for DurationSeconds.
@@ -20,10 +21,14 @@ type Step struct {
 
 // BuildPattern orders a limit ladder into a shape-pattern step list:
 //
-//   - ramp_up     ascending caps (lowest → highest)
-//   - ramp_down   descending caps (highest → lowest)
-//   - pyramid     ascending then descending, without duplicating the apex
-//   - square_wave just the lowest and highest cap, alternating
+//   - ramp_up         ascending caps (lowest → highest)
+//   - ramp_down       descending caps (highest → lowest)
+//   - pyramid         ascending then descending, without duplicating the apex
+//   - square_wave     just the lowest and highest cap, alternating
+//   - transient_shock hold the top cap, then dip to each lower rung in turn
+//     (deepening), returning to the top between dips so the buffer refills —
+//     the deepening-drop staircase the transient_shock characterization mode
+//     uses to find where the player breaks.
 //
 // rungs may arrive in any order (StandardLadder returns them descending);
 // the ascending sequence is derived here. Every step holds for stepSecs.
@@ -49,6 +54,16 @@ func BuildPattern(template string, rungs []Rung, stepSecs int) []Step {
 		seq = append(append([]float64{}, asc...), down...)
 	case SquareWave:
 		seq = []float64{asc[0], asc[len(asc)-1]}
+	case TransientShock:
+		// Deepening-dip staircase: hold the top cap, dip to each lower rung
+		// shallowest-first down to the bottom, recovering to the top between
+		// dips. seq = top, r[n-2], top, r[n-3], …, top, r[0], top. With a
+		// single rung there are no dips, so it's just that one cap.
+		top := asc[len(asc)-1]
+		seq = append(seq, top)
+		for i := len(asc) - 2; i >= 0; i-- {
+			seq = append(seq, asc[i], top)
+		}
 	default:
 		return nil
 	}

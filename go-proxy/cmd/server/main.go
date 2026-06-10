@@ -4440,7 +4440,7 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch payload.TemplateMode {
-	case "sliders", "square_wave", "ramp_up", "ramp_down", "pyramid":
+	case "sliders", "square_wave", "ramp_up", "ramp_down", "pyramid", "transient_shock":
 	default:
 		payload.TemplateMode = "sliders"
 	}

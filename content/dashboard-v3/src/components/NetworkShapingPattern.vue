@@ -4,12 +4,15 @@
  * editor. Sits on `shape.pattern` (a typed nested struct of
  * `{ template, steps, margin_pct, default_step_seconds }`).
  *
- * Five template choices:
- *   - sliders     → pattern is null (rate slider drives the kernel)
- *   - square_wave → alternates high / low across variants
- *   - ramp_up     → ascending rates
- *   - ramp_down   → descending rates
- *   - pyramid     → up then down
+ * Template choices:
+ *   - sliders         → pattern is null (rate slider drives the kernel)
+ *   - square_wave     → alternates high / low across variants
+ *   - ramp_up         → ascending rates
+ *   - ramp_down       → descending rates
+ *   - pyramid         → up then down
+ *   - transient_shock → hold top, dip to each lower rung in turn
+ *     (deepening), recovering to top between dips — the deepening-drop
+ *     staircase mirroring the transient_shock characterization mode
  *
  * Picking a non-sliders template GENERATES a step list from the
  * manifest's variants. The user can then edit each row (rate /
@@ -24,15 +27,16 @@ import { usePlayer } from '@/composables/usePlayer';
 import { useManifestVariants } from '@/composables/useManifestVariants';
 import type { Pattern } from '@/repo/v2-repo';
 
-const TEMPLATES = ['sliders', 'square_wave', 'ramp_up', 'ramp_down', 'pyramid'] as const;
+const TEMPLATES = ['sliders', 'square_wave', 'ramp_up', 'ramp_down', 'pyramid', 'transient_shock'] as const;
 type Template = (typeof TEMPLATES)[number];
 
 const TEMPLATE_LABELS: Record<Template, string> = {
-  sliders:     '🎚 Sliders',
-  square_wave: '▁▔ Square wave',
-  ramp_up:     '↗ Ramp up',
-  ramp_down:   '↘ Ramp down',
-  pyramid:     '⛰ Pyramid',
+  sliders:         '🎚 Sliders',
+  square_wave:     '▁▔ Square wave',
+  ramp_up:         '↗ Ramp up',
+  ramp_down:       '↘ Ramp down',
+  pyramid:         '⛰ Pyramid',
+  transient_shock: '⤓ Transient shock',
 };
 
 function marginLabel(m: number): string {
@@ -213,6 +217,15 @@ function buildSteps(t: Template, marginPct: number, stepSecs: number): Pattern['
     seq = asc.slice().reverse();
   } else if (t === 'pyramid') {
     seq = asc.concat(asc.slice(0, -1).reverse()); // up then down, no apex dupe
+  } else if (t === 'transient_shock') {
+    // Deepening-dip staircase: hold top, dip to each lower rung
+    // shallowest-first down to the bottom, recovering to top between dips.
+    // seq = top, r[n-2], top, r[n-3], …, top, r[0], top.
+    const top = asc[asc.length - 1];
+    seq = [top];
+    for (let i = asc.length - 2; i >= 0; i--) {
+      seq.push(asc[i], top);
+    }
   } else {
     seq = [];
   }
