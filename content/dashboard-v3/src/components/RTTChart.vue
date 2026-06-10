@@ -11,11 +11,19 @@ import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import type { PlayerRecord } from '@/repo/v2-repo';
 import { usePlayer } from '@/composables/usePlayer';
+import { useCompareOverlays, useCompareSelf } from '@/composables/useCompareContext';
+import { compareRttSeries } from '@/composables/compareSeries';
 
 const props = defineProps<{
   playerId: string;
   eventsStream: Stream<Record<string, unknown>>;
 }>();
+
+/** Grouped-sibling RTT overlays (issue #579). Empty unless compare mode
+ *  is on; shares the ms 'y' axis (and 'y2' for RTO) so the scales size
+ *  across every overlaid session. */
+const compareOverlays = useCompareOverlays(compareRttSeries);
+const compareSelf = useCompareSelf();
 
 // AVMetrics is iOS-only (AVPlayer ≥ iOS 18); other players will never
 // populate client_rtt_avmetrics_ms, so we hide the TTFB (client) line
@@ -27,7 +35,11 @@ const isAVPlayer = computed(() => {
   return tech === 'AVPlayer';
 });
 
-const series = computed<SeriesSpec[]>(() => [
+const series = computed<SeriesSpec[]>(() => {
+  // Compare mode: active session shows the same canonical tagged RTT set
+  // (solid `S<id>`) the siblings overlay.
+  if (compareSelf.value) return compareRttSeries(compareSelf.value);
+  return [
   {
     label: 'RTT (ms)',
     color: '#4f46e5',
@@ -68,7 +80,8 @@ const series = computed<SeriesSpec[]>(() => [
     accessor: (p: PlayerRecord) => p.server_metrics?.rto_ms ?? null,
     axis: 'y2',
   },
-]);
+  ];
+});
 </script>
 
 <template>
@@ -78,6 +91,7 @@ const series = computed<SeriesSpec[]>(() => [
     unit="ms"
     :series="series"
     :events-stream="eventsStream"
+    :overlays="compareOverlays"
     :y-min="0"
     y2-title="RTO (ms)"
     :y2-min="0"

@@ -16,8 +16,9 @@
  * to `windowMs * 2` ms on the older side so a zoom-out / pan-back still
  * has data to show. The chart never holds more than ~2× window worth.
  */
-import { computed, onBeforeUnmount, ref, toRef, watch, type PropType } from 'vue';
+import { computed, inject, onBeforeUnmount, ref, toRef, watch, type PropType } from 'vue';
 import { ensureChartJs } from '@/composables/useChartJs';
+import { CompareContextKey } from '@/composables/useCompareContext';
 import { useChartCoordination, fmtTickHMSms, DEFAULT_FOCUS_MS, type ChartViewport } from '@/composables/useChartCoordination';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import { tsOfRow, chRowToPlayerRecord } from '@/composables/chRowAdapter';
@@ -48,6 +49,33 @@ export interface SeriesSpec {
    *  any other set of N lines the operator thinks of as one
    *  conceptual overlay. Issue #486. */
   groupLegend?: string;
+  /** Compare mode (issue #579): the session this series belongs to (its
+   *  `Sx` tag). Lets the session-legend highlight / show / hide every line
+   *  for one session at once across all charts. */
+  sessionTag?: string;
+}
+
+/**
+ * ChartOverlaySource — one grouped-sibling's series overlaid onto this
+ * chart (issue #579 compare mode). Each source carries its OWN events
+ * stream (a separate per-player SSE) and its OWN tagged SeriesSpec[];
+ * the chart drains each source independently and renders its datasets
+ * alongside the primary `series`, on the same axes (so they share — and
+ * size — the y axis with the active session's lines, the #165 fix).
+ *
+ * Overlay datasets are drawn with `spanGaps: false` and explicit null
+ * points for missing samples, so a sibling lacking a wire metric shows
+ * a clean gap instead of an interpolated bridge.
+ */
+export interface ChartOverlaySource {
+  /** Stable identity (the sibling's player UUID) — drives dataset reuse
+   *  across reconciles so a sibling's accumulated history survives a
+   *  membership change elsewhere in the group. */
+  key: string;
+  /** The sibling's events stream (charts_minimal projection). */
+  eventsStream: Stream<Record<string, unknown>>;
+  /** Tagged, per-member-coloured series to overlay for this sibling. */
+  series: SeriesSpec[];
 }
 
 const props = defineProps({
@@ -80,6 +108,14 @@ const props = defineProps({
   markersLabel: { type: String, default: '' },
   /** Marker visibility (v-model). Default true. */
   markersVisible: { type: Boolean, default: true },
+  /** Grouped-sibling overlays (issue #579 compare mode). Each entry is
+   *  one sibling's stream + tagged series; drained independently and
+   *  rendered alongside the primary `series` on shared axes. Empty in
+   *  the normal single-session case — the primary path is untouched. */
+  overlays: {
+    type: Array as PropType<ChartOverlaySource[]>,
+    default: () => [],
+  },
 });
 
 const emit = defineEmits<{
@@ -90,6 +126,12 @@ const canvas = ref<HTMLCanvasElement | null>(null);
 const wrap = ref<HTMLDivElement | null>(null);
 const canvasWrap = ref<HTMLDivElement | null>(null);
 const coord = useChartCoordination(toRef(props, 'playerId'));
+
+// Compare-mode session legend (issue #579). When mounted inside a
+// SessionDisplay that's in compare mode, the S1/S2 chips drive this
+// shared view; we highlight / show / hide this chart's datasets by their
+// `_sessionTag` in lockstep with every other chart. Null outside compare.
+const compareCtx = inject(CompareContextKey, null);
 
 let chart: any = null;
 let dataset: Array<Array<{ x: number; y: number }>> = [];
@@ -227,64 +269,202 @@ async function ensure(): Promise<any> {
   return ensurePromise;
 }
 
-/** Reconcile the live chart's dataset list against props.series
- *  (issue #486). The chart is built once at mount with whatever
- *  series existed then; series that come from a computed (e.g. the
- *  manifest variant overlay on BandwidthChart) may arrive late. This
- *  syncs the chart's `data.datasets` array + the backing `dataset`
- *  cache in place — no destroy/recreate, so accumulated history on
- *  the static series isn't lost. */
-function syncDatasetsFromSeriesProp() {
-  if (!chart || !chart.data?.datasets) return;
+/** Build one Chart.js dataset object from a SeriesSpec. `dsKey` is a
+ *  stable identity (`primary|<label>` for the active session's lines,
+ *  `<siblingPlayerId>|<label>` for a compare overlay) used to reuse the
+ *  same dataset object — and thus its accumulated `data` array — across
+ *  reconciles. `spanGaps` is true for the primary series (legacy
+ *  behaviour) and false for overlays so a sibling's missing samples
+ *  render as gaps, not interpolated bridges (issue #579). */
+function makeDsObj(
+  dsKey: string,
+  s: SeriesSpec,
+  data: Array<{ x: number; y: number | null }>,
+  spanGaps: boolean,
+): any {
+  return {
+    label: s.label,
+    borderColor: s.color,
+    backgroundColor: s.color + '22',
+    data,
+    tension: 0,
+    stepped: !!s.stepped,
+    pointRadius: 0,
+    borderWidth: 2,
+    borderDash: s.borderDash ?? [],
+    spanGaps,
+    yAxisID: s.axis === 'y2' ? 'y2' : 'y',
+    hidden: !!s.hidden,
+    _groupLegend: s.groupLegend ?? null,
+    _sessionTag: s.sessionTag ?? null,
+    _dsKey: dsKey,
+  };
+}
+
+/** Per-overlay runtime state (issue #579). One entry per grouped
+ *  sibling: its current series spec, the backing {x,y} arrays Chart.js
+ *  reads from, an ingest watermark, and the last-seen stream epoch (so a
+ *  sibling's play rotation / refetch wipes and re-drains cleanly). */
+interface OverlayRuntime {
+  datasets: Array<Array<{ x: number; y: number | null }>>;
+  watermark: number;
+  epoch: number;
+}
+const overlayRuntime = new Map<string, OverlayRuntime>();
+
+/** Build the primary (active-session) dataset objects, reconciling
+ *  against whatever is already on the chart by `_dsKey` so a stable
+ *  series keeps its accumulated history when the series list changes
+ *  (e.g. manifest variants arriving late, issue #486). Also keeps the
+ *  backing `dataset` cache 1:1 with these objects for pushSample. */
+function buildPrimaryDatasetObjs(): any[] {
   const target = props.series;
-  // Adjust backing `dataset` length first so pushSample's loop and
-  // chart.data.datasets stay 1:1.
   while (dataset.length < target.length) dataset.push([]);
   while (dataset.length > target.length) dataset.pop();
-  // Reconcile chart datasets in place. Match by label so a stable
-  // series keeps its in-memory data even if a new series is inserted
-  // before it.
-  const existing = chart.data.datasets;
-  const byLabel = new Map<string, any>();
-  for (const d of existing) if (d.label) byLabel.set(d.label, d);
-  const next: any[] = [];
+  const existing = chart?.data?.datasets ?? [];
+  const byKey = new Map<string, any>();
+  for (const d of existing) if (d._dsKey) byKey.set(d._dsKey, d);
+  const out: any[] = [];
   for (let i = 0; i < target.length; i++) {
     const s = target[i];
-    const prev = byLabel.get(s.label);
+    const dsKey = 'primary|' + s.label;
+    const prev = byKey.get(dsKey);
     if (prev) {
-      // Update mutable bits and reuse the data array (preserves history).
       prev.borderColor = s.color;
       prev.backgroundColor = s.color + '22';
       prev.stepped = !!s.stepped;
       prev.borderDash = s.borderDash ?? [];
       prev.yAxisID = s.axis === 'y2' ? 'y2' : 'y';
-      (prev as any)._groupLegend = s.groupLegend ?? null;
-      // Backing `dataset[i]` must point at the same array Chart.js
-      // is reading from. Reuse prev.data and reseat the cache slot.
+      prev.spanGaps = true;
+      prev._groupLegend = s.groupLegend ?? null;
+      prev._sessionTag = s.sessionTag ?? null;
       dataset[i] = prev.data;
-      next.push(prev);
+      out.push(prev);
     } else {
       const data: Array<{ x: number; y: number }> = [];
       dataset[i] = data;
-      next.push({
-        label: s.label,
-        borderColor: s.color,
-        backgroundColor: s.color + '22',
-        data,
-        tension: 0,
-        stepped: !!s.stepped,
-        pointRadius: 0,
-        borderWidth: 2,
-        borderDash: s.borderDash ?? [],
-        spanGaps: true,
-        yAxisID: s.axis === 'y2' ? 'y2' : 'y',
-        hidden: !!s.hidden,
-        _groupLegend: s.groupLegend ?? null,
-      });
+      out.push(makeDsObj(dsKey, s, data, true));
     }
   }
-  chart.data.datasets = next;
+  return out;
+}
+
+/** Build the compare-overlay dataset objects from `props.overlays`,
+ *  reconciling by `<key>|<label>` so a sibling's lines (and history)
+ *  survive a membership change. Prunes runtime for siblings that have
+ *  left the group. Issue #579. */
+function buildOverlayDatasetObjs(): any[] {
+  const sources = props.overlays ?? [];
+  const wantKeys = new Set(sources.map((s) => s.key));
+  for (const key of [...overlayRuntime.keys()]) {
+    if (!wantKeys.has(key)) overlayRuntime.delete(key);
+  }
+  const existing = chart?.data?.datasets ?? [];
+  const byKey = new Map<string, any>();
+  for (const d of existing) if (d._dsKey) byKey.set(d._dsKey, d);
+  const out: any[] = [];
+  for (const src of sources) {
+    let rt = overlayRuntime.get(src.key);
+    if (!rt) {
+      rt = { datasets: [], watermark: -Infinity, epoch: src.eventsStream.epoch.value };
+      overlayRuntime.set(src.key, rt);
+    }
+    while (rt.datasets.length < src.series.length) rt.datasets.push([]);
+    while (rt.datasets.length > src.series.length) rt.datasets.pop();
+    for (let i = 0; i < src.series.length; i++) {
+      const s = src.series[i];
+      const dsKey = src.key + '|' + s.label;
+      const prev = byKey.get(dsKey);
+      if (prev) {
+        prev.borderColor = s.color;
+        prev.backgroundColor = s.color + '22';
+        prev.stepped = !!s.stepped;
+        prev.borderDash = s.borderDash ?? [];
+        prev.yAxisID = s.axis === 'y2' ? 'y2' : 'y';
+        prev.spanGaps = false;
+        prev._groupLegend = s.groupLegend ?? null;
+        prev._sessionTag = s.sessionTag ?? null;
+        rt.datasets[i] = prev.data;
+        out.push(prev);
+      } else {
+        const data = rt.datasets[i] ?? [];
+        rt.datasets[i] = data;
+        out.push(makeDsObj(dsKey, s, data, false));
+      }
+    }
+  }
+  return out;
+}
+
+/** Recompose `chart.data.datasets` = [primary…, overlay…] from the
+ *  current `series` + `overlays` props. The single owner of the dataset
+ *  list; both the series-prop watcher and the overlays watcher route
+ *  through here so the two halves never clobber each other. */
+function rebuildAllDatasets() {
+  if (!chart || !chart.data) return;
+  const primary = buildPrimaryDatasetObjs();
+  const overlay = buildOverlayDatasetObjs();
+  chart.data.datasets = [...primary, ...overlay];
+  // Re-apply the session-legend hidden state so freshly (re)built
+  // datasets for a hidden session start hidden. No render here — the
+  // safeChartUpdate below paints it. Issue #579.
+  applySessionVisibility(false);
   safeChartUpdate();
+}
+
+/** Show/hide every dataset by its session's legend state (#579). When a
+ *  session is toggled off in the S1/S2 chip row, all its lines hide on
+ *  every chart at once. `doUpdate` is false when called from a path that
+ *  renders anyway (rebuildAllDatasets). */
+function applySessionVisibility(doUpdate = true) {
+  if (!chart || !compareCtx) return;
+  const hidden = compareCtx.view.hidden.value;
+  let changed = false;
+  chart.data.datasets.forEach((ds: any, idx: number) => {
+    if (!ds._sessionTag) return;
+    const shouldShow = !hidden.has(ds._sessionTag);
+    if (chart.isDatasetVisible(idx) !== shouldShow) {
+      chart.setDatasetVisibility(idx, shouldShow);
+      changed = true;
+    }
+  });
+  if (changed && doUpdate) { try { chart.update(); } catch { /* ignore */ } }
+}
+
+/** Hovering a session chip pops that session's lines and dims the rest
+ *  (#579). Mirrors the per-series legend hover but keyed on _sessionTag
+ *  so the whole session lights up across every chart. */
+function applySessionHover() {
+  if (!chart || !compareCtx) return;
+  const hov = compareCtx.view.hovered.value;
+  for (const ds of chart.data.datasets as any[]) {
+    if (ds._origBorderWidth == null) ds._origBorderWidth = ds.borderWidth ?? 2;
+    if (ds._origBorderColor == null) ds._origBorderColor = ds.borderColor;
+    if (!hov) {
+      ds.borderWidth = ds._origBorderWidth;
+      ds.borderColor = ds._origBorderColor;
+    } else if (ds._sessionTag === hov) {
+      ds.borderWidth = (ds._origBorderWidth ?? 2) + 2;
+      ds.borderColor = ds._origBorderColor;
+    } else {
+      ds.borderWidth = Math.max(1, (ds._origBorderWidth ?? 2) - 1);
+      const oc = ds._origBorderColor;
+      ds.borderColor = typeof oc === 'string' && oc.startsWith('#') && oc.length === 7 ? oc + '33' : oc;
+    }
+  }
+  try { chart.update('none'); } catch { /* ignore */ }
+}
+
+if (compareCtx) {
+  watch(() => compareCtx.view.hovered.value, () => applySessionHover());
+  watch(() => compareCtx.view.hidden.value, () => applySessionVisibility());
+}
+
+/** Reconcile the live chart's dataset list against props.series
+ *  (issue #486) — now delegates to rebuildAllDatasets so compare
+ *  overlays (#579) are preserved when the primary series list changes. */
+function syncDatasetsFromSeriesProp() {
+  rebuildAllDatasets();
 }
 
 function createChartInstance(Chart: any): any {
@@ -305,28 +485,14 @@ function createChartInstance(Chart: any): any {
   chart = new Chart(canvas.value, {
     type: 'line',
     data: {
-      datasets: props.series.map((s, i) => ({
-        label: s.label,
-        borderColor: s.color,
-        backgroundColor: s.color + '22',
-        data: dataset[i],
-        // Straight line segments between samples — no curve fitting.
-        // Stepped series (player state) keep tension 0 too. Smoothing
-        // implies measurements that weren't taken; for instrumentation
-        // data, straight-line is the truthful representation.
-        tension: 0,
-        stepped: !!s.stepped,
-        pointRadius: 0,
-        borderWidth: 2,
-        borderDash: s.borderDash ?? [],
-        spanGaps: true,
-        yAxisID: s.axis === 'y2' ? 'y2' : 'y',
-        hidden: !!s.hidden,
-        // Marker for the legend group-collapse logic (issue #486).
-        // Datasets that share a `_groupLegend` value collapse to a
-        // single legend entry; clicking it toggles all members.
-        _groupLegend: s.groupLegend ?? null,
-      })),
+      // Straight line segments between samples — no curve fitting.
+      // Stepped series keep tension 0 too. Smoothing implies
+      // measurements that weren't taken; for instrumentation data,
+      // straight-line is the truthful representation. makeDsObj stamps
+      // `_dsKey` (primary|<label>) so later reconciles reuse these
+      // objects — and their accumulated history — by identity, and
+      // `_groupLegend` for the legend group-collapse logic (issue #486).
+      datasets: props.series.map((s, i) => makeDsObj('primary|' + s.label, s, dataset[i], true)),
     },
     /**
      * Inline plugin: vertical "selected event" cursor.
@@ -505,6 +671,21 @@ function createChartInstance(Chart: any): any {
             const c = leg?.chart;
             if (!c || typeof item?.datasetIndex !== 'number') return;
             const hovered = item.datasetIndex;
+            // Compare mode (#579): also give a medium highlight to the
+            // SAME metric on other sessions — hovering `Fetching Variant
+            // (S2)` lifts `Fetching Variant (S1)` too, just less. Metric
+            // identity is the label with its trailing ` (Sx)` stripped.
+            const stripTag = (l: string) => l.replace(/\s*\(S[^)]*\)\s*$/, '');
+            const hoveredDs0 = c.data.datasets[hovered];
+            const sameMetric = new Set<number>();
+            if (hoveredDs0?._sessionTag) {
+              const mk = stripTag(hoveredDs0.label ?? '');
+              c.data.datasets.forEach((ds: any, i: number) => {
+                if (i !== hovered && ds._sessionTag && stripTag(ds.label ?? '') === mk) {
+                  sameMetric.add(i);
+                }
+              });
+            }
             // If the hovered legend entry represents a group (issue
             // #486 — `Variant avg bandwidth` / `Variant peak bandwidth`
             // each stand in for N member series), build a Set of every
@@ -524,7 +705,14 @@ function createChartInstance(Chart: any): any {
               if (ds._origBorderWidth == null) ds._origBorderWidth = ds.borderWidth ?? 2;
               if (ds._origBorderColor == null) ds._origBorderColor = ds.borderColor;
               if (highlighted.has(i)) {
+                // Strongest: the hovered line (or its group).
                 ds.borderWidth = (ds._origBorderWidth ?? 2) + 2;
+                ds.borderColor = ds._origBorderColor;
+              } else if (sameMetric.has(i)) {
+                // Medium: same metric on another session — keep full
+                // colour, a touch bolder than baseline so the eye pairs
+                // it with the hovered line (#579).
+                ds.borderWidth = (ds._origBorderWidth ?? 2) + 1;
                 ds.borderColor = ds._origBorderColor;
               } else {
                 ds.borderWidth = Math.max(1, (ds._origBorderWidth ?? 2) - 1);
@@ -666,6 +854,13 @@ function createChartInstance(Chart: any): any {
   installLeftClickLiveToggle();
   installCursorHoverTooltip();
   installMarkerHoverTooltip();
+  // If compare overlays were already present at mount, compose + drain
+  // them now (the overlays watcher's immediate run may have fired before
+  // the chart existed). Issue #579.
+  if ((props.overlays ?? []).length) {
+    try { rebuildAllDatasets(); } catch { /* ignore */ }
+    void drainOverlays();
+  }
   return chart;
 }
 
@@ -955,7 +1150,10 @@ function installLiveWheelAnchor() {
  *  Duplicate x values overwrite — last write wins for that timestamp.
  *  O(log n) lookup + O(n) shift; chart pushSample is dominated by
  *  Chart.js update() cost anyway. */
-function insertByX(data: { x: number; y: number }[], point: { x: number; y: number }) {
+function insertByX(
+  data: { x: number; y: number | null }[],
+  point: { x: number; y: number | null },
+) {
   if (!data.length || point.x >= data[data.length - 1].x) {
     if (data.length && data[data.length - 1].x === point.x) {
       data[data.length - 1] = point;
@@ -1218,6 +1416,91 @@ watch(
   { immediate: true },
 );
 
+/* ─── Compare-overlay drain (issue #579) ───────────────────────────
+ *
+ * Each grouped sibling has its OWN events stream + tagged series. Drain
+ * them independently of the primary path: per overlay we keep an ingest
+ * watermark and append only NEW rows. Missing accessor values become an
+ * explicit `{x, y:null}` point so the `spanGaps:false` overlay datasets
+ * render a gap (not an interpolated bridge) where a sibling lacks a wire
+ * metric. Overlays never drive the viewport — the active session owns
+ * the brush; siblings just paint onto the shared x/y scales.
+ */
+function drainOverlays() {
+  if (!chart) return;
+  const sources = props.overlays ?? [];
+  let mutated = false;
+  for (const src of sources) {
+    const rt = overlayRuntime.get(src.key);
+    if (!rt) continue;
+    // A sibling re-subscribe (play rotation / refetch-on-pan) bumps its
+    // stream epoch — wipe and re-drain from scratch so we don't splice a
+    // new window's rows onto a stale watermark.
+    const ep = src.eventsStream.epoch.value;
+    if (ep !== rt.epoch) {
+      rt.epoch = ep;
+      rt.watermark = -Infinity;
+      for (const arr of rt.datasets) arr.length = 0;
+    }
+    const fromMs = rt.watermark === -Infinity ? 0 : rt.watermark + 1;
+    const rows = src.eventsStream.inRange(fromMs, Number.MAX_SAFE_INTEGER);
+    if (!rows.length) continue;
+    let hw = rt.watermark;
+    for (const row of rows) {
+      const x = tsOfRow(row);
+      if (!Number.isFinite(x)) continue;
+      if (rt.watermark !== -Infinity && x <= rt.watermark) continue;
+      const p = chRowToPlayerRecord(row);
+      for (let i = 0; i < src.series.length; i++) {
+        const arr = rt.datasets[i];
+        if (!arr) continue;
+        let y: number | null | undefined;
+        try { y = src.series[i].accessor(p); } catch { y = null; }
+        const yVal = (y == null || !Number.isFinite(y)) ? null : Number(y);
+        insertByX(arr, { x, y: yVal });
+      }
+      if (x > hw) hw = x;
+      mutated = true;
+    }
+    rt.watermark = hw;
+    // Same hard per-series memory bound the primary path uses (#582).
+    for (const arr of rt.datasets) {
+      if (arr.length > MAX_POINTS_PER_SERIES) arr.splice(0, arr.length - MAX_POINTS_PER_SERIES);
+    }
+  }
+  if (mutated) safeChartUpdate();
+}
+
+// Structure changes (compare toggled, a sibling joined/left, or its
+// series set changed) → recompose datasets, then drain. Reading
+// props.overlays in the getter tracks the prop so a new membership array
+// re-fires this. immediate so an at-mount overlay set composes once the
+// chart exists.
+watch(
+  () => (props.overlays ?? [])
+    .map((o) => o.key + ':' + o.series.map((s) => s.label).join(',')).join('|'),
+  () => {
+    try { rebuildAllDatasets(); } catch (err) { console.warn('overlay rebuild skipped:', err); }
+    void drainOverlays();
+  },
+  { immediate: true },
+);
+
+// Data changes — any sibling stream version/epoch bump drains new rows.
+// Reading each stream's version/epoch inside the getter establishes the
+// reactive deps; reading props.overlays re-tracks them on a membership
+// swap. Kept separate from the structure watcher so a per-second tick
+// doesn't recompose the dataset list, only appends points.
+watch(
+  () => {
+    const ovs = props.overlays ?? [];
+    let v = 0;
+    for (const o of ovs) v += o.eventsStream.version.value + o.eventsStream.epoch.value;
+    return ovs.length + ':' + v;
+  },
+  () => { void drainOverlays(); },
+);
+
 // Resume drain — flush any samples that arrived while pinned in
 // chronological order, so the chart catches up to the live edge in
 // one pass. insertByX dedupes by x so re-runs stay safe.
@@ -1239,6 +1522,9 @@ watch(
     lastIngestedMs = -Infinity;
     ++backfillToken; // abort any in-flight backfill for the old player
     for (const arr of dataset) arr.length = 0;
+    // Drop compare-overlay state too (#579) so a picker swap doesn't
+    // leave a previous group's sibling lines on the new session.
+    overlayRuntime.clear();
     safeChartUpdate();
   },
 );
