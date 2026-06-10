@@ -27,6 +27,8 @@ import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 import { useManifestVariants, nearestVariantByBitrate } from '@/composables/useManifestVariants';
 import { usePlayer } from '@/composables/usePlayer';
+import { useCompareOverlays, useCompareSelf } from '@/composables/useCompareContext';
+import { compareBandwidthSeries } from '@/composables/compareSeries';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
@@ -300,7 +302,12 @@ const baseSeries: SeriesSpec[] = [
  *
  *  Defaults: peak ON (the rate ABR actually keys on — see abr-ladder
  *  standard), avg OFF (toggle on for the typical-body-bitrate reference). */
+const compareSelf = useCompareSelf();
 const series = computed<SeriesSpec[]>(() => {
+  // Compare mode: the active session shows the SAME canonical tagged set
+  // (solid, `S<id>`) the siblings overlay — not its full single-session
+  // series — so every session reads identically (issue #579).
+  if (compareSelf.value) return compareBandwidthSeries(compareSelf.value);
   const out = [...baseSeries];
   const ladder = variants.value;
   if (!ladder.length) return out;
@@ -389,6 +396,15 @@ const series = computed<SeriesSpec[]>(() => {
   }
   return out;
 });
+
+/** Grouped-sibling overlays (issue #579 compare mode). Empty unless the
+ *  active session is in a group AND the operator enabled Compare Charts;
+ *  resolved from the CompareContext SessionDisplay provides. Each sibling
+ *  overlays its tagged rate series (Player Network Rate + Player Variant
+ *  visible; Player Est / Server Variant / Shaper Avg legend-toggleable).
+ *  On the shared 'y' axis so the rate axis sizes across every overlaid
+ *  session (the #165 union-sizing fix). */
+const compareOverlays = useCompareOverlays(compareBandwidthSeries);
 </script>
 
 <template>
@@ -398,8 +414,9 @@ const series = computed<SeriesSpec[]>(() => {
     unit="Mbps"
     :series="series"
     :events-stream="eventsStream"
-    :markers="segmentMarkers"
-    :markers-label="segmentMarkersLabel"
+    :overlays="compareOverlays"
+    :markers="compareSelf ? [] : segmentMarkers"
+    :markers-label="compareSelf ? '' : segmentMarkersLabel"
     v-model:markers-visible="segmentMarkersVisible"
     :y-min="0"
     :y-max="yMax"

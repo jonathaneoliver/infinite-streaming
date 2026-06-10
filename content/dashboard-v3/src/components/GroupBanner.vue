@@ -15,6 +15,7 @@ import { computed, toRef } from 'vue';
 import { usePlayer } from '@/composables/usePlayer';
 import { useGroups } from '@/composables/useGroups';
 import { usePlayers } from '@/composables/usePlayers';
+import { useCompareMode } from '@/composables/useCompareMode';
 import { deviceFromUA, groupNameFor } from '@/composables/useSessionLabels';
 import * as repo from '@/repo/v2-repo';
 
@@ -22,6 +23,14 @@ const props = defineProps<{ playerId: string }>();
 const { player } = usePlayer(toRef(props, 'playerId'));
 const { groups, disband, updateMembers } = useGroups();
 const { players } = usePlayers();
+
+// Compare-charts toggle (issue #579). Keyed on the raw player id so this
+// button and SessionDisplay's overlay consumer share the same module-
+// level flag. Only meaningful with ≥2 grouped members; the consumer
+// gates the overlay on that, so flipping it on a degenerate group is a
+// harmless no-op that "remembers" the choice for a later regrouping.
+const compareMode = useCompareMode(toRef(props, 'playerId'));
+const compareOn = computed(() => compareMode.state.enabled);
 
 // Identify the active player's group via membership rather than by
 // matching raw_session.group_id against PlayerGroup.id. The server
@@ -120,6 +129,23 @@ async function deleteSession() {
           🔗 Grouped with: <strong>{{ memberNames.join(', ') || '(only you)' }}</strong>
           <span class="chip">{{ groupName }}</span>
         </span>
+        <!-- Compare Charts (issue #579) — overlay each grouped member's
+             rate + buffer series (tagged S<id>) onto the shared charts so
+             two devices read against the same shaping target. Surfaced
+             only with ≥2 members; restores the legacy testing.html
+             compare-mode the v3 cutover dropped. -->
+        <button
+          v-if="memberCount >= 2"
+          type="button"
+          class="btn compare-toggle"
+          :class="{ checked: compareOn }"
+          @click="compareMode.toggle()"
+          :title="compareOn
+            ? 'Hide grouped sibling overlays from the charts'
+            : 'Overlay each grouped session\'s rate + buffer lines on the charts'"
+        >
+          {{ compareOn ? '●' : '○' }} Compare Charts
+        </button>
         <!-- "Ungroup" = this session leaves; "Delete Group" = drop the
              whole group. With only 2 members, leaving leaves a
              degenerate 1-member group, so we surface only "Delete
@@ -199,6 +225,16 @@ async function deleteSession() {
 .btn-secondary:hover { background: #d1d5db; }
 .btn-warn { background: #ef4444; color: white; border-color: #ef4444; font-size: 11px; padding: 4px 10px; }
 .btn-warn:hover { background: #dc2626; }
+/* Compare Charts toggle — filled violet when on (matches the overlay
+ * palette family), muted/outlined when off. */
+.compare-toggle { font-size: 11px; padding: 4px 10px; }
+.compare-toggle.checked {
+  background: #7c3aed;
+  border-color: #6d28d9;
+  color: #fff;
+  font-weight: 600;
+}
+.compare-toggle.checked:hover { background: #6d28d9; }
 .btn-danger { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
 .btn-danger:hover { background: #fecaca; }
 

@@ -26,7 +26,7 @@
  * Composables run unconditionally; if sessionId is empty (live mode
  * before historical resolution), they short-circuit and return empty.
  */
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
+import { ref, shallowRef, computed, watch, onMounted, onBeforeUnmount, provide } from 'vue';
 import { useQueryClient } from '@tanstack/vue-query';
 import CollapsibleSection from '@/components/CollapsibleSection.vue';
 import SessionDetails from '@/components/SessionDetails.vue';
@@ -61,7 +61,12 @@ interface SessionEvent {
   [k: string]: unknown;
 }
 import { usePlayer } from '@/composables/usePlayer';
-import { useSessionTimeSeries } from '@/composables/useSessionTimeSeries';
+import { useSessionTimeSeries, type Stream } from '@/composables/useSessionTimeSeries';
+import { useCompareMode } from '@/composables/useCompareMode';
+import { useGroupSiblings } from '@/composables/useGroupSiblings';
+import { CompareContextKey, sessionDash, type CompareSibling, type CompareSeriesIdentity } from '@/composables/useCompareContext';
+import CompareSeriesSource from '@/components/CompareSeriesSource.vue';
+import CompareSessionLegend from '@/components/CompareSessionLegend.vue';
 import { chRowToPlayerRecord, tsOfRow } from '@/composables/chRowAdapter';
 import {
   setArchivePlayer,
@@ -114,6 +119,94 @@ const playIdRef = computed(() => props.playId);
 // this subscription only matters for mutation-side consumers.
 const livePlayerIdRef = computed(() => props.playerId);
 const { player: livePlayer } = usePlayer(livePlayerIdRef);
+
+/* ─── Compare-charts overlay (issue #579) ───────────────────────────
+ * When the active session is in a group (≥2 members) and the operator
+ * flips "Compare Charts" (the GroupBanner toggle), overlay each grouped
+ * sibling's tagged rate/buffer series onto the shared charts. The toggle
+ * + sibling resolution are keyed on the RAW player id (props.playerId)
+ * so GroupBanner's button and this consumer share state via the
+ * module-level useCompareMode / useGroupSiblings maps. Each sibling's
+ * SSE is owned by one renderless CompareSeriesSource (rendered in the
+ * template); we register its events stream here and publish the assembled
+ * CompareContext so BandwidthChart / BufferChart can pull their overlays
+ * via useCompareOverlays(). */
+const compareMode = useCompareMode(livePlayerIdRef);
+const { siblings: groupSiblings } = useGroupSiblings(livePlayerIdRef);
+const compareEnabled = computed(
+  () => compareMode.state.enabled && groupSiblings.value.length >= 1,
+);
+// Registered sibling streams keyed by player_id. shallowRef + whole-Map
+// replace so add/remove triggers the computed WITHOUT deep-reactive
+// wrapping the Stream (which holds refs + functions).
+const siblingStreams = shallowRef(new Map<string, Stream<Record<string, unknown>>>());
+function registerSibling(pid: string, stream: Stream<Record<string, unknown>>) {
+  const m = new Map(siblingStreams.value);
+  m.set(pid, stream);
+  siblingStreams.value = m;
+}
+function unregisterSibling(pid: string) {
+  if (!siblingStreams.value.has(pid)) return;
+  const m = new Map(siblingStreams.value);
+  m.delete(pid);
+  siblingStreams.value = m;
+}
+// Renderless subscribers to mount — only while compare is on, so a fresh
+// SSE per sibling isn't opened until the operator asks for the overlay.
+const compareSources = computed(() => (compareEnabled.value ? groupSiblings.value : []));
+const compareSiblings = computed<CompareSibling[]>(() => {
+  if (!compareEnabled.value) return [];
+  return groupSiblings.value
+    .filter((s) => siblingStreams.value.has(s.playerId))
+    .map((s) => ({
+      playerId: s.playerId,
+      tag: s.tag,
+      label: s.label,
+      index: s.index,
+      // Each sibling gets a stable dash by index; the active session is
+      // solid (below). Colour is per-metric, assigned in compareSeries.
+      dash: sessionDash(s.index),
+      stream: siblingStreams.value.get(s.playerId)!,
+    }));
+});
+// The active session's own compare identity — tag `S<display_id>` (so it
+// reads as one of the grouped sessions) and a SOLID line (empty dash) to
+// stand out from the dashed siblings. Charts build their primary `series`
+// from this in compare mode so the active session's lines are tagged +
+// slimmed to the same canonical set the siblings show.
+const compareSelf = computed<CompareSeriesIdentity | null>(() => {
+  if (!compareEnabled.value) return null;
+  const did = livePlayer.value?.display_id;
+  const tag = did != null ? `S${did}` : `S${props.playerId.slice(0, 4)}`;
+  return { tag, dash: [] };
+});
+// Shared session-legend view (S1/S2 chips → hover-highlight + show/hide
+// per session across all charts). Cleared when compare mode turns off so
+// a stale hidden set doesn't blank a session on re-entry.
+const compareHovered = ref<string | null>(null);
+const compareHidden = ref<Set<string>>(new Set());
+const compareView = { hovered: compareHovered, hidden: compareHidden };
+watch(compareEnabled, (on) => {
+  if (!on) { compareHovered.value = null; compareHidden.value = new Set(); }
+});
+// The chip list: the active session first (solid, "This session"), then
+// each grouped sibling with its dash + label.
+const compareSessions = computed(() => {
+  if (!compareEnabled.value) return [];
+  const out: Array<{ tag: string; label: string; dash: number[]; isSelf: boolean }> = [];
+  const selfTag = compareSelf.value?.tag;
+  if (selfTag) out.push({ tag: selfTag, label: 'This session', dash: [], isSelf: true });
+  for (const s of compareSiblings.value) {
+    out.push({ tag: s.tag, label: s.label, dash: s.dash, isSelf: false });
+  }
+  return out;
+});
+provide(CompareContextKey, {
+  enabled: compareEnabled,
+  self: compareSelf,
+  siblings: compareSiblings,
+  view: compareView,
+});
 
 // Defensive: only adopt usePlayer's canonical-case id when it
 // matches props.playerId case-insensitively. The shared TanStack
@@ -1271,6 +1364,17 @@ function skipToEnd() {
 
 <template>
   <div class="session-display">
+    <!-- Compare-charts overlay (issue #579): one renderless SSE
+         subscriber per grouped sibling, mounted only while compare mode
+         is on. Each registers its events stream with the CompareContext
+         the charts consume. -->
+    <CompareSeriesSource
+      v-for="sib in compareSources"
+      :key="sib.playerId"
+      :player-id="sib.playerId"
+      @register="registerSibling"
+      @unregister="unregisterSibling"
+    />
     <!-- Test-run metadata — off the event axis (see docs/EVENT_TAXONOMY.md);
          shown here so the viewer still says "this play was harness run X". -->
     <div v-if="testRun" class="test-run-chip" :title="`Harness run ${testRun.run_id}`">
@@ -1585,7 +1689,7 @@ function skipToEnd() {
       <PlayerMetrics :player-id="archivePlayerId" />
     </CollapsibleSection>
 
-    <CollapsibleSection title="Player State" :open="true" eager persist-key="player-state">
+    <CollapsibleSection title="Player State" :open="true" eager persist-key="player-state" :force-collapsed="compareEnabled">
       <!-- Cycle-band overlay — visible only when control_events for
            this play include at least one label_changed row carrying
            a cycle_id (characterization runs only). Aligned with the
@@ -1601,6 +1705,13 @@ function skipToEnd() {
 
     <CollapsibleSection title="Bitrate Chart etc" :open="true" eager persist-key="bitrate-chart">
       <BitrateChartPanelToolbar :player-id="archivePlayerId" />
+      <!-- Compare mode: S1/S2 session chips — hover to highlight a whole
+           session across all charts, click to show/hide it (#579). -->
+      <CompareSessionLegend
+        v-if="compareEnabled"
+        :sessions="compareSessions"
+        :view="compareView"
+      />
       <div class="chart-stack">
         <BandwidthChart :player-id="archivePlayerId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" />
         <BufferChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
@@ -1609,7 +1720,7 @@ function skipToEnd() {
       </div>
     </CollapsibleSection>
 
-    <CollapsibleSection title="Network Log" persist-key="network-log">
+    <CollapsibleSection title="Network Log" persist-key="network-log" :force-collapsed="compareEnabled">
       <!-- The page-level brush in SessionDisplay is the only scrub
            surface — archive shows it always, live shows it once
            paused. NetworkLog's own in-panel brush would duplicate it
@@ -1618,7 +1729,7 @@ function skipToEnd() {
       <NetworkLog :player-id="archivePlayerId" :network-stream="timeseries.network" />
     </CollapsibleSection>
 
-    <CollapsibleSection title="Play Log" persist-key="play-log">
+    <CollapsibleSection title="Play Log" persist-key="play-log" :force-collapsed="compareEnabled">
       <!-- Time-multiplexed view of snapshots + network rows + events
            interleaved on one chronological scroll, with checkbox
            filters per source. The three streams come from the same
