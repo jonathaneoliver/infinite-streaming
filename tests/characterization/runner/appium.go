@@ -798,6 +798,7 @@ func appiumCapabilities(d Device, bundleID string) map[string]any {
 	case PlatformIPhone, PlatformIPad:
 		caps["platformName"] = "iOS"
 		caps["appium:automationName"] = "XCUITest"
+		setXCUITestFleetPorts(caps, d.FleetIndex)
 	case PlatformIPadSim:
 		caps["platformName"] = "iOS"
 		caps["appium:automationName"] = "XCUITest"
@@ -805,9 +806,11 @@ func appiumCapabilities(d Device, bundleID string) map[string]any {
 		// step Appium does by default — WDA only needs (re)deploy on
 		// real devices.
 		caps["appium:useNewWDA"] = false
+		setXCUITestFleetPorts(caps, d.FleetIndex)
 	case PlatformAppleTV:
 		caps["platformName"] = "tvOS"
 		caps["appium:automationName"] = "XCUITest"
+		setXCUITestFleetPorts(caps, d.FleetIndex)
 	case PlatformAndroidTV:
 		caps["platformName"] = "Android"
 		caps["appium:automationName"] = "UiAutomator2"
@@ -821,4 +824,14 @@ func appiumCapabilities(d Device, bundleID string) map[string]any {
 		caps["appium:appWaitActivity"] = "*"
 	}
 	return caps
+}
+
+// setXCUITestFleetPorts pins this session's WebDriverAgent and MJPEG
+// screenshot-stream ports off the device's fleet index. Concurrent
+// XCUITest sessions otherwise default to wdaLocalPort 8100 /
+// mjpegServerPort 9100 and collide — the 2nd+ sim never binds. Index 0
+// → 8100/9100, unchanged for single-device runs.
+func setXCUITestFleetPorts(caps map[string]any, fleetIndex int) {
+	caps["appium:wdaLocalPort"] = 8100 + fleetIndex
+	caps["appium:mjpegServerPort"] = 9100 + fleetIndex
 }

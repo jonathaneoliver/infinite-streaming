@@ -3,7 +3,6 @@ package modes
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -58,35 +57,49 @@ func pyramidFloorFrom(desc []runner.VariantRate) float64 {
 }
 
 func runPyramid(t *testing.T, p runner.Platform) {
-	// --- pick launcher + device ----------------------------------
+	// Resolve the fleet roster (1 device by default, N under CHAR_FLEET_*).
+	devs := resolveFleet(t, p)
+	switch len(devs) {
+	case 0:
+		return // resolveFleet already issued a Skip
+	case 1:
+		runPyramidOnDevice(t, p, devs[0]) // today's single-device path, unchanged
+		return
+	}
+	// Fleet: run each sim as a parallel subtest. Each gets its own launcher
+	// (see runPyramidOnDevice) so the per-sim player_id can't race.
+	for _, dev := range devs {
+		dev := dev
+		name := dev.Label
+		if name == "" {
+			name = dev.UDID
+		}
+		if name == "" {
+			name = fmt.Sprintf("fleet%d", dev.FleetIndex)
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			runPyramidOnDevice(t, p, dev)
+		})
+	}
+}
+
+// runPyramidOnDevice runs the pyramid sweep against ONE explicit device.
+// It calls PickMode itself so every parallel fleet subtest gets its OWN
+// AppiumLauncher: wireConfigOnConnect stores the per-sim player_id in the
+// launcher's launchArgs, so a shared launcher under t.Parallel() would let
+// one sim clobber another's identity before createSession reads it.
+// dev.FleetIndex rides into appiumCapabilities to pin a distinct
+// wdaLocalPort/mjpegServerPort (default index 0 → 8100/9100, unchanged).
+func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device) {
+	// --- pick launcher (own instance per subtest) ----------------
 	mode, launcher, err := runner.PickMode()
 	if err != nil {
 		t.Skipf("PickMode: %v", err)
 	}
 	t.Logf("launch mode: %s", mode)
-
-	discCtx, discCancel := context.WithTimeout(context.Background(), 90*time.Second)
-	devs, err := launcher.Discover(discCtx)
-	discCancel()
-	if err != nil {
-		t.Fatalf("discover: %v", err)
-	}
-	wantUDID := strings.TrimSpace(os.Getenv("CHARACTERIZATION_DEVICE_UDID"))
-	var picked *runner.Device
-	for i := range devs {
-		if devs[i].Platform != p {
-			continue
-		}
-		if wantUDID != "" && !strings.EqualFold(devs[i].UDID, wantUDID) {
-			continue
-		}
-		picked = &devs[i]
-		break
-	}
-	if picked == nil {
-		t.Skipf("no %s device discovered (mode=%s)", p, mode)
-	}
-	t.Logf("picked device: %s", picked)
+	picked := &dev
+	t.Logf("device: %s (fleet index %d)", picked, dev.FleetIndex)
 
 	// --- bootstrap: read the manifest BEFORE kill+launch so we can
 	// cold-start at the pyramid floor. #632: the ascent must BEGIN on the
