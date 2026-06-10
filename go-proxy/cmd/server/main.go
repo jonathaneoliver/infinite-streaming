@@ -829,6 +829,21 @@ func (a *App) setShapeApplyState(port int, state ShapeApplyState) {
 	a.shapeApplyMu.Unlock()
 }
 
+// clearShapeApplyState forgets the last-applied shaping for a port. It MUST be
+// called whenever the port's kernel tc rule is wiped out-of-band (ClearPortShaping
+// at session-start / session-delete on a reused port). Otherwise the cached
+// state still matches a subsequent apply of the same rate and applyShapeIfChanged
+// SKIPS the re-install — leaving the port uncapped (config present, no kernel
+// rule). This bit config-on-connect (#712), which clears the port then re-applies
+// the materialized cap before the 302: on a reused port whose prior session had
+// the same rate (e.g. the pyramid's 1.048 Mbps floor every run), the re-apply was
+// skipped and the player cold-started unshaped on 4K.
+func (a *App) clearShapeApplyState(port int) {
+	a.shapeApplyMu.Lock()
+	delete(a.shapeApply, port)
+	a.shapeApplyMu.Unlock()
+}
+
 type NftShapeStep struct {
 	RateMbps        float64 `json:"rate_mbps"`
 	DurationSeconds float64 `json:"duration_seconds"`
@@ -3207,6 +3222,7 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 			if a.traffic != nil {
 				_ = a.traffic.UpdateNetem(port, 0, 0)
 				a.traffic.ClearPortShaping(port)
+				a.clearShapeApplyState(port)
 			}
 		}
 		writeJSON(w, map[string]string{"message": "Session deleted successfully"})
@@ -5555,6 +5571,14 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// fault_rules-only config) still gets the baseline cap — this
 			// supersedes the plain baseline apply in the else branch.
 			if port, err := strconv.Atoi(assignedInternalPort); err == nil {
+				// The session-start sweep (ClearPortShaping, above) wiped any
+				// leftover kernel tc rule on this reused port, but the
+				// apply-state cache still holds the prior session's rate.
+				// Invalidate it so the apply below actually fires tc instead of
+				// being skipped as "unchanged" — otherwise the player cold-starts
+				// unshaped (config present, no kernel rule). Regression from #712
+				// re-applying at session-start after #352's ClearPortShaping.
+				a.clearShapeApplyState(port)
 				if steps := v2server.PatternStepsFromSession(sessionData); len(steps) > 0 {
 					v1steps := make([]NftShapeStep, 0, len(steps))
 					for _, s := range steps {
