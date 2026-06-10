@@ -375,6 +375,12 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars
 	// known). Hold here until every fleet member is ready too, so the actual
 	// streaming + shaping sweep starts on all sims at the same instant. Bounded
 	// so a sim that failed bring-up can't hang the rest. No-op for single runs.
+	// Register this sim as a prospective group member before the barrier so the
+	// leader sees every player_id once the fleet is assembled (#fleet group).
+	if bars != nil {
+		bars.registerPlayer(sess.PlayerID)
+	}
+
 	// Fleet sync #2 (sweep): this sim is warmed up with its ladder read. Hold
 	// until every sim is here, then all begin the pyramid shaping at once.
 	if bars != nil {
@@ -384,6 +390,41 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars
 		bars.sweep.arriveAndWait(bctx)
 		bcancel()
 		t.Logf("SWEEP barrier released — beginning synchronized sweep")
+	}
+
+	// Group mode (CHAR_FLEET_GROUP=1): drive ONE pyramid for the whole fleet.
+	// The leader creates the player-group and runs the sweep below — every
+	// ApplyRate is broadcast by the proxy to all members, so the shaping lands
+	// identically on every sim. Observers don't drive (that would collide);
+	// they hold playback under the broadcast until the leader is done. Their
+	// samples are archived + grouped for side-by-side comparison in the
+	// dashboard (#579 compare-charts).
+	if bars != nil && bars.group {
+		if dev.FleetIndex != 0 {
+			t.Logf("group observer — holding playback under the leader's broadcast pyramid (compare in dashboard)")
+			bars.waitSweepDone(ctx)
+			t.Logf("leader finished — observer done")
+			return
+		}
+		// Release the observers when the leader returns — registered FIRST so a
+		// failure in CreateGroup (or the sweep) can't leave them blocked.
+		defer bars.signalSweepDone()
+
+		gctx, gcancel := context.WithTimeout(ctx, 30*time.Second)
+		members := bars.members()
+		groupID, gerr := runner.CreateGroup(gctx, "pyramid-"+runID, members)
+		gcancel()
+		if gerr != nil {
+			t.Fatalf("create fleet group: %v", gerr)
+		}
+		t.Logf("created fleet group %s (%d members) — leader drives one broadcast pyramid", groupID, len(members))
+		t.Cleanup(func() {
+			cctx, c := context.WithTimeout(context.Background(), 10*time.Second)
+			defer c()
+			if err := runner.DisbandGroup(cctx, groupID); err != nil {
+				t.Logf("disband group: %v", err)
+			}
+		})
 	}
 
 	// #cycles — run the full up-then-down pyramid REPS times on the SAME

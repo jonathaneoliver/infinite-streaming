@@ -188,18 +188,63 @@ func newFleetStartBarrier(n int) *fleetStartBarrier {
 	return &fleetStartBarrier{target: n, ch: make(chan struct{})}
 }
 
-// fleetBarriers holds the two fleet sync points. `home` gates the simultaneous
-// playback start (every sim waits at the home screen, then all tap play at
-// once); `sweep` gates the simultaneous shaping start (every sim is warmed up
-// with its ladder read, then all begin the pyramid at once). nil for
-// single-device runs.
+// fleetBarriers holds the fleet sync points + group coordination. `home` gates
+// the simultaneous playback start (every sim waits at the home screen, then all
+// tap play at once); `sweep` gates the simultaneous shaping start. When
+// `group` is set (CHAR_FLEET_GROUP=1) the fleet is driven as ONE player-group:
+// every sim registers its player_id, the leader (index 0) creates the group and
+// drives a single pyramid that the proxy broadcasts to all members, and the
+// other sims observe until the leader signals done. nil for single-device runs.
 type fleetBarriers struct {
 	home  *fleetStartBarrier
 	sweep *fleetStartBarrier
+
+	group     bool          // drive the whole fleet as one broadcast group
+	done      chan struct{} // leader closes when its group sweep finishes
+	mu        sync.Mutex
+	playerIDs []string // collected as each sim binds (group members)
 }
 
 func newFleetBarriers(n int) *fleetBarriers {
-	return &fleetBarriers{home: newFleetStartBarrier(n), sweep: newFleetStartBarrier(n)}
+	return &fleetBarriers{
+		home:  newFleetStartBarrier(n),
+		sweep: newFleetStartBarrier(n),
+		group: strings.TrimSpace(os.Getenv("CHAR_FLEET_GROUP")) == "1",
+		done:  make(chan struct{}),
+	}
+}
+
+// registerPlayer records a bound sim's player_id as a prospective group member.
+// Call before the sweep barrier so every member is present when the leader
+// reads them.
+func (b *fleetBarriers) registerPlayer(pid string) {
+	if b == nil || pid == "" {
+		return
+	}
+	b.mu.Lock()
+	b.playerIDs = append(b.playerIDs, pid)
+	b.mu.Unlock()
+}
+
+// members returns a snapshot of the collected member player_ids.
+func (b *fleetBarriers) members() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, len(b.playerIDs))
+	copy(out, b.playerIDs)
+	return out
+}
+
+// signalSweepDone releases the group observers once (leader calls it when its
+// broadcast sweep finishes). Safe to call once.
+func (b *fleetBarriers) signalSweepDone() { close(b.done) }
+
+// waitSweepDone blocks an observer until the leader finishes (or ctx is done).
+func (b *fleetBarriers) waitSweepDone(ctx context.Context) {
+	select {
+	case <-b.done:
+	case <-ctx.Done():
+	}
 }
 
 // maybeRelease closes the gate once every still-in-the-race member has arrived.
