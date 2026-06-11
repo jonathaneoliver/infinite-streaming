@@ -420,6 +420,21 @@ test-go:
 	@echo "=== go-upload ==="
 	cd go-upload && go vet ./... && go test -race ./...
 
+# Install the repo's git hooks into the active hooks dir. The post-checkout
+# hook seeds content/dashboard-v3/node_modules (gitignored) on every
+# `git worktree add` so the Vue dashboard always builds — see #740. Honours
+# core.hooksPath when set, else the shared common hooks dir (which all
+# worktrees share). Re-run after pulling a hook change.
+.PHONY: install-hooks
+install-hooks:
+	@dest="$$(git config --get core.hooksPath || echo "$$(git rev-parse --git-common-dir)/hooks")"; \
+	mkdir -p "$$dest"; \
+	for h in .githooks/*; do \
+		[ -f "$$h" ] || continue; \
+		cp "$$h" "$$dest/$$(basename "$$h")" && chmod +x "$$dest/$$(basename "$$h")"; \
+	done; \
+	echo "Installed hooks from .githooks/ → $$dest"
+
 test-deploy-all: test-deploy-compose test-deploy-ghcr test-deploy-registry
 
 # Frontend-only hot deploy — rebuild the Vue dashboard locally, push
@@ -479,6 +494,10 @@ test-deploy-frontend: _ff-guard
 	@if [ ! -f content/dashboard-v3/package.json ]; then \
 		echo "dashboard-v3 not present — nothing to deploy"; exit 1; \
 	fi
+	@if [ ! -d content/dashboard-v3/node_modules/.bin ]; then \
+		echo "dashboard-v3/node_modules missing — npm ci..."; \
+		(cd content/dashboard-v3 && npm ci); \
+	fi
 	@echo "Building dashboard-v3 (Vue)..."
 	@cd content/dashboard-v3 && npm run --silent build
 	@echo "rsync → host:~/test-dev/content/dashboard/v3/ (bind-mounted into container)..."
@@ -488,6 +507,24 @@ test-deploy-frontend: _ff-guard
 
 test-deploy-dev: _ff-guard
 	@echo "=== Dev: local working tree (port 21000) ==="
+	@# Build the Vue dashboard FIRST, before any rsync --delete touches the
+	@# remote. A missing node_modules (the usual fresh-worktree state — it's
+	@# gitignored) or a failed build now aborts with test-dev UNTOUCHED.
+	@# Previously the working-tree rsync --delete ran first, so a build
+	@# failure half-wiped the box (lost the :21000 override + v3 bundle, no
+	@# container rebuild) — #740, 2026-06-11. `make install-hooks` adds a
+	@# post-checkout hook that seeds node_modules on worktree add; this
+	@# npm-ci fallback covers the case where the hook isn't installed.
+	@if [ -f content/dashboard-v3/package.json ]; then \
+		if [ ! -d content/dashboard-v3/node_modules/.bin ]; then \
+			echo "dashboard-v3/node_modules missing — npm ci..."; \
+			(cd content/dashboard-v3 && npm ci); \
+		fi; \
+		echo "Building dashboard-v3 (Vue)..."; \
+		(cd content/dashboard-v3 && npm run --silent build); \
+	else \
+		echo "dashboard-v3 not present, skipping Vue build"; \
+	fi
 	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev'
 	@echo "Syncing local working tree (excluding .git and .gitignore matches)..."
 	rsync -az --delete \
@@ -500,16 +537,13 @@ test-deploy-dev: _ff-guard
 	@# which is gitignored, so the --filter ':- .gitignore' rule above
 	@# hides it from rsync's source view and --delete then wipes it on
 	@# the remote (this bit you for the testing.html-→-dashboard.html
-	@# redirect on 2026-05-12). Build + push it as an extra rsync
-	@# whose source it can actually see. Skipped silently if
-	@# dashboard-v3 isn't set up yet.
+	@# redirect on 2026-05-12). Push the already-built bundle now (after the
+	@# tree sync, so --delete can't wipe it). Skipped when dashboard-v3 isn't
+	@# set up yet.
 	@if [ -f content/dashboard-v3/package.json ]; then \
-		echo "Building & pushing dashboard-v3 (Vue)..."; \
-		(cd content/dashboard-v3 && npm run --silent build) && \
+		echo "Pushing dashboard-v3 bundle..."; \
 		ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev/content/dashboard/v3' && \
 		rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev/content/dashboard/v3/; \
-	else \
-		echo "dashboard-v3 not present, skipping Vue build"; \
 	fi
 	ssh -n $(TEST_SSH) 'printf "CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=%s\nINFINITE_STREAM_ANNOUNCE_LABEL=%s\nINFINITE_STREAM_TLS=%s\nINFINITE_STREAM_TLS_SAN=%s\n" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(INFINITE_STREAM_ANNOUNCE_URL)" "$(INFINITE_STREAM_ANNOUNCE_LABEL)" "$(INFINITE_STREAM_TLS)" "$(INFINITE_STREAM_TLS_SAN)" > ~/test-dev/.env'
 	scp tests/deploy/override-dev.yml $(TEST_SSH):~/test-dev/docker-compose.override.yml
