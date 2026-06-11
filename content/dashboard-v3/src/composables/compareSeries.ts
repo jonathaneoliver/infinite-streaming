@@ -24,6 +24,7 @@
 import type { SeriesSpec } from '@/components/MetricsLineChart.vue';
 import type { CompareSeriesIdentity } from '@/composables/useCompareContext';
 import type { PlayerRecord } from '@/repo/v2-repo';
+import { displayedVariantPeakMbps, parseManifestVariants } from '@/composables/useManifestVariants';
 
 /** Metric colours — kept in lockstep with the primary chart series so a
  *  metric reads the same hue across the active session and every overlay.
@@ -35,6 +36,7 @@ const C = {
   playerNetRate: '#059669',
   servingVariant: '#b45309',
   fetchingVariant: '#ef4444',
+  displayedVariant: '#a855f7',
   limit: '#f59e0b',
   // BufferChart
   bufferDepth: '#4f46e5',
@@ -115,6 +117,20 @@ export function compareBandwidthSeries(id: CompareSeriesIdentity): SeriesSpec[] 
       label: tagged('Fetching Variant', id),
       color: C.fetchingVariant,
       accessor: (p: PlayerRecord) => p.player_metrics?.video_bitrate_mbps ?? null,
+      stepped: true,
+      borderDash: dash,
+    },
+    {
+      // Decoded rung's published peak bitrate, matched by frame height —
+      // mirrors the single-session "Displayed Variant" (BandwidthChart). The
+      // sibling's ladder rides on raw_session.manifest_variants (#747).
+      label: tagged('Displayed Variant', id),
+      color: C.displayedVariant,
+      accessor: (p: PlayerRecord) =>
+        displayedVariantPeakMbps(
+          parseManifestVariants((p as { raw_session?: { manifest_variants?: unknown } }).raw_session?.manifest_variants),
+          p.player_metrics?.video_resolution,
+        ),
       stepped: true,
       borderDash: dash,
     },

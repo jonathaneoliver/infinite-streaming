@@ -25,7 +25,7 @@
 import { computed, ref, toRef } from 'vue';
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
-import { useManifestVariants, nearestVariantByBitrate } from '@/composables/useManifestVariants';
+import { useManifestVariants, nearestVariantByBitrate, displayedVariantPeakMbps } from '@/composables/useManifestVariants';
 import { usePlayer } from '@/composables/usePlayer';
 import { useCompareOverlays, useCompareSelf } from '@/composables/useCompareContext';
 import { compareBandwidthSeries } from '@/composables/compareSeries';
@@ -339,26 +339,11 @@ const series = computed<SeriesSpec[]>(() => {
   // the displayed rung by the buffer; using it here would mislabel during
   // switches. Same-height variants therefore can't be told apart for the
   // displayed rung — this project's ladders have one rung per height.)
-  const heightOf = (res?: string | null): number | null => {
-    if (!res) return null;
-    const m = /(\d+)\s*[x×]\s*(\d+)/i.exec(res);
-    return m ? Number(m[2]) : null;
-  };
-  const rungs = ladder
-    .map((v) => ({ h: heightOf(v.resolution), peak: Number(v.bandwidth) / 1_000_000 }))
-    .filter((r) => r.h != null && Number.isFinite(r.peak) && r.peak > 0) as { h: number; peak: number }[];
   out.push({
     label: 'Displayed Variant',
     color: '#a855f7',
-    accessor: (p: PlayerRecord) => {
-      const h = heightOf(p.player_metrics?.video_resolution);
-      if (h == null || !rungs.length) return null;
-      let best = rungs[0];
-      for (const r of rungs) {
-        if (Math.abs(r.h - h) < Math.abs(best.h - h)) best = r;
-      }
-      return best.peak;
-    },
+    accessor: (p: PlayerRecord) =>
+      displayedVariantPeakMbps(ladder, p.player_metrics?.video_resolution),
     stepped: true,
   });
   // Mute the variant-line color so it doesn't out-shout the live

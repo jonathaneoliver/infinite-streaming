@@ -27,13 +27,8 @@ export function useManifestVariants(playerId: Ref<string> | string) {
     const p = player.value;
     const typed = p?.current_play?.manifest?.variants;
     if (Array.isArray(typed) && typed.length) return typed;
-    let flat = (p as any)?.raw_session?.manifest_variants;
-    if (typeof flat === 'string') {
-      // raw_session may serialize the variant list as a JSON string
-      // when coming through the CH long-tail column. Parse if so.
-      try { flat = JSON.parse(flat); } catch { flat = undefined; }
-    }
-    if (Array.isArray(flat) && flat.length) return flat as ManifestVariant[];
+    const flat = parseManifestVariants((p as any)?.raw_session?.manifest_variants);
+    if (flat.length) return flat as ManifestVariant[];
     return [];
   });
 
@@ -77,6 +72,52 @@ export function nearestVariantByBitrate(
       bestDelta = delta;
       best = { resolution: String(v?.resolution ?? '').trim(), peakMbps };
     }
+  }
+  return best;
+}
+
+/** Coerce a raw `manifest_variants` value into `VariantLite[]`. The live
+ *  PlayerRecord carries it as an array; the CH long-tail column serialises it
+ *  as a JSON string. Returns `[]` for anything unusable. */
+export function parseManifestVariants(value: unknown): VariantLite[] {
+  let v = value;
+  if (typeof v === 'string') {
+    try { v = JSON.parse(v); } catch { return []; }
+  }
+  return Array.isArray(v) ? (v as VariantLite[]) : [];
+}
+
+/**
+ * Map a player's DECODED frame size (`player_metrics.video_resolution`, e.g.
+ * "640x360") to the published peak BANDWIDTH (Mbps) of the ladder rung it
+ * corresponds to — the "Displayed Variant" line on the bandwidth chart.
+ *
+ * Matched by nearest frame HEIGHT, not exact "WxH" and not by bitrate: the
+ * decoded size legitimately differs from the manifest RESOLUTION attribute
+ * (coded vs display, mod-16 padding, PAR / clean aperture, packager quirks),
+ * and `video_bitrate` is indicatedBitrate — the FETCHED rung, which leads the
+ * displayed one by the buffer during switches. This project's ladders have one
+ * rung per height. Returns null when there's no usable ladder or resolution.
+ */
+export function displayedVariantPeakMbps(
+  variants: ReadonlyArray<VariantLite> | null | undefined,
+  videoResolution: string | null | undefined,
+): number | null {
+  const heightOf = (res?: string | null): number | null => {
+    if (!res) return null;
+    const m = /(\d+)\s*[x×]\s*(\d+)/i.exec(res);
+    return m ? Number(m[2]) : null;
+  };
+  const h = heightOf(videoResolution);
+  if (h == null || !variants || variants.length === 0) return null;
+  let best: number | null = null;
+  let bestDelta = Infinity;
+  for (const v of variants) {
+    const rh = heightOf(v?.resolution);
+    const peak = Number(v?.bandwidth ?? 0) / 1_000_000;
+    if (rh == null || !Number.isFinite(peak) || peak <= 0) continue;
+    const delta = Math.abs(rh - h);
+    if (delta < bestDelta) { bestDelta = delta; best = peak; }
   }
   return best;
 }
