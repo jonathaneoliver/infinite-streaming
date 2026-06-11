@@ -189,17 +189,17 @@ func (a *v2Adapter) DefaultRateMbps() int {
 // in NetworkLogEntry.
 func networkEntryToMap(e NetworkLogEntry) map[string]any {
 	return map[string]any{
-		"timestamp":      e.Timestamp,
-		"method":         e.Method,
-		"url":            e.URL,
-		"upstream_url":   e.UpstreamURL,
-		"path":           e.Path,
-		"request_kind":   e.RequestKind,
-		"status":         e.Status,
-		"bytes_in":       e.BytesIn,
-		"bytes_out":      e.BytesOut,
-		"content_type":   e.ContentType,
-		"play_id":        e.PlayID,
+		"timestamp":    e.Timestamp,
+		"method":       e.Method,
+		"url":          e.URL,
+		"upstream_url": e.UpstreamURL,
+		"path":         e.Path,
+		"request_kind": e.RequestKind,
+		"status":       e.Status,
+		"bytes_in":     e.BytesIn,
+		"bytes_out":    e.BytesOut,
+		"content_type": e.ContentType,
+		"play_id":      e.PlayID,
 		// Phase timings — surfaced when httptrace populated them.
 		"dns_ms":         e.DNSMs,
 		"connect_ms":     e.ConnectMs,
@@ -219,75 +219,100 @@ func networkEntryToMap(e NetworkLogEntry) map[string]any {
 // ----- Mutation surface (Phase D) ------------------------------------------
 
 // MutatePlayer locates the session matching playerID, hands its session
-// map to fn, and persists the result. Runs under sessionsMu so concurrent
-// PATCHes serialise.
+// map to fn, and persists the result via mutateSessions (lock-free CAS,
+// #740 — replaces the old sessionsMu + publishSnapshot path so concurrent
+// PATCHes can't clobber each other).
 //
 // fn may modify the map freely; returning an error from fn aborts the
-// mutation cleanly (no v1 side-effects). A successful fn is followed by
-// publishSnapshot — the same path v1's own write handlers use, so the
-// existing SSE hub / network log / clients see the change identically.
+// mutation cleanly (no v1 side-effects, nothing published). fn must be
+// re-runnable — the CAS retries it on a fresh clone if a concurrent writer
+// committed in between.
 func (a *v2Adapter) MutatePlayer(playerID string, fn func(map[string]any) error) (map[string]any, bool, error) {
 	if playerID == "" || a == nil || a.app == nil {
 		return nil, false, nil
 	}
-	a.app.sessionsMu.Lock()
-	defer a.app.sessionsMu.Unlock()
-
-	current := a.app.getSessionList()
-	idx := -1
-	for i, s := range current {
-		if matchesPlayerID(getString(s, "player_id"), playerID) {
-			idx = i
-			break
+	var (
+		found     bool
+		fnErr     error
+		before    SessionData
+		result    SessionData
+		sessionID string
+	)
+	a.app.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		found = false
+		fnErr = nil
+		before = nil
+		result = nil
+		idx := -1
+		for i, s := range sessions {
+			if matchesPlayerID(getString(s, "player_id"), playerID) {
+				idx = i
+				break
+			}
 		}
+		if idx < 0 {
+			return sessions, false
+		}
+		found = true
+		before = cloneSession(sessions[idx])
+		mutable := cloneSession(sessions[idx])
+		if err := fn(mutable); err != nil {
+			fnErr = err
+			return sessions, false
+		}
+		sessions[idx] = mutable
+		result = mutable
+		sessionID = getString(mutable, "session_id")
+		return sessions, true
+	})
+	if fnErr != nil {
+		return nil, true, fnErr
 	}
-	if idx < 0 {
+	if !found {
 		return nil, false, nil
 	}
-	before := cloneSession(current[idx])
-	mutable := cloneSession(current[idx])
-	if err := fn(mutable); err != nil {
-		return nil, true, err
-	}
-	updated := make([]SessionData, len(current))
-	copy(updated, current)
-	updated[idx] = mutable
-	a.app.publishSnapshot(cloneSessionList(updated))
 	// Emit control_events for operator-driven changes. The v2 PATCH
 	// path does NOT route through applySessionSettingsUpdate, so
 	// without this hook every dashboard slider / fault edit / label
-	// change went unrecorded. Issue #474 follow-up.
-	a.app.emitControlEventsForDiff(getString(mutable, "session_id"), before, mutable)
-	return map[string]any(cloneSession(mutable)), true, nil
+	// change went unrecorded. Issue #474 follow-up. Hoisted out of the
+	// CAS closure — it runs once on the committed result.
+	a.app.emitControlEventsForDiff(sessionID, before, result)
+	return map[string]any(cloneSession(result)), true, nil
 }
 
 // DeletePlayer removes the named player from the v1 store and frees any
 // shaping/fault loops bound to its dedicated port.
 //
-// Mirrors v1's `handleClearSessions` pattern: the session list is
-// captured without holding sessionsMu, helpers (`disablePatternForPort`,
-// `armTransportFaultLoop`) drive their own locking via saveSessionByID,
-// and the final session-list write goes through saveSessionList (which
-// acquires sessionsMu internally). Crucially, sessionsMu is *not* held
-// across the helper calls — sync.Mutex is non-reentrant in Go, and the
-// helpers ultimately re-enter through saveSessionList.
+// #740: the list removal is a mutateSessions CAS; the removed session is
+// captured inside the closure and its teardown (loop-state, recordSessionEnd,
+// pattern/transport-fault disarm) runs once on the committed result — the
+// same hoist-side-effects-out-of-the-closure rule the v1 DELETE handler uses.
 func (a *v2Adapter) DeletePlayer(playerID string) bool {
 	if playerID == "" || a == nil || a.app == nil {
 		return false
 	}
-
-	current := a.app.getSessionList()
-	idx := -1
-	for i, s := range current {
-		if matchesPlayerID(getString(s, "player_id"), playerID) {
-			idx = i
-			break
+	var target SessionData
+	a.app.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		target = nil
+		idx := -1
+		for i, s := range sessions {
+			if matchesPlayerID(getString(s, "player_id"), playerID) {
+				idx = i
+				break
+			}
 		}
-	}
-	if idx < 0 {
+		if idx < 0 {
+			return sessions, false
+		}
+		target = sessions[idx]
+		updated := make([]SessionData, 0, len(sessions)-1)
+		updated = append(updated, sessions[:idx]...)
+		updated = append(updated, sessions[idx+1:]...)
+		return updated, true
+	})
+	if target == nil {
 		return false
 	}
-	target := current[idx]
 	a.app.removeServerLoopState(getString(target, "session_id"))
 	a.app.recordSessionEnd(target, "v2_delete")
 	if portStr := getString(target, "x_forwarded_port"); portStr != "" {
@@ -296,32 +321,31 @@ func (a *v2Adapter) DeletePlayer(playerID string) bool {
 			a.app.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
 		}
 	}
-	updated := make([]SessionData, 0, len(current)-1)
-	updated = append(updated, current[:idx]...)
-	updated = append(updated, current[idx+1:]...)
-	a.app.saveSessionList(updated)
 	return true
 }
 
 // ClearAllPlayers tears every player and live state down — same path
 // as v1's /api/clear-sessions.
 //
-// Mirrors v1: snapshot under no lock, drive helpers without holding
-// sessionsMu (they re-enter via saveSessionByID/saveSessionList), then
-// write the empty list through saveSessionList which takes the lock
-// briefly at the end.
+// #740: the list is emptied via a mutateSessions CAS; the cleared sessions
+// are captured inside the closure and their teardown runs once on the
+// committed result (hoist-side-effects-out-of-the-closure rule).
 func (a *v2Adapter) ClearAllPlayers() {
 	if a == nil || a.app == nil {
 		return
 	}
-	current := a.app.getSessionList()
+	var removed []SessionData
+	a.app.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		removed = append(removed[:0], sessions...)
+		return []SessionData{}, true
+	})
 	portSet := map[int]struct{}{}
 	a.app.shapeMu.Lock()
 	for port := range a.app.shapeLoops {
 		portSet[port] = struct{}{}
 	}
 	a.app.shapeMu.Unlock()
-	for _, sess := range current {
+	for _, sess := range removed {
 		a.app.removeServerLoopState(getString(sess, "session_id"))
 		a.app.recordSessionEnd(sess, "cleared_v2")
 		if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
@@ -334,7 +358,6 @@ func (a *v2Adapter) ClearAllPlayers() {
 		a.app.disablePatternForPort(port)
 		a.app.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
 	}
-	a.app.saveSessionList([]SessionData{})
 }
 
 // CreateSyntheticPlayer mints a synthetic player record by reusing
@@ -362,48 +385,78 @@ func (a *v2Adapter) CreateSyntheticPlayer(playerID string, payload map[string]an
 		return 0, nil, errInvalidPlayerID
 	}
 
-	a.app.sessionsMu.Lock()
-	defer a.app.sessionsMu.Unlock()
-
-	current := a.app.getSessionList()
-	for _, s := range current {
-		if stored, perr := uuid.Parse(getString(s, "player_id")); perr == nil && stored.String() == playerID {
-			existingLabels, _ := s["_v2_labels"].(map[string]any)
-			incomingLabels, _ := payload["labels"].(map[string]any)
-			if labelsEqual(existingLabels, incomingLabels) {
-				return 200, map[string]any(cloneSession(s)), nil
-			}
-			return 409, nil, nil
-		}
-	}
-
-	if len(current) >= a.app.maxSessions {
-		return 0, nil, errSessionLimitReached
-	}
-
+	// #740: the existing-check + allocate + append run inside ONE mutateSessions
+	// CAS closure so two concurrent CreateSyntheticPlayer calls can't claim the
+	// same slot (the v2 analogue of the bootstrap reserve race). The closure
+	// is re-runnable; kernel sweep (ClearPortShaping), loop-state reset, and
+	// recordSessionStart are hoisted out and run once on the committed result.
 	createdAt := nowISO()
-	allocated := allocateSessionNumber(current, a.app.maxSessions)
-	externalPort := replaceThirdFromLastDigit("30081", allocated)
-	internalPort := externalPort
-	if mapped, ok := a.app.portMap.MapExternalPort(externalPort); ok {
-		internalPort = mapped
+	const (
+		codeConflict = -1
+		codeLimit    = -2
+	)
+	var (
+		code         int
+		existingBody map[string]any
+		newSession   SessionData
+		internalPort string
+	)
+	a.app.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		code = 0
+		existingBody = nil
+		newSession = nil
+		internalPort = ""
+		for _, s := range sessions {
+			if stored, perr := uuid.Parse(getString(s, "player_id")); perr == nil && stored.String() == playerID {
+				existingLabels, _ := s["_v2_labels"].(map[string]any)
+				incomingLabels, _ := payload["labels"].(map[string]any)
+				if labelsEqual(existingLabels, incomingLabels) {
+					code = 200
+					existingBody = map[string]any(cloneSession(s))
+					return sessions, false
+				}
+				code = codeConflict
+				return sessions, false
+			}
+		}
+		if len(sessions) >= a.app.maxSessions {
+			code = codeLimit
+			return sessions, false
+		}
+		allocated := allocateSessionNumber(sessions, a.app.maxSessions)
+		externalPort := replaceThirdFromLastDigit("30081", allocated)
+		ip := externalPort
+		if mapped, ok := a.app.portMap.MapExternalPort(externalPort); ok {
+			ip = mapped
+		}
+		internalPort = ip
+		sd := newSyntheticSessionTemplate(playerID, allocated, ip, externalPort, createdAt)
+		if labels, ok := payload["labels"].(map[string]any); ok && len(labels) > 0 {
+			sd["_v2_labels"] = labels
+		}
+		newSession = sd
+		code = 201
+		// Publish a clone so newSession stays a private object the hoisted
+		// recordSessionStart can use without mutating the live snapshot —
+		// the pre-#740 publishSnapshot(cloneSessionList(...)) did the same.
+		return append(sessions, cloneSession(sd)), true
+	})
+	switch code {
+	case 200:
+		return 200, existingBody, nil
+	case codeConflict:
+		return 409, nil, nil
+	case codeLimit:
+		return 0, nil, errSessionLimitReached
 	}
 	if a.app.traffic != nil {
 		if portInt, err := strconv.Atoi(internalPort); err == nil {
 			a.app.traffic.ClearPortShaping(portInt)
 		}
 	}
-
-	sessionData := newSyntheticSessionTemplate(playerID, allocated, internalPort, externalPort, createdAt)
-	if labels, ok := payload["labels"].(map[string]any); ok && len(labels) > 0 {
-		sessionData["_v2_labels"] = labels
-	}
-
-	a.app.resetServerLoopState(fmt.Sprintf("%d", allocated))
-	updated := append(current, sessionData)
-	a.app.publishSnapshot(cloneSessionList(updated))
-	a.app.recordSessionStart(sessionData, "/synthetic/v2")
-	return 201, map[string]any(cloneSession(sessionData)), nil
+	a.app.resetServerLoopState(getString(newSession, "session_id"))
+	a.app.recordSessionStart(newSession, "/synthetic/v2")
+	return 201, map[string]any(cloneSession(newSession)), nil
 }
 
 // errInvalidPlayerID — sentinel for handler 400 mapping.
@@ -418,7 +471,9 @@ var errSessionLimitReached = sessionLimitError{}
 
 type sessionLimitError struct{}
 
-func (sessionLimitError) Error() string { return "session limit reached; clear an existing player first" }
+func (sessionLimitError) Error() string {
+	return "session limit reached; clear an existing player first"
+}
 
 // labelsEqual returns true iff two label maps are byte-equivalent for
 // the purposes of POST /players idempotency.
@@ -705,26 +760,27 @@ func (a *v2Adapter) LinkGroup(groupID string, playerIDs []string) []string {
 			wantedRaw = append(wantedRaw, p)
 		}
 	}
-	current := a.app.getSessionList()
-	updated := cloneSessionList(current)
 	var linked []string
-	for i, s := range updated {
-		pid := getString(s, "player_id")
-		matched := false
-		for _, want := range wantedRaw {
-			if matchesPlayerID(pid, want) {
-				matched = true
-				break
+	a.app.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		linked = linked[:0]
+		for i, s := range sessions {
+			pid := getString(s, "player_id")
+			matched := false
+			for _, want := range wantedRaw {
+				if matchesPlayerID(pid, want) {
+					matched = true
+					break
+				}
 			}
+			if !matched {
+				continue
+			}
+			sessions[i]["group_id"] = groupID
+			sessions[i]["control_revision"] = newControlRevision()
+			linked = append(linked, pid)
 		}
-		if !matched {
-			continue
-		}
-		updated[i]["group_id"] = groupID
-		updated[i]["control_revision"] = newControlRevision()
-		linked = append(linked, pid)
-	}
-	a.app.saveSessionList(updated)
+		return sessions, len(linked) > 0
+	})
 	return linked
 }
 
@@ -734,23 +790,24 @@ func (a *v2Adapter) UnlinkGroup(groupID string) []string {
 	if a == nil || a.app == nil || groupID == "" {
 		return nil
 	}
-	current := a.app.getSessionList()
-	updated := cloneSessionList(current)
 	var cleared []string
-	for i, s := range updated {
-		if getString(s, "group_id") != groupID {
-			continue
+	a.app.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		cleared = cleared[:0]
+		for i, s := range sessions {
+			if getString(s, "group_id") != groupID {
+				continue
+			}
+			sessions[i]["group_id"] = ""
+			sessions[i]["control_revision"] = newControlRevision()
+			if pid := getString(s, "player_id"); pid != "" {
+				cleared = append(cleared, pid)
+			}
 		}
-		updated[i]["group_id"] = ""
-		updated[i]["control_revision"] = newControlRevision()
-		if pid := getString(s, "player_id"); pid != "" {
-			cleared = append(cleared, pid)
-		}
-	}
+		return sessions, len(cleared) > 0
+	})
 	if len(cleared) == 0 {
 		return nil
 	}
-	a.app.saveSessionList(updated)
 	return cleared
 }
 
@@ -760,59 +817,69 @@ func (a *v2Adapter) RemoveFromGroup(playerID string) bool {
 	if a == nil || a.app == nil || playerID == "" {
 		return false
 	}
-	current := a.app.getSessionList()
-	updated := cloneSessionList(current)
-	for i, s := range updated {
-		if !matchesPlayerID(getString(s, "player_id"), playerID) {
-			continue
+	var removed bool
+	a.app.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		removed = false
+		for i, s := range sessions {
+			if !matchesPlayerID(getString(s, "player_id"), playerID) {
+				continue
+			}
+			if getString(s, "group_id") == "" {
+				return sessions, false
+			}
+			sessions[i]["group_id"] = ""
+			sessions[i]["control_revision"] = newControlRevision()
+			removed = true
+			return sessions, true
 		}
-		if getString(s, "group_id") == "" {
-			return false
-		}
-		updated[i]["group_id"] = ""
-		updated[i]["control_revision"] = newControlRevision()
-		a.app.saveSessionList(updated)
-		return true
-	}
-	return false
+		return sessions, false
+	})
+	return removed
 }
 
 // BroadcastPatch applies fn to every group member except
 // `excludePlayerID` and stamps each with the supplied `rev`. The
-// caller's MutatePlayer for the originating player_id has already
-// run; this completes the fan-out under one sessionsMu acquire.
+// caller's MutatePlayer for the originating player_id has already run;
+// this completes the fan-out in one mutateSessions CAS (#740 — replaces
+// the sessionsMu + publishSnapshot path). fn must be re-runnable; a fn
+// error aborts the whole fan-out with nothing published.
 func (a *v2Adapter) BroadcastPatch(groupID string, excludePlayerID string, rev string, fn func(map[string]any) error) ([]string, error) {
 	if a == nil || a.app == nil || groupID == "" {
 		return nil, nil
 	}
-	a.app.sessionsMu.Lock()
-	defer a.app.sessionsMu.Unlock()
-
-	current := a.app.getSessionList()
-	updated := make([]SessionData, len(current))
-	copy(updated, current)
-	var touched []string
-	for i, s := range current {
-		if getString(s, "group_id") != groupID {
-			continue
+	var (
+		touched []string
+		fnErr   error
+	)
+	a.app.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		touched = touched[:0]
+		fnErr = nil
+		for i, s := range sessions {
+			if getString(s, "group_id") != groupID {
+				continue
+			}
+			if matchesPlayerID(getString(s, "player_id"), excludePlayerID) {
+				continue
+			}
+			mutable := cloneSession(s)
+			if err := fn(mutable); err != nil {
+				fnErr = err
+				return sessions, false
+			}
+			mutable["control_revision"] = rev
+			sessions[i] = mutable
+			if pid := getString(mutable, "player_id"); pid != "" {
+				touched = append(touched, pid)
+			}
 		}
-		if matchesPlayerID(getString(s, "player_id"), excludePlayerID) {
-			continue
-		}
-		mutable := cloneSession(s)
-		if err := fn(mutable); err != nil {
-			return touched, err
-		}
-		mutable["control_revision"] = rev
-		updated[i] = mutable
-		if pid := getString(mutable, "player_id"); pid != "" {
-			touched = append(touched, pid)
-		}
+		return sessions, len(touched) > 0
+	})
+	if fnErr != nil {
+		return touched, fnErr
 	}
 	if len(touched) == 0 {
 		return nil, nil
 	}
-	a.app.publishSnapshot(cloneSessionList(updated))
 	return touched, nil
 }
 
