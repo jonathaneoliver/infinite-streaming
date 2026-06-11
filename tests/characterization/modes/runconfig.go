@@ -23,7 +23,7 @@ import (
 //
 //	CHAR_SEGMENT          2s|6s|ll      default: app's current (Appium only)
 //	CHAR_LOCAL_PROXY      on|off        default: on        (Appium only)
-//	CHAR_TRANSFER_TIMEOUT <seconds>     default: 20        (0 = off)
+//	CHAR_TRANSFER_TIMEOUT <seconds>     default: 20        (0 = off; pyramid forces 6)
 type runConfig struct {
 	segment     string        // label form: "" | 2s | 6s | ll
 	localProxy  bool          // default true

@@ -397,6 +397,15 @@ func discoverSimctl(ctx context.Context) ([]Device, error) {
 	return listSimctlDevices(ctx, true)
 }
 
+// DiscoverRealDevices enumerates real (physical) Apple devices via
+// devicectl — iPhone / iPad / Apple TV. Used by the fleet roster to assign
+// the correct platform to a CHAR_FLEET_UDIDS entry that is a real device
+// rather than a simulator. Returns nil (not an error) when devicectl finds
+// nothing.
+func DiscoverRealDevices(ctx context.Context) ([]Device, error) {
+	return discoverDevicectl(ctx)
+}
+
 // AvailableSims enumerates every available simulator of the given
 // platform regardless of boot state — the fleet roster path
 // (CHAR_FLEET_COUNT) needs not-yet-booted sims so it can boot them on

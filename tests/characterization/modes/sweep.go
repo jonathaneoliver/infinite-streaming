@@ -9,7 +9,9 @@ package modes
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -60,21 +62,60 @@ func resolveFloor(ctx context.Context, t *testing.T, preFloor float64, floorFn f
 //   - "app": the PLAYER puts proxy.shape.rate_mbps on its own bootstrap URL via
 //     the -is.proxy_query launch arg (no pre-flight curl).
 //
+// Two opt-in init knobs (0 / 0 ⇒ legacy rate-only behaviour, unchanged):
+//
+//   - xferTimeout>0 folds the server-side active transfer timeout into the proxy
+//     config so it's armed before the first segment (not just via a post-bind
+//     PATCH). Both drivers materialize it identically (ShapeConfig / appProxyQuery).
+//   - peakClampMbps>0 sets the app's startup peak-bitrate clamp via the
+//     -is.flag.peak_bitrate_mbps launch arg, so AVPlayer cold-starts on a variant
+//     the cap can sustain instead of reaching for the top rung (#683 clamps then
+//     releases after first frame). It's a client launch arg, independent of which
+//     side carries the proxy config. Callers derive it with peakClampForCap.
+//
+// Modes that characterize the player's *natural* startup pick (e.g. startup)
+// must pass 0 so they don't perturb what they measure.
+//
 // baseArgs are any other launch args (e.g. segment).
-func wireConfigOnConnect(ctx context.Context, t *testing.T, appium *runner.AppiumLauncher, baseArgs []string, pid string, capMbps float64) {
+func wireConfigOnConnect(ctx context.Context, t *testing.T, appium *runner.AppiumLauncher, baseArgs []string, pid string, capMbps float64, xferTimeout time.Duration, peakClampMbps int) {
 	t.Helper()
 	launchArgs := append(append([]string{}, baseArgs...), "-is.player_id", pid)
+	if peakClampMbps > 0 {
+		launchArgs = append(launchArgs, "-is.flag.peak_bitrate_mbps", strconv.Itoa(peakClampMbps))
+	}
 	if os.Getenv("CHAR_PROXY_CONFIG") == "app" {
-		launchArgs = append(launchArgs, "-is.proxy_query", fmt.Sprintf("proxy.shape.rate_mbps=%g", capMbps))
+		launchArgs = append(launchArgs, "-is.proxy_query", appProxyQuery(capMbps, xferTimeout))
 		appium.SetLaunchArgs(launchArgs)
-		t.Logf("config-on-connect VIA APP URL: -is.proxy_query proxy.shape.rate_mbps=%.3f (no curl); player_id=%s", capMbps, pid)
+		t.Logf("config-on-connect VIA APP URL: rate=%.3f Mbps xfer_timeout=%s peak_clamp=%dMbps (no curl); player_id=%s", capMbps, xferTimeout, peakClampMbps, pid)
 		return
 	}
 	appium.SetLaunchArgs(launchArgs)
-	if err := runner.ConfigureOnConnect(ctx, pid, runner.ShapeRateConfig(capMbps)); err != nil {
+	if err := runner.ConfigureOnConnect(ctx, pid, runner.ShapeConfig(capMbps, xferTimeout)); err != nil {
 		t.Fatalf("ConfigureOnConnect (player_id=%s cap=%.3f Mbps): %v", pid, capMbps, err)
 	}
-	t.Logf("config-on-connect VIA CURL (default): session %s pre-capped at %.3f Mbps before launch", pid, capMbps)
+	t.Logf("config-on-connect VIA CURL (default): session %s pre-capped at %.3f Mbps, xfer_timeout=%s, peak_clamp=%dMbps before launch", pid, capMbps, xferTimeout, peakClampMbps)
+}
+
+// peakClampForCap maps a network cap (Mbps) to the app's whole-Mbps startup
+// peak-bitrate clamp, never collapsing a real cap to 0 (which reads as "off").
+func peakClampForCap(capMbps float64) int {
+	m := int(math.Round(capMbps))
+	if m < 1 && capMbps > 0 {
+		m = 1
+	}
+	return m
+}
+
+// appProxyQuery builds the -is.proxy_query value for CHAR_PROXY_CONFIG=app: the
+// rate cap plus, when xferTimeout>0, the segment transfer timeout. Mirrors the
+// curl-mode ShapeConfig so both drivers materialize the same session.
+func appProxyQuery(capMbps float64, xferTimeout time.Duration) string {
+	q := fmt.Sprintf("proxy.shape.rate_mbps=%g", capMbps)
+	if xferTimeout > 0 {
+		q += fmt.Sprintf("&proxy.transfer_timeouts.active_timeout_seconds=%d&proxy.transfer_timeouts.applies_segments=true",
+			int(xferTimeout.Seconds()))
+	}
+	return q
 }
 
 // OpenSession picks a launcher per $LAUNCH_MODE, discovers a device for
@@ -280,6 +321,9 @@ func RunVariantSweep(ctx context.Context, t *testing.T, sess *runner.Session, mo
 	for i := range steps {
 		st := &steps[i]
 		st.StartedAt = time.Now()
+		if i == 0 {
+			t.Logf("PATTERN-START %s first step ApplyRate=%.3f Mbps utc=%s", mode, st.RateMbps, time.Now().UTC().Format("15:04:05.000"))
+		}
 		if err := sess.ApplyRate(ctx, st.RateMbps); err != nil {
 			t.Errorf("step %d: apply rate %.3f Mbps: %v", i, st.RateMbps, err)
 			st.EndedAt = time.Now()

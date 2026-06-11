@@ -124,7 +124,7 @@ func runRampup(t *testing.T, p runner.Platform) {
 		setupCtx, setupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer setupCancel()
 		floor := resolveFloor(setupCtx, t, preFloor, rampupFloorFrom)
-		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor)
+		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor, 0, 0)
 
 		s, err := appium.LaunchToHome(setupCtx, *picked)
 		if err != nil {

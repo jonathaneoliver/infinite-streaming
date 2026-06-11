@@ -3,12 +3,19 @@ package modes
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jonathaneoliver/infinite-streaming/tests/characterization/runner"
 )
+
+// pyramidInitialLimitMbps is the cold-start cap these runs pin (overriding the
+// manifest-derived floor) — the network cap, the startup peak clamp, and the
+// pyramid ascent's starting rung all derive from it. Override: CHAR_PYRAMID_FLOOR.
+const pyramidInitialLimitMbps = 1.0
 
 // Pyramid — rampup followed by rampdown, ending where it started.
 //
@@ -157,6 +164,13 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars
 	// player starts on them from frame 1; iOS folds them into UserDefaults
 	// (NSArgumentDomain). The transfer-timeout axis is applied server-side.
 	cfg := readRunConfig(t, isAppium)
+	// Pyramid cold-starts at the floor (#632): pin a tight 6s active transfer
+	// timeout (vs the 20s suite default) so a too-large first segment aborts
+	// fast and the player drops to a sustainable variant. Operator-set
+	// CHAR_TRANSFER_TIMEOUT still wins.
+	if os.Getenv("CHAR_TRANSFER_TIMEOUT") == "" {
+		cfg.xferTimeout = 6 * time.Second
+	}
 	segment := cfg.segment
 
 	var sess *runner.Session
@@ -178,7 +192,16 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars
 		setupCtx, setupCancel := context.WithTimeout(context.Background(), setupTimeout)
 		defer setupCancel()
 		floor := resolveFloor(setupCtx, t, preFloor, pyramidFloorFrom)
-		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor)
+		// Pin the cold-start initial limit to 2 Mbps for these runs (overrides
+		// the manifest-derived floor) — drives the network cap, the startup peak
+		// clamp, and the pyramid ascent's starting rung. CHAR_PYRAMID_FLOOR wins.
+		floor = pyramidInitialLimitMbps
+		if v := os.Getenv("CHAR_PYRAMID_FLOOR"); v != "" {
+			if f, perr := strconv.ParseFloat(v, 64); perr == nil && f > 0 {
+				floor = f
+			}
+		}
+		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor, cfg.xferTimeout, peakClampForCap(floor))
 
 		s, lerr := appium.LaunchToHome(setupCtx, *picked)
 		if lerr != nil {

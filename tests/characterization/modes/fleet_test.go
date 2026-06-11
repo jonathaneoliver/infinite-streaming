@@ -138,13 +138,23 @@ func resolveFleetFromUDIDs(t *testing.T, p runner.Platform, udids []string) []ru
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	all, err := runner.AvailableSims(ctx, "")
-	if err != nil {
+	// Build a UDID → Device map across BOTH simulators and real devices so a
+	// mixed roster (e.g. one iPad sim + one real iPhone) gets the correct
+	// per-device platform — the sim launches via simctl/Appium-sim, the real
+	// device via Appium real-device. A UDID found in neither falls back to the
+	// caller's platform p.
+	byUDID := make(map[string]runner.Device)
+	if sims, err := runner.AvailableSims(ctx, ""); err != nil {
 		t.Fatalf("enumerate available sims: %v", err)
+	} else {
+		for _, d := range sims {
+			byUDID[strings.ToLower(d.UDID)] = d
+		}
 	}
-	byUDID := make(map[string]runner.Device, len(all))
-	for _, d := range all {
-		byUDID[strings.ToLower(d.UDID)] = d
+	if reals, err := runner.DiscoverRealDevices(ctx); err == nil {
+		for _, d := range reals {
+			byUDID[strings.ToLower(d.UDID)] = d
+		}
 	}
 
 	fleet := make([]runner.Device, 0, len(udids))
@@ -154,7 +164,10 @@ func resolveFleetFromUDIDs(t *testing.T, p runner.Platform, udids []string) []ru
 			d = runner.Device{Platform: p, UDID: u}
 		}
 		d.FleetIndex = i
-		if autoboot && known {
+		t.Logf("fleet[%d] resolved %s → platform=%s (%s)", i, u, d.Platform, d.Label)
+		// Only simulators are booted + server-seeded; real devices are already
+		// on and carry their own saved server.
+		if autoboot && d.Platform == runner.PlatformIPadSim {
 			if err := runner.BootSim(ctx, d.UDID); err != nil {
 				t.Fatalf("boot fleet sim %d (%s): %v", i, d.UDID, err)
 			}
