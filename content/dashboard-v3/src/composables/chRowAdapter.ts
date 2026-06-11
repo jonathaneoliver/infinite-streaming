@@ -250,6 +250,11 @@ export function chRowToPlayerRecord(
   // in the chart memory.
   const rawSession = {
     effective_rate_limit_mbps: num(row.effective_rate_limit_mbps),
+    // #747: the compare-mode "Displayed Variant (Sx)" series reads the
+    // sibling's ladder from here to map video_resolution → peak bitrate. It's
+    // already in the charts_minimal projection (the single-session chart reads
+    // it off the events rows); expose it on the sibling record too.
+    manifest_variants: row.manifest_variants,
     // Identity fields SessionDetails.vue reads from raw_session (port)
     // and group_id (top-level). Mirror the keys the live PlayerRecord
     // shape uses so the same component renders both paths.
