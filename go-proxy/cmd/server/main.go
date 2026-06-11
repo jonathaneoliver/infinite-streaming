@@ -325,6 +325,10 @@ func (rb *NetworkLogRingBuffer) GetAll() []NetworkLogEntry {
 
 type App struct {
 	sessionsMu               sync.Mutex
+	// createMu serializes the snapshot→allocate→reserve section of new-session
+	// bootstrap so two concurrent config-on-connect requests (a fleet run)
+	// can't both allocate the same session number and collide on one port.
+	createMu                 sync.Mutex
 	sessionsSnap             atomic.Pointer[[]SessionData]
 	throughputMu             sync.RWMutex
 	throughputData           map[int]map[string]interface{}
@@ -5352,6 +5356,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// #alloc-race: snapshot→allocate→reserve must be atomic. Two concurrent
+		// config-on-connect bootstraps (a fleet) otherwise read the same list,
+		// both allocateSessionNumber()→the SAME number, and collide on one port —
+		// one session's rate config lands on the other's port and the loser is
+		// created config-less, falling to the baseline cap (the nftk=100 bug).
+		// Hold createMu across a FRESH re-read + allocate + reserve
+		// (saveSessionList below) so each concurrent bootstrap gets a distinct
+		// slot; released at handler return, after the kernel apply.
+		a.createMu.Lock()
+		defer a.createMu.Unlock()
+		sessionList = a.getSessionList()
 		if len(sessionList) >= a.maxSessions {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
