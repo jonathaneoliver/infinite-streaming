@@ -117,7 +117,7 @@ func (a *v2Adapter) NetworkLogForPlayer(playerID string, limit int) []map[string
 		limit = 5000
 	}
 	var sessionID string
-	for _, s := range a.app.getSessionList() {
+	for _, s := range a.app.sessionsView() { // #740 read-only: matches player, reads port/fields
 		if !matchesPlayerID(getString(s, "player_id"), playerID) {
 			continue
 		}
@@ -574,7 +574,7 @@ func (a *v2Adapter) ApplyShapeToPlayer(playerID string) error {
 	if a == nil || a.app == nil {
 		return nil
 	}
-	for _, s := range a.app.getSessionList() {
+	for _, s := range a.app.sessionsView() { // #740 read-only: matches player, reads port/fields
 		if !matchesPlayerID(getString(s, "player_id"), playerID) {
 			continue
 		}
@@ -598,7 +598,7 @@ func (a *v2Adapter) ApplyPatternToPlayer(playerID string, steps []server.ShapePa
 	if a == nil || a.app == nil {
 		return nil
 	}
-	for _, s := range a.app.getSessionList() {
+	for _, s := range a.app.sessionsView() { // #740 read-only: matches player, reads port/fields
 		if !matchesPlayerID(getString(s, "player_id"), playerID) {
 			continue
 		}
@@ -629,7 +629,7 @@ func (a *v2Adapter) ApplyTransportFaultToPlayer(playerID, faultType string, cons
 	if a == nil || a.app == nil {
 		return nil
 	}
-	for _, s := range a.app.getSessionList() {
+	for _, s := range a.app.sessionsView() { // #740 read-only: matches player, reads port/fields
 		if !matchesPlayerID(getString(s, "player_id"), playerID) {
 			continue
 		}
@@ -729,7 +729,7 @@ func (a *v2Adapter) GroupMembers(groupID string) []string {
 		return nil
 	}
 	var out []string
-	for _, s := range a.app.getSessionList() {
+	for _, s := range a.app.sessionsView() { // #740 read-only: collects group members' player_ids
 		if getString(s, "group_id") == groupID {
 			if pid := getString(s, "player_id"); pid != "" {
 				out = append(out, pid)

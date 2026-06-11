@@ -348,3 +348,95 @@ func TestSessionListNoLostUpdatesUnderConcurrency(t *testing.T) {
 			len(seen), totalAppends, transientLeft)
 	}
 }
+
+// TestSessionsViewBorrowsAndStaysRaceFree covers #740 Commit B. sessionsView
+// returns the published snapshot WITHOUT cloning, which is sound only because
+// every writer copy-on-writes (mutateSessions never mutates a published map in
+// place). The test proves both halves:
+//   - borrow: a mutation to the published map is visible through the view
+//     (getSessionList, which clones, would not show it), and
+//   - safety: readers ranging the no-clone view concurrently with writers
+//     mutating + appending never trip the race detector — because writers only
+//     ever touch their own fresh clone before CAS-publishing it.
+//
+// Run with `go test -race`; a writer that mutated a published map in place
+// (breaking the sessionsView contract) would fail here under -race.
+func TestSessionsViewBorrowsAndStaysRaceFree(t *testing.T) {
+	app := &App{}
+	seed := []SessionData{{"session_id": "0", "marker": int64(0)}}
+	app.sessionsSnap.Store(&seed)
+
+	// Borrow, not clone: mutating the published map is visible through the view.
+	view := app.sessionsView()
+	seed[0]["probe"] = "borrowed"
+	if view[0]["probe"] != "borrowed" {
+		t.Fatalf("sessionsView cloned the snapshot; expected a borrow (probe not visible)")
+	}
+
+	const writers = 4
+	const appendsPer = 200
+	var wgW, wgR sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Writers: each appends uniquely-keyed sessions and increments the shared
+	// marker via mutateSessions (copy-on-write + CAS).
+	for g := 0; g < writers; g++ {
+		g := g
+		wgW.Add(1)
+		go func() {
+			defer wgW.Done()
+			for i := 0; i < appendsPer; i++ {
+				id := fmt.Sprintf("w%d-%d", g, i)
+				app.mutateSessions(func(s []SessionData) ([]SessionData, bool) {
+					for _, m := range s {
+						if getString(m, "session_id") == "0" {
+							m["marker"] = int64FromInterface(m["marker"]) + 1
+						}
+					}
+					return append(s, SessionData{"session_id": id}), true
+				})
+			}
+		}()
+	}
+
+	// Readers: range the no-clone view and read fields. If any writer mutated a
+	// borrowed map in place, -race flags the concurrent read/write here.
+	for g := 0; g < writers; g++ {
+		wgR.Add(1)
+		go func() {
+			defer wgR.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					for _, s := range app.sessionsView() {
+						_ = getString(s, "session_id")
+						_ = int64FromInterface(s["marker"])
+					}
+				}
+			}
+		}()
+	}
+
+	wgW.Wait()
+	close(stop)
+	wgR.Wait()
+
+	final := app.sessionsView()
+	var marker int64
+	appended := 0
+	for _, s := range final {
+		if getString(s, "session_id") == "0" {
+			marker = int64FromInterface(s["marker"])
+		} else {
+			appended++
+		}
+	}
+	if marker != int64(writers*appendsPer) {
+		t.Errorf("lost increments through CAS: marker=%d want=%d", marker, writers*appendsPer)
+	}
+	if appended != writers*appendsPer {
+		t.Errorf("lost appends: got %d want %d", appended, writers*appendsPer)
+	}
+}
