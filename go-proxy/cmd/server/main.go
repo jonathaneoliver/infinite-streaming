@@ -803,6 +803,16 @@ type TcTrafficManager struct {
 	nlMu          sync.Mutex
 	nlHandle      *netlink.Handle // persistent netlink handle, created lazily
 	nlLink        netlink.Link    // resolved once from interfaceName
+	// rootMu serialises the shared-root ensure (root qdisc 1: + root class
+	// 1:1). Both are check-then-act on objects SHARED across all ports, so
+	// concurrent per-port applies otherwise race: two see "no root", both
+	// `tc … add`, the loser gets RTNETLINK "File exists" and bails before
+	// installing its per-port leaf class → that port runs uncapped. This was
+	// masked pre-#740 by the bootstrap createMu (held across the kernel apply);
+	// the reserve-then-fill that replaced it removed that serialization. The
+	// per-port leaf classes (distinct classid) don't collide, so only the
+	// shared root needs this lock. See #745.
+	rootMu sync.Mutex
 	// Per-port ICMP filter state (issue #404). Tracks the last
 	// player_ip we installed an ICMP-routing filter for so the
 	// path-ping sampler's per-tick ApplyPlayerICMPFilter call
@@ -1145,7 +1155,23 @@ func (t *TcTrafficManager) IsActive() bool {
 	return strings.Contains(string(output), "htb")
 }
 
+// tcAddAlreadyExists reports whether a `tc … add` failure is the benign
+// "the object already exists" outcome of a concurrent apply having created
+// the SAME shared object first. RTNETLINK reports a duplicate class/qdisc as
+// "File exists"; the root-qdisc replace path can also report "Exclusivity
+// flag on, cannot modify". Either way the shared root now exists — that's
+// success, not failure. Matching the kernel's English message is unavoidable
+// here: `tc` shells out and only surfaces RTNETLINK strings on stderr. See #745.
+func tcAddAlreadyExists(out []byte) bool {
+	s := strings.ToLower(string(out))
+	return strings.Contains(s, "file exists") || strings.Contains(s, "exclusivity flag on")
+}
+
 func (t *TcTrafficManager) EnsureRootQdisc() error {
+	// Serialise the shared-root check-then-act (#745): without this, two
+	// concurrent applies both see "no root" and both add, racing the kernel.
+	t.rootMu.Lock()
+	defer t.rootMu.Unlock()
 	show := exec.Command("tc", "qdisc", "show", "dev", t.interfaceName)
 	if out, err := show.CombinedOutput(); err == nil {
 		if strings.Contains(string(out), "qdisc htb 1:") || strings.Contains(string(out), "root htb") {
@@ -1155,12 +1181,20 @@ func (t *TcTrafficManager) EnsureRootQdisc() error {
 	_ = exec.Command("tc", "qdisc", "del", "dev", t.interfaceName, "root").Run()
 	cmd := exec.Command("tc", "qdisc", "add", "dev", t.interfaceName, "root", "handle", "1:", "htb", "default", "999")
 	if out, err := cmd.CombinedOutput(); err != nil {
+		// A concurrent installer (or an out-of-band one) won the race — the
+		// htb root now exists, which is what we wanted.
+		if tcAddAlreadyExists(out) {
+			return nil
+		}
 		return fmt.Errorf("tc qdisc add failed: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
 func (t *TcTrafficManager) EnsureRootClass() error {
+	// Serialise the shared root-class 1:1 check-then-act (#745).
+	t.rootMu.Lock()
+	defer t.rootMu.Unlock()
 	cmd := exec.Command("tc", "class", "show", "dev", t.interfaceName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1175,6 +1209,12 @@ func (t *TcTrafficManager) EnsureRootClass() error {
 		"burst", "16k", "cburst", "16k", "quantum", "1514",
 	)
 	if out, err := addCmd.CombinedOutput(); err != nil {
+		// The root class already exists (a concurrent apply created it) →
+		// success. Previously this returned fatal, so the caller bailed before
+		// installing the per-port leaf class and that port ran uncapped (#745).
+		if tcAddAlreadyExists(out) {
+			return nil
+		}
 		return fmt.Errorf("tc root class add failed: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
