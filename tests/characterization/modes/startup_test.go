@@ -364,7 +364,7 @@ func runStartupCycle(
 		// URL): mint a fresh id and cap the session at capMbps before the
 		// first byte — replaces ReadPlayerID + post-launch ApplyRate + tc-settle.
 		pid := runner.NewPlayerID()
-		wireConfigOnConnect(ctx, t, appium, nil, pid, capMbps)
+		wireConfigOnConnect(ctx, t, appium, nil, pid, capMbps, 0, 0)
 		s, err := appium.LaunchToHome(ctx, dev)
 		if err != nil {
 			t.Fatalf("[%d] LaunchToHome: %v", idx, err)

@@ -2,6 +2,7 @@ import AVFoundation
 import Combine
 import CoreGraphics
 import Foundation
+import os
 import UIKit
 
 /// Owns every piece of persistent UI state, the AVPlayer instance, and
@@ -1247,6 +1248,9 @@ final class PlayerViewModel: ObservableObject {
         // from the prior item and re-arm at nil so the next first frame
         // schedules a fresh one.
         item.preferredPeakBitRate = preferredPeakBitRateBps
+        if preferredPeakBitRateMbps > 0 {
+            log("Set startup peak-bitrate clamp (\(preferredPeakBitRateMbps) Mbps) on item")
+        }
         peakCapReleaseTask?.cancel()
         peakCapReleaseTask = nil
         // Deterministic startup variant (#683) — forces the first-listed
@@ -1811,7 +1815,13 @@ final class PlayerViewModel: ObservableObject {
         isMuted = d.bool(forKey: Self.flagMuted)
         liveOffsetSeconds = d.object(forKey: Self.flagLiveOffset) as? Double ?? 0
         playIdRotationSeconds = max(0, d.object(forKey: Self.flagPlayIdRotation) as? Int ?? 0)
-        preferredPeakBitRateMbps = max(0, d.object(forKey: Self.flagPeakBitrate) as? Int ?? 0)
+        // integer(forKey:) — NOT object(forKey:) as? Int — because a launch-arg
+        // override (-is.flag.peak_bitrate_mbps 1, the characterization harness)
+        // lands in NSArgumentDomain as the STRING "1"; `as? Int` fails that cast
+        // and silently reads 0 (clamp off). integer(forKey:) coerces the string,
+        // and still reads the UI-persisted NSNumber correctly. Was the reason
+        // the cold-start clamp never engaged on fleet sims.
+        preferredPeakBitRateMbps = max(0, d.integer(forKey: Self.flagPeakBitrate))
         startsOnFirstEligibleVariant = d.bool(forKey: Self.flagStartsFirstVariant)
         // First launch: no key yet → use the device's hardware cap so
         // the user starts with the richest preview their hardware can
@@ -3295,10 +3305,14 @@ extension PlayerViewModel {
         (value * 100).rounded() / 100
     }
 
+    private static let osLog = Logger(subsystem: "com.jeoliver.InfiniteStreamPlayer", category: "vm")
     fileprivate func log(_ message: String) {
-        // Lightweight console log — the legacy VM also persisted these
-        // in a UI panel. Reintroduce that surface later if needed.
+        // Swift.print goes to stdout (visible via `simctl launch --console`);
+        // the os_log mirror lands in the unified log so it's greppable via
+        // `log show --predicate 'subsystem == "com.jeoliver.InfiniteStreamPlayer"'`
+        // even for Appium-launched apps (stdout isn't capturable there).
         Swift.print("[InfiniteStream] \(message)")
+        Self.osLog.notice("\(message, privacy: .public)")
     }
 }
 

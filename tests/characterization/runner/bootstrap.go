@@ -50,6 +50,20 @@ func ShapeRateConfig(rateMbps float64) BootstrapConfig {
 	return BootstrapConfig{"shape.rate_mbps": strconv.FormatFloat(rateMbps, 'g', -1, 64)}
 }
 
+// ShapeConfig is ShapeRateConfig plus, when xferTimeout>0, the server-side
+// active transfer timeout on segment fetches — folded into config-on-connect so
+// it's armed before the first segment (not via a post-bind PATCH). 0 timeout ⇒
+// rate only. The transfer_timeouts.* keys ride the same parseProxyArgs nesting
+// the PATCH API uses, so the proxy materializes them identically.
+func ShapeConfig(rateMbps float64, xferTimeout time.Duration) BootstrapConfig {
+	cfg := ShapeRateConfig(rateMbps)
+	if xferTimeout > 0 {
+		cfg["transfer_timeouts.active_timeout_seconds"] = strconv.Itoa(int(xferTimeout.Seconds()))
+		cfg["transfer_timeouts.applies_segments"] = "true"
+	}
+	return cfg
+}
+
 // ConfigureOnConnect allocates and configures the proxy session for playerID
 // BEFORE the app launches. Clip-agnostic: shape/fault config is session-scoped,
 // so any discoverable clip triggers the allocation; the app's real clip

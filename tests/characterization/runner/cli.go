@@ -38,13 +38,7 @@ func NewCLILauncher() *CLILauncher {
 	return &CLILauncher{
 		Out:              os.Stderr,
 		HeartbeatTimeout: 60 * time.Second,
-		BundleIDs: map[Platform]string{
-			PlatformIPhone:    "com.jeoliver.InfiniteStreamPlayer",
-			PlatformIPad:      "com.jeoliver.InfiniteStreamPlayer",
-			PlatformIPadSim:   "com.jeoliver.InfiniteStreamPlayer",
-			PlatformAppleTV:   "com.jeoliver.InfiniteStreamPlayerTV",
-			PlatformAndroidTV: "com.infinitestream.player",
-		},
+		BundleIDs:        cloneBundleIDs(),
 	}
 }
 
@@ -396,10 +390,53 @@ type simctlListResult struct {
 }
 
 func discoverSimctl(ctx context.Context) ([]Device, error) {
+	// Default discovery surfaces only Booted sims — a non-booted entry
+	// would force a slow `simctl boot` (and steal UI focus) before
+	// launch. Fleet enumeration that wants the not-yet-booted ones uses
+	// AvailableSims with bootedOnly=false.
+	return listSimctlDevices(ctx, true)
+}
+
+// DiscoverRealDevices enumerates real (physical) Apple devices via
+// devicectl — iPhone / iPad / Apple TV. Used by the fleet roster to assign
+// the correct platform to a CHAR_FLEET_UDIDS entry that is a real device
+// rather than a simulator. Returns nil (not an error) when devicectl finds
+// nothing.
+func DiscoverRealDevices(ctx context.Context) ([]Device, error) {
+	return discoverDevicectl(ctx)
+}
+
+// AvailableSims enumerates every available simulator of the given
+// platform regardless of boot state — the fleet roster path
+// (CHAR_FLEET_COUNT) needs not-yet-booted sims so it can boot them on
+// demand. Pass an empty platform to return all simulator platforms.
+func AvailableSims(ctx context.Context, platform Platform) ([]Device, error) {
+	all, err := listSimctlDevices(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	if platform == "" {
+		return all, nil
+	}
+	var out []Device
+	for _, d := range all {
+		if d.Platform == platform {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// listSimctlDevices runs `simctl list devices available --json` and maps
+// the result to Devices. When bootedOnly is true, only State=="Booted"
+// entries are returned (the default-discovery contract).
+func listSimctlDevices(ctx context.Context, bootedOnly bool) ([]Device, error) {
 	if _, err := exec.LookPath("xcrun"); err != nil {
 		return nil, errors.New("xcrun not on $PATH")
 	}
-	cmd := exec.CommandContext(ctx, "xcrun", "simctl", "list", "devices", "--json")
+	// `available` drops unusable runtimes/devices (missing runtime, etc.)
+	// — the same set the operator can actually boot.
+	cmd := exec.CommandContext(ctx, "xcrun", "simctl", "list", "devices", "available", "--json")
 	raw, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("xcrun simctl: %w", err)
@@ -415,11 +452,7 @@ func discoverSimctl(ctx context.Context) ([]Device, error) {
 			continue
 		}
 		for _, d := range devs {
-			// Only surface booted sims by default. Non-booted entries
-			// would force a `simctl boot` before launch, which is slow
-			// and changes the operator's UI focus — keep that as an
-			// explicit opt-in (Phase 1+).
-			if d.State != "Booted" {
+			if bootedOnly && d.State != "Booted" {
 				continue
 			}
 			out = append(out, Device{
@@ -430,6 +463,27 @@ func discoverSimctl(ctx context.Context) ([]Device, error) {
 		}
 	}
 	return out, nil
+}
+
+// BootSim boots the given simulator UDID and waits until it reports
+// Booted (simctl bootstatus blocks until the system is up). Booting an
+// already-booted sim is a no-op error from simctl ("Unable to boot … in
+// current state: Booted") which we swallow.
+func BootSim(ctx context.Context, udid string) error {
+	cmd := exec.CommandContext(ctx, "xcrun", "simctl", "boot", udid)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if strings.Contains(msg, "current state: Booted") {
+			return nil // already booted
+		}
+		return fmt.Errorf("simctl boot %s: %w: %s", udid, err, msg)
+	}
+	// bootstatus blocks until the sim finishes booting (or ctx fires).
+	wait := exec.CommandContext(ctx, "xcrun", "simctl", "bootstatus", udid)
+	if out, err := wait.CombinedOutput(); err != nil {
+		return fmt.Errorf("simctl bootstatus %s: %w: %s", udid, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func mapSimRuntime(rt string) Platform {
