@@ -3338,7 +3338,7 @@ func (a *App) handleGetNetworkLog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleGetExternalIPs(w http.ResponseWriter, r *http.Request) {
-	sessionList := a.getSessionList()
+	sessionList := a.sessionsView() // #740 read-only: builds ExternalIPEntry view, no mutation
 	if shouldScopeSessionsByRequesterIP(r) {
 		requesterIP := extractClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
 		sessionList = filterSessionsByOriginationIP(sessionList, requesterIP)
@@ -3646,7 +3646,7 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 		// the session update above so applySessionShaping sees the
 		// freshly cleared pattern_enabled flag and doesn't no-op via
 		// its "pattern owns the rate" guard.
-		for _, sess := range a.getSessionList() {
+		for _, sess := range a.sessionsView() { // #740 read-only: applySessionShaping reads sess, drives kernel
 			if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
 				if p, err := strconv.Atoi(portStr); err == nil && p == port {
 					a.applySessionShaping(sess, port)
@@ -3694,7 +3694,7 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 	// above when the caller included it in the payload, so any session
 	// on this port has the freshest value.
 	mode := ""
-	for _, sess := range a.getSessionList() {
+	for _, sess := range a.sessionsView() { // #740 read-only: reads pattern template mode
 		if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
 			if pn, err := strconv.Atoi(portStr); err == nil && pn == port {
 				mode = getString(sess, "nftables_pattern_template_mode")
@@ -3789,7 +3789,7 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 		// this port (issue #474 Milestone B). Info is a tiny JSON
 		// blob so downstream (graphs, harness archive) can read
 		// step / rate / duration without re-fetching pattern config.
-		for _, sess := range a.getSessionList() {
+		for _, sess := range a.sessionsView() { // #740 read-only: builds control-event info string
 			if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
 				if pn, err := strconv.Atoi(portStr); err == nil && pn == port {
 					info := fmt.Sprintf(`{"step":%d,"rate_mbps":%.3f,"duration_s":%.1f}`,
@@ -4016,7 +4016,7 @@ func (a *App) emitControlEventForPort(port int, source, event, info string) {
 	if a == nil || a.controlHub == nil || event == "" {
 		return
 	}
-	for _, sess := range a.getSessionList() {
+	for _, sess := range a.sessionsView() { // #740 read-only: matches port, emits control event
 		portStr := getString(sess, "x_forwarded_port")
 		if portStr == "" {
 			continue
@@ -4206,9 +4206,11 @@ func transportFaultConfigFromSession(session SessionData) (string, int, string, 
 
 func (a *App) getFirstSessionByPort(port int) SessionData {
 	portStr := strconv.Itoa(port)
-	for _, session := range a.getSessionList() {
+	// #740: scan the no-clone view, but return a clone of the single match —
+	// callers may mutate the result, so it must not alias the live snapshot.
+	for _, session := range a.sessionsView() {
 		if getString(session, "x_forwarded_port") == portStr {
-			return session
+			return cloneSession(session)
 		}
 	}
 	return nil
@@ -4423,7 +4425,7 @@ func (a *App) runTransportFaultLoop(ctx context.Context, port int, faultType str
 
 func (a *App) restoreTransportFaultSchedules() {
 	seenPorts := map[int]struct{}{}
-	for _, session := range a.getSessionList() {
+	for _, session := range a.sessionsView() { // #740 read-only: re-arms transport faults from config
 		portStr := getString(session, "x_forwarded_port")
 		if portStr == "" {
 			continue
@@ -4459,7 +4461,7 @@ func (a *App) restoreShapeApplication() (restored, skipped int) {
 		return 0, 0
 	}
 	seenPorts := map[int]struct{}{}
-	for _, session := range a.getSessionList() {
+	for _, session := range a.sessionsView() { // #740 read-only: re-applies shape from config
 		portStr := getString(session, "x_forwarded_port")
 		if portStr == "" {
 			skipped++
@@ -4563,7 +4565,7 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 	}, "")
 
 	// Propagate to group members
-	snap := a.getSessionList()
+	snap := a.sessionsView() // #740 read-only: group/port lookups only
 	groupID := a.getGroupIdByPort(port, snap)
 	if groupID != "" {
 		groupPorts := a.getPortsForGroup(groupID, snap)
@@ -4778,7 +4780,7 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 	}, "")
 
 	// Propagate to group members
-	snap2 := a.getSessionList()
+	snap2 := a.sessionsView() // #740 read-only: group/port lookups only
 	groupID := a.getGroupIdByPort(port, snap2)
 	if groupID != "" {
 		groupPorts := a.getPortsForGroup(groupID, snap2)
@@ -7090,7 +7092,7 @@ func (a *App) trackPortThroughput() {
 	for {
 		tickNow := time.Now()
 		if lastPortsRefresh.IsZero() || tickNow.Sub(lastPortsRefresh) >= time.Second {
-			sessions := a.getSessionList()
+			sessions := a.sessionsView() // #740 read-only: collects ports for throughput refresh
 			refreshed := map[int]struct{}{}
 			addPort := func(portStr string) {
 				if portStr == "" {
@@ -7167,10 +7169,12 @@ func (a *App) getSessionData(identifier string) SessionData {
 	if identifier == "" {
 		return nil
 	}
-	sessions := a.getSessionList()
-	for _, session := range sessions {
+	// #740: scan the no-clone view, return a clone of the single match —
+	// callers mutate this (and feed it to normalizeSessionsForResponse, which
+	// writes in place), so it must not alias the live snapshot.
+	for _, session := range a.sessionsView() {
 		if getString(session, "session_id") == identifier {
-			return session
+			return cloneSession(session)
 		}
 	}
 	return nil
@@ -7685,6 +7689,27 @@ func (a *App) getSessionList() []SessionData {
 		return []SessionData{}
 	}
 	return cloneSessionList(*snap)
+}
+
+// sessionsView returns the current session snapshot WITHOUT cloning — a
+// read-only borrow of the immutable published slice (issue #740 Commit B).
+// The dominant per-read cost was cloneSession (a deep copy of ~110 fields × N
+// sessions) on every getSessionList, and ~half the call sites only read.
+//
+// CONTRACT — callers MUST treat the result, and every map inside it, as
+// read-only. This is sound only because writers never mutate in place:
+// mutateSessions always copy-on-writes and CAS-publishes a fresh slice, so the
+// snapshot a caller borrows is frozen for its lifetime (a concurrent writer
+// publishes a new slice; it never touches this one). A caller that needs to
+// mutate a session — or hands maps to normalizeSessionsForResponse, which
+// writes in place — must use getSessionList (which clones) or cloneSession the
+// specific map it retains.
+func (a *App) sessionsView() []SessionData {
+	snap := a.sessionsSnap.Load()
+	if snap == nil {
+		return nil
+	}
+	return *snap
 }
 
 // mutateSessions is the lock-free read-modify-write primitive for the
@@ -9511,7 +9536,7 @@ func refreshFailureStateFromLatest(a *App, dst SessionData, sessionID string) {
 	if a == nil || dst == nil || sessionID == "" {
 		return
 	}
-	latest := a.getSessionList()
+	latest := a.sessionsView() // #740 read-only: reads matched session into dst, never writes the snapshot
 	for _, s := range latest {
 		if getString(s, "session_id") != sessionID {
 			continue
@@ -9838,7 +9863,7 @@ func (a *App) resolveSessionList(sessions [][]SessionData) []SessionData {
 	if len(sessions) > 0 && sessions[0] != nil {
 		return sessions[0]
 	}
-	return a.getSessionList()
+	return a.sessionsView() // #740 read-only: callers (getGroupIdByPort/getPortsForGroup) only read
 }
 
 // updateSessionGroup updates all sessions in a group with the given updates
