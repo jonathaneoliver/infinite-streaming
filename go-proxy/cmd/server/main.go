@@ -95,8 +95,6 @@ type tcStatsCache struct {
 	backlog int64
 }
 
-
-
 // HeaderPair is a single name/value pair, used to carry HTTP request /
 // response headers and query parameters in NetworkLogEntry. Mirrors the
 // HAR 1.2 NameValue shape so a HAR consumer can drop these straight into
@@ -324,70 +322,70 @@ func (rb *NetworkLogRingBuffer) GetAll() []NetworkLogEntry {
 }
 
 type App struct {
-	sessionsMu               sync.Mutex
-	// createMu serializes the snapshot→allocate→reserve section of new-session
-	// bootstrap so two concurrent config-on-connect requests (a fleet run)
-	// can't both allocate the same session number and collide on one port.
-	createMu                 sync.Mutex
-	sessionsSnap             atomic.Pointer[[]SessionData]
-	throughputMu             sync.RWMutex
-	throughputData           map[int]map[string]interface{}
-	sessionEvents            *SessionEventStore
-	traffic                  *TcTrafficManager
-	upstreamHost             string
-	upstreamPort             string
-	maxSessions              int
+	// #740: the in-memory session list is now mutated lock-free via
+	// mutateSessions (immutable copy-on-write + CompareAndSwap). The former
+	// sessionsMu (guarded only the publish, never the read-modify-write) and
+	// createMu (#739 bootstrap-allocation lock, subsumed by reserve-then-fill)
+	// are gone — see mutateSessions and the handleProxy reserve CAS.
+	sessionsSnap   atomic.Pointer[[]SessionData]
+	throughputMu   sync.RWMutex
+	throughputData map[int]map[string]interface{}
+	sessionEvents  *SessionEventStore
+	traffic        *TcTrafficManager
+	upstreamHost   string
+	upstreamPort   string
+	maxSessions    int
 	// defaultRateMbps is the baseline rate cap (Mbps) applied to every
 	// new player session via setDefault on `nftables_bandwidth_mbps` in
 	// normalizeSessionsForResponse. Read once at boot from
 	// INFINITE_STREAM_DEFAULT_RATE_MBPS. 0 = no cap (today's behaviour);
 	// non-zero = the deployment's interpretation of "no operator
 	// override." See issue #480.
-	defaultRateMbps          int
-	client                   *http.Client
-	portMap                  PortMapping
-	shapeMu                  sync.Mutex
-	shapeLoops               map[int]context.CancelFunc
-	shapeStates              map[int]NftShapePattern
-	shapeApplyMu             sync.Mutex
-	shapeApply               map[int]ShapeApplyState
-	faultMu                  sync.Mutex
-	faultLoops               map[int]context.CancelFunc
-	networkLogsMu            sync.RWMutex
-	networkLogs              map[string]*NetworkLogRingBuffer // sessionId -> ring buffer
-	loopStateMu              sync.Mutex
-	loopStateBySession       map[string]ServerLoopState
-	sessionsHub              *SessionEventHub
+	defaultRateMbps    int
+	client             *http.Client
+	portMap            PortMapping
+	shapeMu            sync.Mutex
+	shapeLoops         map[int]context.CancelFunc
+	shapeStates        map[int]NftShapePattern
+	shapeApplyMu       sync.Mutex
+	shapeApply         map[int]ShapeApplyState
+	faultMu            sync.Mutex
+	faultLoops         map[int]context.CancelFunc
+	networkLogsMu      sync.RWMutex
+	networkLogs        map[string]*NetworkLogRingBuffer // sessionId -> ring buffer
+	loopStateMu        sync.Mutex
+	loopStateBySession map[string]ServerLoopState
+	sessionsHub        *SessionEventHub
 	// Monotonic revision stamped on each /api/sessions/stream frame
 	// (handleSessionStream initial frame + emitSessionEvent per-event
 	// frames). Was named sessionsBroadcastSeq when the debounced
 	// full-state broadcast lived here; kept stable as the wire
 	// revision is consumer-visible.
-	sessionsBroadcastSeq     uint64
-	networkHub               *NetworkEventHub
+	sessionsBroadcastSeq uint64
+	networkHub           *NetworkEventHub
 	// controlHub broadcasts proxy/harness control events to subscribers
 	// (forwarder + any dashboard SSE client). Issue #474 Milestone B.
-	controlHub               *ControlEventHub
+	controlHub *ControlEventHub
 	// avmetricsHub broadcasts iOS 18 AVMetrics raw events posted by the
 	// player to dashboard + forwarder subscribers. Issue #486 spike.
-	avmetricsHub             *AVMetricEventHub
-	uiStateVersionSeq        uint64
-	segmentFlightMu          sync.Mutex
-	segmentFlight            map[int]segmentFlightInfo // internal port -> segment transfer info
-	segmentFlightSeq         uint64                    // atomic generation counter for flight IDs
-	segmentRunMu             sync.Mutex
-	segmentRun               map[int]segmentRunRecord // internal port -> last completed run record
-	drainActiveMu            sync.Mutex
-	drainActive              map[int]bool // per-port: true while awaitSocketDrain is running
-	tcSamplesMu              sync.Mutex
-	tcSamples                map[int][]tcSample
-	wireRateMu               sync.Mutex
-	wireRate                 map[int]wireRateSample // latest byte-change-gated rate per port
-	tcCacheMu                sync.Mutex
-	tcCache                  map[int]*tcStatsCache // per-port TC stats cache
-	transferCompleteMu           sync.Mutex
-	transferCompleteMbps         map[int]float64   // latest completed segment Mbps per port
-	transferCompleteAt           map[int]time.Time // when the drain completed
+	avmetricsHub         *AVMetricEventHub
+	uiStateVersionSeq    uint64
+	segmentFlightMu      sync.Mutex
+	segmentFlight        map[int]segmentFlightInfo // internal port -> segment transfer info
+	segmentFlightSeq     uint64                    // atomic generation counter for flight IDs
+	segmentRunMu         sync.Mutex
+	segmentRun           map[int]segmentRunRecord // internal port -> last completed run record
+	drainActiveMu        sync.Mutex
+	drainActive          map[int]bool // per-port: true while awaitSocketDrain is running
+	tcSamplesMu          sync.Mutex
+	tcSamples            map[int][]tcSample
+	wireRateMu           sync.Mutex
+	wireRate             map[int]wireRateSample // latest byte-change-gated rate per port
+	tcCacheMu            sync.Mutex
+	tcCache              map[int]*tcStatsCache // per-port TC stats cache
+	transferCompleteMu   sync.Mutex
+	transferCompleteMbps map[int]float64   // latest completed segment Mbps per port
+	transferCompleteAt   map[int]time.Time // when the drain completed
 	// metricsPostMu serialises `handlePostSessionMetrics` per session_id.
 	// Without this, two near-simultaneous POSTs run in independent
 	// goroutines that race for `sessionsMu`; the loser writes after the
@@ -397,7 +395,7 @@ type App struct {
 	// arrival order — Go's sync.Mutex grants in approximately FIFO
 	// order under contention since 1.9, which is what TCP delivery
 	// guarantees per connection. Issue #403 follow-up.
-	metricsPostMu                sync.Map // session_id -> *sync.Mutex
+	metricsPostMu sync.Map // session_id -> *sync.Mutex
 }
 
 // sessionStateMu serialises read-modify-write on the session map
@@ -1429,7 +1427,9 @@ func (t *TcTrafficManager) scheduleRateLimitVerification(port int, expectedMbps 
 // (issue #352 layer 3) so any divergence is visible to operators.
 //
 // `tc class show` output for an htb class looks like:
-//   class htb 1:181 parent 1:1 prio 0 rate 15414Kbit ceil 15414Kbit ...
+//
+//	class htb 1:181 parent 1:1 prio 0 rate 15414Kbit ceil 15414Kbit ...
+//
 // We parse the "rate" token. Kbit and Mbit are the only units the
 // proxy ever installs, so the parser handles both.
 func (t *TcTrafficManager) ReadActualRateMbps(port int) float64 {
@@ -1973,38 +1973,38 @@ func main() {
 
 	emptySessions := []SessionData{}
 	app := &App{
-		throughputData: map[int]map[string]interface{}{},
-		sessionEvents: eventStore,
-		traffic:       NewTcTrafficManager(interfaceName, tcDebug),
-		upstreamHost:  upstreamHost,
-		upstreamPort:  upstreamPort,
-		maxSessions:      maxSessions,
-		defaultRateMbps:  defaultRateMbps,
-		portMap:       loadPortMapping(),
+		throughputData:  map[int]map[string]interface{}{},
+		sessionEvents:   eventStore,
+		traffic:         NewTcTrafficManager(interfaceName, tcDebug),
+		upstreamHost:    upstreamHost,
+		upstreamPort:    upstreamPort,
+		maxSessions:     maxSessions,
+		defaultRateMbps: defaultRateMbps,
+		portMap:         loadPortMapping(),
 		client: &http.Client{
 			Transport: &http.Transport{
 				DialContext:           (&net.Dialer{Timeout: 6 * time.Second}).DialContext,
 				ResponseHeaderTimeout: 6 * time.Second,
 			},
 		},
-		shapeLoops:         map[int]context.CancelFunc{},
-		shapeStates:        map[int]NftShapePattern{},
-		shapeApply:         map[int]ShapeApplyState{},
-		faultLoops:         map[int]context.CancelFunc{},
-		sessionsHub:        NewSessionEventHub(),
-		networkHub:         NewNetworkEventHub(),
-		controlHub:         NewControlEventHub(),
-		avmetricsHub:       NewAVMetricEventHub(),
-		networkLogs:        map[string]*NetworkLogRingBuffer{},
-		loopStateBySession: map[string]ServerLoopState{},
-		segmentFlight:      map[int]segmentFlightInfo{},
-		segmentRun:         map[int]segmentRunRecord{},
-		drainActive:        map[int]bool{},
-		tcSamples:          map[int][]tcSample{},
-		wireRate:            map[int]wireRateSample{},
-		tcCache:             map[int]*tcStatsCache{},
-		transferCompleteMbps:    map[int]float64{},
-		transferCompleteAt:      map[int]time.Time{},
+		shapeLoops:           map[int]context.CancelFunc{},
+		shapeStates:          map[int]NftShapePattern{},
+		shapeApply:           map[int]ShapeApplyState{},
+		faultLoops:           map[int]context.CancelFunc{},
+		sessionsHub:          NewSessionEventHub(),
+		networkHub:           NewNetworkEventHub(),
+		controlHub:           NewControlEventHub(),
+		avmetricsHub:         NewAVMetricEventHub(),
+		networkLogs:          map[string]*NetworkLogRingBuffer{},
+		loopStateBySession:   map[string]ServerLoopState{},
+		segmentFlight:        map[int]segmentFlightInfo{},
+		segmentRun:           map[int]segmentRunRecord{},
+		drainActive:          map[int]bool{},
+		tcSamples:            map[int][]tcSample{},
+		wireRate:             map[int]wireRateSample{},
+		tcCache:              map[int]*tcStatsCache{},
+		transferCompleteMbps: map[int]float64{},
+		transferCompleteAt:   map[int]time.Time{},
 	}
 
 	app.sessionsSnap.Store(&emptySessions)
@@ -3201,21 +3201,30 @@ func parseShapeStepsFromSession(session SessionData) []NftShapeStep {
 func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	if r.Method == http.MethodDelete {
-		sessions := a.getSessionList()
-		filtered := make([]SessionData, 0, len(sessions))
-		removedPorts := map[int]struct{}{}
-		for _, session := range sessions {
-			if getString(session, "session_id") != id {
-				filtered = append(filtered, session)
-				continue
+		// Collect the removed session(s) inside the (re-runnable) CAS
+		// closure; loop-state teardown / recordSessionEnd / kernel teardown
+		// run once on the committed result (mutateSessions side-effect rule).
+		var removed []SessionData
+		a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+			removed = removed[:0]
+			filtered := make([]SessionData, 0, len(sessions))
+			for _, session := range sessions {
+				if getString(session, "session_id") != id {
+					filtered = append(filtered, session)
+					continue
+				}
+				removed = append(removed, session)
 			}
+			return filtered, len(removed) > 0
+		})
+		removedPorts := map[int]struct{}{}
+		for _, session := range removed {
 			a.removeServerLoopState(id)
 			a.recordSessionEnd(session, "deleted")
 			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
 				removedPorts[port] = struct{}{}
 			}
 		}
-		a.saveSessionList(filtered)
 		for port := range removedPorts {
 			a.disablePatternForPort(port)
 			a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
@@ -3348,14 +3357,21 @@ func (a *App) handleGetExternalIPs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
-	sessions := a.getSessionList()
+	// Capture the cleared sessions inside the (re-runnable) CAS closure;
+	// loop-state teardown / recordSessionEnd / kernel teardown run once on
+	// the committed result (mutateSessions side-effect rule).
+	var removed []SessionData
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		removed = append(removed[:0], sessions...)
+		return []SessionData{}, true
+	})
 	portSet := map[int]struct{}{}
 	a.shapeMu.Lock()
 	for port := range a.shapeLoops {
 		portSet[port] = struct{}{}
 	}
 	a.shapeMu.Unlock()
-	for _, session := range sessions {
+	for _, session := range removed {
 		a.removeServerLoopState(getString(session, "session_id"))
 		a.recordSessionEnd(session, "cleared")
 		portStr := getString(session, "x_forwarded_port")
@@ -3374,7 +3390,6 @@ func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
 		a.disablePatternForPort(port)
 		a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
 	}
-	a.saveSessionList([]SessionData{})
 	writeJSON(w, map[string]string{"message": "All sessions cleared successfully"})
 }
 
@@ -4160,55 +4175,58 @@ func (a *App) getFirstSessionByPort(port int) SessionData {
 }
 
 func (a *App) setTransportFaultSessionState(port int, faultType string, active bool, startedAt string, phaseSeconds float64, cycleSeconds float64) {
-	sessions := a.getSessionList()
-	changed := false
-	controlRevision := ""
 	phaseRounded := math.Round(phaseSeconds*1000) / 1000
 	cycleRounded := math.Round(cycleSeconds*1000) / 1000
-	for _, session := range sessions {
-		portStr := getString(session, "x_forwarded_port")
-		if portStr == "" {
-			continue
-		}
-		if portNum, err := strconv.Atoi(portStr); err == nil && portNum == port {
-			prevType := getString(session, "transport_fault_type")
-			if prevType == "" {
-				prevType = getString(session, "transport_failure_type")
+	controlRevision := newControlRevision()
+	// fault active-edge sessions captured inside the (re-runnable) CAS
+	// closure; the fault_on/fault_off control_events are emitted once on
+	// the committed result (mutateSessions side-effect rule).
+	var edges []string
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		edges = edges[:0]
+		changed := false
+		for _, session := range sessions {
+			portStr := getString(session, "x_forwarded_port")
+			if portStr == "" {
+				continue
 			}
-			prevActive := getBool(session, "transport_fault_active")
-			prevStarted := getString(session, "transport_fault_started_at")
-			session["transport_failure_type"] = faultType
-			session["transport_fault_type"] = faultType
-			session["transport_fault_active"] = active
-			session["transport_fault_started_at"] = startedAt
-			session["transport_fault_phase_seconds"] = phaseRounded
-			session["transport_fault_cycle_seconds"] = cycleRounded
-			controlChanged := prevType != faultType || prevActive != active
-			if !controlChanged && startedAt != "" && prevStarted != startedAt {
-				controlChanged = true
-			}
-			if controlChanged {
-				if controlRevision == "" {
-					controlRevision = newControlRevision()
+			if portNum, err := strconv.Atoi(portStr); err == nil && portNum == port {
+				prevType := getString(session, "transport_fault_type")
+				if prevType == "" {
+					prevType = getString(session, "transport_failure_type")
 				}
-				applyControlRevision(session, controlRevision)
-			}
-			// Emit control_event on the fault active edge — fault_on /
-			// fault_off (issue #474 Milestone B). Replaces the
-			// snapshot_failures classifier's transport_fault edge.
-			if prevActive != active {
-				sessionID := getString(session, "session_id")
-				ev := "fault_off"
-				if active {
-					ev = "fault_on"
+				prevActive := getBool(session, "transport_fault_active")
+				prevStarted := getString(session, "transport_fault_started_at")
+				session["transport_failure_type"] = faultType
+				session["transport_fault_type"] = faultType
+				session["transport_fault_active"] = active
+				session["transport_fault_started_at"] = startedAt
+				session["transport_fault_phase_seconds"] = phaseRounded
+				session["transport_fault_cycle_seconds"] = cycleRounded
+				controlChanged := prevType != faultType || prevActive != active
+				if !controlChanged && startedAt != "" && prevStarted != startedAt {
+					controlChanged = true
 				}
-				a.emitControlEventForSession(sessionID, "proxy", ev, faultType)
+				if controlChanged {
+					applyControlRevision(session, controlRevision)
+				}
+				if prevActive != active {
+					edges = append(edges, getString(session, "session_id"))
+				}
+				changed = true
 			}
-			changed = true
 		}
+		return sessions, changed
+	})
+	// Emit control_event on the fault active edge — fault_on / fault_off
+	// (issue #474 Milestone B). Replaces the snapshot_failures classifier's
+	// transport_fault edge.
+	ev := "fault_off"
+	if active {
+		ev = "fault_on"
 	}
-	if changed {
-		a.saveSessionList(sessions)
+	for _, sessionID := range edges {
+		a.emitControlEventForSession(sessionID, "proxy", ev, faultType)
 	}
 }
 
@@ -4947,7 +4965,7 @@ func isSocketFaultType(faultType string) bool {
 // The canonical reference for every fault type's wire shape AND the
 // real-world failure mode it models is:
 //
-//   .claude/standards/fault-injection-wire-contract.md
+//	.claude/standards/fault-injection-wire-contract.md
 //
 // Read it before editing this function or any of the case branches
 // below. The doc lists: TCP-level shape, what the client OS surfaces,
@@ -5356,23 +5374,47 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		// #alloc-race: snapshot→allocate→reserve must be atomic. Two concurrent
-		// config-on-connect bootstraps (a fleet) otherwise read the same list,
-		// both allocateSessionNumber()→the SAME number, and collide on one port —
-		// one session's rate config lands on the other's port and the loser is
-		// created config-less, falling to the baseline cap (the nftk=100 bug).
-		// Hold createMu across a FRESH re-read + allocate + reserve
-		// (saveSessionList below) so each concurrent bootstrap gets a distinct
-		// slot; released at handler return, after the kernel apply.
-		a.createMu.Lock()
-		defer a.createMu.Unlock()
-		sessionList = a.getSessionList()
-		if len(sessionList) >= a.maxSessions {
+		// #740 reserve-then-fill: atomically claim a session slot via CAS
+		// instead of serialising the whole bootstrap under createMu. The
+		// closure re-reads the committed list and re-picks `allocated` on every
+		// retry, so two concurrent config-on-connect bootstraps (a fleet) can
+		// never claim the same slot — superseding #739's createMu and the
+		// snapshot→allocate→reserve lost-update that let one session's rate
+		// config land on the other's port (the loser created config-less →
+		// nftk=100 baseline leak). The reservation is a minimal placeholder
+		// carrying a stable session_id (so a concurrent allocateSessionNumber
+		// sees the slot used) plus player_id/group_id (so a concurrent
+		// same-player reattach still de-dupes) and a fresh last_request (so
+		// removeInactiveSessions won't evict it mid-bootstrap). The full
+		// session is CAS-filled below once the port-derived work and config
+		// materialization succeed; a rejected config triggers a cleanup CAS so
+		// no slot leaks.
+		createdAt := nowISO()
+		groupID := extractGroupId(playerID)
+		var allocated int
+		_, reserved := a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+			if len(sessions) >= a.maxSessions {
+				return sessions, false
+			}
+			allocated = allocateSessionNumber(sessions, a.maxSessions)
+			idStr := fmt.Sprintf("%d", allocated)
+			return append(sessions, SessionData{
+				"session_id":         idStr,
+				"session_number":     idStr,
+				"sid":                idStr,
+				"player_id":          playerID,
+				"group_id":           groupID,
+				"last_request":       createdAt,
+				"session_start_time": createdAt,
+				"_reserved":          true,
+			}), true
+		})
+		if !reserved {
+			// Only false path is at-capacity (closure always changes otherwise).
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		createdAt := nowISO()
-		allocated := allocateSessionNumber(sessionList, a.maxSessions)
+		idStr := fmt.Sprintf("%d", allocated)
 		assignedExternalPort := replaceThirdFromLastDigit(externalPort, allocated)
 		assignedInternalPort := assignedExternalPort
 		// Sweep any leftover tc rate-limit / filter on the assigned
@@ -5412,7 +5454,6 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if internalPortInt, err := strconv.Atoi(assignedInternalPort); err == nil {
 			a.armTransportFaultLoop(internalPortInt, "none", 1, transportUnitsSeconds, 0)
 		}
-		groupID := extractGroupId(playerID)
 		// Optional play_id from the client. iOS/tvOS/Roku don't mint one
 		// (the v2 read path derives a stable fallback), but the v3 web
 		// player (VideoPlayerFrame) does — surfacing it here lets the
@@ -5420,23 +5461,23 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// instead of the server-side derivation.
 		playID := r.URL.Query().Get("play_id")
 		sessionData := SessionData{
-			"session_number":                           fmt.Sprintf("%d", allocated),
-			"sid":                                      fmt.Sprintf("%d", allocated),
-			"session_id":                               fmt.Sprintf("%d", allocated),
-			"player_id":                                playerID,
-			"play_id":                                  playID,
-			"group_id":                                 groupID,
-			"control_revision":                         newControlRevision(),
-			"headers_player_id":                        playerHeader,
-			"headers_player-ID":                        playerHeaderAlt,
-			"headers_x_playback_session_id":            playbackSessionHeader,
-			"manifest_requests_count":                  0,
-			"master_manifest_requests_count":           0,
-			"segments_count":                           0,
-			"all_requests_count":                       0,
-			"last_request":                             createdAt,
-			"first_request_time":                       createdAt,
-			"session_start_time":                       createdAt,
+			"session_number":                 fmt.Sprintf("%d", allocated),
+			"sid":                            fmt.Sprintf("%d", allocated),
+			"session_id":                     fmt.Sprintf("%d", allocated),
+			"player_id":                      playerID,
+			"play_id":                        playID,
+			"group_id":                       groupID,
+			"control_revision":               newControlRevision(),
+			"headers_player_id":              playerHeader,
+			"headers_player-ID":              playerHeaderAlt,
+			"headers_x_playback_session_id":  playbackSessionHeader,
+			"manifest_requests_count":        0,
+			"master_manifest_requests_count": 0,
+			"segments_count":                 0,
+			"all_requests_count":             0,
+			"last_request":                   createdAt,
+			"first_request_time":             createdAt,
+			"session_start_time":             createdAt,
 			// Segment / manifest / master_manifest fault config —
 			// initialise mode + units explicitly so both server
 			// (NewFailureHandler) and dashboard (Mode dropdown) read
@@ -5445,47 +5486,47 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// "failures_per_seconds" mode → consecutive=requests,
 			// frequency=seconds, matching the dashboard's visible
 			// default Mode for a fresh session.
-			"segment_failure_type":                     "none",
-			"segment_failure_frequency":                0,
-			"segment_consecutive_failures":             0,
-			"segment_failure_units":                    "requests",
-			"segment_consecutive_units":                "requests",
-			"segment_frequency_units":                  "seconds",
-			"segment_failure_mode":                     "failures_per_seconds",
-			"manifest_failure_type":                    "none",
-			"manifest_failure_frequency":               0,
-			"manifest_failure_units":                   "requests",
-			"manifest_consecutive_units":               "requests",
-			"manifest_frequency_units":                 "seconds",
-			"manifest_failure_mode":                    "failures_per_seconds",
-			"manifest_consecutive_failures":            0,
-			"master_manifest_failure_type":             "none",
-			"master_manifest_failure_frequency":        0,
-			"master_manifest_failure_units":            "requests",
-			"master_manifest_consecutive_units":        "requests",
-			"master_manifest_frequency_units":          "seconds",
-			"master_manifest_failure_mode":             "failures_per_seconds",
-			"master_manifest_consecutive_failures":     0,
+			"segment_failure_type":                 "none",
+			"segment_failure_frequency":            0,
+			"segment_consecutive_failures":         0,
+			"segment_failure_units":                "requests",
+			"segment_consecutive_units":            "requests",
+			"segment_frequency_units":              "seconds",
+			"segment_failure_mode":                 "failures_per_seconds",
+			"manifest_failure_type":                "none",
+			"manifest_failure_frequency":           0,
+			"manifest_failure_units":               "requests",
+			"manifest_consecutive_units":           "requests",
+			"manifest_frequency_units":             "seconds",
+			"manifest_failure_mode":                "failures_per_seconds",
+			"manifest_consecutive_failures":        0,
+			"master_manifest_failure_type":         "none",
+			"master_manifest_failure_frequency":    0,
+			"master_manifest_failure_units":        "requests",
+			"master_manifest_consecutive_units":    "requests",
+			"master_manifest_frequency_units":      "seconds",
+			"master_manifest_failure_mode":         "failures_per_seconds",
+			"master_manifest_consecutive_failures": 0,
 			// "All" fault override — when all_failure_type != "none",
 			// HandleRequest uses this rule for every HTTP request and
 			// ignores the per-kind tabs above. Same control shape as
 			// segment, plus all_failure_urls for variant scoping.
-			"all_failure_type":                         "none",
-			"all_failure_frequency":                    0,
-			"all_consecutive_failures":                 0,
-			"all_failure_units":                        "requests",
-			"all_consecutive_units":                    "requests",
-			"all_frequency_units":                      "seconds",
-			"all_failure_mode":                         "failures_per_seconds",
-			"current_failures":                         0,
-			"consecutive_failures_count":               0,
-			"player_ip":                                requesterIP,
-			"user_agent":                               "",
-			"origination_ip":                           requesterIP,
-			"origination_time":                         createdAt,
-			"is_external_ip":                           isExternalIP(requesterIP),
-			"manifest_failure_at":                      nil,
-			"manifest_failure_recover_at":              nil,
+			"all_failure_type":            "none",
+			"all_failure_frequency":       0,
+			"all_consecutive_failures":    0,
+			"all_failure_units":           "requests",
+			"all_consecutive_units":       "requests",
+			"all_frequency_units":         "seconds",
+			"all_failure_mode":            "failures_per_seconds",
+			"current_failures":            0,
+			"consecutive_failures_count":  0,
+			"player_ip":                   requesterIP,
+			"user_agent":                  "",
+			"origination_ip":              requesterIP,
+			"origination_time":            createdAt,
+			"is_external_ip":              isExternalIP(requesterIP),
+			"manifest_failure_at":         nil,
+			"manifest_failure_recover_at": nil,
 			// nil (not []string{}) so the dashboard can tell "fresh
 			// session, default to all-URLs filter" from "user
 			// explicitly cleared the list" — both serialize to JSON
@@ -5555,7 +5596,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// haven't touched this." The derived effective_rate_mbps
 			// field surfaces what the kernel is actually enforcing.
 			// Issue #480.
-			"nftables_bandwidth_mbps":                  float64(0),
+			"nftables_bandwidth_mbps": float64(0),
 		}
 		// #712: materialize proxy.* config onto the fresh SessionData before
 		// it's published. ApplyConfigPatch runs the SAME translator the PATCH
@@ -5563,14 +5604,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// Translation only — the kernel is driven below, after the save.
 		if hasConfig {
 			if aerr := v2server.ApplyConfigPatch(sessionData, configPatch); aerr != nil {
+				// #740: a rejected config must not leak the reserved slot —
+				// CAS the placeholder back out before returning the 400.
+				a.removeReservedSession(idStr)
 				w.WriteHeader(http.StatusBadRequest)
 				writeJSON(w, map[string]interface{}{"error": "proxy config rejected", "detail": aerr.Error()})
 				return
 			}
 		}
-		a.resetServerLoopState(fmt.Sprintf("%d", allocated))
-		sessionList = append(sessionList, sessionData)
-		a.saveSessionList(sessionList)
+		a.resetServerLoopState(idStr)
+		// #740 fill: CAS the placeholder reservation up to the full session.
+		a.fillReservedSession(idStr, sessionData)
 		// Apply the deployment baseline to the kernel BEFORE the
 		// redirect fires — the client reconnects on the new port
 		// immediately and the first segment burst would otherwise run
@@ -5854,9 +5898,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				sessionID := getString(sessionData, "session_id")
 				netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, http.StatusBadGateway, requestBytes, requestReceivedAt)
 				stampNetMeta(&netEntry, requestHeaders, queryString, nil)
-				logEntry(sessionID,netEntry)
-				sessionList[index] = sessionData
-				a.saveSessionList(sessionList)
+				logEntry(sessionID, netEntry)
+				// #740: persist the fault-path mutations as a single-session
+				// atomic merge instead of re-publishing the stale full list
+				// captured at handler top (which clobbered concurrent sessions).
+				a.saveSessionByID(sessionNumber, sessionData)
 				return
 			}
 			resp, netEntry, err := a.doRequestWithTracing(r.Context(), proxyReq)
@@ -5888,9 +5934,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				netEntry.FaultAction = actionTaken
 				netEntry.FaultCategory = categorizeFaultType(failureType)
 				stampNetMeta(netEntry, requestHeaders, queryString, nil)
-				logEntry(sessionID,*netEntry)
-				sessionList[index] = sessionData
-				a.saveSessionList(sessionList)
+				logEntry(sessionID, *netEntry)
+				// #740: persist the fault-path mutations as a single-session
+				// atomic merge instead of re-publishing the stale full list
+				// captured at handler top (which clobbered concurrent sessions).
+				a.saveSessionByID(sessionNumber, sessionData)
 				return
 			}
 			defer resp.Body.Close()
@@ -5910,9 +5958,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				netEntry.FaultAction = actionTaken
 				netEntry.FaultCategory = categorizeFaultType(failureType)
 				stampNetMeta(netEntry, requestHeaders, queryString, resp)
-				logEntry(sessionID,*netEntry)
-				sessionList[index] = sessionData
-				a.saveSessionList(sessionList)
+				logEntry(sessionID, *netEntry)
+				// #740: persist the fault-path mutations as a single-session
+				// atomic merge instead of re-publishing the stale full list
+				// captured at handler top (which clobbered concurrent sessions).
+				a.saveSessionByID(sessionNumber, sessionData)
 				return
 			}
 			if contentType != "" {
@@ -5944,9 +5994,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			netEntry.FaultAction = actionTaken
 			netEntry.FaultCategory = categorizeFaultType(failureType)
 			stampNetMeta(netEntry, requestHeaders, queryString, resp)
-			logEntry(sessionID,*netEntry)
-			sessionList[index] = sessionData
-			a.saveSessionList(sessionList)
+			logEntry(sessionID, *netEntry)
+			// #740: single-session atomic merge (see note above) — was a
+			// stale full-list re-publish.
+			a.saveSessionByID(sessionNumber, sessionData)
 			return
 		}
 		if isSocketFaultType(failureType) {
@@ -5984,14 +6035,16 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, status, requestBytes, requestReceivedAt)
 			stampNetMeta(&netEntry, requestHeaders, queryString, nil)
-			logEntry(sessionID,netEntry)
-			sessionList[index] = sessionData
-			a.saveSessionList(sessionList)
+			logEntry(sessionID, netEntry)
+			// #740: single-session atomic merge (see note above) — was a
+			// stale full-list re-publish.
+			a.saveSessionByID(sessionNumber, sessionData)
 			return
 		}
 		updateSessionTraffic(sessionData, requestBytes, 0)
-		sessionList[index] = sessionData
-		a.saveSessionList(sessionList)
+		// #740: single-session atomic merge (see note above) — was a
+		// stale full-list re-publish.
+		a.saveSessionByID(sessionNumber, sessionData)
 		status := http.StatusInternalServerError
 		switch failureType {
 		case "404":
@@ -6036,7 +6089,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionID := getString(sessionData, "session_id")
 		netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, status, requestBytes, requestReceivedAt)
 		stampNetMeta(&netEntry, requestHeaders, queryString, nil)
-		logEntry(sessionID,netEntry)
+		logEntry(sessionID, netEntry)
 		return
 	}
 
@@ -6059,7 +6112,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionID := getString(sessionData, "session_id")
 		netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, "none", "http_502_request_failed", http.StatusBadGateway, requestBytes, requestReceivedAt)
 		stampNetMeta(&netEntry, requestHeaders, queryString, nil)
-		logEntry(sessionID,netEntry)
+		logEntry(sessionID, netEntry)
 		return
 	}
 	clientRange := r.Header.Get("Range")
@@ -6110,7 +6163,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		netEntry.RequestKind = requestKind
 		netEntry.BytesIn = requestBytes
 		stampNetMeta(netEntry, requestHeaders, queryString, nil)
-		logEntry(sessionID,*netEntry)
+		logEntry(sessionID, *netEntry)
 		return
 	}
 	defer resp.Body.Close()
@@ -6136,7 +6189,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		netEntry.RequestKind = requestKind
 		netEntry.BytesIn = requestBytes
 		stampNetMeta(netEntry, requestHeaders, queryString, resp)
-		logEntry(sessionID,*netEntry)
+		logEntry(sessionID, *netEntry)
 		return
 	}
 	copyUpstreamHeaders(w, resp)
@@ -6292,7 +6345,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	netEntry.BytesIn = requestBytes
 	netEntry.BytesOut = bytesOut
 	stampNetMeta(netEntry, requestHeaders, queryString, resp)
-	logEntry(sessionID,*netEntry)
+	logEntry(sessionID, *netEntry)
 	a.saveSessionByID(sessionNumber, sessionData)
 }
 
@@ -6818,16 +6871,16 @@ func (a *App) trackPortThroughput() {
 		mbps float64
 	}
 	type throughputState struct {
-		bytes                int64
-		timestamp            time.Time
-		samples              []throughputSample
-		a1sHistory           []a1sSample // rolling buffer of a1s values for a6s averaging
+		bytes      int64
+		timestamp  time.Time
+		samples    []throughputSample
+		a1sHistory []a1sSample // rolling buffer of a1s values for a6s averaging
 	}
 	const (
 		sampleInterval      = 100 * time.Millisecond
 		shortWindow         = 1 * time.Second
 		mediumWindow        = 6 * time.Second
-		transferRateWindow   = 400 * time.Millisecond
+		transferRateWindow  = 400 * time.Millisecond
 		activeByteThreshold = int64(8192)
 	)
 	cache := map[int]throughputState{}
@@ -6841,10 +6894,10 @@ func (a *App) trackPortThroughput() {
 		state, ok := cache[port]
 		if !ok || state.timestamp.IsZero() {
 			cache[port] = throughputState{
-				bytes:                bytesValue,
-				timestamp:            now,
-				samples:              state.samples,
-				a1sHistory:           state.a1sHistory,
+				bytes:      bytesValue,
+				timestamp:  now,
+				samples:    state.samples,
+				a1sHistory: state.a1sHistory,
 			}
 			return
 		}
@@ -6971,19 +7024,16 @@ func (a *App) trackPortThroughput() {
 			}
 		}
 
-
-
-
 		cache[port] = state
 		payload := map[string]interface{}{
-			"bytes":                       deltaBytes,
-			"wire_tc_bytes_now":           bytesValue,
-			"timestamp":                   now.Unix(),
-			"timestamp_ms":                now.UnixMilli(),
-			"mbps_shaper_rate":               mbpsShaperRate,
-			"mbps_shaper_avg":               mbpsShaperAvg,
-			"mbps_transfer_rate":           mbpsTransferRate,
-			"mbps_transfer_complete":          mbpsTransferComplete,
+			"bytes":                  deltaBytes,
+			"wire_tc_bytes_now":      bytesValue,
+			"timestamp":              now.Unix(),
+			"timestamp_ms":           now.UnixMilli(),
+			"mbps_shaper_rate":       mbpsShaperRate,
+			"mbps_shaper_avg":        mbpsShaperAvg,
+			"mbps_transfer_rate":     mbpsTransferRate,
+			"mbps_transfer_complete": mbpsTransferComplete,
 		}
 		a.throughputMu.Lock()
 		a.throughputData[port] = payload
@@ -7189,9 +7239,9 @@ func (a *App) getOrCreateNetworkLog(sessionID string) *NetworkLogRingBuffer {
 // and segments — iOS HLS doesn't preserve the master manifest's
 // `?play_id=…` query string on derived URLs), fall back to the session's
 // last-known sticky play_id from the live session map. session_snapshots
-// already does this implicitly via the "if playID != ''" guard at the
+// already does this implicitly via the "if playID != ”" guard at the
 // session level; without this fallback the network_requests table ends
-// up with most rows attributed to play_id='' and the session-viewer's
+// up with most rows attributed to play_id=” and the session-viewer's
 // play_id filter only catches the master manifest hits.
 func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 	if sessionID == "" {
@@ -7486,28 +7536,47 @@ func (a *App) normalizeSessionForResponse(session SessionData) SessionData {
 }
 
 func (a *App) updateSessionsByPortWithControl(port int, updates map[string]interface{}, controlRevision string) {
-	sessions := a.getSessionList()
-	changed := false
 	rev := controlRevision
 	if rev == "" {
 		rev = newControlRevision()
 	}
-	for _, session := range sessions {
-		if a.sessionMatchesPort(session, port) {
-			log.Printf("NETSHAPE session_match port=%d session_id=%s before: x_forwarded_port=%s x_forwarded_port_external=%s nftables_bandwidth_mbps=%v",
-				port, getString(session, "session_id"), getString(session, "x_forwarded_port"),
-				getString(session, "x_forwarded_port_external"), session["nftables_bandwidth_mbps"])
-			for key, value := range updates {
-				session[key] = value
-			}
-			applyControlRevision(session, rev)
-			log.Printf("NETSHAPE session_updated port=%d session_id=%s after: nftables_bandwidth_mbps=%v",
-				port, getString(session, "session_id"), session["nftables_bandwidth_mbps"])
-			changed = true
-		}
+	// Diagnostics captured inside the (re-runnable) CAS closure and logged
+	// once on the committed result — see mutateSessions' side-effect rule.
+	type netshapeLog struct {
+		sessionID  string
+		fwdPort    string
+		fwdPortExt string
+		beforeBW   interface{}
+		afterBW    interface{}
 	}
-	if changed {
-		a.saveSessionList(sessions)
+	var captured []netshapeLog
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		captured = captured[:0]
+		changed := false
+		for _, session := range sessions {
+			if a.sessionMatchesPort(session, port) {
+				entry := netshapeLog{
+					sessionID:  getString(session, "session_id"),
+					fwdPort:    getString(session, "x_forwarded_port"),
+					fwdPortExt: getString(session, "x_forwarded_port_external"),
+					beforeBW:   session["nftables_bandwidth_mbps"],
+				}
+				for key, value := range updates {
+					session[key] = value
+				}
+				applyControlRevision(session, rev)
+				entry.afterBW = session["nftables_bandwidth_mbps"]
+				captured = append(captured, entry)
+				changed = true
+			}
+		}
+		return sessions, changed
+	})
+	for _, e := range captured {
+		log.Printf("NETSHAPE session_match port=%d session_id=%s before: x_forwarded_port=%s x_forwarded_port_external=%s nftables_bandwidth_mbps=%v",
+			port, e.sessionID, e.fwdPort, e.fwdPortExt, e.beforeBW)
+		log.Printf("NETSHAPE session_updated port=%d session_id=%s after: nftables_bandwidth_mbps=%v",
+			port, e.sessionID, e.afterBW)
 	}
 }
 
@@ -7556,19 +7625,18 @@ func (a *App) sessionMatchesPort(session SessionData, port int) bool {
 }
 
 func (a *App) updateSessionsByPort(port int, updates map[string]interface{}) {
-	sessions := a.getSessionList()
-	changed := false
-	for _, session := range sessions {
-		if a.sessionMatchesPort(session, port) {
-			for key, value := range updates {
-				session[key] = value
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		changed := false
+		for _, session := range sessions {
+			if a.sessionMatchesPort(session, port) {
+				for key, value := range updates {
+					session[key] = value
+				}
+				changed = true
 			}
-			changed = true
 		}
-	}
-	if changed {
-		a.saveSessionList(sessions)
-	}
+		return sessions, changed
+	})
 }
 
 func (a *App) getSessionList() []SessionData {
@@ -7579,28 +7647,70 @@ func (a *App) getSessionList() []SessionData {
 	return cloneSessionList(*snap)
 }
 
-func (a *App) publishSnapshot(sessions []SessionData) {
-	uiVersion := atomic.AddUint64(&a.uiStateVersionSeq, 1)
-	uiRevision := newControlRevision()
-	for _, session := range sessions {
-		session["ui_state_version"] = uiVersion
-		session["ui_state_revision"] = uiRevision
+// mutateSessions is the lock-free read-modify-write primitive for the
+// in-memory session list (issue #740). It loads the current immutable
+// snapshot, hands `fn` a PRIVATE deep clone it may freely mutate, and
+// publishes the result via atomic CompareAndSwap — retrying from a fresh
+// clone on every conflict so no concurrent writer's update is lost. This
+// replaces the old `getSessionList → mutate → saveSessionList` pattern,
+// which held no lock across the read and the write and was therefore a
+// last-writer-wins lost-update race against every other writer.
+//
+// CONTRACT — `fn` MUST be pure / re-runnable:
+//   - It receives a private clone (never the live snapshot) and returns the
+//     new list plus a `changed` flag. Returning changed=false aborts with no
+//     store (and no ui-version bump).
+//   - It MUST NOT perform side effects (kernel/tc calls, control-event emits,
+//     recordSessionEnd, resetServerLoopState, logging of committed state):
+//     fn can run multiple times under contention. Hoist side effects OUT and
+//     run them once on the committed result this returns — the idiomatic shape
+//     is to reset a captured slice at the TOP of fn and append to it as fn
+//     walks the list, so only the committed run's captures survive.
+//
+// Returns the published slice (the committed clone) and true on a successful
+// store, or (nil, false) when fn reported no change.
+func (a *App) mutateSessions(fn func([]SessionData) ([]SessionData, bool)) ([]SessionData, bool) {
+	for {
+		oldPtr := a.sessionsSnap.Load()
+		var current []SessionData
+		if oldPtr != nil {
+			current = *oldPtr
+		}
+		// Hand fn a private deep clone: a retry starts clean and the
+		// committed snapshot is never aliased by the caller.
+		next, changed := fn(cloneSessionList(current))
+		if !changed {
+			return nil, false
+		}
+		// Stamp the ui-version on the to-be-published slice — same shape
+		// the retired publishSnapshot used. A burned version on a lost CAS
+		// is harmless (the field is monotonic, never read for an exact value).
+		uiVersion := atomic.AddUint64(&a.uiStateVersionSeq, 1)
+		uiRevision := newControlRevision()
+		for _, session := range next {
+			session["ui_state_version"] = uiVersion
+			session["ui_state_revision"] = uiRevision
+		}
+		if a.sessionsSnap.CompareAndSwap(oldPtr, &next) {
+			return next, true
+		}
+		// Lost the race — another writer published between our Load and
+		// CompareAndSwap. Re-clone from the new snapshot and re-run fn.
 	}
-	a.sessionsSnap.Store(&sessions)
-	// Issue #470: stopped broadcasting the full session list on every
-	// snapshot publish. /api/sessions/stream is now a per-event channel
-	// driven by emitSessionEvent; the debounced full-state path served
-	// only the forwarder and produced duplicates in session_events as
-	// stale `player_metrics_last_event` markers leaked across emissions.
-	// The in-memory snapshot (sessionsSnap) is still maintained because
-	// GET /api/sessions reads from it.
 }
 
-func (a *App) saveSessionList(sessions []SessionData) {
-	a.sessionsMu.Lock()
-	a.publishSnapshot(cloneSessionList(sessions))
-	a.sessionsMu.Unlock()
-}
+// Issue #470: the proxy stopped broadcasting the full session list on every
+// snapshot publish. /api/sessions/stream is now a per-event channel driven by
+// emitSessionEvent; the debounced full-state path served only the forwarder
+// and produced duplicates in session_events as stale `player_metrics_last_event`
+// markers leaked across emissions. The in-memory snapshot (sessionsSnap) is
+// still maintained because GET /api/sessions reads from it.
+//
+// Issue #740: publishSnapshot and saveSessionList were retired in favour of
+// mutateSessions (lock-free CAS) — every full-list write now composes the
+// read, mutate, ui-version stamp, and store into one atomic step, so a
+// concurrent writer can no longer clobber another's update. sessionsMu and
+// createMu went with them.
 
 func (a *App) saveSessionByID(sessionID string, session SessionData) {
 	a.saveSessionByIDReturning(sessionID, session)
@@ -7619,15 +7729,22 @@ func (a *App) saveSessionByID(sessionID string, session SessionData) {
 // in-memory snapshot for GET /api/sessions, but no longer queues a
 // hub broadcast.
 func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (SessionData, bool) {
-	a.sessionsMu.Lock()
-	defer a.sessionsMu.Unlock()
-	snap := a.getSessionList()
-	updated := make([]SessionData, len(snap))
-	copy(updated, snap)
+	// #740: the merge is now a mutateSessions CAS closure rather than an
+	// RMW under sessionsMu. metricsPostMu (held by the caller) still
+	// serialises same-session POSTs for arrival ordering; the CAS guards
+	// cross-session writers. resetServerLoopState is the one side effect and
+	// is hoisted out to run once on the committed result.
 	var merged SessionData
 	var found bool
-	for i, s := range updated {
-		if getString(s, "session_id") == sessionID {
+	var playRotated bool
+	a.mutateSessions(func(updated []SessionData) ([]SessionData, bool) {
+		merged = nil
+		found = false
+		playRotated = false
+		for i, s := range updated {
+			if getString(s, "session_id") != sessionID {
+				continue
+			}
 			// Drop the merge if it's a player_metrics POST whose
 			// `player_metrics_event_time` predates what we already have.
 			// One goroutine per request means two near-simultaneous
@@ -7637,7 +7754,7 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 			// event_time jumps in session_snapshots and zigzag charts
 			// at step boundaries (issue #403 follow-up).
 			if isStalePlayerMetricsUpdate(s, session) {
-				return nil, false
+				return updated, false
 			}
 			merged = cloneSession(s)
 			for k, v := range session {
@@ -7692,18 +7809,59 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 			newPlay := getString(session, "play_id")
 			if prevPlay != "" && newPlay != "" && prevPlay != newPlay {
 				resetPlayScopedServerCounters(merged)
-				a.resetServerLoopState(sessionID)
+				playRotated = true
 			}
 			updated[i] = merged
 			found = true
 			break
 		}
+		return updated, found
+	})
+	// Hoisted out of the CAS closure (non-idempotent in-memory reset).
+	if playRotated {
+		a.resetServerLoopState(sessionID)
 	}
-	a.publishSnapshot(updated)
 	if !found {
 		return nil, false
 	}
 	return cloneSession(merged), true
+}
+
+// fillReservedSession replaces the bootstrap placeholder (see the reserve CAS
+// in handleProxy, #740) with the fully-built session, matched by session_id.
+// A clone of `full` is published — the caller keeps mutating its own
+// sessionData for the kernel apply / recordSessionStart that follow, exactly
+// as the pre-#740 saveSessionList (which cloned at publish) allowed. If the
+// reservation is somehow gone (e.g. reaped mid-bootstrap), the full session is
+// appended so the bootstrap still completes.
+func (a *App) fillReservedSession(sessionID string, full SessionData) {
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		clone := cloneSession(full)
+		for i, s := range sessions {
+			if getString(s, "session_id") == sessionID {
+				sessions[i] = clone
+				return sessions, true
+			}
+		}
+		return append(sessions, clone), true
+	})
+}
+
+// removeReservedSession CAS-removes the bootstrap placeholder when config
+// materialization fails, so a rejected config leaks no session slot (#740).
+func (a *App) removeReservedSession(sessionID string) {
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		filtered := make([]SessionData, 0, len(sessions))
+		removed := false
+		for _, s := range sessions {
+			if getString(s, "session_id") == sessionID {
+				removed = true
+				continue
+			}
+			filtered = append(filtered, s)
+		}
+		return filtered, removed
+	})
 }
 
 // resetFailureWindowState clears the persisted per-surface failure
@@ -7754,6 +7912,7 @@ func resetFailureWindowState(payload map[string]interface{}, target SessionData)
 //   - transport_fault_*_packets can be the "packets"-units cycle counter for
 //     transport faults (and self-reset each on/off cycle), so they're left
 //     alone too.
+//
 // The fault_count_* family below is purely a write-only reporting tally
 // (bumpFaultCounter only writes; every read is reporting/init/projection),
 // so resetting it does NOT affect fault firing.
@@ -8553,13 +8712,6 @@ func (a *App) emitSessionEvent(session SessionData) {
 }
 
 func (a *App) removeInactiveSessions() {
-	sessions := a.getSessionList()
-	if len(sessions) == 0 {
-		return
-	}
-	active := make([]SessionData, 0, len(sessions))
-	now := time.Now()
-	removedPorts := map[int]struct{}{}
 	// A player that makes no request for this long is treated as gone and
 	// its session synthesized to a terminal inactive_timeout. Kept generous
 	// (5m) so a *legitimately rebuffering* play isn't evicted mid-stream: a
@@ -8568,26 +8720,45 @@ func (a *App) removeInactiveSessions() {
 	// stranded 4K segment — well under any real abandonment but over the old
 	// 60s window, which killed the play (and orphaned later cycles).
 	const inactiveWindow = 5 * time.Minute
-	for _, session := range sessions {
-		lastRequest := getString(session, "last_request")
-		if lastRequest == "" {
-			continue
-		}
-		lastTime, err := time.Parse("2006-01-02T15:04:05.000", lastRequest)
-		if err != nil {
-			continue
-		}
-		if now.Sub(lastTime) < inactiveWindow {
-			active = append(active, session)
-		} else {
-			a.recordSessionEnd(session, "inactive_timeout")
-			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
-				removedPorts[port] = struct{}{}
+	// Pin the cut point once so a CAS retry can't flip a borderline session
+	// active/inactive on micro-timing.
+	now := time.Now()
+	// removed/active captured inside the (re-runnable) CAS closure;
+	// recordSessionEnd + kernel teardown run once on the committed result
+	// (mutateSessions side-effect rule). active is reused for auto-ungroup.
+	var removed []SessionData
+	var active []SessionData
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		removed = removed[:0]
+		active = make([]SessionData, 0, len(sessions))
+		for _, session := range sessions {
+			lastRequest := getString(session, "last_request")
+			if lastRequest == "" {
+				continue
 			}
-			// session removed from active list — no separate cleanup needed
+			lastTime, err := time.Parse("2006-01-02T15:04:05.000", lastRequest)
+			if err != nil {
+				continue
+			}
+			if now.Sub(lastTime) < inactiveWindow {
+				active = append(active, session)
+			} else {
+				removed = append(removed, session)
+				// session removed from active list — no separate cleanup needed
+			}
+		}
+		// Republish whenever the list is non-empty, matching the pre-#740
+		// unconditional saveSessionList(active) (which also dropped sessions
+		// with empty/unparseable last_request). Empty input → no-op.
+		return active, len(sessions) > 0
+	})
+	removedPorts := map[int]struct{}{}
+	for _, session := range removed {
+		a.recordSessionEnd(session, "inactive_timeout")
+		if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
+			removedPorts[port] = struct{}{}
 		}
 	}
-	a.saveSessionList(active)
 	for port := range removedPorts {
 		a.disablePatternForPort(port)
 		a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
@@ -9635,20 +9806,18 @@ func (a *App) updateSessionGroup(groupID string, updates map[string]interface{})
 	if groupID == "" {
 		return
 	}
-	sessions := a.getSessionList()
-	changed := false
-	for _, session := range sessions {
-		sessionGroupID := getString(session, "group_id")
-		if sessionGroupID == groupID {
-			for key, value := range updates {
-				session[key] = value
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		changed := false
+		for _, session := range sessions {
+			if getString(session, "group_id") == groupID {
+				for key, value := range updates {
+					session[key] = value
+				}
+				changed = true
 			}
-			changed = true
 		}
-	}
-	if changed {
-		a.saveSessionList(sessions)
-	}
+		return sessions, changed
+	})
 }
 
 type RequestHandler struct {
