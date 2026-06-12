@@ -880,6 +880,22 @@ func appiumCapabilities(d Device, bundleID string) map[string]any {
 		caps["platformName"] = "iOS"
 		caps["appium:automationName"] = "XCUITest"
 		setXCUITestFleetPorts(caps, d.FleetIndex)
+		// Real-device WDA bring-up is the slow part: by default Appium runs
+		// xcodebuild + deploys WebDriverAgent into a throwaway DerivedData dir
+		// every session. Pin a STABLE derivedDataPath so the build persists
+		// across runs — xcodebuild goes incremental and the WDA app stays
+		// installed, cutting per-session bring-up. Always safe (still builds on
+		// first run). Per fleet index so parallel real devices don't share one
+		// build dir. (Sims are fast enough not to need this.)
+		caps["appium:derivedDataPath"] = iosWDADerivedDataPath(d.FleetIndex)
+		// CHAR_IOS_PREBUILT_WDA=1 skips the xcodebuild step entirely and reuses
+		// the WDA already built at derivedDataPath — the big speedup. Off by
+		// default because Appium ERRORS when usePrebuiltWDA is set but nothing
+		// has been built there yet: run once WITHOUT it to populate the path,
+		// then flip it on. (See the run-prebuilt-wda guide.)
+		if os.Getenv("CHAR_IOS_PREBUILT_WDA") == "1" {
+			caps["appium:usePrebuiltWDA"] = true
+		}
 	case PlatformIPadSim:
 		caps["platformName"] = "iOS"
 		caps["appium:automationName"] = "XCUITest"
@@ -915,4 +931,22 @@ func appiumCapabilities(d Device, bundleID string) map[string]any {
 func setXCUITestFleetPorts(caps map[string]any, fleetIndex int) {
 	caps["appium:wdaLocalPort"] = 8100 + fleetIndex
 	caps["appium:mjpegServerPort"] = 9100 + fleetIndex
+}
+
+// iosWDADerivedDataPath returns a STABLE DerivedData dir for the real-device
+// WebDriverAgent build so it persists across runs (incremental builds, and
+// prebuilt reuse under CHAR_IOS_PREBUILT_WDA=1) instead of Appium's default
+// throwaway temp dir. Base overridable via CHAR_IOS_WDA_DERIVED_DATA; default
+// ~/.appium-wda-deriveddata. Suffixed by fleet index so parallel real devices
+// each build into their own dir (no concurrent-xcodebuild conflict).
+func iosWDADerivedDataPath(fleetIndex int) string {
+	base := strings.TrimSpace(os.Getenv("CHAR_IOS_WDA_DERIVED_DATA"))
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			home = os.TempDir()
+		}
+		base = filepath.Join(home, ".appium-wda-deriveddata")
+	}
+	return filepath.Join(base, fmt.Sprintf("wda-%d", fleetIndex))
 }
