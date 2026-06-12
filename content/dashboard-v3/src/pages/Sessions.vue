@@ -1918,7 +1918,10 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 .btn-secondary { background: var(--bg-secondary, #f9fafb); }
 
 .table-wrap {
-  max-height: 60vh;
+  /* Fill the viewport below the page chrome (header + filter bar) instead of
+     the old fixed 60vh, so far more rows are visible before scrolling. */
+  max-height: calc(100vh - 180px);
+  min-height: 320px;
   overflow: auto;
   background: var(--bg-primary);
   border: 1px solid var(--border-color, #e5e7eb);
