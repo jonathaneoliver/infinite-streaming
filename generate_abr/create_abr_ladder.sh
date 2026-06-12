@@ -71,6 +71,10 @@ Optional Arguments:
   --segment-duration <s> Segment duration in seconds (default: 6)
   --partial-duration <s> Partial/GOP duration in seconds (default: 0.2)
   --gop-duration <s>     GOP/keyframe duration in seconds (default: 1.0)
+  --byteranges           Emit .byteranges sidecar files (Phase 6). Default OFF —
+                         LL-HLS embeds #EXT-X-PART inline and DASH uses the MPD,
+                         so the sidecars go unread unless a consumer needs the
+                         fallback.
   --bitrate-override-hevc <map> Override HEVC ladder kbps by resolution (e.g. 360p=1367,540p=2617)
   --bitrate-override-h264 <map> Override H264 ladder kbps by resolution (e.g. 360p=1421,540p=2762)
   --vmaf-lookup-csv <p>  CSV from crf_bandwidth_sweep.py for estimated VMAF burn-in
@@ -191,6 +195,11 @@ DEFAULT_VMAF_LOOKUP_CSV="${SCRIPT_DIR}/crf_bandwidth_sweep_newer.csv"
 RESUME_PACKAGE_FROM=""    # Optional path to existing abr_ladder temp dir
 RESUME_MODE=false
 FRAGMENT_PARSER_SCRIPT="" # Auto-detected path to parse_fmp4_fragments.py
+# Phase 6 .byteranges sidecars — default OFF (#762). LL-HLS embeds the partial
+# byte ranges inline as #EXT-X-PART (go-live's authoritative source; the sidecar
+# is only a fallback) and DASH addresses via the MPD's SegmentList — so nothing
+# reads these by default. Re-enable with --byteranges for the fallback path.
+EMIT_BYTERANGES=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -276,6 +285,10 @@ while [[ $# -gt 0 ]]; do
         --gop-duration)
             GOP_DURATION="$2"
             shift 2
+            ;;
+        --byteranges)
+            EMIT_BYTERANGES=true
+            shift
             ;;
         --bitrate-override-hevc)
             BITRATE_OVERRIDE_HEVC="$2"
@@ -1450,12 +1463,14 @@ check_prerequisites() {
     fi
     log_success "Font available"
 
-    # Check fMP4 fragment parser helper (used in Phase 6).
-    if detect_fragment_parser_script; then
-        log_success "Fragment parser: $FRAGMENT_PARSER_SCRIPT"
-    else
-        log_warn "Fragment parser script not found (parse_fmp4_fragments.py)"
-        log_warn "Phase 6 (.byteranges generation) will be skipped"
+    # Check fMP4 fragment parser helper (used in Phase 6 — only when --byteranges).
+    if [[ "$EMIT_BYTERANGES" == true ]]; then
+        if detect_fragment_parser_script; then
+            log_success "Fragment parser: $FRAGMENT_PARSER_SCRIPT"
+        else
+            log_warn "Fragment parser script not found (parse_fmp4_fragments.py)"
+            log_warn "Phase 6 (.byteranges generation) will be skipped"
+        fi
     fi
     
     echo ""
@@ -3825,8 +3840,15 @@ main() {
         export_mezzanine_files "av1" "$OUTPUT_DIR_AV1"
     fi
     
-    # Generate fragment metadata (.byteranges files) for LL-HLS support
-    parse_fmp4_fragments
+    # Generate fragment metadata (.byteranges files) for LL-HLS support — default
+    # OFF (#762): LL-HLS embeds #EXT-X-PART inline (go-live's authoritative source)
+    # and DASH uses the MPD's SegmentList, so the sidecars go unread. --byteranges
+    # re-enables them for any consumer that needs the fallback.
+    if [[ "$EMIT_BYTERANGES" == true ]]; then
+        parse_fmp4_fragments
+    else
+        log "Skipping .byteranges sidecars (default; pass --byteranges to emit)"
+    fi
     
     # Generate HLS manifests
     generate_hls_manifests
