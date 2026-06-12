@@ -41,7 +41,7 @@ func TestConfigOnConnectCapacity(t *testing.T) {
 	for i := 0; i < iters; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		pid := NewPlayerID()
-		err := ConfigureOnConnect(ctx, pid, "", ShapeRateConfig(2.0))
+		err := ConfigureOnConnect(ctx, pid, "", true, ShapeRateConfig(2.0))
 		if err != nil && i == 0 {
 			cancel()
 			t.Skipf("ConfigureOnConnect unavailable (server down?): %v", err)

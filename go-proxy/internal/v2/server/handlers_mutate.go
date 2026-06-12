@@ -211,7 +211,8 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 	// is empty when the player isn't in any group — broadcast becomes
 	// a no-op.
 	var groupID string
-	srv := s // capture the Server receiver before the closure shadows it
+	groupBroadcast := true // default; a display-only group sets group_broadcast=false at connect
+	srv := s               // capture the Server receiver before the closure shadows it
 	post, found, mErr := s.v1.MutatePlayer(pidStr, func(s map[string]any) error {
 		// Re-check under sessionsMu. Another v2 PATCH that won the
 		// outer race would have updated FieldRevisions before
@@ -228,6 +229,9 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		s["control_revision"] = rev
 		fr.TouchWith(paths, rev)
 		groupID = getString(s, "group_id")
+		if v, ok := s["group_broadcast"].(bool); ok {
+			groupBroadcast = v
+		}
 		return nil
 	})
 	if mErr != nil {
@@ -261,9 +265,11 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 	// new control_revision and the same patch applied; their per-
 	// player FieldRevisions tracker is bumped to the same `rev` so a
 	// concurrent PATCHer reading from any member sees the latest
-	// revision uniformly.
+	// revision uniformly. Skipped when the group is display-only
+	// (group_broadcast=false at connect) — members share group_id for
+	// charting but are shaped/labelled independently (startup fleet).
 	var broadcastTouched []string
-	if groupID != "" {
+	if groupID != "" && groupBroadcast {
 		touched, bErr := s.v1.BroadcastPatch(groupID, pidStr, rev, func(member map[string]any) error {
 			return applyPatchToSession(srv, member, patch)
 		})
@@ -344,7 +350,9 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 // Phase D: labels.* only.
 // Phase H: + shape.{rate_mbps,delay_ms,loss_pct,transport_fault.*}
 // Phase I: + fault_rules (whole-array PATCH; the per-rule sub-resource
-//          endpoints have their own paths and don't run through here).
+//
+//	endpoints have their own paths and don't run through here).
+//
 // Phase K: + shape.pattern (drives v1's pattern step-engine).
 func unsupportedPaths(paths []string) []string {
 	var bad []string
@@ -825,4 +833,3 @@ func writePreconditionFailed(w http.ResponseWriter, currentRevision string, conf
 		},
 	)
 }
-

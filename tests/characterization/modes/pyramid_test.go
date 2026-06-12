@@ -175,7 +175,7 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars
 				floor = f
 			}
 		}
-		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor, cfg.xferTimeout, peakClampForCap(floor), bars.fleetGroupID())
+		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor, cfg.xferTimeout, peakClampForCap(floor), bars.fleetGroupID(), true)
 
 		s, lerr := appium.LaunchToHome(setupCtx, *picked)
 		if lerr != nil {

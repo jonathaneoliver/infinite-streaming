@@ -948,6 +948,40 @@ func TestPatch_GroupedMember_Broadcasts(t *testing.T) {
 	}
 }
 
+// TestPatch_DisplayOnlyGroup_NoBroadcast covers the connect-param display-only
+// group: two sessions share a group_id but were born with group_broadcast=false
+// (the startup fleet path). A PATCH to one member must NOT mirror to the other —
+// each device is shaped/labelled independently, even though the dashboard charts
+// them together by group_id.
+func TestPatch_DisplayOnlyGroup_NoBroadcast(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	p1, p2 := uuid.New().String(), uuid.New().String()
+	rev := "2020-01-01T00:00:00.000000000Z"
+	// Born-grouped display-only (what the proxy's connect path writes when the
+	// bootstrap carries group_id=G1&group_broadcast=false).
+	a.addSession(map[string]any{
+		"player_id": p1, "session_id": "s1", "control_revision": rev,
+		"group_id": "G1", "group_broadcast": false,
+	})
+	a.addSession(map[string]any{
+		"player_id": p2, "session_id": "s2", "control_revision": rev,
+		"group_id": "G1", "group_broadcast": false,
+	})
+
+	// PATCH p1's labels — must NOT reach p2.
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+p1,
+		`{"labels":{"only":"p1"}}`,
+		map[string]string{"If-Match": `"` + rev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("PATCH p1 %d body=%s", status, respBody)
+	}
+	stored2, _ := a.SessionByPlayerID(p2)
+	l2, _ := stored2["_v2_labels"].(map[string]any)
+	if l2["only"] == "p1" {
+		t.Errorf("p2 received p1's label — display-only group still broadcast: %v", l2)
+	}
+}
+
 // ----- Plays --------------------------------------------------------------
 
 func TestGet_PlaysPlayId_404_Unknown(t *testing.T) {
