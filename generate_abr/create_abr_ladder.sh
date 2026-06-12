@@ -472,12 +472,27 @@ NC='\033[0m' # No Color
 
 # All possible resolution tiers (filtered based on source resolution)
 # Format: name:width:height:bitrate_h265_kbps:bitrate_h264_kbps:bitrate_av1_kbps:preset:fontsize_tc:fontsize_label:x:y_tc:y_label
+# Geometric (~√2) ladder, ONE variant per unique height (#762). The original
+# 6 rungs are UNCHANGED (★) — they are the 2× "skip every other" subset the
+# proxy synthesises live (content.skip_alternate_variants), so they must stay
+# byte-for-byte. The 5 NEW rungs (432/648/900/1296/1800p) are the ~1.41× fills,
+# interleaved at the ODD indices, each bitrate = geometric mean √(a·b) of its
+# two existing neighbours per codec. Keep them in ascending height order — the
+# alternating fill/★ pattern is what makes the proxy's keep-even-index skip
+# yield exactly the original ladder (incl. floor + ceiling). Fill bitrates are
+# provisional (tune via crf_bandwidth_sweep / VMAF, --vmaf-lookup-mode sw).
+# Format: name:width:height:h265_kbps:h264_kbps:av1_kbps:preset:fs_tc:fs_label:x:y_tc:y_label
 declare -a ALL_RESOLUTION_TIERS=(
     "360p:640:360:300:600:300:medium:20:16:10:10:30"
+    "432p:768:432:520:850:520:medium:22:18:10:10:32"
     "540p:960:540:900:1200:900:medium:24:20:10:10:34"
+    "648p:1152:648:1162:1700:1162:medium:26:22:10:10:36"
     "720p:1280:720:1500:2400:1500:medium:28:24:10:10:38"
+    "900p:1600:900:2600:3460:2600:medium:32:28:10:10:41"
     "1080p:1920:1080:4500:5000:4500:medium:36:32:10:10:45"
+    "1296p:2304:1296:5810:7420:5810:medium:39:34:10:10:48"
     "1440p:2560:1440:7500:11000:7500:medium:42:36:10:10:52"
+    "1800p:3200:1800:10610:15450:10610:medium:48:42:10:10:58"
     "2160p:3840:2160:15000:21700:15000:medium:54:48:10:10:64"
 )
 
@@ -635,6 +650,14 @@ get_resolution_name() {
         640)  echo "360p" ;;
         2560) echo "1440p" ;;
         3840) echo "2160p" ;;
+        # Distinct-height fill rungs (#762): each 16:9 width is unique, so the
+        # width→height-name map stays unambiguous. Without these the `*)`
+        # fallback would misname e.g. 768 as "768p" instead of "432p".
+        768)  echo "432p" ;;
+        1152) echo "648p" ;;
+        1600) echo "900p" ;;
+        2304) echo "1296p" ;;
+        3200) echo "1800p" ;;
         *)    echo "${width}p" ;;
     esac
 }
@@ -643,10 +666,15 @@ get_resolution_height() {
     local res_name=$1
     case "$res_name" in
         "360p") echo "360" ;;
+        "432p") echo "432" ;;
         "540p") echo "540" ;;
+        "648p") echo "648" ;;
         "720p") echo "720" ;;
+        "900p") echo "900" ;;
         "1080p") echo "1080" ;;
+        "1296p") echo "1296" ;;
         "1440p") echo "1440" ;;
+        "1800p") echo "1800" ;;
         "2160p") echo "2160" ;;
         *) echo "0" ;;
     esac
