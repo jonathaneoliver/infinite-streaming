@@ -18,7 +18,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
 import SessionDisplay from '@/components/SessionDisplay.vue';
 import ChatPanel from '@/components/chat/ChatPanel.vue';
-import { parseTimeAny, canonicalUUID } from '@/composables/urlTimeFormat';
+import { parseTimeAny, canonicalUUID, parseCompareParam } from '@/composables/urlTimeFormat';
 import { getPlay, patchPlayClassification, type PlaySummary } from '@/repo/v2-repo';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 import type { ChatScope } from '@/types/chat';
@@ -29,8 +29,23 @@ const qs = new URLSearchParams(window.location.search);
 // the v3 timeseries endpoint and the SSE pool both key by player_id.
 // UUIDs are lowercased — CH stores them lowercase and iOS sometimes
 // emits uppercase (case_sensitivity_ids memory).
-const playerId = ref<string>(canonicalUUID(qs.get('player_id') ?? ''));
-const playId = ref<string | null>(qs.get('play_id') ? canonicalUUID(qs.get('play_id')!) : null);
+// #736: `compare=<player>~<play>~<tag>,…` — the grouped set to overlay in
+// archive compare mode (the active play is included). Like testing.html's
+// session-tab pill rail, the active member is switchable: player_id / play_id
+// FOLLOW the selected tab, SessionDisplay re-keys reactively, and it
+// re-derives self vs siblings from the (unchanged) compare set. Empty
+// `compare` ⇒ ordinary single-play view.
+const comparePlays = parseCompareParam(qs.get('compare'));
+const urlPlayerId = canonicalUUID(qs.get('player_id') ?? '');
+const urlPlayId = qs.get('play_id') ? canonicalUUID(qs.get('play_id')!) : null;
+// Active tab index — defaults to the play the user clicked (the URL player_id).
+const activeIdx = ref(Math.max(0, comparePlays.findIndex((m) => m.playerId === urlPlayerId)));
+const playerId = computed<string>(() =>
+  comparePlays.length ? comparePlays[activeIdx.value].playerId : urlPlayerId,
+);
+const playId = computed<string | null>(() =>
+  comparePlays.length ? (comparePlays[activeIdx.value].playId ?? null) : urlPlayId,
+);
 
 /** Initial time window. New canonical param names are `from` / `to`
  *  (shorter, no `:` in compact ISO → no `%3A` clutter). Legacy
@@ -103,6 +118,23 @@ const playQuery = useQuery<PlaySummary | null>({
 const starred = computed<boolean>(
   () => String(playQuery.data.value?.classification ?? '') === 'favourite',
 );
+
+// #736 member-tab labels — mirror testing.html's `Session #N (Port …) · device
+// · content`. Port is derived from the session number (external band 21<sid>81,
+// the third-from-last digit carrying the session); device · content + the group
+// badge come off the active play summary (fleet members share them).
+function portForTag(tag?: string): string {
+  return tag && /^\d$/.test(tag) ? `21${tag}81` : '';
+}
+function memberLabel(m: { tag?: string }): string {
+  const port = portForTag(m.tag);
+  return `Session #${m.tag ?? '?'}${port ? ` (Port ${port})` : ''}`;
+}
+const memberTail = computed<string>(() => {
+  const p = playQuery.data.value;
+  return [p?.device_class, p?.content_id].filter(Boolean).join(' · ');
+});
+const groupBadge = computed<string>(() => String(playQuery.data.value?.group_id ?? ''));
 
 const starMutation = useMutation({
   mutationFn: (next: boolean) =>
@@ -184,6 +216,25 @@ const backHref = '/dashboard/sessions.html';
                   : (playId ?? '(all plays)')"
               >{{ playId ?? '(all plays)' }}</code>
             </div>
+            <!-- #736 member tab rail — like testing.html's session pills.
+                 Click a tab to make that grouped play active (its panels show,
+                 its line goes solid); the overlay set stays the same. -->
+            <div v-if="comparePlays.length" class="session-tabs" role="tablist" aria-label="Grouped sessions">
+              <button
+                v-for="(m, i) in comparePlays"
+                :key="m.playerId"
+                type="button"
+                role="tab"
+                class="session-tab grouped"
+                :class="{ active: i === activeIdx }"
+                :aria-selected="i === activeIdx"
+                :title="m.playerId"
+                @click="activeIdx = i"
+              >
+                <span class="st-label">{{ memberLabel(m) }}<span v-if="memberTail" class="st-tail"> · {{ memberTail }}</span></span>
+                <span v-if="groupBadge" class="group-badge">{{ groupBadge }}</span>
+              </button>
+            </div>
             <div class="banner-actions">
               <button
                 type="button"
@@ -218,6 +269,7 @@ const backHref = '/dashboard/sessions.html';
             :show-context="showContext"
             :start-ms="startMs"
             :end-ms="endMs"
+            :compare-plays="comparePlays"
           />
         </template>
       </main>
@@ -337,6 +389,25 @@ const backHref = '/dashboard/sessions.html';
 }
 
 .banner-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+/* #736 member tab rail — matches testing.html's session pills exactly. */
+.session-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.session-tab {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 380px;
+  border: 1px solid #c7d2fe; background: #eef2ff; color: #1e1b4b;
+  padding: 8px 14px; border-radius: 999px; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: transform 0.08s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.session-tab:hover { background: #e0e7ff; box-shadow: 0 4px 12px rgba(59,130,246,0.18); transform: translateY(-1px); }
+.session-tab.active { background: #1e40af; color: #fff; border-color: #1e40af; box-shadow: 0 6px 14px rgba(30,64,175,0.32); }
+.session-tab.grouped { border-left: 4px solid #10b981; padding-left: 10px; }
+.session-tab.grouped.active { border-left-color: #34d399; }
+.session-tab .st-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-tab .st-tail { font-weight: 500; opacity: 0.85; }
+.session-tab .group-badge {
+  flex: none; background: #10b981; color: #fff; font-size: 10px; font-weight: 700;
+  padding: 1px 8px; border-radius: 8px; font-family: ui-monospace, monospace;
+}
+.session-tab.active .group-badge { background: #34d399; }
 .banner-btn {
   display: inline-flex;
   align-items: center;

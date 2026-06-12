@@ -17,17 +17,27 @@
  * accessors read). No network/control/avmetrics: the overlay only plots
  * rate + buffer lines, not the sibling's lanes or per-segment markers.
  *
- * playId is null so the sibling follows its own latest play and rotates
- * with it — matching the live-comparison use case (two devices under
- * test at once). The default 10-minute backfill + live tail aligns with
- * the live edge the primary chart tracks. (The archive path — locking a
- * sibling to a specific historical play_id — is a follow-up; this
- * component takes a playId prop so that wiring is a one-line change.)
+ * Live use (issue #579): playId is null so the sibling follows its own
+ * latest play and rotates with it (two devices under test at once); the
+ * default 10-minute backfill + live tail aligns with the live edge the
+ * primary chart tracks.
+ *
+ * Archive use (issue #736): pass a locked `playId` AND the active play's
+ * `fromMs`/`toMs` window. The playId pins the sibling to that historical
+ * play; the window is REQUIRED because useSessionTimeSeries otherwise
+ * backfills only the last 10 minutes — useless for a play hours/days old.
+ * Grouped fleet plays share a wall-clock window, so the active play's
+ * bounds cover every sibling.
  */
 import { computed, onMounted, onUnmounted } from 'vue';
 import { useSessionTimeSeries, type Stream } from '@/composables/useSessionTimeSeries';
 
-const props = defineProps<{ playerId: string; playId?: string | null }>();
+const props = defineProps<{
+  playerId: string;
+  playId?: string | null;
+  fromMs?: number | null;
+  toMs?: number | null;
+}>();
 const emit = defineEmits<{
   (e: 'register', playerId: string, stream: Stream<Record<string, unknown>>): void;
   (e: 'unregister', playerId: string): void;
@@ -35,10 +45,14 @@ const emit = defineEmits<{
 
 const playerIdRef = computed(() => props.playerId);
 const playIdRef = computed<string | null>(() => props.playId ?? null);
+const fromMsRef = computed<number | null>(() => props.fromMs ?? null);
+const toMsRef = computed<number | null>(() => props.toMs ?? null);
 
 const ts = useSessionTimeSeries(playerIdRef, playIdRef, {
   streams: ['events'],
   bundles: ['charts_minimal'],
+  fromMs: fromMsRef,
+  toMs: toMsRef,
 });
 
 onMounted(() => emit('register', props.playerId, ts.events));
