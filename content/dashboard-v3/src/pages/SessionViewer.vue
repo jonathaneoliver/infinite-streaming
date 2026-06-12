@@ -29,12 +29,23 @@ const qs = new URLSearchParams(window.location.search);
 // the v3 timeseries endpoint and the SSE pool both key by player_id.
 // UUIDs are lowercased — CH stores them lowercase and iOS sometimes
 // emits uppercase (case_sensitivity_ids memory).
-const playerId = ref<string>(canonicalUUID(qs.get('player_id') ?? ''));
-const playId = ref<string | null>(qs.get('play_id') ? canonicalUUID(qs.get('play_id')!) : null);
 // #736: `compare=<player>~<play>~<tag>,…` — the grouped set to overlay in
-// archive compare mode (the active play is included; SessionDisplay picks self
-// vs siblings). Empty ⇒ ordinary single-play view.
+// archive compare mode (the active play is included). Like testing.html's
+// session-tab pill rail, the active member is switchable: player_id / play_id
+// FOLLOW the selected tab, SessionDisplay re-keys reactively, and it
+// re-derives self vs siblings from the (unchanged) compare set. Empty
+// `compare` ⇒ ordinary single-play view.
 const comparePlays = parseCompareParam(qs.get('compare'));
+const urlPlayerId = canonicalUUID(qs.get('player_id') ?? '');
+const urlPlayId = qs.get('play_id') ? canonicalUUID(qs.get('play_id')!) : null;
+// Active tab index — defaults to the play the user clicked (the URL player_id).
+const activeIdx = ref(Math.max(0, comparePlays.findIndex((m) => m.playerId === urlPlayerId)));
+const playerId = computed<string>(() =>
+  comparePlays.length ? comparePlays[activeIdx.value].playerId : urlPlayerId,
+);
+const playId = computed<string | null>(() =>
+  comparePlays.length ? (comparePlays[activeIdx.value].playId ?? null) : urlPlayId,
+);
 
 /** Initial time window. New canonical param names are `from` / `to`
  *  (shorter, no `:` in compact ISO → no `%3A` clutter). Legacy
@@ -187,6 +198,23 @@ const backHref = '/dashboard/sessions.html';
                   ? `${playId ?? '(all plays)'} — filter disabled while showing context`
                   : (playId ?? '(all plays)')"
               >{{ playId ?? '(all plays)' }}</code>
+            </div>
+            <!-- #736 member tab rail — like testing.html's session pills.
+                 Click a tab to make that grouped play active (its panels show,
+                 its line goes solid); the overlay set stays the same. -->
+            <div v-if="comparePlays.length" class="member-tabs" role="tablist" aria-label="Grouped sessions">
+              <span class="member-tabs-label">compare:</span>
+              <button
+                v-for="(m, i) in comparePlays"
+                :key="m.playerId"
+                type="button"
+                role="tab"
+                class="member-tab"
+                :class="{ active: i === activeIdx }"
+                :aria-selected="i === activeIdx"
+                :title="m.playerId"
+                @click="activeIdx = i"
+              >{{ m.tag ? `S${m.tag}` : m.playerId.slice(0, 6) }}</button>
             </div>
             <div class="banner-actions">
               <button
@@ -342,6 +370,16 @@ const backHref = '/dashboard/sessions.html';
 }
 
 .banner-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+/* #736 member tab rail — mirrors testing.html's session pills. */
+.member-tabs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.member-tabs-label { font-size: 11px; color: #6b7280; margin-right: 2px; }
+.member-tab {
+  padding: 2px 10px; border-radius: 999px; cursor: pointer;
+  font-size: 12px; font-weight: 600; font-family: ui-monospace, monospace;
+  color: #4338ca; background: #eef2ff; border: 1px solid #c7d2fe;
+}
+.member-tab:hover { background: #e0e7ff; }
+.member-tab.active { color: #fff; background: #6366f1; border-color: #4f46e5; }
 .banner-btn {
   display: inline-flex;
   align-items: center;

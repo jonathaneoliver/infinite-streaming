@@ -136,7 +136,16 @@ const { player: livePlayer } = usePlayer(livePlayerIdRef);
  * template); we register its events stream here and publish the assembled
  * CompareContext so BandwidthChart / BufferChart can pull their overlays
  * via useCompareOverlays(). */
-const compareMode = useCompareMode(livePlayerIdRef);
+// Compare-toggle key. Live: per-player, so it shares state with GroupBanner's
+// checkbox. Archive (#736): a STABLE group key — switching the active-member
+// tab rail changes props.playerId, and we don't want that to land on a fresh
+// (off) toggle and silently drop compare mode.
+const compareKey = computed<string>(() => {
+  const cps = props.comparePlays ?? [];
+  if (cps.length >= 2) return 'archive-group:' + cps.map((m) => m.playerId).slice().sort().join(',');
+  return props.playerId;
+});
+const compareMode = useCompareMode(compareKey);
 const { siblings: groupSiblings } = useGroupSiblings(livePlayerIdRef);
 // #736 archive compare: when the viewer is opened with a grouped set
 // (comparePlays from the URL), siblings come from there — each pinned to a
