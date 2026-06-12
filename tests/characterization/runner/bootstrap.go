@@ -68,7 +68,7 @@ func ShapeConfig(rateMbps float64, xferTimeout time.Duration) BootstrapConfig {
 // BEFORE the app launches. Clip-agnostic: shape/fault config is session-scoped,
 // so any discoverable clip triggers the allocation; the app's real clip
 // reattaches by player_id.
-func ConfigureOnConnect(ctx context.Context, playerID string, cfg BootstrapConfig) error {
+func ConfigureOnConnect(ctx context.Context, playerID, groupID string, cfg BootstrapConfig) error {
 	if playerID == "" {
 		return fmt.Errorf("ConfigureOnConnect: empty playerID")
 	}
@@ -87,6 +87,11 @@ func ConfigureOnConnect(ctx context.Context, playerID string, cfg BootstrapConfi
 
 	q := url.Values{}
 	q.Set("player_id", playerID)
+	// #fleet-group: explicit group_id connect param (born-groups the session
+	// while player_id stays a clean UUID). Top-level, NOT a proxy.* arg.
+	if groupID != "" {
+		q.Set("group_id", groupID)
+	}
 	for k, v := range cfg {
 		q.Set("proxy."+k, v)
 	}

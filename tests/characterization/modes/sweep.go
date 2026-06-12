@@ -77,23 +77,30 @@ func resolveFloor(ctx context.Context, t *testing.T, preFloor float64, floorFn f
 // must pass 0 so they don't perturb what they measure.
 //
 // baseArgs are any other launch args (e.g. segment).
-func wireConfigOnConnect(ctx context.Context, t *testing.T, appium *runner.AppiumLauncher, baseArgs []string, pid string, capMbps float64, xferTimeout time.Duration, peakClampMbps int) {
+func wireConfigOnConnect(ctx context.Context, t *testing.T, appium *runner.AppiumLauncher, baseArgs []string, pid string, capMbps float64, xferTimeout time.Duration, peakClampMbps int, groupID string) {
 	t.Helper()
 	launchArgs := append(append([]string{}, baseArgs...), "-is.player_id", pid)
 	if peakClampMbps > 0 {
 		launchArgs = append(launchArgs, "-is.flag.peak_bitrate_mbps", strconv.Itoa(peakClampMbps))
 	}
 	if os.Getenv("CHAR_PROXY_CONFIG") == "app" {
-		launchArgs = append(launchArgs, "-is.proxy_query", appProxyQuery(capMbps, xferTimeout))
+		launchArgs = append(launchArgs, "-is.proxy_query", appProxyQuery(capMbps, xferTimeout, groupID))
 		appium.SetLaunchArgs(launchArgs)
-		t.Logf("config-on-connect VIA APP URL: rate=%.3f Mbps xfer_timeout=%s peak_clamp=%dMbps (no curl); player_id=%s", capMbps, xferTimeout, peakClampMbps, pid)
+		t.Logf("config-on-connect VIA APP URL: rate=%.3f Mbps xfer_timeout=%s peak_clamp=%dMbps group=%q (no curl); player_id=%s", capMbps, xferTimeout, peakClampMbps, groupID, pid)
 		return
 	}
 	appium.SetLaunchArgs(launchArgs)
-	if err := runner.ConfigureOnConnect(ctx, pid, runner.ShapeConfig(capMbps, xferTimeout)); err != nil {
-		t.Fatalf("ConfigureOnConnect (player_id=%s cap=%.3f Mbps): %v", pid, capMbps, err)
+	// capMbps<=0 ⇒ no shape (uncapped) — e.g. a born-grouped transient_shock
+	// whose curl carries only player_id + group_id, so the session joins the
+	// group at connect yet warms uncapped to its top variant.
+	var cfg runner.BootstrapConfig
+	if capMbps > 0 {
+		cfg = runner.ShapeConfig(capMbps, xferTimeout)
 	}
-	t.Logf("config-on-connect VIA CURL (default): session %s pre-capped at %.3f Mbps, xfer_timeout=%s, peak_clamp=%dMbps before launch", pid, capMbps, xferTimeout, peakClampMbps)
+	if err := runner.ConfigureOnConnect(ctx, pid, groupID, cfg); err != nil {
+		t.Fatalf("ConfigureOnConnect (player_id=%s cap=%.3f Mbps group=%q): %v", pid, capMbps, groupID, err)
+	}
+	t.Logf("config-on-connect VIA CURL (default): session %s cap=%.3f Mbps xfer_timeout=%s peak_clamp=%dMbps group=%q before launch", pid, capMbps, xferTimeout, peakClampMbps, groupID)
 }
 
 // peakClampForCap maps a network cap (Mbps) to the app's whole-Mbps startup
@@ -109,13 +116,20 @@ func peakClampForCap(capMbps float64) int {
 // appProxyQuery builds the -is.proxy_query value for CHAR_PROXY_CONFIG=app: the
 // rate cap plus, when xferTimeout>0, the segment transfer timeout. Mirrors the
 // curl-mode ShapeConfig so both drivers materialize the same session.
-func appProxyQuery(capMbps float64, xferTimeout time.Duration) string {
-	q := fmt.Sprintf("proxy.shape.rate_mbps=%g", capMbps)
-	if xferTimeout > 0 {
-		q += fmt.Sprintf("&proxy.transfer_timeouts.active_timeout_seconds=%d&proxy.transfer_timeouts.applies_segments=true",
-			int(xferTimeout.Seconds()))
+func appProxyQuery(capMbps float64, xferTimeout time.Duration, groupID string) string {
+	var parts []string
+	if capMbps > 0 {
+		parts = append(parts, fmt.Sprintf("proxy.shape.rate_mbps=%g", capMbps))
+		if xferTimeout > 0 {
+			parts = append(parts,
+				fmt.Sprintf("proxy.transfer_timeouts.active_timeout_seconds=%d", int(xferTimeout.Seconds())),
+				"proxy.transfer_timeouts.applies_segments=true")
+		}
 	}
-	return q
+	if groupID != "" {
+		parts = append(parts, "group_id="+groupID)
+	}
+	return strings.Join(parts, "&")
 }
 
 // OpenSession picks a launcher per $LAUNCH_MODE, discovers a device for
@@ -128,6 +142,28 @@ func appProxyQuery(capMbps float64, xferTimeout time.Duration) string {
 // On success registers a t.Cleanup that clears the shape so we don't
 // leave the proxy stuck in a degraded state between tests.
 func OpenSession(t *testing.T, platform runner.Platform) *runner.Session {
+	t.Helper()
+	return OpenSessionOnDevice(t, platform, nil, nil)
+}
+
+// OpenSessionOnDevice is the device-explicit, optionally fleet-synchronized
+// form of OpenSession. It is the launch path for modes that start the player
+// HIGH/uncapped (rampdown, startup) and need to run as a fleet.
+//
+//   - dev == nil  → resolve the single device the legacy way (Discover →
+//     first-match, honouring CHARACTERIZATION_DEVICE_UDID). This is exactly
+//     OpenSession's behaviour and keeps the single-device callers
+//     (abort / startup_caps / state_residency / playback_end) unchanged.
+//   - dev != nil  → launch against THAT explicit device (no Discover-pick).
+//
+// When bars != nil AND the launcher is Appium, the launch is split so the home
+// barrier gates the simultaneous playback start across the fleet:
+// LaunchToHome → bars.home.arriveAndWait → ResumePlayback → WaitForHeartbeat.
+// Otherwise it uses launcher.Launch (the single-shot home+resume+heartbeat),
+// byte-for-byte identical to the legacy path. The caller wires the SWEEP
+// barrier itself (right before its shaping sweep) — this helper owns the HOME
+// barrier (including dropping itself from it if bring-up fails).
+func OpenSessionOnDevice(t *testing.T, platform runner.Platform, dev *runner.Device, bars *fleetBarriers) *runner.Session {
 	t.Helper()
 	mode, launcher, err := runner.PickMode()
 	if err != nil {
@@ -147,38 +183,83 @@ func OpenSession(t *testing.T, platform runner.Platform) *runner.Session {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	devs, err := launcher.Discover(ctx)
-	if err != nil {
-		t.Fatalf("discover: %v", err)
-	}
-	// Device selection. When CHARACTERIZATION_DEVICE_UDID is set the test
-	// targets ONLY that specific device — required for parallel runs
-	// across multiple sims of the same platform (each terminal exports
-	// its own UDID, no race for the same device). When unset we fall
-	// back to "first matching platform" — the simple default.
-	wantUDID := strings.TrimSpace(os.Getenv("CHARACTERIZATION_DEVICE_UDID"))
 	var picked *runner.Device
-	for i := range devs {
-		if devs[i].Platform != platform {
-			continue
+	if dev != nil {
+		// Device-explicit (fleet or honoured single dev) — no Discover pick.
+		d := *dev
+		picked = &d
+		t.Logf("device: %s (fleet index %d)", picked, d.FleetIndex)
+	} else {
+		devs, err := launcher.Discover(ctx)
+		if err != nil {
+			t.Fatalf("discover: %v", err)
 		}
-		if wantUDID != "" && !strings.EqualFold(devs[i].UDID, wantUDID) {
-			continue
+		// Device selection. When CHARACTERIZATION_DEVICE_UDID is set the test
+		// targets ONLY that specific device — required for parallel runs
+		// across multiple sims of the same platform (each terminal exports
+		// its own UDID, no race for the same device). When unset we fall
+		// back to "first matching platform" — the simple default.
+		wantUDID := strings.TrimSpace(os.Getenv("CHARACTERIZATION_DEVICE_UDID"))
+		for i := range devs {
+			if devs[i].Platform != platform {
+				continue
+			}
+			if wantUDID != "" && !strings.EqualFold(devs[i].UDID, wantUDID) {
+				continue
+			}
+			picked = &devs[i]
+			break
 		}
-		picked = &devs[i]
-		break
+		if picked == nil {
+			if wantUDID != "" {
+				t.Skipf("no %s device with UDID=%s discovered (mode=%s)", platform, wantUDID, mode)
+			}
+			t.Skipf("no %s device discovered (mode=%s)", platform, mode)
+		}
+		t.Logf("picked device: %s", picked)
 	}
-	if picked == nil {
-		if wantUDID != "" {
-			t.Skipf("no %s device with UDID=%s discovered (mode=%s)", platform, wantUDID, mode)
-		}
-		t.Skipf("no %s device discovered (mode=%s)", platform, mode)
-	}
-	t.Logf("picked device: %s", picked)
 
-	sess, err := launcher.Launch(ctx, *picked)
-	if err != nil {
-		t.Fatalf("launch %s: %v", picked, err)
+	var sess *runner.Session
+	if appium, isAppium := launcher.(*runner.AppiumLauncher); isAppium && bars != nil {
+		// Fleet path: split the launch so the home barrier can gate the
+		// simultaneous playback start. The launcher already carries any launch
+		// args the caller set (none for the high-start modes). A generous
+		// setup window — an early sim holds at the home barrier until the last
+		// (most-staggered) sim arrives.
+		setupCtx, setupCancel := context.WithTimeout(context.Background(), 12*time.Minute)
+		defer setupCancel()
+		// If we die before reaching the home barrier (e.g. LaunchToHome fails),
+		// drop ourselves from its expected set so the survivors still release
+		// together. t.Fatalf runs deferred funcs via runtime.Goexit.
+		homeArrived := false
+		defer func() {
+			if !homeArrived {
+				bars.home.giveUp()
+			}
+		}()
+		s, lerr := appium.LaunchToHome(setupCtx, *picked)
+		if lerr != nil {
+			t.Fatalf("LaunchToHome: %v", lerr)
+		}
+		// Fleet sync #1 (home): hold until every sim is at home, then all start
+		// playback at once.
+		homeArrived = true
+		t.Logf("at home — waiting at fleet HOME barrier (playback starts together)")
+		bars.home.arriveAndWait(setupCtx)
+		t.Logf("HOME barrier released — starting playback")
+		if rerr := appium.ResumePlayback(setupCtx, *picked); rerr != nil {
+			t.Fatalf("ResumePlayback: %v", rerr)
+		}
+		if herr := s.WaitForHeartbeat(setupCtx, 90*time.Second); herr != nil {
+			t.Fatalf("WaitForHeartbeat: %v", herr)
+		}
+		sess = s
+	} else {
+		s, lerr := launcher.Launch(ctx, *picked)
+		if lerr != nil {
+			t.Fatalf("launch %s: %v", picked, lerr)
+		}
+		sess = s
 	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -688,6 +769,60 @@ func RunMode(t *testing.T, platform runner.Platform, mode string,
 	if len(report.Steps) == 0 {
 		t.Errorf("no steps recorded")
 	}
+}
+
+// env helpers — small generic readers shared across modes. They live in this
+// NON-test file (not startup_test.go) so the non-test fleet.go can call envInt
+// for CHAR_FLEET_COUNT / CHAR_FLEET_STAGGER_SEC.
+
+func envOr(key, dflt string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return dflt
+}
+
+// envFloatList parses a comma-separated list of floats from env.
+// Empty / unset / malformed → returns dflt unchanged.
+func envFloatList(key string, dflt []float64) []float64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return dflt
+	}
+	out := []float64{}
+	for _, p := range strings.Split(v, ",") {
+		t := strings.TrimSpace(p)
+		if t == "" {
+			continue
+		}
+		f, err := strconv.ParseFloat(t, 64)
+		if err != nil {
+			return dflt
+		}
+		out = append(out, f)
+	}
+	if len(out) == 0 {
+		return dflt
+	}
+	return out
+}
+
+func envFloat(key string, dflt float64) float64 {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return dflt
+}
+
+func envInt(key string, dflt int) int {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return dflt
 }
 
 // timeoutForSteps adds a 60s slack on top of the planned sweep time so

@@ -64,37 +64,11 @@ func pyramidFloorFrom(desc []runner.VariantRate) float64 {
 }
 
 func runPyramid(t *testing.T, p runner.Platform) {
-	// Resolve the fleet roster (1 device by default, N under CHAR_FLEET_*).
-	devs := resolveFleet(t, p)
-	switch len(devs) {
-	case 0:
-		return // resolveFleet already issued a Skip
-	case 1:
-		runPyramidOnDevice(t, p, devs[0], nil) // today's single-device path, unchanged
-		return
-	}
-	// Fleet: run each sim as a parallel subtest. Each gets its own launcher
-	// (see runPyramidOnDevice) so the per-sim player_id can't race. Two sync
-	// points (sims get ready at different times; the test fires together):
-	//   - home  → every sim waits at the home screen, then all start playback
-	//             at the same instant.
-	//   - sweep → every sim is warmed up + ladder-read, then all begin the
-	//             pyramid shaping at the same instant.
-	bars := newFleetBarriers(len(devs))
-	for _, dev := range devs {
-		dev := dev
-		name := dev.Label
-		if name == "" {
-			name = dev.UDID
-		}
-		if name == "" {
-			name = fmt.Sprintf("fleet%d", dev.FleetIndex)
-		}
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			runPyramidOnDevice(t, p, dev, bars)
-		})
-	}
+	// Fleet dispatch (1 device by default, N under CHAR_FLEET_*). The shared
+	// runFleet helper resolves the roster and either runs the single-device
+	// path unchanged or fans out one parallel subtest per device with the home
+	// + sweep sync barriers wired (see runPyramidOnDevice).
+	runFleet(t, p, runPyramidOnDevice)
 }
 
 // runPyramidOnDevice runs the pyramid sweep against ONE explicit device.
@@ -201,7 +175,7 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars
 				floor = f
 			}
 		}
-		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor, cfg.xferTimeout, peakClampForCap(floor))
+		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor, cfg.xferTimeout, peakClampForCap(floor), bars.fleetGroupID())
 
 		s, lerr := appium.LaunchToHome(setupCtx, *picked)
 		if lerr != nil {
@@ -398,12 +372,6 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars
 	// known). Hold here until every fleet member is ready too, so the actual
 	// streaming + shaping sweep starts on all sims at the same instant. Bounded
 	// so a sim that failed bring-up can't hang the rest. No-op for single runs.
-	// Register this sim as a prospective group member before the barrier so the
-	// leader sees every player_id once the fleet is assembled (#fleet group).
-	if bars != nil {
-		bars.registerPlayer(sess.PlayerID)
-	}
-
 	// Fleet sync #2 (sweep): this sim is warmed up with its ladder read. Hold
 	// until every sim is here, then all begin the pyramid shaping at once.
 	if bars != nil {
@@ -429,25 +397,13 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars
 			t.Logf("leader finished — observer done")
 			return
 		}
-		// Release the observers when the leader returns — registered FIRST so a
-		// failure in CreateGroup (or the sweep) can't leave them blocked.
+		// The proxy already grouped the fleet by the `_G<num>` token in each
+		// sim's player_id (born grouped at connect — no CreateGroup race). The
+		// leader just drives; the proxy fans every ApplyRate to the group by
+		// group_id. signalSweepDone (deferred FIRST) releases the observers when
+		// the leader returns, even if the sweep below fails.
 		defer bars.signalSweepDone()
-
-		gctx, gcancel := context.WithTimeout(ctx, 30*time.Second)
-		members := bars.members()
-		groupID, gerr := runner.CreateGroup(gctx, "pyramid-"+runID, members)
-		gcancel()
-		if gerr != nil {
-			t.Fatalf("create fleet group: %v", gerr)
-		}
-		t.Logf("created fleet group %s (%d members) — leader drives one broadcast pyramid", groupID, len(members))
-		t.Cleanup(func() {
-			cctx, c := context.WithTimeout(context.Background(), 10*time.Second)
-			defer c()
-			if err := runner.DisbandGroup(cctx, groupID); err != nil {
-				t.Logf("disband group: %v", err)
-			}
-		})
+		t.Logf("group leader — driving one broadcast pyramid for group %s", bars.groupID)
 	}
 
 	// #cycles — run the full up-then-down pyramid REPS times on the SAME

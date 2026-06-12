@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -93,7 +91,44 @@ func TestStartupAndroidTV(t *testing.T) { runStartup(t, runner.PlatformAndroidTV
 func TestStartupWeb(t *testing.T)       { runStartup(t, runner.PlatformWeb) }
 
 func runStartup(t *testing.T, p runner.Platform) {
-	sess := OpenSession(t, p)
+	// Fleet dispatch (1 device by default, N under CHAR_FLEET_*). runFleet
+	// resolves the roster and either runs the single-device path unchanged or
+	// fans out one parallel subtest per device with the home + sweep barriers
+	// wired (see runStartupOnDevice).
+	// TODO(fleet): group mode like pyramid (CHAR_FLEET_GROUP) — parallel-
+	// independent + synchronized only for now.
+	runFleet(t, p, runStartupOnDevice)
+}
+
+// runStartupOnDevice runs the startup cap matrix against ONE explicit device.
+// startup KEEPS its existing per-cycle prime (each app_cold cycle mints a fresh
+// player_id and caps the session at capMbps before launch, inside
+// runStartupCycle) — fleet-awareness only changes WHICH device it targets and
+// adds the home/sweep sync barriers. The initial OpenSessionOnDevice warms a
+// player so we can read the manifest's variant bandwidths up front; the HOME
+// barrier is wired inside it, the SWEEP barrier (below) gates the cap matrix.
+func runStartupOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars *fleetBarriers) {
+	// The home barrier is owned by OpenSessionOnDevice. We own the sweep
+	// barrier — drop ourselves from it if we die before reaching it.
+	sweepArrived := false
+	if bars != nil {
+		defer func() {
+			if !sweepArrived {
+				bars.sweep.giveUp()
+			}
+		}()
+	}
+
+	// Spread parallel fleet launches so N sims don't cold-build WDA at once
+	// (no-op for index 0 / single-device runs).
+	staggerFleetLaunch(t, dev.FleetIndex)
+
+	// Device-explicit launch (HOME barrier wired inside when bars != nil).
+	var devPtr *runner.Device
+	if bars != nil {
+		devPtr = &dev
+	}
+	sess := OpenSessionOnDevice(t, p, devPtr, bars)
 
 	target := envOr("CHAR_STARTUP_CLIP_TARGET", defaultStartupClipTarget)
 	setupClip := envOr("CHAR_STARTUP_CLIP_SETUP", defaultStartupClipSetup)
@@ -205,6 +240,18 @@ func runStartup(t *testing.T, p runner.Platform) {
 		for res, bw := range bws {
 			t.Logf("  %-12s avg=%.3f peak=%.3f Mbps", res, bw.AvgMbps, bw.PeakMbps)
 		}
+	}
+
+	// Fleet sync #2 (sweep): this sim is warmed up with its manifest read. Hold
+	// until every sim is here, then all begin the cap matrix at once. Bounded
+	// so a sim that failed bring-up can't hang the rest. No-op single.
+	if bars != nil {
+		sweepArrived = true
+		t.Logf("ready — waiting at fleet SWEEP barrier (cap matrix starts together across the fleet)")
+		bctx, bcancel := context.WithTimeout(ctx, 5*time.Minute)
+		bars.sweep.arriveAndWait(bctx)
+		bcancel()
+		t.Logf("SWEEP barrier released — beginning synchronized cap matrix")
 	}
 
 	var allCycles []runner.StartupCycleResult
@@ -364,7 +411,7 @@ func runStartupCycle(
 		// URL): mint a fresh id and cap the session at capMbps before the
 		// first byte — replaces ReadPlayerID + post-launch ApplyRate + tc-settle.
 		pid := runner.NewPlayerID()
-		wireConfigOnConnect(ctx, t, appium, nil, pid, capMbps, 0, 0)
+		wireConfigOnConnect(ctx, t, appium, nil, pid, capMbps, 0, 0, "")
 		s, err := appium.LaunchToHome(ctx, dev)
 		if err != nil {
 			t.Fatalf("[%d] LaunchToHome: %v", idx, err)
@@ -802,55 +849,8 @@ func pickedDevice(s *runner.Session) *runner.Device {
 	return &d
 }
 
-func envOr(key, dflt string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return dflt
-}
-
-// envFloatList parses a comma-separated list of floats from env.
-// Empty / unset / malformed → returns dflt unchanged.
-func envFloatList(key string, dflt []float64) []float64 {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return dflt
-	}
-	out := []float64{}
-	for _, p := range strings.Split(v, ",") {
-		t := strings.TrimSpace(p)
-		if t == "" {
-			continue
-		}
-		f, err := strconv.ParseFloat(t, 64)
-		if err != nil {
-			return dflt
-		}
-		out = append(out, f)
-	}
-	if len(out) == 0 {
-		return dflt
-	}
-	return out
-}
-
-func envFloat(key string, dflt float64) float64 {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return f
-		}
-	}
-	return dflt
-}
-
-func envInt(key string, dflt int) int {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return dflt
-}
+// env helpers (envOr / envFloatList / envFloat / envInt) live in sweep.go so
+// the non-test fleet.go can reference envInt for CHAR_FLEET_COUNT etc.
 
 func countSettleMisses(cs []runner.StartupCycleResult) int {
 	n := 0

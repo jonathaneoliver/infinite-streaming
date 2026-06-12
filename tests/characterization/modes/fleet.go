@@ -2,6 +2,7 @@ package modes
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -10,6 +11,44 @@ import (
 
 	"github.com/jonathaneoliver/infinite-streaming/tests/characterization/runner"
 )
+
+// runFleet is the shared fleet dispatcher every fleet-aware mode funnels
+// through. It resolves the roster (1 device by default, N under CHAR_FLEET_*)
+// and either runs the single-device path unchanged or fans the work out as one
+// parallel subtest per device with shared sync barriers. `perDevice` does the
+// per-device work (mint its OWN launcher via runner.PickMode, use the PASSED
+// dev, wire the barriers when non-nil) — see runPyramidOnDevice for the
+// canonical shape. nil barriers ⇒ single-device run (no sync points).
+func runFleet(t *testing.T, p runner.Platform, perDevice func(*testing.T, runner.Platform, runner.Device, *fleetBarriers)) {
+	devs := resolveFleet(t, p)
+	switch len(devs) {
+	case 0:
+		return // resolveFleet already issued a Skip
+	case 1:
+		perDevice(t, p, devs[0], nil) // single-device path, unchanged
+		return
+	}
+	bars := newFleetBarriers(len(devs))
+	for _, dev := range devs {
+		dev := dev
+		t.Run(fleetSubtestName(dev), func(t *testing.T) {
+			t.Parallel()
+			perDevice(t, p, dev, bars)
+		})
+	}
+}
+
+// fleetSubtestName names a per-device subtest: prefer the device label, fall
+// back to its UDID, then to fleet<index>.
+func fleetSubtestName(dev runner.Device) string {
+	if dev.Label != "" {
+		return dev.Label
+	}
+	if dev.UDID != "" {
+		return dev.UDID
+	}
+	return fmt.Sprintf("fleet%d", dev.FleetIndex)
+}
 
 // resolveFleet resolves the roster of devices a fleet-aware mode runs
 // against, in priority order:
@@ -205,47 +244,49 @@ func newFleetStartBarrier(n int) *fleetStartBarrier {
 // the simultaneous playback start (every sim waits at the home screen, then all
 // tap play at once); `sweep` gates the simultaneous shaping start. When
 // `group` is set (CHAR_FLEET_GROUP=1) the fleet is driven as ONE player-group:
-// every sim registers its player_id, the leader (index 0) creates the group and
-// drives a single pyramid that the proxy broadcasts to all members, and the
-// other sims observe until the leader signals done. nil for single-device runs.
+// every sim is BORN into the group via the `_G<num>` token appended to its
+// player_id (the proxy's extractGroupId parses it at connect — grouped live AND
+// archived from row 1, no dynamic CreateGroup membership race), the leader
+// (index 0) drives a single sweep that the proxy broadcasts to all members by
+// group_id, and the other sims observe until the leader signals done. nil for
+// single-device runs.
 type fleetBarriers struct {
 	home  *fleetStartBarrier
 	sweep *fleetStartBarrier
 
-	group     bool          // drive the whole fleet as one broadcast group
-	done      chan struct{} // leader closes when its group sweep finishes
-	mu        sync.Mutex
-	playerIDs []string // collected as each sim binds (group members)
+	group   bool          // drive the whole fleet as one broadcast group
+	groupID string        // "G<num>" — passed as the explicit group_id connect param
+	done    chan struct{} // leader closes when its group sweep finishes
 }
 
 func newFleetBarriers(n int) *fleetBarriers {
+	group := strings.TrimSpace(os.Getenv("CHAR_FLEET_GROUP")) == "1"
+	groupID := ""
+	if group {
+		// One group_id per run, passed as the explicit `group_id` connect param
+		// (NOT a player_id suffix — a non-UUID player_id derives a divergent v5
+		// id in the analytics layer and breaks the archive). The proxy births
+		// each session into this group at connect while player_id stays a clean
+		// UUID. Unix seconds keeps distinct runs from colliding in the archive.
+		groupID = fmt.Sprintf("G%d", time.Now().Unix())
+	}
 	return &fleetBarriers{
-		home:  newFleetStartBarrier(n),
-		sweep: newFleetStartBarrier(n),
-		group: strings.TrimSpace(os.Getenv("CHAR_FLEET_GROUP")) == "1",
-		done:  make(chan struct{}),
+		home:    newFleetStartBarrier(n),
+		sweep:   newFleetStartBarrier(n),
+		group:   group,
+		groupID: groupID,
+		done:    make(chan struct{}),
 	}
 }
 
-// registerPlayer records a bound sim's player_id as a prospective group member.
-// Call before the sweep barrier so every member is present when the leader
-// reads them.
-func (b *fleetBarriers) registerPlayer(pid string) {
-	if b == nil || pid == "" {
-		return
+// fleetGroupID is the "G<num>" passed as the group_id connect param so the proxy
+// births the fleet into one group. Empty for single-device / non-group runs (so
+// no group_id param is sent and the session is ungrouped).
+func (b *fleetBarriers) fleetGroupID() string {
+	if b == nil {
+		return ""
 	}
-	b.mu.Lock()
-	b.playerIDs = append(b.playerIDs, pid)
-	b.mu.Unlock()
-}
-
-// members returns a snapshot of the collected member player_ids.
-func (b *fleetBarriers) members() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	out := make([]string, len(b.playerIDs))
-	copy(out, b.playerIDs)
-	return out
+	return b.groupID
 }
 
 // signalSweepDone releases the group observers once (leader calls it when its

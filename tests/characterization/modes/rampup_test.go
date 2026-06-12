@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,35 +38,47 @@ func TestRampupAndroidTV(t *testing.T) { runRampup(t, runner.PlatformAndroidTV) 
 func TestRampupWeb(t *testing.T)       { runRampup(t, runner.PlatformWeb) }
 
 func runRampup(t *testing.T, p runner.Platform) {
-	// --- pick launcher + device ----------------------------------
+	// Fleet dispatch (1 device by default, N under CHAR_FLEET_*). runFleet
+	// resolves the roster and either runs the single-device path unchanged or
+	// fans out one parallel subtest per device with the home + sweep barriers
+	// wired (see runRampupOnDevice). Under CHAR_FLEET_GROUP=1 the leader drives
+	// one broadcast rampup for the whole group (like pyramid).
+	runFleet(t, p, runRampupOnDevice)
+}
+
+// runRampupOnDevice runs the rampup climb against ONE explicit device. Like
+// runPyramidOnDevice it mints its OWN launcher (so the per-sim player_id can't
+// race under t.Parallel()) and uses the PASSED dev. When bars != nil it syncs
+// at the home barrier (all sims start playback together) and the sweep barrier
+// (all start shaping together). dev.FleetIndex rides into the Appium caps to
+// pin distinct WDA ports.
+func runRampupOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars *fleetBarriers) {
+	// --- pick launcher (own instance per subtest) ----------------
 	mode, launcher, err := runner.PickMode()
 	if err != nil {
 		t.Skipf("PickMode: %v", err)
 	}
 	t.Logf("launch mode: %s", mode)
+	picked := &dev
+	t.Logf("device: %s (fleet index %d)", picked, dev.FleetIndex)
 
-	discCtx, discCancel := context.WithTimeout(context.Background(), 90*time.Second)
-	devs, err := launcher.Discover(discCtx)
-	discCancel()
-	if err != nil {
-		t.Fatalf("discover: %v", err)
+	// If this sim dies before reaching a barrier, drop it from that barrier's
+	// expected set so the survivors still release together (home, sweep).
+	homeArrived, sweepArrived := false, false
+	if bars != nil {
+		defer func() {
+			if !homeArrived {
+				bars.home.giveUp()
+			}
+			if !sweepArrived {
+				bars.sweep.giveUp()
+			}
+		}()
 	}
-	wantUDID := strings.TrimSpace(os.Getenv("CHARACTERIZATION_DEVICE_UDID"))
-	var picked *runner.Device
-	for i := range devs {
-		if devs[i].Platform != p {
-			continue
-		}
-		if wantUDID != "" && !strings.EqualFold(devs[i].UDID, wantUDID) {
-			continue
-		}
-		picked = &devs[i]
-		break
-	}
-	if picked == nil {
-		t.Skipf("no %s device discovered (mode=%s)", p, mode)
-	}
-	t.Logf("picked device: %s", picked)
+
+	// Spread parallel fleet launches so N sims don't cold-build WDA at once
+	// (no-op for index 0 / single-device runs).
+	staggerFleetLaunch(t, dev.FleetIndex)
 
 	// --- bootstrap: read manifest BEFORE kill+launch -------------
 	bootCtx, bootCancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -110,6 +123,11 @@ func runRampup(t *testing.T, p runner.Platform) {
 	// player starts on them from frame 1; iOS folds them into UserDefaults
 	// (NSArgumentDomain). The transfer-timeout axis is applied server-side.
 	cfg := readRunConfig(t, isAppium)
+	// Pin the active transfer timeout to 6s (matching pyramid) unless the
+	// operator overrides — CHAR_TRANSFER_TIMEOUT still wins.
+	if os.Getenv("CHAR_TRANSFER_TIMEOUT") == "" {
+		cfg.xferTimeout = 6 * time.Second
+	}
 	segment := cfg.segment
 
 	var sess *runner.Session
@@ -121,16 +139,43 @@ func runRampup(t *testing.T, p runner.Platform) {
 		// proxy.* on its own bootstrap URL). Replaces the old coldStart /
 		// conservativeStart dance — the app streams under the cap from segment 0.
 		pid := runner.NewPlayerID()
-		setupCtx, setupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		// Fleet runs need a generous setup window: an early sim holds at the
+		// home barrier until the last (most-staggered) sim arrives. Single
+		// runs keep 2m.
+		setupTimeout := 2 * time.Minute
+		if bars != nil {
+			setupTimeout = 12 * time.Minute
+		}
+		setupCtx, setupCancel := context.WithTimeout(context.Background(), setupTimeout)
 		defer setupCancel()
 		floor := resolveFloor(setupCtx, t, preFloor, rampupFloorFrom)
-		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor, 0, 0)
+		// Pin the cold-start initial limit to the same value pyramid uses
+		// (overrides the manifest-derived rampup floor) so rampup cold-starts on
+		// the same low rung and climbs from there — identical init to pyramid
+		// (floor + transfer timeout + startup peak clamp). CHAR_PYRAMID_FLOOR wins.
+		floor = pyramidInitialLimitMbps
+		if v := os.Getenv("CHAR_PYRAMID_FLOOR"); v != "" {
+			if f, perr := strconv.ParseFloat(v, 64); perr == nil && f > 0 {
+				floor = f
+			}
+		}
+		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor, cfg.xferTimeout, peakClampForCap(floor), bars.fleetGroupID())
 
 		s, err := appium.LaunchToHome(setupCtx, *picked)
 		if err != nil {
 			t.Fatalf("LaunchToHome: %v", err)
 		}
 		s.PlayerID = pid
+
+		// Fleet sync #1 (home): this sim is at home, not yet playing. Hold
+		// until every sim is at home, then all start playback at once.
+		if bars != nil {
+			homeArrived = true
+			t.Logf("at home — waiting at fleet HOME barrier (playback starts together)")
+			bars.home.arriveAndWait(setupCtx)
+			t.Logf("HOME barrier released — starting playback")
+		}
+
 		if err := appium.ResumePlayback(setupCtx, *picked); err != nil {
 			t.Fatalf("ResumePlayback: %v", err)
 		}
@@ -305,6 +350,33 @@ func runRampup(t *testing.T, p runner.Platform) {
 	for i, v := range asc {
 		v := v
 		steps[i] = runner.Step{RateMbps: v.CapMbps, Hold: rampdownMaxHold, Variant: &v}
+	}
+
+	// Fleet sync #2 (sweep): this sim is warmed up with its ladder read. Hold
+	// until every sim is here, then all begin the rampup shaping at once.
+	// Bounded so a sim that failed bring-up can't hang the rest. No-op single.
+	if bars != nil {
+		sweepArrived = true
+		t.Logf("ready — waiting at fleet SWEEP barrier (shaping starts together across the fleet)")
+		bctx, bcancel := context.WithTimeout(ctx, 5*time.Minute)
+		bars.sweep.arriveAndWait(bctx)
+		bcancel()
+		t.Logf("SWEEP barrier released — beginning synchronized sweep")
+	}
+
+	// Group mode: the leader (index 0) drives ONE broadcast rampup for the whole
+	// fleet; observers hold playback under it and DON'T drive — the proxy fans
+	// the leader's ApplyRate to every member by group_id, so concurrent drivers
+	// would collide. Mirrors pyramid / transient_shock.
+	if bars != nil && bars.group {
+		if dev.FleetIndex != 0 {
+			t.Logf("group observer — holding under the leader's broadcast rampup (compare in dashboard)")
+			bars.waitSweepDone(ctx)
+			t.Logf("leader finished — observer done")
+			return
+		}
+		defer bars.signalSweepDone()
+		t.Logf("group leader — driving one broadcast rampup for group %s", bars.groupID)
 	}
 
 	// #cycles — run the climb REPS times on the SAME live play (default 3,
