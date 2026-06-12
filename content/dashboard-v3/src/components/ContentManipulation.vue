@@ -89,6 +89,36 @@ function onVariantToggle(url: string, checked: boolean) {
   setContent({ allowed_variants: next } as Partial<Content>);
 }
 
+/** Adjacent BANDWIDTH ratios (ascending). A dense geometric ladder sits at
+ *  ~1.41× (√2); the legacy 2× ladder is ~2.0×. Used to gate "Keep every other"
+ *  so it only offers on this ladder or an equivalent (#762) — halving a 2×
+ *  ladder would create ~4× gaps. */
+const isGeometricLadder = computed(() => {
+  const asc = variants.value
+    .map((v) => v.bandwidth ?? 0)
+    .filter((b) => b > 0)
+    .sort((a, b) => a - b);
+  if (asc.length < 5) return false;
+  for (let i = 1; i < asc.length; i++) {
+    if (asc[i] / asc[i - 1] > 1.7) return false; // a ~2× gap ⇒ not geometric
+  }
+  return true;
+});
+
+/** Thin to the "skip every other" 2× subset: on the bandwidth-sorted ladder
+ *  keep indices 0,2,4,… plus the last, so floor AND ceiling are retained. On
+ *  this geometric ladder that yields exactly the original 2× rungs. Sets the
+ *  existing allowed_variants whitelist — the proxy already filters the master
+ *  to it, so no backend change (#762). */
+function keepEveryOther() {
+  const asc = variants.value
+    .slice()
+    .sort((a, b) => (a.bandwidth ?? 0) - (b.bandwidth ?? 0));
+  const n = asc.length;
+  const keep = asc.filter((_, i) => i % 2 === 0 || i === n - 1).map((v) => v.url);
+  setContent({ allowed_variants: keep } as Partial<Content>);
+}
+
 function heightOf(res?: string | null): string {
   if (!res) return '?';
   const m = res.match(/x(\d+)/i);
@@ -195,7 +225,21 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
     </p>
 
     <div class="variants">
-      <span class="label">Allowed variants <span class="muted">(All checked = allow every variant)</span></span>
+      <div class="variants-head">
+        <span class="label">Allowed variants <span class="muted">(All checked = allow every variant)</span></span>
+        <button
+          type="button"
+          class="thin-btn"
+          data-testid="content-keep-every-other"
+          :disabled="!isGeometricLadder"
+          :title="isGeometricLadder
+            ? 'Drop the ~1.41× fill rungs → keep the 2× subset (floor + ceiling retained)'
+            : 'Only on a dense ~1.41× geometric ladder — this content isn’t one'"
+          @click="keepEveryOther"
+        >
+          Keep every other (2×)
+        </button>
+      </div>
       <div v-if="!variants.length" class="muted">Play content once to populate variant list.</div>
       <div v-else class="variant-list">
         <label class="all">
@@ -323,6 +367,25 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
   display: grid;
   gap: 6px;
 }
+
+.variants-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.thin-btn {
+  border: 1px solid #d1d5db;
+  background: #fff;
+  color: #374151;
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.thin-btn:hover:not(:disabled) { background: #f3f4f6; }
+.thin-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .variant-list {
   display: grid;
