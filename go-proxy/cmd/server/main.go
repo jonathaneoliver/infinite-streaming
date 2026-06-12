@@ -803,16 +803,25 @@ type TcTrafficManager struct {
 	nlMu          sync.Mutex
 	nlHandle      *netlink.Handle // persistent netlink handle, created lazily
 	nlLink        netlink.Link    // resolved once from interfaceName
-	// rootMu serialises the shared-root ensure (root qdisc 1: + root class
-	// 1:1). Both are check-then-act on objects SHARED across all ports, so
-	// concurrent per-port applies otherwise race: two see "no root", both
-	// `tc … add`, the loser gets RTNETLINK "File exists" and bails before
-	// installing its per-port leaf class → that port runs uncapped. This was
-	// masked pre-#740 by the bootstrap createMu (held across the kernel apply);
-	// the reserve-then-fill that replaced it removed that serialization. The
-	// per-port leaf classes (distinct classid) don't collide, so only the
-	// shared root needs this lock. See #745.
-	rootMu sync.Mutex
+	// tcMu serialises ALL tc tree mutations — the shared-root ensure (root
+	// qdisc 1: + root class 1:1), the per-port leaf HTB class add/change, the
+	// per-port filter install, and the per-port clear sweep. Every one of these
+	// is a check-then-act against the SAME tc tree, so concurrent
+	// config-on-connects otherwise interleave and wipe each other's leaf
+	// classes: a leaf-class add racing a clear (or another port's root ensure)
+	// leaves that port running uncapped through the 10 Gbps default class.
+	// Guarding only the shared root (the pre-#746 scope) was not enough — the
+	// leaf add/change, filter install, and ClearPortShaping all ran OUTSIDE the
+	// lock and clobbered each other. This was masked pre-#740 by the bootstrap
+	// createMu (held across the kernel apply); the reserve-then-fill that
+	// replaced it removed that serialization. See #745 / #746.
+	//
+	// Deadlock-free by construction: Go sync.Mutex is NOT reentrant, so we use
+	// the public-wrapper / lock-free-core split. Public methods acquire tcMu
+	// once and delegate to a lock-free *Core helper; *Core helpers NEVER take
+	// the lock and only call other lock-free helpers — never a public (locking)
+	// method.
+	tcMu sync.Mutex
 	// Per-port ICMP filter state (issue #404). Tracks the last
 	// player_ip we installed an ICMP-routing filter for so the
 	// path-ping sampler's per-tick ApplyPlayerICMPFilter call
@@ -1167,18 +1176,21 @@ func tcAddAlreadyExists(out []byte) bool {
 	return strings.Contains(s, "file exists") || strings.Contains(s, "exclusivity flag on")
 }
 
-func (t *TcTrafficManager) EnsureRootQdisc() error {
-	// Serialise the shared-root check-then-act (#745): without this, two
-	// concurrent applies both see "no root" and both add, racing the kernel.
-	t.rootMu.Lock()
-	defer t.rootMu.Unlock()
+// ensureRootQdiscCore is the lock-free core of the root-qdisc ensure. The
+// caller MUST hold t.tcMu (#746). It NEVER takes the lock itself and is only
+// ever called from tcMu-holding paths (updateRateLimitCore, updateNetemCore,
+// EnsureClass).
+func (t *TcTrafficManager) ensureRootQdiscCore() error {
 	show := exec.Command("tc", "qdisc", "show", "dev", t.interfaceName)
 	if out, err := show.CombinedOutput(); err == nil {
 		if strings.Contains(string(out), "qdisc htb 1:") || strings.Contains(string(out), "root htb") {
 			return nil
 		}
 	}
-	_ = exec.Command("tc", "qdisc", "del", "dev", t.interfaceName, "root").Run()
+	// NOTE: no `tc qdisc del root` here — deleting the root nukes EVERY port's
+	// leaf class + filter at once (the #746 footgun). The "root already exists"
+	// check above plus the idempotent add (tcAddAlreadyExists below) are
+	// sufficient to converge on a single shared root.
 	cmd := exec.Command("tc", "qdisc", "add", "dev", t.interfaceName, "root", "handle", "1:", "htb", "default", "999")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		// A concurrent installer (or an out-of-band one) won the race — the
@@ -1191,10 +1203,10 @@ func (t *TcTrafficManager) EnsureRootQdisc() error {
 	return nil
 }
 
-func (t *TcTrafficManager) EnsureRootClass() error {
-	// Serialise the shared root-class 1:1 check-then-act (#745).
-	t.rootMu.Lock()
-	defer t.rootMu.Unlock()
+// ensureRootClassCore is the lock-free core of the root-class 1:1 ensure. The
+// caller MUST hold t.tcMu (#746). It NEVER takes the lock itself and is only
+// ever called from tcMu-holding paths.
+func (t *TcTrafficManager) ensureRootClassCore() error {
 	cmd := exec.Command("tc", "class", "show", "dev", t.interfaceName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1293,11 +1305,25 @@ func (t *TcTrafficManager) GetPortConfig(port int) (map[string]interface{}, erro
 	return config, nil
 }
 
+// UpdateRateLimit is the public, lock-acquiring entrypoint. It holds t.tcMu
+// for the whole leaf-class mutation (#746) so a concurrent config-on-connect
+// can't wipe this port's leaf class mid-apply, then delegates to the lock-free
+// core.
 func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
-	if err := t.EnsureRootQdisc(); err != nil {
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
+	return t.updateRateLimitCore(port, rateMbps)
+}
+
+// updateRateLimitCore is the lock-free core of UpdateRateLimit. The caller MUST
+// hold t.tcMu. It only calls other lock-free helpers (ensureRootQdiscCore,
+// ensureRootClassCore, updateNetemCore, RemoveFilter, RemoveClass,
+// ensurePortFilter, ensurePrioLeafForPort) — never a public locking method.
+func (t *TcTrafficManager) updateRateLimitCore(port int, rateMbps float64) error {
+	if err := t.ensureRootQdiscCore(); err != nil {
 		return err
 	}
-	if err := t.EnsureRootClass(); err != nil {
+	if err := t.ensureRootClassCore(); err != nil {
 		return err
 	}
 	if rateMbps <= 0 {
@@ -1306,7 +1332,7 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 			time.Now().UTC().Format(time.RFC3339Nano),
 			port,
 		)
-		_ = t.UpdateNetem(port, 0, 0)
+		_ = t.updateNetemCore(port, 0, 0)
 		_ = t.RemoveFilter(port)
 		_ = t.RemoveClass(port)
 		t.logTcState("rate_clear", port)
@@ -1398,6 +1424,14 @@ func (t *TcTrafficManager) RemoveClass(port int) error {
 //     about to belong to a fresh playback episode; whatever was
 //     there before is by definition leftover from a prior session.
 func (t *TcTrafficManager) ClearPortShaping(port int) {
+	// Hold tcMu for the whole clear sweep (#746): the class-del here otherwise
+	// races a concurrent leaf-class add/change on another port's apply against
+	// the shared tc tree. The icmpFilterMu acquired below is a DIFFERENT mutex
+	// (guards only the per-port ICMP tracking map) and never overlaps tcMu's
+	// scope, so no deadlock. This method runs raw tc commands only — no *Core
+	// split needed.
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
 	portSuffix := fmt.Sprintf("%03d", port%1000)
 	classid := fmt.Sprintf("1:%s", portSuffix)
 	// First check if there's actually a class to clear — keeps the
@@ -1540,11 +1574,23 @@ func (t *TcTrafficManager) ensurePortFilter(port int, classid string) error {
 	return nil
 }
 
+// EnsureClass is a public, lock-acquiring entrypoint (App + updateNetemCore
+// callers). It holds t.tcMu for the whole ensure (#746) and delegates to
+// lock-free cores. NOTE: updateNetemCore calls ensureClassCore directly (it
+// already holds tcMu); only external/App callers go through this wrapper.
 func (t *TcTrafficManager) EnsureClass(port int, rateMbps float64) error {
-	if err := t.EnsureRootQdisc(); err != nil {
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
+	return t.ensureClassCore(port, rateMbps)
+}
+
+// ensureClassCore is the lock-free core of EnsureClass. The caller MUST hold
+// t.tcMu. Only calls other lock-free helpers.
+func (t *TcTrafficManager) ensureClassCore(port int, rateMbps float64) error {
+	if err := t.ensureRootQdiscCore(); err != nil {
 		return err
 	}
-	if err := t.EnsureRootClass(); err != nil {
+	if err := t.ensureRootClassCore(); err != nil {
 		return err
 	}
 	cmd := exec.Command("tc", "class", "show", "dev", t.interfaceName)
@@ -1557,7 +1603,7 @@ func (t *TcTrafficManager) EnsureClass(port int, rateMbps float64) error {
 	if strings.Contains(string(output), classid) {
 		return t.ensurePortFilter(port, classid)
 	}
-	return t.UpdateRateLimit(port, rateMbps)
+	return t.updateRateLimitCore(port, rateMbps)
 }
 
 // ensurePrioLeafForPort installs the prio+netem-per-band leaf inside
@@ -1617,11 +1663,24 @@ func (t *TcTrafficManager) ensurePrioLeafForPort(port int) error {
 // installed (or confirmed present) before the netem replacements so
 // this works even when called on a class created by UpdateRateLimit
 // without netem ever previously being touched.
+// UpdateNetem is the public, lock-acquiring entrypoint. It holds t.tcMu for the
+// whole netem mutation (#746) and delegates to the lock-free core.
 func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) error {
-	if err := t.EnsureRootQdisc(); err != nil {
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
+	return t.updateNetemCore(port, delayMs, lossPct)
+}
+
+// updateNetemCore is the lock-free core of UpdateNetem. The caller MUST hold
+// t.tcMu. Only calls other lock-free helpers (ensureRootQdiscCore,
+// ensureRootClassCore, ensureClassCore, ensurePrioLeafForPort) — never a public
+// locking method. (Also called directly from updateRateLimitCore's clear
+// branch, which already holds tcMu.)
+func (t *TcTrafficManager) updateNetemCore(port int, delayMs int, lossPct float64) error {
+	if err := t.ensureRootQdiscCore(); err != nil {
 		return err
 	}
-	if err := t.EnsureRootClass(); err != nil {
+	if err := t.ensureRootClassCore(); err != nil {
 		return err
 	}
 	portSuffix := fmt.Sprintf("%03d", port%1000)
@@ -1636,7 +1695,7 @@ func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) e
 			return nil
 		}
 	} else {
-		if err := t.EnsureClass(port, 10000); err != nil {
+		if err := t.ensureClassCore(port, 10000); err != nil {
 			return err
 		}
 	}
@@ -5433,6 +5492,13 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// no slot leaks.
 		createdAt := nowISO()
 		groupID := extractGroupId(playerID)
+		// #fleet-group: an explicit group_id connect param wins over the legacy
+		// `_G<num>` player_id suffix. Lets the harness born-group a fleet while
+		// keeping player_id a clean UUID — so the analytics layer doesn't derive
+		// a divergent v5 id from a non-UUID player_id (the suffix's fatal flaw).
+		if g := r.URL.Query().Get("group_id"); g != "" {
+			groupID = g
+		}
 		var allocated int
 		_, reserved := a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
 			if len(sessions) >= a.maxSessions {
@@ -8828,18 +8894,48 @@ func (a *App) removeInactiveSessions() {
 		a.disablePatternForPort(port)
 		a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
 	}
-	// Auto-ungroup single-member groups
-	groupMembers := map[string][]string{}
+	// Auto-ungroup groups that have DECAYED to a single member — but never a
+	// group that is still ASSEMBLING. A fleet (token `_G<num>` suffix or
+	// CreateGroup) can pass through a transient 1-member state as its sims
+	// connect sequentially; clearing the group then would PERMANENTLY break it,
+	// because group_id is only derived at session creation and never re-derived.
+	// So we collapse a singleton ONLY if we've previously seen its group with ≥2
+	// concurrent members — tracked per-session via group_ever_multi. This is
+	// mechanism-agnostic: it protects suffix groups and operator/API groups
+	// alike while still cleaning up a real group that lost all but one member.
+	type groupMember struct {
+		sessionID string
+		everMulti bool
+	}
+	groupMembers := map[string][]groupMember{}
 	for _, session := range active {
 		gid := getString(session, "group_id")
 		if gid != "" {
-			groupMembers[gid] = append(groupMembers[gid], getString(session, "session_id"))
+			groupMembers[gid] = append(groupMembers[gid], groupMember{
+				sessionID: getString(session, "session_id"),
+				everMulti: getString(session, "group_ever_multi") == "1",
+			})
 		}
 	}
 	for _, members := range groupMembers {
-		if len(members) == 1 {
-			a.saveSessionByID(members[0], SessionData{
-				"session_id": members[0],
+		if len(members) >= 2 {
+			// A real multi-member group right now — stamp every member so a
+			// later decay-to-1 is distinguishable from a still-assembling group.
+			for _, m := range members {
+				if !m.everMulti {
+					a.saveSessionByID(m.sessionID, SessionData{
+						"session_id":       m.sessionID,
+						"group_ever_multi": "1",
+					})
+				}
+			}
+			continue
+		}
+		// Exactly one member: ungroup only if this group was previously ≥2
+		// (decayed). A never-multi singleton is still assembling — keep it.
+		if members[0].everMulti {
+			a.saveSessionByID(members[0].sessionID, SessionData{
+				"session_id": members[0].sessionID,
 				"group_id":   "",
 			})
 		}
