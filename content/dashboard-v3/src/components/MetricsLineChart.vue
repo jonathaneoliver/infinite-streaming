@@ -670,6 +670,13 @@ function createChartInstance(Chart: any): any {
           onHover(_evt: any, item: any, leg: any) {
             const c = leg?.chart;
             if (!c || typeof item?.datasetIndex !== 'number') return;
+            // The synthetic markers chip carries datasetIndex -1 (a number, so
+            // it slips past the guard above) and _isMarkerToggle. It maps to no
+            // real dataset, so the highlight logic below would dim EVERY line
+            // (highlighted = {-1} matches nothing) and leave them greyed while
+            // the cursor rests on the chip. The overlay toggle is orthogonal to
+            // line focus — skip hover-highlight for it entirely (issue #486/#579).
+            if (item.datasetIndex < 0 || item._isMarkerToggle) return;
             const hovered = item.datasetIndex;
             // Compare mode (#579): also give a medium highlight to the
             // SAME metric on other sessions — hovering `Fetching Variant
