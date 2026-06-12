@@ -1464,6 +1464,15 @@ function drainOverlays() {
         let y: number | null | undefined;
         try { y = src.series[i].accessor(p); } catch { y = null; }
         const yVal = (y == null || !Number.isFinite(y)) ? null : Number(y);
+        // Don't seed a dataset with LEADING nulls. A sibling on a device that
+        // never provides this field (e.g. Android/ExoPlayer has no per-segment
+        // AVMetrics throughput) must contribute an EMPTY dataset — an all-null
+        // one desyncs Chart.js's point-element cache and crashes the
+        // nearest-mode hover (`reading 'skip'` on an undefined element). Once
+        // the series has its first real value, nulls ARE pushed so spanGaps:false
+        // still renders gaps for an intermittently-missing metric. This matches
+        // the primary path, which simply skips null samples (pushSample).
+        if (yVal === null && arr.length === 0) continue;
         insertByX(arr, { x, y: yVal });
       }
       if (x > hw) hw = x;
