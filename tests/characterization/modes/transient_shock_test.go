@@ -126,7 +126,7 @@ func runTransientShockOnDevice(t *testing.T, p runner.Platform, dev runner.Devic
 		// shape), so the fleet is grouped at connect yet still uncapped. Player_id
 		// stays a clean UUID. Otherwise a bare launch (no pre-created session).
 		if gid := bars.fleetGroupID(); gid != "" {
-			wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, 0, 0, 0, gid)
+			wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, 0, 0, 0, gid, true)
 			t.Logf("transient-shock: born-grouped (group=%s), uncapped — player_id=%s", gid, pid)
 		} else {
 			launchArgs := append(append([]string{}, cfg.launchArgs()...), "-is.player_id", pid)

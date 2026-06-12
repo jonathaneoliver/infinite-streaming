@@ -77,16 +77,21 @@ func resolveFloor(ctx context.Context, t *testing.T, preFloor float64, floorFn f
 // must pass 0 so they don't perturb what they measure.
 //
 // baseArgs are any other launch args (e.g. segment).
-func wireConfigOnConnect(ctx context.Context, t *testing.T, appium *runner.AppiumLauncher, baseArgs []string, pid string, capMbps float64, xferTimeout time.Duration, peakClampMbps int, groupID string) {
+// groupBroadcast selects the group semantics when groupID is set: true is the
+// pyramid-style auto-broadcast group (a member PATCH mirrors to all members);
+// false is a display-only group (members share a group_id for dashboard compare
+// but are shaped/labelled independently) — the startup fleet uses false.
+// Ignored when groupID is empty.
+func wireConfigOnConnect(ctx context.Context, t *testing.T, appium *runner.AppiumLauncher, baseArgs []string, pid string, capMbps float64, xferTimeout time.Duration, peakClampMbps int, groupID string, groupBroadcast bool) {
 	t.Helper()
 	launchArgs := append(append([]string{}, baseArgs...), "-is.player_id", pid)
 	if peakClampMbps > 0 {
 		launchArgs = append(launchArgs, "-is.flag.peak_bitrate_mbps", strconv.Itoa(peakClampMbps))
 	}
 	if os.Getenv("CHAR_PROXY_CONFIG") == "app" {
-		launchArgs = append(launchArgs, "-is.proxy_query", appProxyQuery(capMbps, xferTimeout, groupID))
+		launchArgs = append(launchArgs, "-is.proxy_query", appProxyQuery(capMbps, xferTimeout, groupID, groupBroadcast))
 		appium.SetLaunchArgs(launchArgs)
-		t.Logf("config-on-connect VIA APP URL: rate=%.3f Mbps xfer_timeout=%s peak_clamp=%dMbps group=%q (no curl); player_id=%s", capMbps, xferTimeout, peakClampMbps, groupID, pid)
+		t.Logf("config-on-connect VIA APP URL: rate=%.3f Mbps xfer_timeout=%s peak_clamp=%dMbps group=%q broadcast=%v (no curl); player_id=%s", capMbps, xferTimeout, peakClampMbps, groupID, groupBroadcast, pid)
 		return
 	}
 	appium.SetLaunchArgs(launchArgs)
@@ -97,10 +102,10 @@ func wireConfigOnConnect(ctx context.Context, t *testing.T, appium *runner.Appiu
 	if capMbps > 0 {
 		cfg = runner.ShapeConfig(capMbps, xferTimeout)
 	}
-	if err := runner.ConfigureOnConnect(ctx, pid, groupID, cfg); err != nil {
+	if err := runner.ConfigureOnConnect(ctx, pid, groupID, groupBroadcast, cfg); err != nil {
 		t.Fatalf("ConfigureOnConnect (player_id=%s cap=%.3f Mbps group=%q): %v", pid, capMbps, groupID, err)
 	}
-	t.Logf("config-on-connect VIA CURL (default): session %s cap=%.3f Mbps xfer_timeout=%s peak_clamp=%dMbps group=%q before launch", pid, capMbps, xferTimeout, peakClampMbps, groupID)
+	t.Logf("config-on-connect VIA CURL (default): session %s cap=%.3f Mbps xfer_timeout=%s peak_clamp=%dMbps group=%q broadcast=%v before launch", pid, capMbps, xferTimeout, peakClampMbps, groupID, groupBroadcast)
 }
 
 // peakClampForCap maps a network cap (Mbps) to the app's whole-Mbps startup
@@ -116,7 +121,7 @@ func peakClampForCap(capMbps float64) int {
 // appProxyQuery builds the -is.proxy_query value for CHAR_PROXY_CONFIG=app: the
 // rate cap plus, when xferTimeout>0, the segment transfer timeout. Mirrors the
 // curl-mode ShapeConfig so both drivers materialize the same session.
-func appProxyQuery(capMbps float64, xferTimeout time.Duration, groupID string) string {
+func appProxyQuery(capMbps float64, xferTimeout time.Duration, groupID string, groupBroadcast bool) string {
 	var parts []string
 	if capMbps > 0 {
 		parts = append(parts, fmt.Sprintf("proxy.shape.rate_mbps=%g", capMbps))
@@ -128,6 +133,9 @@ func appProxyQuery(capMbps float64, xferTimeout time.Duration, groupID string) s
 	}
 	if groupID != "" {
 		parts = append(parts, "group_id="+groupID)
+		if !groupBroadcast {
+			parts = append(parts, "group_broadcast=false")
+		}
 	}
 	return strings.Join(parts, "&")
 }

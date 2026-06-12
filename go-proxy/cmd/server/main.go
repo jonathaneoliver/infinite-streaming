@@ -5499,6 +5499,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if g := r.URL.Query().Get("group_id"); g != "" {
 			groupID = g
 		}
+		// #fleet-group display-only: group_broadcast=false makes the group a
+		// pure DISPLAY link — members share group_id (so the dashboard charts
+		// them together and the archive groups them) but a member PATCH is NOT
+		// mirrored to the other members. Used by the startup fleet, where every
+		// device runs its own cold-start plan and a broadcast would corrupt the
+		// per-device measurements. Default (absent / any non-false value) keeps
+		// the pyramid-style auto-broadcast group.
+		groupBroadcast := true
+		if gb := r.URL.Query().Get("group_broadcast"); gb == "false" || gb == "0" {
+			groupBroadcast = false
+		}
 		var allocated int
 		_, reserved := a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
 			if len(sessions) >= a.maxSessions {
@@ -5575,6 +5586,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"player_id":                      playerID,
 			"play_id":                        playID,
 			"group_id":                       groupID,
+			"group_broadcast":                groupBroadcast,
 			"control_revision":               newControlRevision(),
 			"headers_player_id":              playerHeader,
 			"headers_player-ID":              playerHeaderAlt,

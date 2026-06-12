@@ -95,8 +95,13 @@ func runStartup(t *testing.T, p runner.Platform) {
 	// resolves the roster and either runs the single-device path unchanged or
 	// fans out one parallel subtest per device with the home + sweep barriers
 	// wired (see runStartupOnDevice).
-	// TODO(fleet): group mode like pyramid (CHAR_FLEET_GROUP) — parallel-
-	// independent + synchronized only for now.
+	//
+	// Group mode (CHAR_FLEET_GROUP=1): unlike pyramid's broadcast group (one
+	// leader drives, the proxy mirrors to all), startup forms a DISPLAY-ONLY
+	// group — every device runs its OWN cold-start plan independently and the
+	// shared group_id only groups the plays for the dashboard's side-by-side
+	// compare. A broadcast group would corrupt the per-device measurements, so
+	// each session is born with group_broadcast=false (see runStartupCycle).
 	runFleet(t, p, runStartupOnDevice)
 }
 
@@ -254,6 +259,15 @@ func runStartupOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars
 		t.Logf("SWEEP barrier released — beginning synchronized cap matrix")
 	}
 
+	// Display-only group id (empty for single-device / non-group runs). Each
+	// app_cold cycle's config-on-connect carries it so every fresh session is
+	// born into the group at connect (survives the per-cycle player_id churn),
+	// with group_broadcast=false so per-device shaping/labels don't mirror.
+	groupID := bars.fleetGroupID()
+	if groupID != "" {
+		t.Logf("display-only group %s — this device runs its own plan; grouped only for dashboard compare", groupID)
+	}
+
 	var allCycles []runner.StartupCycleResult
 	cycleIdx := 0
 
@@ -262,7 +276,7 @@ func runStartupOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars
 		for rep := 0; rep < reps; rep++ {
 			for _, boundary := range startupBoundaries {
 				cycleIdx++
-				result := runStartupCycle(ctx, t, sess, appium, *picked, boundary, target, setupClip, capMbps, cycleIdx, rep, bws)
+				result := runStartupCycle(ctx, t, sess, appium, *picked, boundary, target, setupClip, capMbps, cycleIdx, rep, bws, groupID)
 				allCycles = append(allCycles, result)
 				firstAnnot := runner.AnnotateVariant(bws, result.FirstVariantPicked, capMbps)
 				settledAnnot := runner.AnnotateVariant(bws, result.SettledVariant, capMbps)
@@ -351,7 +365,7 @@ func runStartupCycle(
 	ctx context.Context, t *testing.T,
 	sess *runner.Session, appium *runner.AppiumLauncher, dev runner.Device,
 	boundary startupBoundary, targetClip, setupClip string, capMbps float64, idx, rep int,
-	bws map[string]runner.VariantBandwidth,
+	bws map[string]runner.VariantBandwidth, groupID string,
 ) runner.StartupCycleResult {
 	result := runner.StartupCycleResult{
 		CycleIdx:      idx,
@@ -411,7 +425,10 @@ func runStartupCycle(
 		// URL): mint a fresh id and cap the session at capMbps before the
 		// first byte — replaces ReadPlayerID + post-launch ApplyRate + tc-settle.
 		pid := runner.NewPlayerID()
-		wireConfigOnConnect(ctx, t, appium, nil, pid, capMbps, 0, 0, "")
+		// groupID born-groups this fresh session at connect (display-only:
+		// group_broadcast=false ⇒ no cross-device mirroring). Empty for
+		// single-device / non-group runs, so no group_id param is sent.
+		wireConfigOnConnect(ctx, t, appium, nil, pid, capMbps, 0, 0, groupID, false)
 		s, err := appium.LaunchToHome(ctx, dev)
 		if err != nil {
 			t.Fatalf("[%d] LaunchToHome: %v", idx, err)
