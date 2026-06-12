@@ -1213,6 +1213,7 @@ const COLUMNS = [
   { key: 'content_id',       label: 'Content',    type: 'string' as const,  sortable: true },
   { key: 'scenario',         label: 'Scenario',   type: 'string' as const,  sortable: false },
   { key: 'play_id',          label: 'Play ID',    type: 'string' as const,  sortable: true },
+  { key: 'group_id',         label: 'Group',      type: 'string' as const,  sortable: true },
   { key: 'last_state',       label: 'State',      type: 'string' as const,  sortable: true },
   { key: 'playback_status',  label: 'Outcome',    type: 'string' as const,  sortable: true },
   { key: 'issues_count',     label: 'Issues',     type: 'number' as const,  sortable: true },
@@ -1677,13 +1678,17 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                   <td class="cell-play-id">
                     <a v-if="r.play_id && r.player_id" :href="viewerHref(r)" class="play-id-link">{{ r.play_id }}</a>
                     <template v-else>{{ r.play_id || '' }}</template>
+                  </td>
+                  <td class="cell-group-id">
                     <a
                       v-if="canCompareGroup(r)"
                       :href="compareGroupHref(r)"
-                      class="compare-group-link"
-                      :title="`Compare all ${groupMembers(r).length} grouped plays side-by-side`"
+                      class="group-compare-link"
+                      :title="`Open all ${groupMembers(r).length} grouped plays in compare mode`"
                       @click.stop
-                    >⊞ compare</a>
+                    >{{ r.group_id }}</a>
+                    <span v-else-if="r.group_id" class="group-id-plain" :title="r.group_id">{{ r.group_id }}</span>
+                    <span v-else class="dash">—</span>
                   </td>
                   <td>{{ r.last_state || '' }}</td>
                   <td><span :style="{ color: endOutcome(r).color, fontWeight: 600 }" :title="endOutcome(r).tip">{{ endOutcome(r).label }}</span></td>
@@ -1985,12 +1990,15 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 .cell-play-id { font-weight: 600; color: #1d4ed8; }
 .play-id-link { color: #1d4ed8; text-decoration: none; font-weight: 600; }
 .play-id-link:hover { text-decoration: underline; }
-.compare-group-link {
-  margin-left: 8px; padding: 1px 6px; border-radius: 4px;
-  font-size: 0.72rem; font-weight: 600; white-space: nowrap;
+.cell-group-id { max-width: 170px; }
+.group-compare-link {
+  display: inline-block; max-width: 100%; padding: 1px 6px; border-radius: 4px;
+  font-family: ui-monospace, monospace; font-size: 0.72rem; font-weight: 600;
   color: #6d28d9; background: #ede9fe; text-decoration: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
 }
-.compare-group-link:hover { background: #ddd6fe; }
+.group-compare-link:hover { background: #ddd6fe; text-decoration: underline; }
+.group-id-plain { font-family: ui-monospace, monospace; font-size: 0.72rem; color: #6b7280; }
 
 .issue-badge, .health-badge {
   display: inline-block;

@@ -125,6 +125,11 @@ let savedOpenBeforeForce: boolean | null = null;
 watch(
   () => props.forceCollapsed,
   (v, old) => {
+    // `immediate` so a section that mounts with forceCollapsed ALREADY true
+    // still folds — the archive compare view (#736) defaults compare on, so
+    // there's no false→true transition to catch otherwise. On the immediate
+    // tick `old` is undefined; treat that like `false` so true folds and
+    // false is a no-op.
     if (v && !old) {
       savedOpenBeforeForce = isOpen.value;
       isOpen.value = false;
@@ -133,6 +138,7 @@ watch(
       savedOpenBeforeForce = null;
     }
   },
+  { immediate: true },
 );
 </script>
 
