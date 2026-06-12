@@ -104,9 +104,13 @@ function toggle() {
   if (props.persistKey) writeStored(props.persistKey, isOpen.value);
 }
 
-// If `persistKey` arrives async (rare), re-resolve once it's set.
+// If `persistKey` arrives async (rare), re-resolve once it's set. But NOT
+// when forceCollapsed is active — the immediate forceCollapsed watch (below)
+// already folded us during setup, and re-resolving here to the persisted/open
+// default would silently re-open a section that compare mode wants folded
+// (#736: Player State defaults `:open="true"`, so it kept popping back open).
 onMounted(() => {
-  if (props.persistKey) {
+  if (props.persistKey && !props.forceCollapsed) {
     isOpen.value = resolveInitial();
   }
 });
