@@ -144,6 +144,33 @@ func (a *AppiumLauncher) SetLaunchArgs(args []string) {
 	a.mu.Unlock()
 }
 
+// baselineTestFlags are config-on-startup flags EVERY characterization launch
+// forces to a known value, so a sim's stale persisted setting can't silently
+// leak into a run. These launch args land in NSArgumentDomain, which outranks
+// the app's persistent UserDefaults — so `-is.flag.4k true` overrides a sim
+// whose "4K" toggle was left off (it would otherwise cap itself at 1080p), and
+// `-is.flag.peak_bitrate_mbps 0` clears a leftover startup peak-bitrate clamp
+// from a prior capped run (e.g. pyramid's floor clamp). A mode that sets one of
+// these explicitly wins — withBaselineTestFlags only fills the ones it omitted.
+var baselineTestFlags = [][2]string{
+	{"-is.flag.4k", "true"},
+	{"-is.flag.peak_bitrate_mbps", "0"},
+}
+
+func withBaselineTestFlags(args []string) []string {
+	present := map[string]bool{}
+	for i := 0; i+1 < len(args); i += 2 {
+		present[args[i]] = true
+	}
+	out := append([]string{}, args...)
+	for _, kv := range baselineTestFlags {
+		if !present[kv[0]] {
+			out = append(out, kv[0], kv[1])
+		}
+	}
+	return out
+}
+
 // intentExtrasFromLaunchArgs converts `-is.X Y` launch-arg pairs into the
 // `--es is.X Y` form Android's appium:optionalIntentArguments expects (String
 // intent extras appended to the start intent). Values in the #714 vocab
@@ -169,19 +196,22 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 		return nil, fmt.Errorf("appium server not reachable at %s: %w (start with `appium`, or unset LAUNCH_MODE=appium)", a.URL, err)
 	}
 	caps := appiumCapabilities(d, bundleID)
-	if len(a.launchArgs) > 0 {
+	// Always fold in the baseline test flags (4K on, peak clamp off unless the
+	// mode set it) so a sim's stale persisted UserDefaults can't leak in.
+	effectiveArgs := withBaselineTestFlags(a.launchArgs)
+	if len(effectiveArgs) > 0 {
 		if d.Platform == PlatformAndroidTV {
 			// UiAutomator2 ignores processArguments. Deliver the launch args
 			// as intent extras appended to the start intent: `-is.X Y` →
 			// `--es is.X Y`. The Android app reads `is.player_id` off the
 			// launch intent (config-on-connect, #714), mirroring how iOS reads
 			// it from NSArgumentDomain.
-			caps["appium:optionalIntentArguments"] = intentExtrasFromLaunchArgs(a.launchArgs)
+			caps["appium:optionalIntentArguments"] = intentExtrasFromLaunchArgs(effectiveArgs)
 		} else {
 			// XCUITest passes these to the app on launch; iOS folds `-key value`
 			// pairs into UserDefaults (NSArgumentDomain). #segments forces the
 			// segment this way so a single cold launch lands on it.
-			caps["appium:processArguments"] = map[string]any{"args": a.launchArgs}
+			caps["appium:processArguments"] = map[string]any{"args": effectiveArgs}
 		}
 	}
 	sessID, err := a.createSession(ctx, caps)

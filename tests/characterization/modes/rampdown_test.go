@@ -49,7 +49,161 @@ func TestRampdownAndroidTV(t *testing.T) { runRampdown(t, runner.PlatformAndroid
 func TestRampdownWeb(t *testing.T)       { runRampdown(t, runner.PlatformWeb) }
 
 func runRampdown(t *testing.T, p runner.Platform) {
-	sess := OpenSession(t, p)
+	// Fleet dispatch (1 device by default, N under CHAR_FLEET_*). runFleet
+	// resolves the roster and either runs the single-device path unchanged or
+	// fans out one parallel subtest per device with the home + sweep barriers
+	// wired (see runRampdownOnDevice). Under CHAR_FLEET_GROUP=1 the leader drives
+	// one broadcast descent for the whole group (like transient_shock / pyramid).
+	runFleet(t, p, runRampdownOnDevice)
+}
+
+// runRampdownOnDevice runs the descending sweep against ONE explicit device.
+// Like transient_shock it mints its OWN launcher + per-sim player_id and uses
+// the PASSED dev; when bars != nil it syncs at the home barrier (all sims start
+// playback together) and the sweep barrier (all start shaping together).
+//
+// rampdown shares transient_shock's INIT CONFIG: it does NOT prime a cold-start
+// floor — it warms HIGH/uncapped to the top variant before descending, so a
+// floor prime would leave it pinned low. Under CHAR_FLEET_GROUP=1 the session is
+// born-grouped via a config-on-connect carrying ONLY player_id + group_id (no
+// shape), so the fleet is grouped at connect yet still uncapped; the leader
+// (index 0) then drives one broadcast descent and observers hold under it.
+func runRampdownOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars *fleetBarriers) {
+	// --- pick launcher (own instance per subtest) ----------------
+	mode, launcher, err := runner.PickMode()
+	if err != nil {
+		t.Skipf("PickMode: %v", err)
+	}
+	t.Logf("launch mode: %s", mode)
+	picked := &dev
+	t.Logf("device: %s (fleet index %d)", picked, dev.FleetIndex)
+
+	// If this sim dies before reaching a barrier, drop it from that barrier's
+	// expected set so the survivors still release together (home, sweep).
+	homeArrived, sweepArrived := false, false
+	if bars != nil {
+		defer func() {
+			if !homeArrived {
+				bars.home.giveUp()
+			}
+			if !sweepArrived {
+				bars.sweep.giveUp()
+			}
+		}()
+	}
+
+	// Spread parallel fleet launches so N sims don't cold-build WDA at once
+	// (no-op for index 0 / single-device runs).
+	staggerFleetLaunch(t, dev.FleetIndex)
+
+	appium, isAppium := launcher.(*runner.AppiumLauncher)
+
+	// #config — read the per-run configuration axes (segment, LocalProxy,
+	// transfer-timeout). The launch-arg ones plus the minted -is.player_id are
+	// forced on the cold launch in the Appium block below.
+	cfg := readRunConfig(t, isAppium)
+
+	var sess *runner.Session
+	if isAppium {
+		// #714: mint a per-sim player_id and force it onto the cold launch via
+		// the launch args — but DO NOT prime a config-on-connect rate cap. Like
+		// transient_shock, rampdown starts HIGH/uncapped (it warms to the top
+		// variant, then descends), so a cold-start floor would leave it pinned
+		// low. When grouping, born-group the session via a config-on-connect
+		// carrying ONLY player_id + group_id (capMbps=0 ⇒ no shape) so the fleet
+		// is grouped at connect yet still uncapped; player_id stays a clean UUID.
+		// Otherwise a bare launch (no pre-created session).
+		pid := runner.NewPlayerID()
+		// Generous budget — fleet runs hold at the home barrier until the last sim.
+		setupTimeout := 4 * time.Minute
+		if bars != nil {
+			setupTimeout = 12 * time.Minute
+		}
+		setupCtx, setupCancel := context.WithTimeout(context.Background(), setupTimeout)
+		defer setupCancel()
+		if gid := bars.fleetGroupID(); gid != "" {
+			wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, 0, 0, 0, gid)
+			t.Logf("rampdown: born-grouped (group=%s), uncapped — player_id=%s", gid, pid)
+		} else {
+			launchArgs := append(append([]string{}, cfg.launchArgs()...), "-is.player_id", pid)
+			appium.SetLaunchArgs(launchArgs)
+			t.Logf("rampdown: bare launch (no rate prime) — player_id=%s, args=%v", pid, launchArgs)
+		}
+
+		s, lerr := appium.LaunchToHome(setupCtx, *picked)
+		if lerr != nil {
+			t.Fatalf("LaunchToHome: %v", lerr)
+		}
+		s.PlayerID = pid
+
+		// Fleet sync #1 (home): this sim is at home, not yet playing. Hold
+		// until every sim is at home, then all start playback at once.
+		if bars != nil {
+			homeArrived = true
+			t.Logf("at home — waiting at fleet HOME barrier (playback starts together)")
+			bars.home.arriveAndWait(setupCtx)
+			t.Logf("HOME barrier released — starting playback")
+		}
+		// Survive transient content-startup: right after a cold launch the
+		// catalogue can be briefly empty, so tapping Resume starts nothing.
+		// Retry resume → heartbeat until the play comes up.
+		var herr error
+		for attempt := 1; attempt <= 3; attempt++ {
+			if rerr := appium.ResumePlayback(setupCtx, *picked); rerr != nil {
+				t.Logf("resume attempt %d: %v", attempt, rerr)
+			}
+			if herr = s.WaitForHeartbeat(setupCtx, 50*time.Second); herr == nil {
+				break
+			}
+			t.Logf("no heartbeat after resume attempt %d — content may still be loading; retrying", attempt)
+		}
+		if herr != nil {
+			t.Fatalf("WaitForHeartbeat after resume retries: %v", herr)
+		}
+		sess = s
+		t.Cleanup(func() {
+			cleanCtx, c := context.WithTimeout(context.Background(), 15*time.Second)
+			defer c()
+			if cerr := sess.ClearShape(cleanCtx); cerr != nil {
+				t.Logf("clear shape: %v", cerr)
+			}
+			if cerr := sess.CloseViaUI(cleanCtx); cerr != nil {
+				t.Logf("close playback via UI: %v", cerr)
+			}
+			// #714: free the session slot immediately (don't wait for the 5-min
+			// reaper) — config-on-connect mints a fresh player_id per run.
+			if cerr := sess.Release(cleanCtx); cerr != nil {
+				t.Logf("release session: %v", cerr)
+			}
+			if cerr := launcher.Close(); cerr != nil {
+				t.Logf("close launcher: %v", cerr)
+			}
+			if cerr := sess.ReleaseDevice(cleanCtx); cerr != nil {
+				t.Logf("release device: %v", cerr)
+			}
+		})
+	} else {
+		t.Logf("config-on-connect unavailable (non-Appium launcher) — legacy path")
+		sess = OpenSession(t, p)
+	}
+
+	// #config — arm the server-side active transfer timeout for this run.
+	{
+		tctx, tcancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := cfg.applyServerSide(tctx, sess); err != nil {
+			t.Logf("set transfer timeout: %v (test continues)", err)
+		} else {
+			t.Logf("transfer timeout: %s on segments", cfg.labels()["xfer_timeout"])
+		}
+		tcancel()
+		t.Cleanup(func() {
+			cctx, c := context.WithTimeout(context.Background(), 10*time.Second)
+			defer c()
+			if err := sess.SetSegmentTimeout(cctx, 0); err != nil {
+				t.Logf("clear transfer timeout: %v", err)
+			}
+		})
+	}
 
 	// Tag the current play with searchable metadata BEFORE the sweep
 	// starts. If the test crashes mid-sweep these still survive — at
@@ -59,6 +213,9 @@ func runRampdown(t *testing.T, p runner.Platform) {
 		"test":     "rampdown",
 		"platform": string(p),
 		"run_id":   runID,
+	}
+	for k, v := range cfg.labels() {
+		startLabels[k] = v
 	}
 	if err := sess.LabelPlay(context.Background(), startLabels); err != nil {
 		t.Logf("label play (start): %v (test continues)", err)
@@ -120,6 +277,38 @@ func runRampdown(t *testing.T, p runner.Platform) {
 	for i, v := range sweep {
 		v := v
 		steps[i] = runner.Step{RateMbps: v.CapMbps, Hold: rampdownMaxHold, Variant: &v}
+	}
+
+	// Fleet sync #2 (sweep): this sim is warmed up with its ladder read. Hold
+	// until every sim is here, then all begin the rampdown shaping at once.
+	// Bounded so a sim that failed bring-up can't hang the rest. No-op single.
+	if bars != nil {
+		sweepArrived = true
+		t.Logf("ready — waiting at fleet SWEEP barrier (shaping starts together across the fleet)")
+		bctx, bcancel := context.WithTimeout(ctx, 5*time.Minute)
+		bars.sweep.arriveAndWait(bctx)
+		bcancel()
+		t.Logf("SWEEP barrier released — beginning synchronized sweep")
+	}
+
+	// Group mode (CHAR_FLEET_GROUP=1): drive ONE descent for the whole fleet.
+	// The leader (index 0) runs the cycled sweep below — every ApplyRate is
+	// broadcast by the proxy to all members by group_id, so the descent lands
+	// identically on every sim. Observers DON'T drive (concurrent drivers would
+	// collide); they hold playback under the broadcast until the leader is done.
+	// Their samples are archived + grouped for side-by-side comparison in the
+	// dashboard. Mirrors transient_shock / pyramid.
+	if bars != nil && bars.group {
+		if dev.FleetIndex != 0 {
+			t.Logf("group observer — holding playback under the leader's broadcast descent (compare in dashboard)")
+			bars.waitSweepDone(ctx)
+			t.Logf("leader finished — observer done")
+			return
+		}
+		// signalSweepDone (deferred FIRST) releases the observers when the leader
+		// returns, even if the sweep below fails.
+		defer bars.signalSweepDone()
+		t.Logf("group leader — driving one broadcast descent for group %s", bars.groupID)
 	}
 
 	// #cycles — run the descent REPS times on the SAME live play (default

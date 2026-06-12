@@ -3,7 +3,6 @@ package modes
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -11,9 +10,9 @@ import (
 	"github.com/jonathaneoliver/infinite-streaming/tests/characterization/runner"
 )
 
-// Transient-shock — graduated-drop staircase: cold-start at the floor,
-// then build a full 4K buffer under a high cap (headroom ABOVE the 4K peak)
-// and drop to a sequence of escalating depths — the peak cap (×1.05 TCP
+// Transient-shock — graduated-drop staircase: warm up UNCAPPED to the top
+// variant (4K), then build a full 4K buffer under a high cap (headroom ABOVE
+// the 4K peak) and drop to a sequence of escalating depths — the peak cap (×1.05 TCP
 // overhead) of the published variant 3/4, 1/2, 1/4 up from the bottom, and
 // the bottom variant — returning to the high cap between drops so the
 // buffer refills. Finds WHERE the player breaks, not just the worst case.
@@ -27,9 +26,11 @@ import (
 // and the AVMetrics feed (CoreMedia errors + variant-switch start/complete)
 // to see whether the link survives the drop and whether the player recovers.
 //
-// Shares all of rampup's machinery: cold-start bootstrap, the run-config
-// axes (CHAR_SEGMENT / CHAR_LOCAL_PROXY / CHAR_TRANSFER_TIMEOUT) forced at
-// launch + applied server-side, play labels, and UI-close teardown.
+// Shares most of rampup's machinery: the run-config axes (CHAR_SEGMENT /
+// CHAR_LOCAL_PROXY / CHAR_TRANSFER_TIMEOUT) forced at launch + applied
+// server-side, play labels, and UI-close teardown. It deliberately does NOT
+// cold-start at a floor (rampup/pyramid do) — it warms up uncapped so the
+// player reaches 4K before the first shock.
 //
 // Env axes (in addition to the shared CHAR_SEGMENT / CHAR_LOCAL_PROXY /
 // CHAR_TRANSFER_TIMEOUT):
@@ -46,54 +47,51 @@ func TestTransientShockAndroidTV(t *testing.T) { runTransientShock(t, runner.Pla
 func TestTransientShockWeb(t *testing.T)       { runTransientShock(t, runner.PlatformWeb) }
 
 func runTransientShock(t *testing.T, p runner.Platform) {
-	// --- pick launcher + device ----------------------------------
+	// Fleet dispatch (1 device by default, N under CHAR_FLEET_*). runFleet
+	// resolves the roster and either runs the single-device path unchanged or
+	// fans out one parallel subtest per device with the home + sweep barriers
+	// wired (see runTransientShockOnDevice). Under CHAR_FLEET_GROUP=1 the leader
+	// drives one broadcast staircase for the whole group (like pyramid).
+	runFleet(t, p, runTransientShockOnDevice)
+}
+
+// runTransientShockOnDevice runs the graduated-drop staircase against ONE
+// explicit device. Like runPyramidOnDevice it mints its OWN launcher and uses
+// the PASSED dev; when bars != nil it syncs at the home barrier (all sims start
+// playback together) and the sweep barrier (all start shaping together).
+//
+// UNLIKE rampup/pyramid, transient-shock does NOT prime a cold-start floor: the
+// probe must warm to the top variant (4K) UNCAPPED before the first shock, so
+// there's a full forward buffer to drop FROM. We still mint a per-sim player_id
+// and set the launch args (incl. the per-sim WDA ports via dev.FleetIndex) and
+// bind the session — just with no config-on-connect rate curl and no peak clamp.
+func runTransientShockOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars *fleetBarriers) {
+	// --- pick launcher (own instance per subtest) ----------------
 	mode, launcher, err := runner.PickMode()
 	if err != nil {
 		t.Skipf("PickMode: %v", err)
 	}
 	t.Logf("launch mode: %s", mode)
+	picked := &dev
+	t.Logf("device: %s (fleet index %d)", picked, dev.FleetIndex)
 
-	discCtx, discCancel := context.WithTimeout(context.Background(), 90*time.Second)
-	devs, err := launcher.Discover(discCtx)
-	discCancel()
-	if err != nil {
-		t.Fatalf("discover: %v", err)
+	// If this sim dies before reaching a barrier, drop it from that barrier's
+	// expected set so the survivors still release together (home, sweep).
+	homeArrived, sweepArrived := false, false
+	if bars != nil {
+		defer func() {
+			if !homeArrived {
+				bars.home.giveUp()
+			}
+			if !sweepArrived {
+				bars.sweep.giveUp()
+			}
+		}()
 	}
-	wantUDID := strings.TrimSpace(os.Getenv("CHARACTERIZATION_DEVICE_UDID"))
-	var picked *runner.Device
-	for i := range devs {
-		if devs[i].Platform != p {
-			continue
-		}
-		if wantUDID != "" && !strings.EqualFold(devs[i].UDID, wantUDID) {
-			continue
-		}
-		picked = &devs[i]
-		break
-	}
-	if picked == nil {
-		t.Skipf("no %s device discovered (mode=%s)", p, mode)
-	}
-	t.Logf("picked device: %s", picked)
 
-	// --- bootstrap: read manifest BEFORE kill+launch so we cold-start
-	// at the floor (clean startup), then climb to the top under the high
-	// cap before the first shock. Same machinery rampup uses.
-	bootCtx, bootCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	preRec, preErr := runner.PreLaunchInfo(bootCtx, *picked)
-	bootCancel()
-
-	var preFloor float64
-	if preErr != nil {
-		t.Logf("pre-launch info: %v (cold-start unavailable; conservative/fallback path)", preErr)
-	} else if preRec.CurrentPlay == nil || len(preRec.CurrentPlay.Manifest.Variants) == 0 {
-		t.Logf("pre-launch: no current play / no variants yet (cold-start unavailable)")
-	} else if preDesc, derr := runner.StandardLadderRates(preRec); derr != nil {
-		t.Logf("pre-launch StandardLadderRates: %v (cold-start unavailable)", derr)
-	} else {
-		preFloor = rampupFloorFrom(preDesc)
-		t.Logf("bootstrap: pre-launch floor = %.3f Mbps (from current player's manifest)", preFloor)
-	}
+	// Spread parallel fleet launches so N sims don't cold-build WDA at once
+	// (no-op for index 0 / single-device runs).
+	staggerFleetLaunch(t, dev.FleetIndex)
 
 	appium, isAppium := launcher.(*runner.AppiumLauncher)
 
@@ -105,24 +103,51 @@ func runTransientShock(t *testing.T, p runner.Platform) {
 
 	var sess *runner.Session
 	if isAppium {
-		// #714 config-on-connect: mint the player_id, resolve the cold-start
-		// floor, and wire the driver (default = harness pre-configures via a
-		// curl, so the variant ladder is known up front; CHAR_PROXY_CONFIG=app →
-		// the player emits proxy.* on its own bootstrap URL). Replaces the old
-		// coldStart / conservativeStart split — the Android special-casing is
-		// gone now that Android honors the launch arg.
+		// #714: mint a per-sim player_id and force it onto the cold launch via
+		// the launch args — but DO NOT prime a config-on-connect rate cap. This
+		// probe must warm to its top variant (4K) UNCAPPED before the first
+		// shock (so it has a full forward buffer to drop FROM); a floor prime
+		// would leave it pinned low. We wire the launch args (segment + the
+		// minted -is.player_id) directly, skipping the rate curl / peak clamp
+		// that rampup/pyramid use. The per-sim WDA ports come from
+		// dev.FleetIndex flowing into the Appium caps.
 		pid := runner.NewPlayerID()
-		// Generous budget — Android adds a catalogue-load settle on top of launch.
-		setupCtx, setupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		// Generous budget — Android adds a catalogue-load settle on top of
+		// launch; fleet runs also hold at the home barrier until the last sim.
+		setupTimeout := 4 * time.Minute
+		if bars != nil {
+			setupTimeout = 12 * time.Minute
+		}
+		setupCtx, setupCancel := context.WithTimeout(context.Background(), setupTimeout)
 		defer setupCancel()
-		floor := resolveFloor(setupCtx, t, preFloor, rampupFloorFrom)
-		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor, 0, 0)
+		// No rate prime (uncapped) — this probe must warm to its top variant (4K)
+		// before the first shock. When grouping, born-group the session via a
+		// config-on-connect carrying ONLY player_id + group_id (capMbps=0 ⇒ no
+		// shape), so the fleet is grouped at connect yet still uncapped. Player_id
+		// stays a clean UUID. Otherwise a bare launch (no pre-created session).
+		if gid := bars.fleetGroupID(); gid != "" {
+			wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, 0, 0, 0, gid)
+			t.Logf("transient-shock: born-grouped (group=%s), uncapped — player_id=%s", gid, pid)
+		} else {
+			launchArgs := append(append([]string{}, cfg.launchArgs()...), "-is.player_id", pid)
+			appium.SetLaunchArgs(launchArgs)
+			t.Logf("transient-shock: bare launch (no rate prime) — player_id=%s, args=%v", pid, launchArgs)
+		}
 
 		s, lerr := appium.LaunchToHome(setupCtx, *picked)
 		if lerr != nil {
 			t.Fatalf("LaunchToHome: %v", lerr)
 		}
 		s.PlayerID = pid
+
+		// Fleet sync #1 (home): this sim is at home, not yet playing. Hold
+		// until every sim is at home, then all start playback at once.
+		if bars != nil {
+			homeArrived = true
+			t.Logf("at home — waiting at fleet HOME barrier (playback starts together)")
+			bars.home.arriveAndWait(setupCtx)
+			t.Logf("HOME barrier released — starting playback")
+		}
 		// Survive transient content-startup: right after a cold launch the
 		// catalogue can be briefly empty ("No content available"), so tapping
 		// Resume starts nothing. Retry resume → heartbeat until the play comes up.
@@ -213,7 +238,7 @@ func runTransientShock(t *testing.T, p runner.Platform) {
 
 	// --- variant ladder (post-launch — definitive) --------------
 	if isAppium {
-		t.Logf("waiting %s for manifest to populate under config-on-connect cap", rampdownWarmupHold)
+		t.Logf("waiting %s for manifest to populate (uncapped warmup — no cold-start floor)", rampdownWarmupHold)
 		if err := holdContext(ctx, rampdownWarmupHold); err != nil {
 			t.Fatalf("manifest-fetch hold: %v", err)
 		}
@@ -287,6 +312,41 @@ func runTransientShock(t *testing.T, p runner.Platform) {
 
 	t.Logf("staircase: build@%.1f Mbps (%s); drops (variant peaks ×1.05, 3/4·1/2·1/4·bottom)=%.3f Mbps (hold %s each)",
 		high, highHold, drops, dipHold)
+
+	// Fleet sync #2 (sweep): this sim is warmed up with its ladder read. Hold
+	// until every sim is here, then all begin the staircase shaping at once.
+	// Bounded so a sim that failed bring-up can't hang the rest. No-op single.
+	if bars != nil {
+		sweepArrived = true
+		t.Logf("ready — waiting at fleet SWEEP barrier (shaping starts together across the fleet)")
+		bctx, bcancel := context.WithTimeout(ctx, 5*time.Minute)
+		bars.sweep.arriveAndWait(bctx)
+		bcancel()
+		t.Logf("SWEEP barrier released — beginning synchronized sweep")
+	}
+
+	// Group mode (CHAR_FLEET_GROUP=1): drive ONE staircase for the whole fleet.
+	// The leader (index 0) creates the player-group and runs the sweep below —
+	// every ApplyRate is broadcast by the proxy to all members, so the shock
+	// lands identically on every sim. Observers don't drive (that would collide);
+	// they hold playback under the broadcast until the leader is done. Their
+	// samples are archived + grouped for side-by-side comparison in the
+	// dashboard (#579 compare-charts).
+	if bars != nil && bars.group {
+		if dev.FleetIndex != 0 {
+			t.Logf("group observer — holding playback under the leader's broadcast staircase (compare in dashboard)")
+			bars.waitSweepDone(ctx)
+			t.Logf("leader finished — observer done")
+			return
+		}
+		// The proxy already grouped the fleet by the `_G<num>` token in each
+		// sim's player_id (born grouped at connect — no CreateGroup race). The
+		// leader just drives; the proxy fans every ApplyRate to the group by
+		// group_id. signalSweepDone (deferred FIRST) releases the observers when
+		// the leader returns, even if the sweep below fails.
+		defer bars.signalSweepDone()
+		t.Logf("group leader — driving one broadcast staircase for group %s", bars.groupID)
+	}
 
 	report := RunSweep(ctx, t, sess, "transient-shock", steps, time.Second)
 	report.Variants = unionRungs(desc)
