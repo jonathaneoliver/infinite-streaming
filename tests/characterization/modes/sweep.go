@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -82,16 +83,54 @@ func resolveFloor(ctx context.Context, t *testing.T, preFloor float64, floorFn f
 // false is a display-only group (members share a group_id for dashboard compare
 // but are shaped/labelled independently) — the startup fleet uses false.
 // Ignored when groupID is empty.
-func wireConfigOnConnect(ctx context.Context, t *testing.T, appium *runner.AppiumLauncher, baseArgs []string, pid string, capMbps float64, xferTimeout time.Duration, peakClampMbps int, groupID string, groupBroadcast bool) {
+// contentCfg carries this member's per-member content treatment (e.g.
+// allowed_variants keep-set from an A/B arm), applied at ALLOCATE so it lands
+// before the player's first master fetch. nil ⇒ no treatment (full ladder).
+// Content is not broadcast-eligible, so it stays per-member regardless of the
+// group's broadcast mode.
+func wireConfigOnConnect(ctx context.Context, t *testing.T, appium *runner.AppiumLauncher, baseArgs []string, pid string, capMbps float64, xferTimeout time.Duration, peakClampMbps int, groupID string, groupBroadcast bool, contentCfg runner.BootstrapConfig) {
 	t.Helper()
 	launchArgs := append(append([]string{}, baseArgs...), "-is.player_id", pid)
+	// Force play_id rotation OFF for every characterization launch
+	// (is.flag.play_id_rotation_s). A device with a non-zero "Rotate play_id
+	// (soak runs)" value saved in UserDefaults otherwise mints a fresh play
+	// mid-run, fragmenting the run's data across multiple — often UNLABELLED —
+	// plays (seen on a real iPhone: one pyramid split into 3 unlabelled plays,
+	// making per-play ABR analysis impossible). The NSArgumentDomain override
+	// wins over the persisted value, so this pins it off regardless of what the
+	// device has saved.
+	launchArgs = append(launchArgs, "-is.flag.play_id_rotation_s", "0")
+	// Pin two more launch-state flags for appium-driven characterization
+	// (NSArgumentDomain overrides any saved value; CLI mode never reaches here —
+	// wireConfigOnConnect is appium-only):
+	//   - skip_home OFF: land on Home so LaunchToHome + ResumePlayback drive the
+	//     ONE intended play. With skip_home ON the app cold-launches straight into
+	//     playback on lastPlayed — consuming the minted player_id on the wrong
+	//     content — and the harness then backs out, minting an extra unlabelled
+	//     play (same data-fragmentation class as rotation).
+	//   - dev_mode ON: render the on-screen HUD (PlaybackScreen gates the metrics
+	//     overlay on developerMode) for live observation during runs.
+	launchArgs = append(launchArgs,
+		"-is.flag.skip_home", "false",
+		"-is.flag.dev_mode", "true",
+	)
+	// CHAR_CONTENT pins the clip EVERY device plays (e.g. "insane_new_p200_h264"),
+	// overriding each device's own lastPlayed so the whole fleet streams identical
+	// content — required for apples-to-apples ABR comparison (otherwise each device
+	// resumes its own clip with its own variant ladder). Forced via the
+	// is.lastPlayed NSArgumentDomain key: ResumePlayback's continue-watching hero
+	// resolves to this clip. Value is the full catalogue `name`. Unset = today's
+	// behaviour (each device resumes its own lastPlayed / the featured clip).
+	if clip := os.Getenv("CHAR_CONTENT"); clip != "" {
+		launchArgs = append(launchArgs, "-is.lastPlayed", clip)
+	}
 	if peakClampMbps > 0 {
 		launchArgs = append(launchArgs, "-is.flag.peak_bitrate_mbps", strconv.Itoa(peakClampMbps))
 	}
 	if os.Getenv("CHAR_PROXY_CONFIG") == "app" {
-		launchArgs = append(launchArgs, "-is.proxy_query", appProxyQuery(capMbps, xferTimeout, groupID, groupBroadcast))
+		launchArgs = append(launchArgs, "-is.proxy_query", appProxyQuery(capMbps, xferTimeout, groupID, groupBroadcast, contentCfg))
 		appium.SetLaunchArgs(launchArgs)
-		t.Logf("config-on-connect VIA APP URL: rate=%.3f Mbps xfer_timeout=%s peak_clamp=%dMbps group=%q broadcast=%v (no curl); player_id=%s", capMbps, xferTimeout, peakClampMbps, groupID, groupBroadcast, pid)
+		t.Logf("config-on-connect VIA APP URL: rate=%.3f Mbps xfer_timeout=%s peak_clamp=%dMbps group=%q broadcast=%v content_keys=%d (no curl); player_id=%s", capMbps, xferTimeout, peakClampMbps, groupID, groupBroadcast, len(contentCfg), pid)
 		return
 	}
 	appium.SetLaunchArgs(launchArgs)
@@ -102,10 +141,18 @@ func wireConfigOnConnect(ctx context.Context, t *testing.T, appium *runner.Appiu
 	if capMbps > 0 {
 		cfg = runner.ShapeConfig(capMbps, xferTimeout)
 	}
+	// Merge the per-member content treatment into the allocate so it's live from
+	// the player's first master fetch (e.g. an A/B arm's allowed_variants keep-set).
+	for k, v := range contentCfg {
+		if cfg == nil {
+			cfg = runner.BootstrapConfig{}
+		}
+		cfg[k] = v
+	}
 	if err := runner.ConfigureOnConnect(ctx, pid, groupID, groupBroadcast, cfg); err != nil {
 		t.Fatalf("ConfigureOnConnect (player_id=%s cap=%.3f Mbps group=%q): %v", pid, capMbps, groupID, err)
 	}
-	t.Logf("config-on-connect VIA CURL (default): session %s cap=%.3f Mbps xfer_timeout=%s peak_clamp=%dMbps group=%q broadcast=%v before launch", pid, capMbps, xferTimeout, peakClampMbps, groupID, groupBroadcast)
+	t.Logf("config-on-connect VIA CURL (default): session %s cap=%.3f Mbps xfer_timeout=%s peak_clamp=%dMbps group=%q broadcast=%v content_keys=%d before launch", pid, capMbps, xferTimeout, peakClampMbps, groupID, groupBroadcast, len(contentCfg))
 }
 
 // peakClampForCap maps a network cap (Mbps) to the app's whole-Mbps startup
@@ -121,7 +168,7 @@ func peakClampForCap(capMbps float64) int {
 // appProxyQuery builds the -is.proxy_query value for CHAR_PROXY_CONFIG=app: the
 // rate cap plus, when xferTimeout>0, the segment transfer timeout. Mirrors the
 // curl-mode ShapeConfig so both drivers materialize the same session.
-func appProxyQuery(capMbps float64, xferTimeout time.Duration, groupID string, groupBroadcast bool) string {
+func appProxyQuery(capMbps float64, xferTimeout time.Duration, groupID string, groupBroadcast bool, contentCfg runner.BootstrapConfig) string {
 	var parts []string
 	if capMbps > 0 {
 		parts = append(parts, fmt.Sprintf("proxy.shape.rate_mbps=%g", capMbps))
@@ -131,6 +178,16 @@ func appProxyQuery(capMbps float64, xferTimeout time.Duration, groupID string, g
 				"proxy.transfer_timeouts.applies_segments=true")
 		}
 	}
+	// Per-member content treatment rides the same proxy.<path> form (keys are
+	// stable-sorted so the URL is deterministic).
+	keys := make([]string, 0, len(contentCfg))
+	for k := range contentCfg {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		parts = append(parts, "proxy."+k+"="+contentCfg[k])
+	}
 	if groupID != "" {
 		parts = append(parts, "group_id="+groupID)
 		if !groupBroadcast {
@@ -138,6 +195,51 @@ func appProxyQuery(capMbps float64, xferTimeout time.Duration, groupID string, g
 		}
 	}
 	return strings.Join(parts, "&")
+}
+
+// clipIDFromContent derives the app's clip_id from a catalogue name by stripping
+// the _p200_<codec> suffix (mirrors the iOS ContentItem.deriveClipId and
+// go-upload's splitClipIDAndCodec). "insane_new_p200_h264" → "insane_new". Used
+// to tap the clip-specific home-tile-<clip_id> so a pinned-content run lands on
+// the intended clip rather than the racy continue-watching hero.
+func clipIDFromContent(name string) string {
+	lower := strings.ToLower(name)
+	if i := strings.Index(lower, "_p200_"); i >= 0 {
+		return lower[:i]
+	}
+	return lower
+}
+
+// armContentConfig resolves this fleet member's per-member content treatment for
+// an A/B run, applied at ALLOCATE (left of the group barrier — content is not
+// broadcast-eligible, so it stays per-member). CHAR_ARM_<idx>_VARIANT_KEEP
+// (e.g. "every_other") selects a variant keep-rule; the keep-set is computed
+// from the catalogue ladder for CHAR_CONTENT — read straight from /api/content,
+// which is fault-immune and session-independent — and resolved to RESOLUTION
+// terms (the proxy matches allowed_variants by resolution). Returns nil when no
+// arm is configured for this index (member streams the full ladder).
+func armContentConfig(ctx context.Context, t *testing.T, fleetIndex int) runner.BootstrapConfig {
+	rule := strings.TrimSpace(os.Getenv(fmt.Sprintf("CHAR_ARM_%d_VARIANT_KEEP", fleetIndex)))
+	if rule == "" || rule == "all" {
+		return nil
+	}
+	clip := strings.TrimSpace(os.Getenv("CHAR_CONTENT"))
+	if clip == "" {
+		t.Logf("arm[%d] variant_keep=%q ignored: CHAR_CONTENT unset (can't resolve the ladder)", fleetIndex, rule)
+		return nil
+	}
+	variants, err := runner.FetchContentVariants(ctx, clip)
+	if err != nil {
+		t.Logf("arm[%d] variant_keep=%q: %v — falling back to full ladder", fleetIndex, rule, err)
+		return nil
+	}
+	keep := runner.ApplyKeep(rule, variants)
+	if len(keep) == 0 {
+		t.Logf("arm[%d] variant_keep=%q resolved to no thinning (full ladder)", fleetIndex, rule)
+		return nil
+	}
+	t.Logf("arm[%d] variant_keep=%q → kept %d/%d rungs: %v", fleetIndex, rule, len(keep), len(variants), keep)
+	return runner.ContentAllowedVariantsConfig(keep)
 }
 
 // OpenSession picks a launcher per $LAUNCH_MODE, discovers a device for
@@ -566,10 +668,34 @@ func playerWedged(s *runner.Sampler, lookback time.Duration) bool {
 }
 
 // holdWithEarlyExit sleeps up to maxHold, polling every pollPeriod after
-// minHold. Returns the exit reason: "full" / "early-stable" / "cancelled".
+// minHold. Returns the exit reason: "full" / "early-stable" / "cancelled" /
+// "const".
 func holdWithEarlyExit(ctx context.Context, s *runner.Sampler, st *runner.Step,
 	minHold, maxHold, pollPeriod, earlyExitWindow time.Duration,
 	earlyExitTol float64) string {
+	// CHAR_STEP_S forces a CONSTANT step duration across every variant-sweep
+	// mode (rampup / rampdown / pyramid): hold each step exactly this many
+	// seconds and disable early-exit entirely. This matters for group/leader
+	// runs — early-exit advances on the LEADER's settling, then the broadcast
+	// imposes that leader-timed cadence on every member, so observers see
+	// identical caps but leader-dependent durations. A fixed duration makes the
+	// sweep a pure open-loop stimulus: same caps AND same dwell for all devices,
+	// so any divergence is genuine per-device ABR response. Unset / <=0 keeps
+	// the historical leader-gated early-exit behaviour below.
+	if secs := envInt("CHAR_STEP_S", 0); secs > 0 {
+		select {
+		case <-ctx.Done():
+			return "cancelled"
+		case <-time.After(time.Duration(secs) * time.Second):
+			return "const"
+		}
+	}
+	// CHAR_NO_EARLY_EXIT disables the early-exit predicate ONLY (orthogonal to
+	// CHAR_STEP_S): every step then runs to its full maxHold instead of
+	// advancing on the leader's settling. Use it to hold the existing per-step
+	// maxHold without committing to a single fixed duration. CHAR_STEP_S, if
+	// set, already returned above and takes precedence.
+	noEarlyExit := envInt("CHAR_NO_EARLY_EXIT", 0) > 0
 	start := time.Now()
 	for {
 		elapsed := time.Since(start)
@@ -590,7 +716,7 @@ func holdWithEarlyExit(ctx context.Context, s *runner.Sampler, st *runner.Step,
 		if elapsed < minHold {
 			continue
 		}
-		if stepOnTarget(s, st, earlyExitWindow, earlyExitTol) {
+		if !noEarlyExit && stepOnTarget(s, st, earlyExitWindow, earlyExitTol) {
 			return "early-stable"
 		}
 	}

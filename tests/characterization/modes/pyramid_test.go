@@ -175,7 +175,8 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars
 				floor = f
 			}
 		}
-		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor, cfg.xferTimeout, peakClampForCap(floor), bars.fleetGroupID(), true)
+		armCfg := armContentConfig(setupCtx, t, dev.FleetIndex)
+		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor, cfg.xferTimeout, peakClampForCap(floor), bars.fleetGroupID(), true, armCfg)
 
 		s, lerr := appium.LaunchToHome(setupCtx, *picked)
 		if lerr != nil {
@@ -193,7 +194,17 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars
 			t.Logf("HOME barrier released — starting playback")
 		}
 
-		if rerr := appium.ResumePlayback(setupCtx, *picked); rerr != nil {
+		// When CHAR_CONTENT pins a clip, tap that clip's specific tile rather
+		// than the continue-watching hero (which races the catalogue load and
+		// can land on the featured clip). Falls back to continue-watching inside
+		// ResumePlaybackClip when the clip tile never renders.
+		var rerr error
+		if clip := os.Getenv("CHAR_CONTENT"); clip != "" {
+			rerr = appium.ResumePlaybackClip(setupCtx, *picked, clipIDFromContent(clip))
+		} else {
+			rerr = appium.ResumePlayback(setupCtx, *picked)
+		}
+		if rerr != nil {
 			t.Fatalf("ResumePlayback: %v", rerr)
 		}
 		if herr := s.WaitForHeartbeat(setupCtx, 90*time.Second); herr != nil {

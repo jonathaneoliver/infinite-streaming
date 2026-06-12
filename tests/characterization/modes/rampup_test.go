@@ -159,7 +159,7 @@ func runRampupOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars 
 				floor = f
 			}
 		}
-		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor, cfg.xferTimeout, peakClampForCap(floor), bars.fleetGroupID(), true)
+		wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, floor, cfg.xferTimeout, peakClampForCap(floor), bars.fleetGroupID(), true, nil)
 
 		s, err := appium.LaunchToHome(setupCtx, *picked)
 		if err != nil {

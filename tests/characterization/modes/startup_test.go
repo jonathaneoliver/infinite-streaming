@@ -428,7 +428,7 @@ func runStartupCycle(
 		// groupID born-groups this fresh session at connect (display-only:
 		// group_broadcast=false ⇒ no cross-device mirroring). Empty for
 		// single-device / non-group runs, so no group_id param is sent.
-		wireConfigOnConnect(ctx, t, appium, nil, pid, capMbps, 0, 0, groupID, false)
+		wireConfigOnConnect(ctx, t, appium, nil, pid, capMbps, 0, 0, groupID, false, nil)
 		s, err := appium.LaunchToHome(ctx, dev)
 		if err != nil {
 			t.Fatalf("[%d] LaunchToHome: %v", idx, err)
