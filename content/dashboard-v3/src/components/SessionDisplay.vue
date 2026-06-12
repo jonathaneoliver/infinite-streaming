@@ -106,6 +106,11 @@ const props = defineProps<{
    *  identically to startMs!=null && endMs==null but without forcing
    *  a startMs anchor. Default: false (legacy archive behaviour). */
   followLive?: boolean;
+  /** #736 archive compare: the grouped set (incl. the active play) to
+   *  overlay, each member pinned to a specific historical play_id. When
+   *  present (≥2 members) compare mode is forced on and siblings resolve
+   *  from here instead of the live useGroupSiblings path. */
+  comparePlays?: Array<{ playerId: string; playId: string; tag?: string }>;
 }>();
 
 const playIdRef = computed(() => props.playId);
@@ -133,8 +138,30 @@ const { player: livePlayer } = usePlayer(livePlayerIdRef);
  * via useCompareOverlays(). */
 const compareMode = useCompareMode(livePlayerIdRef);
 const { siblings: groupSiblings } = useGroupSiblings(livePlayerIdRef);
+// #736 archive compare: when the viewer is opened with a grouped set
+// (comparePlays from the URL), siblings come from there — each pinned to a
+// specific historical play_id — instead of the live group resolution, and
+// compare mode is forced on. Tag from the carried session number so the
+// legend reads S1/S2/S3 without a live player lookup.
+type EffSibling = { playerId: string; label: string; tag: string; index: number; playId?: string };
+const archiveCompare = computed(() => (props.comparePlays?.length ?? 0) >= 2);
+const archiveSiblings = computed<EffSibling[]>(() =>
+  (props.comparePlays ?? [])
+    .filter((m) => m.playerId !== props.playerId)
+    .map((m, index) => ({
+      playerId: m.playerId,
+      playId: m.playId,
+      tag: m.tag ? `S${m.tag}` : `S${m.playerId.slice(0, 4)}`,
+      label: m.tag ? `#${m.tag}` : m.playerId.slice(0, 8),
+      index,
+    })),
+);
+const effectiveSiblings = computed<EffSibling[]>(() =>
+  archiveCompare.value ? archiveSiblings.value : groupSiblings.value,
+);
 const compareEnabled = computed(
-  () => compareMode.state.enabled && groupSiblings.value.length >= 1,
+  () => effectiveSiblings.value.length >= 1 &&
+        (archiveCompare.value || compareMode.state.enabled),
 );
 // Registered sibling streams keyed by player_id. shallowRef + whole-Map
 // replace so add/remove triggers the computed WITHOUT deep-reactive
@@ -153,10 +180,10 @@ function unregisterSibling(pid: string) {
 }
 // Renderless subscribers to mount — only while compare is on, so a fresh
 // SSE per sibling isn't opened until the operator asks for the overlay.
-const compareSources = computed(() => (compareEnabled.value ? groupSiblings.value : []));
+const compareSources = computed(() => (compareEnabled.value ? effectiveSiblings.value : []));
 const compareSiblings = computed<CompareSibling[]>(() => {
   if (!compareEnabled.value) return [];
-  return groupSiblings.value
+  return effectiveSiblings.value
     .filter((s) => siblingStreams.value.has(s.playerId))
     .map((s) => ({
       playerId: s.playerId,
@@ -176,6 +203,13 @@ const compareSiblings = computed<CompareSibling[]>(() => {
 // slimmed to the same canonical set the siblings show.
 const compareSelf = computed<CompareSeriesIdentity | null>(() => {
   if (!compareEnabled.value) return null;
+  if (archiveCompare.value) {
+    // Archive: tag from the active member's carried session number (no live
+    // player record to read display_id from).
+    const self = (props.comparePlays ?? []).find((m) => m.playerId === props.playerId);
+    const tag = self?.tag ? `S${self.tag}` : `S${props.playerId.slice(0, 4)}`;
+    return { tag, dash: [] };
+  }
   const did = livePlayer.value?.display_id;
   const tag = did != null ? `S${did}` : `S${props.playerId.slice(0, 4)}`;
   return { tag, dash: [] };
@@ -1372,6 +1406,9 @@ function skipToEnd() {
       v-for="sib in compareSources"
       :key="sib.playerId"
       :player-id="sib.playerId"
+      :play-id="sib.playId ?? null"
+      :from-ms="archiveCompare ? startMs : null"
+      :to-ms="archiveCompare ? endMs : null"
       @register="registerSibling"
       @unregister="unregisterSibling"
     />

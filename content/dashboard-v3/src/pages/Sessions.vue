@@ -11,7 +11,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
 import ChatPanel from '@/components/chat/ChatPanel.vue';
-import { sessionViewerURL } from '@/composables/urlTimeFormat';
+import { sessionViewerURL, type CompareMember } from '@/composables/urlTimeFormat';
 import { listPlays, patchPlayClassification, type PlaySummary, type Scenario } from '@/repo/v2-repo';
 
 interface SessionRow {
@@ -883,6 +883,53 @@ function viewerHref(r: SessionRow): string {
     toMs: stillLive ? undefined : (Number.isFinite(lastSeen) ? lastSeen : undefined),
   });
 }
+// #736 — grouped plays by group_id (born-grouped runs carry a unique
+// G<num> from row 1). One play per player_id; tag = the session number so
+// the viewer's overlay legend reads S1/S2/S3. Computed once per render so
+// the per-row "Compare group" check stays O(rows), not O(rows²).
+const groupsById = computed(() => {
+  const byGroup = new Map<string, CompareMember[]>();
+  const seen = new Map<string, Set<string>>();
+  for (const r of rows.value) {
+    const gid = r.group_id;
+    if (!gid || !r.player_id || !r.play_id || r.play_id === '—') continue;
+    if (!byGroup.has(gid)) { byGroup.set(gid, []); seen.set(gid, new Set()); }
+    const players = seen.get(gid)!;
+    if (players.has(r.player_id)) continue;
+    players.add(r.player_id);
+    byGroup.get(gid)!.push({ playerId: r.player_id, playId: r.play_id, tag: r.session_id });
+  }
+  return byGroup;
+});
+function groupMembers(r: SessionRow): CompareMember[] {
+  return (r.group_id ? groupsById.value.get(r.group_id) : undefined) ?? [];
+}
+function canCompareGroup(r: SessionRow): boolean {
+  return groupMembers(r).length >= 2;
+}
+// Open the session-viewer in compare mode over every play in this row's
+// group, windowed to the union of all members' bounds so no sibling's data
+// is clipped.
+function compareGroupHref(r: SessionRow): string {
+  const members = groupMembers(r);
+  if (members.length < 2 || !r.player_id) return '#';
+  let minStart = Infinity, maxEnd = -Infinity, anyLive = false;
+  for (const m of rows.value) {
+    if (m.group_id !== r.group_id) continue;
+    const s = m.started ? parseChIsoMs(m.started) : NaN;
+    const e = m.last_seen ? parseChIsoMs(m.last_seen) : NaN;
+    if (Number.isFinite(s)) minStart = Math.min(minStart, s);
+    if (Number.isFinite(e)) maxEnd = Math.max(maxEnd, e);
+    if (isStillLive(m)) anyLive = true;
+  }
+  return sessionViewerURL({
+    playerId: r.player_id,
+    playId: r.play_id && r.play_id !== '—' ? r.play_id : undefined,
+    fromMs: Number.isFinite(minStart) ? minStart : undefined,
+    toMs: anyLive ? undefined : (Number.isFinite(maxEnd) ? maxEnd : undefined),
+    compare: members,
+  });
+}
 function bundleHref(r: SessionRow): string {
   if (!r.player_id) return '#';
   const qs = new URLSearchParams({ player_id: r.player_id });
@@ -1630,6 +1677,13 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                   <td class="cell-play-id">
                     <a v-if="r.play_id && r.player_id" :href="viewerHref(r)" class="play-id-link">{{ r.play_id }}</a>
                     <template v-else>{{ r.play_id || '' }}</template>
+                    <a
+                      v-if="canCompareGroup(r)"
+                      :href="compareGroupHref(r)"
+                      class="compare-group-link"
+                      :title="`Compare all ${groupMembers(r).length} grouped plays side-by-side`"
+                      @click.stop
+                    >⊞ compare</a>
                   </td>
                   <td>{{ r.last_state || '' }}</td>
                   <td><span :style="{ color: endOutcome(r).color, fontWeight: 600 }" :title="endOutcome(r).tip">{{ endOutcome(r).label }}</span></td>
@@ -1931,6 +1985,12 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 .cell-play-id { font-weight: 600; color: #1d4ed8; }
 .play-id-link { color: #1d4ed8; text-decoration: none; font-weight: 600; }
 .play-id-link:hover { text-decoration: underline; }
+.compare-group-link {
+  margin-left: 8px; padding: 1px 6px; border-radius: 4px;
+  font-size: 0.72rem; font-weight: 600; white-space: nowrap;
+  color: #6d28d9; background: #ede9fe; text-decoration: none;
+}
+.compare-group-link:hover { background: #ddd6fe; }
 
 .issue-badge, .health-badge {
   display: inline-block;

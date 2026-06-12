@@ -18,7 +18,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
 import SessionDisplay from '@/components/SessionDisplay.vue';
 import ChatPanel from '@/components/chat/ChatPanel.vue';
-import { parseTimeAny, canonicalUUID } from '@/composables/urlTimeFormat';
+import { parseTimeAny, canonicalUUID, parseCompareParam } from '@/composables/urlTimeFormat';
 import { getPlay, patchPlayClassification, type PlaySummary } from '@/repo/v2-repo';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 import type { ChatScope } from '@/types/chat';
@@ -31,6 +31,10 @@ const qs = new URLSearchParams(window.location.search);
 // emits uppercase (case_sensitivity_ids memory).
 const playerId = ref<string>(canonicalUUID(qs.get('player_id') ?? ''));
 const playId = ref<string | null>(qs.get('play_id') ? canonicalUUID(qs.get('play_id')!) : null);
+// #736: `compare=<player>~<play>~<tag>,…` — the grouped set to overlay in
+// archive compare mode (the active play is included; SessionDisplay picks self
+// vs siblings). Empty ⇒ ordinary single-play view.
+const comparePlays = parseCompareParam(qs.get('compare'));
 
 /** Initial time window. New canonical param names are `from` / `to`
  *  (shorter, no `:` in compact ISO → no `%3A` clutter). Legacy
@@ -218,6 +222,7 @@ const backHref = '/dashboard/sessions.html';
             :show-context="showContext"
             :start-ms="startMs"
             :end-ms="endMs"
+            :compare-plays="comparePlays"
           />
         </template>
       </main>
