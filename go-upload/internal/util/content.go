@@ -12,6 +12,19 @@ import (
 	"time"
 )
 
+// Variant is one rung of a content item's ABR ladder, parsed from the on-disk
+// HLS master playlist. Resolution-keyed (no URI): the *served* master's
+// per-segment-duration URIs (`playlist_6s_360p.m3u8`) differ from the source
+// master's (`360p/playlist.m3u8`) and from each other across 2s/6s/LL, so the
+// stable cross-segment identity is resolution + bitrate. Field names mirror the
+// proxy v2 `ManifestVariant` so dashboard code can consume either source.
+type Variant struct {
+	Resolution       string `json:"resolution"`        // "640x360"
+	Height           int    `json:"height"`            // 360
+	Bandwidth        int    `json:"bandwidth"`         // EXT-X-STREAM-INF BANDWIDTH (peak)
+	AverageBandwidth int    `json:"average_bandwidth"` // AVERAGE-BANDWIDTH, 0 if the playlist omits it
+}
+
 type ContentInfo struct {
 	Name string `json:"name"`
 	// Logical clip identifier — the lowercased name with the
@@ -53,6 +66,12 @@ type ContentInfo struct {
 	HasLL         bool    `json:"has_ll"`
 	MaxResolution *string `json:"max_resolution"`
 	MaxHeight     *int    `json:"max_height"`
+	// Full ABR ladder (one entry per video rung), ascending by bandwidth,
+	// parsed from the on-disk master.m3u8. Resolution-keyed — see Variant.
+	// Empty/omitted for content with no HLS master. Lets clients (the
+	// characterization harness, the dashboard) read the rung list without
+	// fetching + parsing a playlist or priming a proxy session.
+	Variants []Variant `json:"variants,omitempty"`
 
 	// Internal — used for newest-wins dedup. Lowercase so encoding/json
 	// skips it. Set during ListContent from the encode-timestamp suffix
@@ -139,6 +158,7 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 		segmentDurations := availableSegmentDurations(itemPath, hasHls, segmentDuration)
 		hasLL := hasHls && contentHasPartials(itemPath)
 		maxResolution, maxHeight := detectMaxResolution(itemPath)
+		variants := parseMasterVariants(itemPath)
 		clipID, codec, ts := splitClipIDAndCodec(name)
 		// If the name didn't carry an encode timestamp (older content),
 		// fall back to the directory's mtime for tiebreaks. Avoids
@@ -164,6 +184,7 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 			HasLL:             hasLL,
 			MaxResolution:     maxResolution,
 			MaxHeight:         maxHeight,
+			Variants:          variants,
 			encodeTS:          ts,
 		})
 	}
@@ -377,6 +398,52 @@ func parseDashSegmentDuration(path string) *int {
 			}
 		}
 	}
+}
+
+// parseMasterVariants reads the content's source master.m3u8 and returns its
+// full video-variant ladder (resolution + peak/average bandwidth per rung),
+// sorted ascending by bandwidth. Returns nil when there is no master or it
+// carries no EXT-X-STREAM-INF entries. The source master is segment-duration
+// independent (go-live synthesizes the 2s/6s/LL masters on the fly), so this is
+// the content's intrinsic ladder — every existing clip gets it for free, no
+// re-encode. The BANDWIDTH match is anchored on `[,:]` so it does NOT capture
+// the digits of `AVERAGE-BANDWIDTH=` (which contains the substring "BANDWIDTH").
+func parseMasterVariants(contentPath string) []Variant {
+	file, err := os.Open(filepath.Join(contentPath, "master.m3u8"))
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+
+	bwRe := regexp.MustCompile(`[,:]BANDWIDTH=(\d+)`)
+	avgRe := regexp.MustCompile(`AVERAGE-BANDWIDTH=(\d+)`)
+	resRe := regexp.MustCompile(`RESOLUTION=(\d+)x(\d+)`)
+
+	var variants []Variant
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "#EXT-X-STREAM-INF") {
+			continue
+		}
+		var v Variant
+		if m := bwRe.FindStringSubmatch(line); m != nil {
+			v.Bandwidth, _ = strconv.Atoi(m[1])
+		}
+		if m := avgRe.FindStringSubmatch(line); m != nil {
+			v.AverageBandwidth, _ = strconv.Atoi(m[1])
+		}
+		if m := resRe.FindStringSubmatch(line); m != nil {
+			v.Resolution = m[1] + "x" + m[2]
+			v.Height, _ = strconv.Atoi(m[2])
+		}
+		variants = append(variants, v)
+	}
+	if len(variants) == 0 {
+		return nil
+	}
+	sort.Slice(variants, func(i, j int) bool { return variants[i].Bandwidth < variants[j].Bandwidth })
+	return variants
 }
 
 func detectMaxResolution(contentPath string) (*string, *int) {

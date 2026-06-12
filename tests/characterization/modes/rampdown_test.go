@@ -122,7 +122,7 @@ func runRampdownOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bar
 		setupCtx, setupCancel := context.WithTimeout(context.Background(), setupTimeout)
 		defer setupCancel()
 		if gid := bars.fleetGroupID(); gid != "" {
-			wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, 0, 0, 0, gid, true)
+			wireConfigOnConnect(setupCtx, t, appium, cfg.launchArgs(), pid, 0, 0, 0, gid, true, nil)
 			t.Logf("rampdown: born-grouped (group=%s), uncapped — player_id=%s", gid, pid)
 		} else {
 			launchArgs := append(append([]string{}, cfg.launchArgs()...), "-is.player_id", pid)

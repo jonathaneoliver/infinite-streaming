@@ -6532,6 +6532,34 @@ func (a *App) applyContentManipulation(body []byte, session SessionData, content
 }
 
 // manipulateHLSMaster modifies an HLS master playlist
+// variantAllowed reports whether a master variant is whitelisted by
+// allowed_variants. It matches either the exact served URI (e.g.
+// "playlist_6s_360p.m3u8" — back-compat) OR the variant's resolution: the full
+// "640x360", the bare height "360", or "360p". Resolution matching lets a
+// keep-set expressed in resolution terms (e.g. derived from the content
+// catalogue's variants[], which is resolution-keyed) survive across segment
+// durations whose served URIs differ — the harness/dashboard need not know the
+// per-segment URI scheme.
+func variantAllowed(v *m3u8.Variant, allowed map[string]bool) bool {
+	if allowed[v.URI] {
+		return true
+	}
+	res := v.Resolution // "640x360"
+	if res == "" {
+		return false
+	}
+	if allowed[res] {
+		return true
+	}
+	if i := strings.LastIndex(res, "x"); i >= 0 {
+		h := res[i+1:] // "360"
+		if allowed[h] || allowed[h+"p"] {
+			return true
+		}
+	}
+	return false
+}
+
 func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, stripResolution bool, overstateBandwidth bool, liveOffset int, allowedVariants []string, variantOrder string) ([]byte, error) {
 	playlist, listType, err := m3u8.DecodeFrom(bufio.NewReader(bytes.NewReader(body)), true)
 	if err != nil {
@@ -6555,7 +6583,7 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 
 		filteredVariants := make([]*m3u8.Variant, 0)
 		for _, variant := range master.Variants {
-			if variant != nil && allowedMap[variant.URI] {
+			if variant != nil && variantAllowed(variant, allowedMap) {
 				filteredVariants = append(filteredVariants, variant)
 			}
 		}

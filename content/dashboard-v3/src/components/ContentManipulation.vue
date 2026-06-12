@@ -52,9 +52,26 @@ function onVariantOrderChange(value: VariantOrder) {
 const allowed = computed(() => new Set(content.value?.allowed_variants ?? []));
 const isAllAllowed = computed(() => allowed.value.size === 0);
 
-function isVariantChecked(url: string): boolean {
+/** A variant is whitelisted if allowed_variants contains its served URI
+ *  (`playlist_6s_360p.m3u8`) OR its resolution: full "640x360", bare height
+ *  "360", or "360p". Mirrors the proxy's variantAllowed (go-proxy main.go) so a
+ *  resolution-form keep-set — e.g. set by the characterization harness or the
+ *  "Keep every other" → resolution path — is reflected here, not shown as
+ *  "none selected". */
+function variantMatches(v: { url?: string; resolution?: string }): boolean {
+  if (v.url && allowed.value.has(v.url)) return true;
+  const res = v.resolution;
+  if (res) {
+    if (allowed.value.has(res)) return true;
+    const h = /x(\d+)/.exec(res)?.[1];
+    if (h && (allowed.value.has(h) || allowed.value.has(`${h}p`))) return true;
+  }
+  return false;
+}
+
+function isVariantChecked(v: { url?: string; resolution?: string }): boolean {
   if (isAllAllowed.value) return true;
-  return allowed.value.has(url);
+  return variantMatches(v);
 }
 
 function onAllToggle(on: boolean) {
@@ -74,11 +91,11 @@ function onAllToggle(on: boolean) {
 }
 
 function onVariantToggle(url: string, checked: boolean) {
-  // Starting state: if we're in "all allowed" mode, seed from every
-  // variant so toggling one off narrows from there.
-  const baseline = isAllAllowed.value
-    ? new Set(variants.value.map((v) => v.url))
-    : new Set(allowed.value);
+  // Seed from the variants currently shown as checked (matched by url OR
+  // resolution, via isVariantChecked) as URLs — so a resolution-form whitelist
+  // (e.g. set by the harness) migrates cleanly to URL form on the first manual
+  // toggle instead of producing a mixed url/resolution set.
+  const baseline = new Set(variants.value.filter((v) => isVariantChecked(v)).map((v) => v.url));
   if (checked) baseline.add(url);
   else baseline.delete(url);
   // If every variant is checked again, collapse to the "all allowed"
@@ -253,7 +270,7 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
         <label v-for="v in variants" :key="v.url">
           <input
             type="checkbox"
-            :checked="isVariantChecked(v.url)"
+            :checked="isVariantChecked(v)"
             @change="onVariantToggle(v.url, ($event.target as HTMLInputElement).checked)"
           />
           {{ variantLabel(v) }}

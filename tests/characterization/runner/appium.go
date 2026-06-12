@@ -277,6 +277,40 @@ func (a *AppiumLauncher) ResumePlayback(ctx context.Context, d Device) error {
 	return nil
 }
 
+// ResumePlaybackClip starts playback of a SPECIFIC clip by tapping its
+// home-tile-<clipID> tile (waiting for that tile to render first), instead of
+// the continue-watching hero. The hero resolves to lastPlayed only AFTER the
+// catalogue loads; until then it falls back to the featured clip, so a pinned
+// run (CHAR_CONTENT) racing the hero can land on the wrong content. Tapping the
+// clip-specific tile is deterministic about WHICH content plays. Empty clipID,
+// or the tile never rendering, falls back to ResumePlayback so the run isn't
+// dead in the water.
+func (a *AppiumLauncher) ResumePlaybackClip(ctx context.Context, d Device, clipID string) error {
+	if clipID == "" {
+		return a.ResumePlayback(ctx, d)
+	}
+	a.mu.Lock()
+	sessID := a.sessions[d.UDID]
+	a.mu.Unlock()
+	if sessID == "" {
+		return errors.New("ResumePlaybackClip: no active appium session for device")
+	}
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim, PlatformAndroidTV:
+		id := "home-tile-" + clipID
+		elID, err := a.waitForAccessibilityID(ctx, sessID, id, 30*time.Second)
+		if err != nil {
+			// Tile never rendered (clip absent from the LIVE row / catalogue not
+			// loaded) — fall back to the continue-watching hero.
+			return a.ResumePlayback(ctx, d)
+		}
+		if err := a.clickElement(ctx, sessID, elID); err != nil {
+			return fmt.Errorf("tap %s: %w", id, err)
+		}
+	}
+	return nil
+}
+
 // WaitForBind polls the harness players list until the device shows
 // up as heartbeating, then sets sess.PlayerID. Used by tests that
 // drive launch in phases (LaunchToHome → ResumePlayback → bind) and

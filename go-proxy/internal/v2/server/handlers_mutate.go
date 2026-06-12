@@ -260,6 +260,17 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Per-mutation broadcast override (?broadcast=true|false). Wins over the
+	// group's default (resolved above from the session's group_broadcast) for
+	// THIS PATCH only, so an A/B can drive shared shaping (broadcast=true) and
+	// per-member treatment such as a per-member fault (broadcast=false) in any
+	// order, independent of the group-mode flag set at connect. Absent ⇒ group
+	// default. content/labels are not broadcast-eligible regardless, so this
+	// only changes behaviour for shape / fault_rules — exactly where it's needed.
+	if ov := r.URL.Query().Get("broadcast"); ov != "" {
+		groupBroadcast = ov == "true" || ov == "1"
+	}
+
 	// Auto-broadcast to other group members (DESIGN.md § Player groups
 	// — auto-broadcast preserved from v1). Each member gets the same
 	// new control_revision and the same patch applied; their per-
