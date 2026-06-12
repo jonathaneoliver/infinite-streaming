@@ -58,6 +58,29 @@ interface ManifestVariantLite {
   resolution?: string;
 }
 
+/** Append one horizontal reference line per ladder rung at its published PEAK
+ *  bandwidth (EXT-X-STREAM-INF BANDWIDTH), all collapsed under the single
+ *  "Variant peak bandwidth" legend chip. `hidden` starts the whole group off
+ *  (compare mode) or on (single-session, the rate ABR keys on). Shared so the
+ *  ladder reads identically in both modes. */
+function appendPeakLadder(out: SeriesSpec[], ladder: ManifestVariantLite[], hidden: boolean): void {
+  const PEAK_COLOR = '#cbd5e1';
+  for (const v of ladder) {
+    const peakBw = Number(v.bandwidth);
+    if (!Number.isFinite(peakBw) || peakBw <= 0) continue;
+    const mbps = peakBw / 1_000_000;
+    out.push({
+      label: `Variant peak ${v.resolution ?? '?'} (${mbps.toFixed(2)} Mbps)`,
+      color: PEAK_COLOR,
+      accessor: () => mbps,
+      stepped: false,
+      borderDash: [6, 4],
+      groupLegend: 'Variant peak bandwidth',
+      hidden,
+    });
+  }
+}
+
 /** Most-recent non-empty `manifest_variants` value from the events
  *  stream. SessionDisplay passes `archivePlayerId` to BandwidthChart;
  *  for live testing.html that synthesises a separate scope from the
@@ -307,7 +330,15 @@ const series = computed<SeriesSpec[]>(() => {
   // Compare mode: the active session shows the SAME canonical tagged set
   // (solid, `S<id>`) the siblings overlay — not its full single-session
   // series — so every session reads identically (issue #579).
-  if (compareSelf.value) return compareBandwidthSeries(compareSelf.value);
+  if (compareSelf.value) {
+    const compareOut = compareBandwidthSeries(compareSelf.value);
+    // Variant peak-bandwidth ladder, also available in compare mode but
+    // hidden by default (toggle via the single "Variant peak bandwidth" legend
+    // chip). The manifest ladder is content-level — the same across the
+    // compared sessions — so it's drawn ONCE here, not tagged per sibling.
+    appendPeakLadder(compareOut, variants.value, true);
+    return compareOut;
+  }
   const out = [...baseSeries];
   const ladder = variants.value;
   if (!ladder.length) return out;
@@ -349,7 +380,6 @@ const series = computed<SeriesSpec[]>(() => {
   // Mute the variant-line color so it doesn't out-shout the live
   // traces. Slate-400 reads at a glance but stays in the background.
   const AVG_COLOR = '#94a3b8';
-  const PEAK_COLOR = '#cbd5e1';
   for (const v of ladder) {
     const avgBw = Number((v as any).average_bandwidth ?? v.bandwidth);
     if (Number.isFinite(avgBw) && avgBw > 0) {
@@ -365,20 +395,10 @@ const series = computed<SeriesSpec[]>(() => {
         hidden: true,
       });
     }
-    const peakBw = Number(v.bandwidth);
-    if (Number.isFinite(peakBw) && peakBw > 0) {
-      const mbps = peakBw / 1_000_000;
-      const resLabel = v.resolution ?? '?';
-      out.push({
-        label: `Variant peak ${resLabel} (${mbps.toFixed(2)} Mbps)`,
-        color: PEAK_COLOR,
-        accessor: () => mbps,
-        stepped: false,
-        borderDash: [6, 4],
-        groupLegend: 'Variant peak bandwidth',
-      });
-    }
   }
+  // Variant peak ladder — default ON in single-session (the rung rate ABR
+  // keys on). Same builder feeds the default-OFF compare-mode ladder above.
+  appendPeakLadder(out, ladder, false);
   return out;
 });
 
@@ -400,8 +420,8 @@ const compareOverlays = useCompareOverlays(compareBandwidthSeries);
     :series="series"
     :events-stream="eventsStream"
     :overlays="compareOverlays"
-    :markers="compareSelf ? [] : segmentMarkers"
-    :markers-label="compareSelf ? '' : segmentMarkersLabel"
+    :markers="segmentMarkers"
+    :markers-label="segmentMarkersLabel"
     v-model:markers-visible="segmentMarkersVisible"
     :y-min="0"
     :y-max="yMax"
