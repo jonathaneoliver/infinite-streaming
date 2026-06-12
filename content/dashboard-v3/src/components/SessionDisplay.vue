@@ -160,9 +160,14 @@ const effectiveSiblings = computed<EffSibling[]>(() =>
   archiveCompare.value ? archiveSiblings.value : groupSiblings.value,
 );
 const compareEnabled = computed(
-  () => effectiveSiblings.value.length >= 1 &&
-        (archiveCompare.value || compareMode.state.enabled),
+  () => effectiveSiblings.value.length >= 1 && compareMode.state.enabled,
 );
+// #736: arriving via the sessions "Compare group" link defaults the Compare
+// Charts toggle ON — the archive view has no live GroupBanner to flip it, so
+// SessionDisplay renders its own toggle (below) and seeds it here. The user
+// can still uncheck it; driving everything through compareMode (not a forced
+// flag) keeps the panel collapse + overlay consistent with the live page.
+if (archiveCompare.value) compareMode.setEnabled(true);
 // Registered sibling streams keyed by player_id. shallowRef + whole-Map
 // replace so add/remove triggers the computed WITHOUT deep-reactive
 // wrapping the Stream (which holds refs + functions).
@@ -1412,6 +1417,23 @@ function skipToEnd() {
       @register="registerSibling"
       @unregister="unregisterSibling"
     />
+    <!-- #736 archive compare: the live page surfaces the Compare Charts
+         toggle via GroupBanner, but the session-viewer has no live group, so
+         render it here when opened over a grouped set. Defaults ON (seeded in
+         setup); unchecking it expands the per-session panels again. -->
+    <div v-if="archiveCompare" class="archive-compare-bar">
+      <button
+        type="button"
+        class="btn compare-toggle"
+        :class="{ checked: compareMode.state.enabled }"
+        @click="compareMode.toggle()"
+        :title="compareMode.state.enabled
+          ? 'Hide grouped overlays and re-expand the per-session panels'
+          : 'Overlay every grouped play\'s rate + buffer lines on the charts'"
+      >
+        {{ compareMode.state.enabled ? '●' : '○' }} Compare Charts ({{ effectiveSiblings.length + 1 }} sessions)
+      </button>
+    </div>
     <!-- Test-run metadata — off the event axis (see docs/EVENT_TAXONOMY.md);
          shown here so the viewer still says "this play was harness run X". -->
     <div v-if="testRun" class="test-run-chip" :title="`Harness run ${testRun.run_id}`">
@@ -1787,6 +1809,22 @@ function skipToEnd() {
 
 <style scoped>
 .session-display { display: contents; }
+/* #736 archive Compare Charts toggle — mirrors GroupBanner's compare-toggle
+ * (violet when on) so the archive view reads like the live page. */
+.archive-compare-bar {
+  display: flex; align-items: center; gap: 10px;
+  background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 10px;
+  padding: 8px; margin-bottom: 12px;
+}
+.archive-compare-bar .compare-toggle {
+  background: #f1f3f4; border: 1px solid #dadce0; border-radius: 6px;
+  padding: 4px 12px; font-size: 12px; font-weight: 500; color: #202124; cursor: pointer;
+}
+.archive-compare-bar .compare-toggle:hover { background: #e8eaed; }
+.archive-compare-bar .compare-toggle.checked {
+  background: #7c3aed; border-color: #6d28d9; color: #fff; font-weight: 600;
+}
+.archive-compare-bar .compare-toggle.checked:hover { background: #6d28d9; }
 
 /* Empty-state for the Focus Window before archive snapshots land. */
 .brush-empty {
