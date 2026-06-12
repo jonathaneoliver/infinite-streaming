@@ -119,6 +119,23 @@ const starred = computed<boolean>(
   () => String(playQuery.data.value?.classification ?? '') === 'favourite',
 );
 
+// #736 member-tab labels — mirror testing.html's `Session #N (Port …) · device
+// · content`. Port is derived from the session number (external band 21<sid>81,
+// the third-from-last digit carrying the session); device · content + the group
+// badge come off the active play summary (fleet members share them).
+function portForTag(tag?: string): string {
+  return tag && /^\d$/.test(tag) ? `21${tag}81` : '';
+}
+function memberLabel(m: { tag?: string }): string {
+  const port = portForTag(m.tag);
+  return `Session #${m.tag ?? '?'}${port ? ` (Port ${port})` : ''}`;
+}
+const memberTail = computed<string>(() => {
+  const p = playQuery.data.value;
+  return [p?.device_class, p?.content_id].filter(Boolean).join(' · ');
+});
+const groupBadge = computed<string>(() => String(playQuery.data.value?.group_id ?? ''));
+
 const starMutation = useMutation({
   mutationFn: (next: boolean) =>
     patchPlayClassification(playId.value as string, next ? 'favourite' : 'auto'),
@@ -202,19 +219,21 @@ const backHref = '/dashboard/sessions.html';
             <!-- #736 member tab rail — like testing.html's session pills.
                  Click a tab to make that grouped play active (its panels show,
                  its line goes solid); the overlay set stays the same. -->
-            <div v-if="comparePlays.length" class="member-tabs" role="tablist" aria-label="Grouped sessions">
-              <span class="member-tabs-label">compare:</span>
+            <div v-if="comparePlays.length" class="session-tabs" role="tablist" aria-label="Grouped sessions">
               <button
                 v-for="(m, i) in comparePlays"
                 :key="m.playerId"
                 type="button"
                 role="tab"
-                class="member-tab"
+                class="session-tab grouped"
                 :class="{ active: i === activeIdx }"
                 :aria-selected="i === activeIdx"
                 :title="m.playerId"
                 @click="activeIdx = i"
-              >{{ m.tag ? `S${m.tag}` : m.playerId.slice(0, 6) }}</button>
+              >
+                <span class="st-label">{{ memberLabel(m) }}<span v-if="memberTail" class="st-tail"> · {{ memberTail }}</span></span>
+                <span v-if="groupBadge" class="group-badge">{{ groupBadge }}</span>
+              </button>
             </div>
             <div class="banner-actions">
               <button
@@ -370,16 +389,25 @@ const backHref = '/dashboard/sessions.html';
 }
 
 .banner-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-/* #736 member tab rail — mirrors testing.html's session pills. */
-.member-tabs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
-.member-tabs-label { font-size: 11px; color: #6b7280; margin-right: 2px; }
-.member-tab {
-  padding: 2px 10px; border-radius: 999px; cursor: pointer;
-  font-size: 12px; font-weight: 600; font-family: ui-monospace, monospace;
-  color: #4338ca; background: #eef2ff; border: 1px solid #c7d2fe;
+/* #736 member tab rail — matches testing.html's session pills exactly. */
+.session-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.session-tab {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 380px;
+  border: 1px solid #c7d2fe; background: #eef2ff; color: #1e1b4b;
+  padding: 8px 14px; border-radius: 999px; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: transform 0.08s ease, box-shadow 0.15s ease, background 0.15s ease;
 }
-.member-tab:hover { background: #e0e7ff; }
-.member-tab.active { color: #fff; background: #6366f1; border-color: #4f46e5; }
+.session-tab:hover { background: #e0e7ff; box-shadow: 0 4px 12px rgba(59,130,246,0.18); transform: translateY(-1px); }
+.session-tab.active { background: #1e40af; color: #fff; border-color: #1e40af; box-shadow: 0 6px 14px rgba(30,64,175,0.32); }
+.session-tab.grouped { border-left: 4px solid #10b981; padding-left: 10px; }
+.session-tab.grouped.active { border-left-color: #34d399; }
+.session-tab .st-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-tab .st-tail { font-weight: 500; opacity: 0.85; }
+.session-tab .group-badge {
+  flex: none; background: #10b981; color: #fff; font-size: 10px; font-weight: 700;
+  padding: 1px 8px; border-radius: 8px; font-family: ui-monospace, monospace;
+}
+.session-tab.active .group-badge { background: #34d399; }
 .banner-btn {
   display: inline-flex;
   align-items: center;
