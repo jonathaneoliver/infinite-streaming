@@ -8,9 +8,9 @@ require (
 	github.com/grafov/m3u8 v0.12.1
 	github.com/oapi-codegen/runtime v1.4.0
 	github.com/vishvananda/netlink v1.3.1
-	golang.org/x/net v0.55.0
-	golang.org/x/sys v0.45.0
-	modernc.org/sqlite v1.50.1
+	golang.org/x/net v0.56.0
+	golang.org/x/sys v0.46.0
+	modernc.org/sqlite v1.52.0
 )
 
 require (
