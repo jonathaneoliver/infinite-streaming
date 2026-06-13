@@ -27,7 +27,7 @@ import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 import { useManifestVariants, nearestVariantByBitrate, displayedVariantPeakMbps } from '@/composables/useManifestVariants';
 import { usePlayer } from '@/composables/usePlayer';
-import { useCompareOverlays, useCompareSelf } from '@/composables/useCompareContext';
+import { useCompareOverlays, useCompareSelf, useCompareSiblings, sessionMarkerColor, SELF_MARKER_COLOR } from '@/composables/useCompareContext';
 import { compareBandwidthSeries } from '@/composables/compareSeries';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import type { PlayerRecord } from '@/repo/v2-repo';
@@ -122,15 +122,24 @@ const variants = computed<ManifestVariantLite[]>(() => {
 // at all — MetricsLineChart renders the legend entry whenever the label
 // prop is non-empty, regardless of whether there's data.
 const isAVPlayerForMarkers = computed(() => player.value?.player_metrics?.player_tech === 'AVPlayer');
-const segmentMarkersLabel = computed(() => isAVPlayerForMarkers.value ? 'Per-segment throughput (AVMetrics)' : '');
+const compareSelf = useCompareSelf();
+const compareSiblings = useCompareSiblings();
 
-const segmentMarkers = computed(() => {
-  if (!isAVPlayerForMarkers.value) return [];
-  const stream = props.avmetricsStream;
+/** Extract per-segment throughput dots from one session's AVMetrics stream.
+ *  `colorOverride` (compare mode) paints every dot the session's hue so
+ *  devices read apart; when null (single-session) the dot keeps its
+ *  request-type colour. `tag` (e.g. `S2`) is stamped on each marker (for
+ *  per-session legend grouping + session-legend hiding) and prefixed to the
+ *  tooltip so the operator knows which device a dot belongs to. Issue #486. */
+function extractSegmentMarkers(
+  stream: Stream<Record<string, unknown>> | undefined,
+  colorOverride: string | null,
+  tag: string,
+): Array<{ x: number; y: number; color?: string; label?: string; tag?: string }> {
   if (!stream) return [];
   void stream.version.value;
   const rows = stream.inRange(0, Number.MAX_SAFE_INTEGER);
-  const out: Array<{ x: number; y: number; color?: string; label?: string }> = [];
+  const out: Array<{ x: number; y: number; color?: string; label?: string; tag?: string }> = [];
   for (const row of rows) {
     const type = String(row.event_type ?? '');
     // Video segments only (issue #486). Skip playlists, DRM keys,
@@ -172,7 +181,7 @@ const segmentMarkers = computed(() => {
         const d = new Date(ts);
         const hms = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
         const lines = [
-          `${shortType} · ${hms}`,
+          `${tag ? tag + ' · ' : ''}${shortType} · ${hms}`,
           filename ? filename : '',
           mbps != null ? `${mbps.toFixed(2)} Mbps` : '',
           Number.isFinite(bytes) && bytes > 0 ? `${bytes.toLocaleString()} bytes` : '',
@@ -183,9 +192,50 @@ const segmentMarkers = computed(() => {
       } catch { /* fall through */ }
     }
     if (mbps == null) continue;
-    out.push({ x: ts, y: mbps, color: colorForRequestType(type), label });
+    out.push({ x: ts, y: mbps, color: colorOverride ?? colorForRequestType(type), label, tag: tag || undefined });
   }
   return out;
+}
+
+/** Per-session marker sets. Compare mode: the active session AND every
+ *  sibling that provides AVMetrics, each coloured + tagged distinctly, so
+ *  the iOS dots show regardless of which device is selected (a non-iOS
+ *  session's avmetrics stream is empty → no set). Single-session: just the
+ *  active player's dots, and only when it's iOS. Issue #486. */
+const sessionMarkerSets = computed<Array<{ tag: string; color: string | null; dots: Array<{ x: number; y: number; color?: string; label?: string; tag?: string }> }>>(() => {
+  if (compareSelf.value) {
+    const sets = [{
+      tag: compareSelf.value.tag,
+      color: SELF_MARKER_COLOR,
+      dots: extractSegmentMarkers(props.avmetricsStream, SELF_MARKER_COLOR, compareSelf.value.tag),
+    }];
+    for (const sib of compareSiblings.value) {
+      const color = sessionMarkerColor(sib.index);
+      sets.push({ tag: sib.tag, color, dots: extractSegmentMarkers(sib.avmetricsStream, color, sib.tag) });
+    }
+    return sets;
+  }
+  if (!isAVPlayerForMarkers.value) return [];
+  return [{ tag: '', color: null, dots: extractSegmentMarkers(props.avmetricsStream, null, '') }];
+});
+
+const segmentMarkers = computed(() => sessionMarkerSets.value.flatMap((s) => s.dots));
+
+/** Per-session legend chips, one per session that actually contributed dots
+ *  — `Per segment (Sx)`, coloured to match its dots. Empty in single-session
+ *  (that path uses the flat `segmentMarkersLabel` chip instead). Issue #486. */
+const segmentMarkerGroups = computed<Array<{ tag: string; label: string; color: string }>>(() => {
+  if (!compareSelf.value) return [];
+  return sessionMarkerSets.value
+    .filter((s) => s.dots.length > 0)
+    .map((s) => ({ tag: s.tag, label: `Per segment (${s.tag})`, color: s.color ?? SELF_MARKER_COLOR }));
+});
+
+const segmentMarkersLabel = computed(() => {
+  // Single-session only — compare mode uses the per-session group chips. Gate
+  // on the active player being iOS so non-iOS players never see the chip.
+  if (compareSelf.value) return '';
+  return isAVPlayerForMarkers.value ? 'Per-segment throughput (AVMetrics)' : '';
 });
 
 function colorForRequestType(type: string): string {
@@ -325,7 +375,6 @@ const baseSeries: SeriesSpec[] = [
  *
  *  Defaults: peak ON (the rate ABR actually keys on — see abr-ladder
  *  standard), avg OFF (toggle on for the typical-body-bitrate reference). */
-const compareSelf = useCompareSelf();
 const series = computed<SeriesSpec[]>(() => {
   // Compare mode: the active session shows the SAME canonical tagged set
   // (solid, `S<id>`) the siblings overlay — not its full single-session
@@ -422,6 +471,7 @@ const compareOverlays = useCompareOverlays(compareBandwidthSeries);
     :overlays="compareOverlays"
     :markers="segmentMarkers"
     :markers-label="segmentMarkersLabel"
+    :marker-groups="segmentMarkerGroups"
     v-model:markers-visible="segmentMarkersVisible"
     :y-min="0"
     :y-max="yMax"

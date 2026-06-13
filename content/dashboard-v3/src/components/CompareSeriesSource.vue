@@ -39,7 +39,7 @@ const props = defineProps<{
   toMs?: number | null;
 }>();
 const emit = defineEmits<{
-  (e: 'register', playerId: string, stream: Stream<Record<string, unknown>>): void;
+  (e: 'register', playerId: string, stream: Stream<Record<string, unknown>>, avmetricsStream: Stream<Record<string, unknown>>): void;
   (e: 'unregister', playerId: string): void;
 }>();
 
@@ -49,13 +49,20 @@ const fromMsRef = computed<number | null>(() => props.fromMs ?? null);
 const toMsRef = computed<number | null>(() => props.toMs ?? null);
 
 const ts = useSessionTimeSeries(playerIdRef, playIdRef, {
-  streams: ['events'],
-  bundles: ['charts_minimal'],
+  // Explicit bundles override the per-stream defaults, so every bundle the
+  // overlay needs must be listed: charts_minimal (rate/buffer accessors),
+  // lanes_v1 (carries manifest_variants for the "Displayed Variant" line —
+  // it is NOT in charts_minimal, issue #579), and avmetrics (per-segment
+  // throughput dots so the sibling's markers merge onto the bandwidth chart,
+  // issue #486). AVMetrics is iOS-only on the wire, so a non-iOS sibling's
+  // avmetrics stream simply stays empty.
+  streams: ['events', 'avmetrics'],
+  bundles: ['charts_minimal', 'lanes_v1', 'avmetrics'],
   fromMs: fromMsRef,
   toMs: toMsRef,
 });
 
-onMounted(() => emit('register', props.playerId, ts.events));
+onMounted(() => emit('register', props.playerId, ts.events, ts.avmetrics));
 onUnmounted(() => emit('unregister', props.playerId));
 </script>
 
