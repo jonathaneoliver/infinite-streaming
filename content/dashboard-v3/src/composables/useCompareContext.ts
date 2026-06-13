@@ -39,6 +39,11 @@ export interface CompareSibling extends CompareSeriesIdentity {
   index: number;
   /** This sibling's events stream (charts_minimal projection). */
   stream: Stream<Record<string, unknown>>;
+  /** This sibling's AVMetrics stream (iOS-only on the wire — empty for
+   *  non-iOS peers). Feeds the per-segment throughput dots so the
+   *  bandwidth chart can merge every device's markers, not just the
+   *  active session's (issue #486 compare-mode). */
+  avmetricsStream?: Stream<Record<string, unknown>>;
 }
 
 /** Shared session-legend view state (issue #579). The S1/S2 chip row in
@@ -84,6 +89,26 @@ export function sessionDash(index: number): number[] {
   return SESSION_DASH[((index % n) + n) % n];
 }
 
+/** Per-session colours for the per-segment AVMetrics dots in compare mode.
+ *  Lines tell sessions apart by DASH, but a dot can't carry a dash — so
+ *  each session's per-segment markers take a distinct hue instead. The
+ *  active session is slate (`SELF_MARKER_COLOR`, matching the single-
+ *  session segment dot); each sibling takes the next hue by its stable
+ *  index so a device keeps its colour as peers come and go. Issue #486. */
+export const SELF_MARKER_COLOR = '#475569'; // slate — the single-session segment dot
+export const SESSION_MARKER_COLORS: ReadonlyArray<string> = [
+  '#0ea5e9', // sky
+  '#ea580c', // orange
+  '#16a34a', // green
+  '#db2777', // pink
+  '#7c3aed', // violet
+  '#ca8a04', // amber
+];
+export function sessionMarkerColor(index: number): string {
+  const n = SESSION_MARKER_COLORS.length;
+  return SESSION_MARKER_COLORS[((index % n) + n) % n];
+}
+
 /**
  * useCompareOverlays — turn the provided compare context into a chart's
  * `overlays` prop. `specsFor` maps one session identity to the
@@ -111,4 +136,15 @@ export function useCompareOverlays(
 export function useCompareSelf(): ComputedRef<CompareSeriesIdentity | null> {
   const ctx = inject(CompareContextKey, null);
   return computed(() => (ctx && ctx.enabled.value ? ctx.self.value : null));
+}
+
+/** Inject the grouped siblings directly (empty when compare mode is off /
+ *  outside a SessionDisplay). Unlike useCompareOverlays — which maps each
+ *  sibling to chart SERIES — this hands back the raw sibling list so a
+ *  chart can read per-sibling streams it overlays by hand (e.g. the
+ *  bandwidth chart merging every sibling's per-segment AVMetrics dots,
+ *  issue #486). */
+export function useCompareSiblings(): ComputedRef<CompareSibling[]> {
+  const ctx = inject(CompareContextKey, null);
+  return computed(() => (ctx && ctx.enabled.value ? ctx.siblings.value : []));
 }

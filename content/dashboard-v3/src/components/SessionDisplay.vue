@@ -181,16 +181,31 @@ if (archiveCompare.value) compareMode.setEnabled(true);
 // replace so add/remove triggers the computed WITHOUT deep-reactive
 // wrapping the Stream (which holds refs + functions).
 const siblingStreams = shallowRef(new Map<string, Stream<Record<string, unknown>>>());
-function registerSibling(pid: string, stream: Stream<Record<string, unknown>>) {
+// Parallel map of each sibling's AVMetrics stream, registered alongside its
+// events stream so the bandwidth chart can merge every device's per-segment
+// dots (issue #486 compare-mode). Kept separate (not folded onto a tuple) so
+// the existing events-keyed lookups stay unchanged.
+const siblingAvmetrics = shallowRef(new Map<string, Stream<Record<string, unknown>>>());
+function registerSibling(
+  pid: string,
+  stream: Stream<Record<string, unknown>>,
+  avmetricsStream: Stream<Record<string, unknown>>,
+) {
   const m = new Map(siblingStreams.value);
   m.set(pid, stream);
   siblingStreams.value = m;
+  const a = new Map(siblingAvmetrics.value);
+  a.set(pid, avmetricsStream);
+  siblingAvmetrics.value = a;
 }
 function unregisterSibling(pid: string) {
-  if (!siblingStreams.value.has(pid)) return;
+  if (!siblingStreams.value.has(pid) && !siblingAvmetrics.value.has(pid)) return;
   const m = new Map(siblingStreams.value);
   m.delete(pid);
   siblingStreams.value = m;
+  const a = new Map(siblingAvmetrics.value);
+  a.delete(pid);
+  siblingAvmetrics.value = a;
 }
 // Renderless subscribers to mount — only while compare is on, so a fresh
 // SSE per sibling isn't opened until the operator asks for the overlay.
@@ -208,6 +223,7 @@ const compareSiblings = computed<CompareSibling[]>(() => {
       // solid (below). Colour is per-metric, assigned in compareSeries.
       dash: sessionDash(s.index),
       stream: siblingStreams.value.get(s.playerId)!,
+      avmetricsStream: siblingAvmetrics.value.get(s.playerId),
     }));
 });
 // The active session's own compare identity — tag `S<display_id>` (so it

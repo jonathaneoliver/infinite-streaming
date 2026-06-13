@@ -100,12 +100,22 @@ const props = defineProps({
    *  BandwidthChart for per-AVMetric-segment throughput points; any
    *  chart can pass any stream of {x, y, color, label} the same way. */
   markers: {
-    type: Array as PropType<Array<{ x: number; y: number; color?: string; label?: string }>>,
+    type: Array as PropType<Array<{ x: number; y: number; color?: string; label?: string; tag?: string }>>,
     default: () => [],
   },
-  /** Synthetic legend entry text. When set, a clickable chip appears at
-   *  the end of the legend that toggles all markers on/off. */
+  /** Synthetic legend entry text. When set (and no markerGroups), a single
+   *  clickable chip appears at the end of the legend that toggles all
+   *  markers on/off. */
   markersLabel: { type: String, default: '' },
+  /** Per-session marker legend groups (issue #486 compare-mode). When
+   *  non-empty, ONE chip per group is rendered (e.g. `Per segment (S1)`,
+   *  `Per segment (S2)`) in the group's colour instead of the single
+   *  markersLabel chip — so the operator sees which sessions contributed
+   *  per-segment dots. All chips toggle the shared markers visibility. */
+  markerGroups: {
+    type: Array as PropType<Array<{ tag: string; label: string; color: string }>>,
+    default: () => [],
+  },
   /** Marker visibility (v-model). Default true. */
   markersVisible: { type: Boolean, default: true },
   /** Grouped-sibling overlays (issue #579 compare mode). Each entry is
@@ -164,6 +174,15 @@ function onGlobal(
 // Read by the markers-stream watcher to drain only NEW rows on each
 // version bump (the cache holds the full backfill + live tail).
 let lastIngestedMs = -Infinity;
+
+// Per-segment marker focus, so the dots highlight/fade in lockstep with the
+// line series (issue #486/#579). The hover handlers (session-legend + per-
+// series legend) set this and trigger a repaint; the overlayMarkers plugin
+// reads it at draw time:
+//   undefined → no focus, every dot full
+//   null      → something else is focused (a line / its session) → dim ALL dots
+//   'Sx'      → that session is focused → its dots pop, other sessions' dots dim
+let markerFocusTag: string | null | undefined = undefined;
 
 /** Tolerance for "right edge is at the live sample" — matches the
  *  brush-drop-at-live heuristic in SessionDisplay. */
@@ -437,6 +456,9 @@ function applySessionVisibility(doUpdate = true) {
 function applySessionHover() {
   if (!chart || !compareCtx) return;
   const hov = compareCtx.view.hovered.value;
+  // Markers follow the same focus: hovering session Sx pops its dots and
+  // fades the others; no hover → all dots full. Issue #486.
+  markerFocusTag = hov ? hov : undefined;
   for (const ds of chart.data.datasets as any[]) {
     if (ds._origBorderWidth == null) ds._origBorderWidth = ds.borderWidth ?? 2;
     if (ds._origBorderColor == null) ds._origBorderColor = ds.borderColor;
@@ -518,10 +540,16 @@ function createChartInstance(Chart: any): any {
           if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) continue;
           if (m.x < sx.min || m.x > sx.max) continue;
           if (m.y < sy.min || m.y > sy.max) continue;
+          // Highlight/fade in lockstep with the line series. focused = this
+          // dot's session is the focus (or nothing is focused); dimmed = a
+          // line / another session is focused, so fade this dot to ~0.2
+          // (matching the lines' `#rrggbb33` dim) and skip the pop.
+          const focused = markerFocusTag === undefined || markerFocusTag === m.tag;
           const px = sx.getPixelForValue(m.x);
           const py = sy.getPixelForValue(m.y);
+          ctx.globalAlpha = focused ? 1 : 0.2;
           ctx.beginPath();
-          ctx.arc(px, py, 3, 0, Math.PI * 2);
+          ctx.arc(px, py, focused && markerFocusTag !== undefined ? 4 : 3, 0, Math.PI * 2);
           ctx.fillStyle = m.color ?? '#1f2937';
           ctx.fill();
           // Hairline border so the dot stands out on a same-colored line.
@@ -529,6 +557,7 @@ function createChartInstance(Chart: any): any {
           ctx.lineWidth = 1;
           ctx.stroke();
         }
+        ctx.globalAlpha = 1;
         ctx.restore();
       },
     }, {
@@ -616,7 +645,24 @@ function createChartInstance(Chart: any): any {
               // #486). Rendered as a filled circle (no line) so it
               // reads as "dot overlay" not "line series". onClick
               // below toggles `props.markersVisible` via emit.
-              if (props.markersLabel) {
+              // Compare mode: one chip per session that contributed dots
+              // (`Per segment (Sx)`, in the session's marker hue). Falls back
+              // to the single markersLabel chip in single-session mode.
+              if (props.markerGroups && props.markerGroups.length) {
+                for (const g of props.markerGroups) {
+                  out.push({
+                    text: g.label,
+                    fillStyle: g.color,
+                    strokeStyle: g.color,
+                    lineWidth: 0,
+                    pointStyle: 'circle',
+                    hidden: !props.markersVisible,
+                    datasetIndex: -1,
+                    _isMarkerToggle: true,
+                    _markerTag: g.tag,
+                  });
+                }
+              } else if (props.markersLabel) {
                 out.push({
                   text: props.markersLabel,
                   fillStyle: '#475569',
@@ -670,13 +716,24 @@ function createChartInstance(Chart: any): any {
           onHover(_evt: any, item: any, leg: any) {
             const c = leg?.chart;
             if (!c || typeof item?.datasetIndex !== 'number') return;
-            // The synthetic markers chip carries datasetIndex -1 (a number, so
-            // it slips past the guard above) and _isMarkerToggle. It maps to no
-            // real dataset, so the highlight logic below would dim EVERY line
-            // (highlighted = {-1} matches nothing) and leave them greyed while
-            // the cursor rests on the chip. The overlay toggle is orthogonal to
-            // line focus — skip hover-highlight for it entirely (issue #486/#579).
-            if (item.datasetIndex < 0 || item._isMarkerToggle) return;
+            // The synthetic markers chip carries datasetIndex -1 and
+            // _isMarkerToggle, mapping to no real dataset. Treat hovering it
+            // as "focus the dots": fade every LINE, and focus this chip's
+            // session's dots (its `_markerTag`; absent = single-session chip,
+            // so all dots stay full). Issue #486/#579.
+            if (item.datasetIndex < 0 || item._isMarkerToggle) {
+              markerFocusTag = item._markerTag ?? undefined;
+              for (const ds of c.data.datasets as any[]) {
+                if (ds._origBorderWidth == null) ds._origBorderWidth = ds.borderWidth ?? 2;
+                if (ds._origBorderColor == null) ds._origBorderColor = ds.borderColor;
+                ds.borderWidth = Math.max(1, (ds._origBorderWidth ?? 2) - 1);
+                const oc = ds._origBorderColor;
+                ds.borderColor = typeof oc === 'string' && oc.startsWith('#') && oc.length === 7 ? oc + '33' : oc;
+              }
+              try { c.update('none'); } catch { /* ignore */ }
+              if (c.canvas) c.canvas.style.cursor = 'pointer';
+              return;
+            }
             const hovered = item.datasetIndex;
             // Compare mode (#579): also give a medium highlight to the
             // SAME metric on other sessions — hovering `Fetching Variant
@@ -731,6 +788,12 @@ function createChartInstance(Chart: any): any {
                   typeof oc === 'string' && oc.startsWith('#') && oc.length === 7 ? oc + '33' : oc;
               }
             });
+            // A LINE is focused, not the dots — so fade ALL per-segment dots
+            // regardless of session. The dots pop only when their own session
+            // chip (applySessionHover) or the "Per segment (Sx)" marker chip
+            // is hovered; hovering any line isolates that line and fades the
+            // dots like every other non-hovered element. Issue #486.
+            markerFocusTag = null;
             try { c.update('none'); } catch { /* ignore */ }
             // Cursor cue so the user knows the label is interactive.
             if (c.canvas) c.canvas.style.cursor = 'pointer';
@@ -738,6 +801,9 @@ function createChartInstance(Chart: any): any {
           onLeave(_evt: any, _item: any, leg: any) {
             const c = leg?.chart;
             if (!c) return;
+            // Clear marker focus too (unless a session-legend hover is still
+            // active — that path manages markerFocusTag itself).
+            if (!compareCtx || !compareCtx.view.hovered.value) markerFocusTag = undefined;
             c.data.datasets.forEach((ds: any) => {
               if (ds._origBorderWidth != null) ds.borderWidth = ds._origBorderWidth;
               if (ds._origBorderColor != null) ds.borderColor = ds._origBorderColor;
@@ -1282,6 +1348,17 @@ function safeChartUpdate() {
     pendingUpdateTimer = null;
     lastUpdateAt = Date.now();
     if (!chart) return;
+    // Full update (default mode), NOT 'none'. In compare mode the overlaid
+    // sessions can carry different field sets (one device has per-segment
+    // AVMetrics / network_bitrate, another never does), so a sibling's
+    // series can be EMPTY while its peers are populated. Chart.js's 'none'
+    // fast-path reuses its incremental point-element cache and cannot
+    // reconcile a dataset whose point count flips 0↔N — it desyncs and
+    // crashes `_resyncElements` (`.skip` on an undefined element), blanking
+    // the chart until a full update runs. A full update rebuilds the element
+    // array every paint, which is exactly why clicking a session tab (which
+    // calls full chart.update() via the visibility path) un-blanks it. The
+    // throttle (pickThrottleMs) keeps the cost bounded. Issues #486 / #579.
     try { chart.update('none'); } catch (err) { console.warn('chart update skipped:', err); }
   }, delay);
 }
@@ -1464,6 +1541,15 @@ function drainOverlays() {
         let y: number | null | undefined;
         try { y = src.series[i].accessor(p); } catch { y = null; }
         const yVal = (y == null || !Number.isFinite(y)) ? null : Number(y);
+        // Don't seed a dataset with LEADING nulls. A sibling on a device that
+        // never provides this field (e.g. Android/ExoPlayer has no per-segment
+        // AVMetrics throughput) must contribute an EMPTY dataset — an all-null
+        // one desyncs Chart.js's point-element cache and crashes the
+        // nearest-mode hover (`reading 'skip'` on an undefined element). Once
+        // the series has its first real value, nulls ARE pushed so spanGaps:false
+        // still renders gaps for an intermittently-missing metric. This matches
+        // the primary path, which simply skips null samples (pushSample).
+        if (yVal === null && arr.length === 0) continue;
         insertByX(arr, { x, y: yVal });
       }
       if (x > hw) hw = x;
@@ -1488,6 +1574,16 @@ watch(
     .map((o) => o.key + ':' + o.series.map((s) => s.label).join(',')).join('|'),
   () => {
     try { rebuildAllDatasets(); } catch (err) { console.warn('overlay rebuild skipped:', err); }
+    // Establish Chart.js's point-element tracking on the overlay data arrays
+    // while they're still EMPTY, before drainOverlays bulk-fills them. Chart.js
+    // patches a dataset's data array (push/splice) on its first update() and
+    // from then on adds/removes elements incrementally. If that first update
+    // sees an already-full array, it must BULK-insert every element in one
+    // _resyncElements pass — which desyncs (data populated, elements 0/partial)
+    // and crashes `.skip`-on-undefined, blanking every sibling line. Updating
+    // once while empty makes the subsequent backfill build elements one push at
+    // a time — exactly how the primary (self) path stays healthy. Issue #579.
+    try { chart?.update('none'); } catch (err) { console.warn('overlay prime skipped:', err); }
     void drainOverlays();
   },
   { immediate: true },
