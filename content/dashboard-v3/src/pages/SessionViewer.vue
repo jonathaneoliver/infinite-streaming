@@ -14,11 +14,12 @@
  * of the live `/api/v2/players` fetch.
  */
 import { ref, computed } from 'vue';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
+import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
 import SessionDisplay from '@/components/SessionDisplay.vue';
 import ChatPanel from '@/components/chat/ChatPanel.vue';
 import { parseTimeAny, canonicalUUID, parseCompareParam } from '@/composables/urlTimeFormat';
+import { contentFromMasterUrl } from '@/composables/useSessionLabels';
 import { getPlay, patchPlayClassification, type PlaySummary } from '@/repo/v2-repo';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 import type { ChatScope } from '@/types/chat';
@@ -130,10 +131,31 @@ function memberLabel(m: { tag?: string }): string {
   const port = portForTag(m.tag);
   return `Session #${m.tag ?? '?'}${port ? ` (Port ${port})` : ''}`;
 }
-const memberTail = computed<string>(() => {
-  const p = playQuery.data.value;
-  return [p?.device_class, p?.content_id].filter(Boolean).join(' · ');
+// Per-member device tail. One getPlay() per compare member, keyed identically
+// to the active playQuery (['play', playId]) so the active member dedupes
+// against the existing cache — one-shot, no polling, no SSE. Each tab shows
+// ITS OWN device: previously a single computed read the ACTIVE play, so every
+// tab showed the same device (a phone+TV compare read "· phone" on both).
+const memberPlayQueries = useQueries({
+  queries: computed(() => comparePlays.map((m) => ({
+    queryKey: ['play', m.playId] as const,
+    queryFn: () => getPlay(m.playId),
+    enabled: !!m.playId,
+    refetchInterval: false as const,
+  }))),
 });
+// Bare CPU arch is not a meaningful device model (iOS reports "arm64"); skip it.
+const ARCH_ONLY = /^(arm64|aarch64|x86_64|x86|arm)$/i;
+function memberTail(i: number): string {
+  const p = memberPlayQueries.value[i]?.data as Record<string, unknown> | undefined | null;
+  if (!p) return '';
+  const deviceClass = p.device_class ? String(p.device_class) : '';
+  const modelRaw = p.device_model ? String(p.device_model) : '';
+  const model = modelRaw && !ARCH_ONLY.test(modelRaw) ? modelRaw : '';
+  const content = (p.content_id ? String(p.content_id) : '')
+    || contentFromMasterUrl((p.master_manifest_url as string | null | undefined) ?? null);
+  return [deviceClass, model, content].filter(Boolean).join(' · ');
+}
 const groupBadge = computed<string>(() => String(playQuery.data.value?.group_id ?? ''));
 
 const starMutation = useMutation({
@@ -189,14 +211,42 @@ const backHref = '/dashboard/sessions.html';
 
     <div class="page">
       <main class="content">
+        <header class="page-header">
+          <div>
+            <div class="page-title">Session Viewer</div>
+            <div class="page-subtitle">Replay an archived session through the live charts.</div>
+          </div>
+        </header>
+
         <div v-if="!playerId" class="empty">
           <p>No <code>player_id</code> in the URL.</p>
           <p>Open <code>/dashboard/session-viewer.html?player_id=&lt;uuid&gt;&amp;play_id=&lt;uuid&gt;</code></p>
         </div>
 
         <template v-else>
+          <!-- #736 member tab rail — like testing.html's session pills, on
+               its own row above the banner. Click a tab to make that grouped
+               play active (its panels show, its line goes solid); the overlay
+               set stays the same. -->
+          <div v-if="comparePlays.length" class="session-tabs" role="tablist" aria-label="Grouped sessions">
+            <button
+              v-for="(m, i) in comparePlays"
+              :key="m.playerId"
+              type="button"
+              role="tab"
+              class="session-tab grouped"
+              :class="{ active: i === activeIdx }"
+              :aria-selected="i === activeIdx"
+              :title="m.playerId"
+              @click="activeIdx = i"
+            >
+              <span class="st-label">{{ memberLabel(m) }}<span v-if="memberTail(i)" class="st-tail"> · {{ memberTail(i) }}</span></span>
+              <span v-if="groupBadge" class="group-badge">{{ groupBadge }}</span>
+            </button>
+          </div>
           <!-- REPLAY banner — page-specific (SessionDisplay's brush
-               block joins flush below it via shared border styling). -->
+               block joins flush below it via shared border styling).
+               Single-session controls only: player/play + actions. -->
           <header class="meta-banner">
             <div class="meta-line">
               <span class="replay-badge">REPLAY</span>
@@ -215,25 +265,6 @@ const backHref = '/dashboard/sessions.html';
                   ? `${playId ?? '(all plays)'} — filter disabled while showing context`
                   : (playId ?? '(all plays)')"
               >{{ playId ?? '(all plays)' }}</code>
-            </div>
-            <!-- #736 member tab rail — like testing.html's session pills.
-                 Click a tab to make that grouped play active (its panels show,
-                 its line goes solid); the overlay set stays the same. -->
-            <div v-if="comparePlays.length" class="session-tabs" role="tablist" aria-label="Grouped sessions">
-              <button
-                v-for="(m, i) in comparePlays"
-                :key="m.playerId"
-                type="button"
-                role="tab"
-                class="session-tab grouped"
-                :class="{ active: i === activeIdx }"
-                :aria-selected="i === activeIdx"
-                :title="m.playerId"
-                @click="activeIdx = i"
-              >
-                <span class="st-label">{{ memberLabel(m) }}<span v-if="memberTail" class="st-tail"> · {{ memberTail }}</span></span>
-                <span v-if="groupBadge" class="group-badge">{{ groupBadge }}</span>
-              </button>
             </div>
             <div class="banner-actions">
               <button
@@ -332,6 +363,10 @@ const backHref = '/dashboard/sessions.html';
   overflow-x: hidden;
 }
 .header-title { font-size: 16px; font-weight: 600; }
+/* In-page page title, mirroring Testing.vue's .page-header/.page-title. */
+.page-header { margin-bottom: 16px; }
+.page-title { font-size: 24px; font-weight: 600; color: #202124; }
+.page-subtitle { font-size: 13px; color: #5f6368; margin-top: 2px; }
 
 .meta-banner {
   display: flex;
@@ -390,7 +425,7 @@ const backHref = '/dashboard/sessions.html';
 
 .banner-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 /* #736 member tab rail — matches testing.html's session pills exactly. */
-.session-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.session-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
 .session-tab {
   display: inline-flex; align-items: center; gap: 8px; max-width: 380px;
   border: 1px solid #c7d2fe; background: #eef2ff; color: #1e1b4b;
