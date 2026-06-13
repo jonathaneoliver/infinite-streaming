@@ -177,10 +177,17 @@ func TestManipulateHLSMaster(t *testing.T) {
 			check: func(t *testing.T, out []byte) { wantURIOrder(t, out, "v1080.m3u8") },
 		},
 		{
-			// mixed match keys, authored ascending order preserved among survivors.
+			// mixed match keys (URI + bare height), authored ascending order
+			// preserved among survivors.
 			name:  "allowed/mixed_keys",
 			cm:    ContentManipulation{AllowedVariants: []string{"v240.m3u8", "720"}},
 			check: func(t *testing.T, out []byte) { wantURIOrder(t, out, "v240.m3u8 v720.m3u8") },
+		},
+		{
+			// two full-resolution keys keep both ends of the ladder (#766).
+			name:  "allowed/multi_resolution",
+			cm:    ContentManipulation{AllowedVariants: []string{"426x240", "1920x1080"}},
+			check: func(t *testing.T, out []byte) { wantURIOrder(t, out, "v240.m3u8 v1080.m3u8") },
 		},
 		{
 			// no whitelist entry matches → every variant is filtered out,
