@@ -118,8 +118,8 @@ const variants = computed<ManifestVariantLite[]>(() => {
  *  by event type — segment dots are slate, playlist dots blue, key
  *  fetches orange — so the role of each request is visible at a glance. */
 // AVMetrics is iOS-AVPlayer-only. Gate both the data AND the legend
-// label so non-iOS players don't see "Per-segment throughput (AVMetrics)"
-// at all — MetricsLineChart renders the legend entry whenever the label
+// label so non-iOS players don't see the "Video segment fetch" chip at
+// all — MetricsLineChart renders the legend entry whenever the label
 // prop is non-empty, regardless of whether there's data.
 const isAVPlayerForMarkers = computed(() => player.value?.player_metrics?.player_tech === 'AVPlayer');
 const compareSelf = useCompareSelf();
@@ -222,20 +222,20 @@ const sessionMarkerSets = computed<Array<{ tag: string; color: string | null; do
 const segmentMarkers = computed(() => sessionMarkerSets.value.flatMap((s) => s.dots));
 
 /** Per-session legend chips, one per session that actually contributed dots
- *  — `Per segment (Sx)`, coloured to match its dots. Empty in single-session
+ *  — `Video segment fetch (Sx)`, coloured to match its dots. Empty in single-session
  *  (that path uses the flat `segmentMarkersLabel` chip instead). Issue #486. */
 const segmentMarkerGroups = computed<Array<{ tag: string; label: string; color: string }>>(() => {
   if (!compareSelf.value) return [];
   return sessionMarkerSets.value
     .filter((s) => s.dots.length > 0)
-    .map((s) => ({ tag: s.tag, label: `Per segment (${s.tag})`, color: s.color ?? SELF_MARKER_COLOR }));
+    .map((s) => ({ tag: s.tag, label: `Video segment fetch (${s.tag})`, color: s.color ?? SELF_MARKER_COLOR }));
 });
 
 const segmentMarkersLabel = computed(() => {
   // Single-session only — compare mode uses the per-session group chips. Gate
   // on the active player being iOS so non-iOS players never see the chip.
   if (compareSelf.value) return '';
-  return isAVPlayerForMarkers.value ? 'Per-segment throughput (AVMetrics)' : '';
+  return isAVPlayerForMarkers.value ? 'Video segment fetch' : '';
 });
 
 function colorForRequestType(type: string): string {
