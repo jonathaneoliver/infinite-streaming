@@ -175,6 +175,15 @@ function onGlobal(
 // version bump (the cache holds the full backfill + live tail).
 let lastIngestedMs = -Infinity;
 
+// Per-segment marker focus, so the dots highlight/fade in lockstep with the
+// line series (issue #486/#579). The hover handlers (session-legend + per-
+// series legend) set this and trigger a repaint; the overlayMarkers plugin
+// reads it at draw time:
+//   undefined → no focus, every dot full
+//   null      → something else is focused (a line / its session) → dim ALL dots
+//   'Sx'      → that session is focused → its dots pop, other sessions' dots dim
+let markerFocusTag: string | null | undefined = undefined;
+
 /** Tolerance for "right edge is at the live sample" — matches the
  *  brush-drop-at-live heuristic in SessionDisplay. */
 const LIVE_EDGE_TOLERANCE_MS = 2000;
@@ -447,6 +456,9 @@ function applySessionVisibility(doUpdate = true) {
 function applySessionHover() {
   if (!chart || !compareCtx) return;
   const hov = compareCtx.view.hovered.value;
+  // Markers follow the same focus: hovering session Sx pops its dots and
+  // fades the others; no hover → all dots full. Issue #486.
+  markerFocusTag = hov ? hov : undefined;
   for (const ds of chart.data.datasets as any[]) {
     if (ds._origBorderWidth == null) ds._origBorderWidth = ds.borderWidth ?? 2;
     if (ds._origBorderColor == null) ds._origBorderColor = ds.borderColor;
@@ -528,10 +540,16 @@ function createChartInstance(Chart: any): any {
           if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) continue;
           if (m.x < sx.min || m.x > sx.max) continue;
           if (m.y < sy.min || m.y > sy.max) continue;
+          // Highlight/fade in lockstep with the line series. focused = this
+          // dot's session is the focus (or nothing is focused); dimmed = a
+          // line / another session is focused, so fade this dot to ~0.2
+          // (matching the lines' `#rrggbb33` dim) and skip the pop.
+          const focused = markerFocusTag === undefined || markerFocusTag === m.tag;
           const px = sx.getPixelForValue(m.x);
           const py = sy.getPixelForValue(m.y);
+          ctx.globalAlpha = focused ? 1 : 0.2;
           ctx.beginPath();
-          ctx.arc(px, py, 3, 0, Math.PI * 2);
+          ctx.arc(px, py, focused && markerFocusTag !== undefined ? 4 : 3, 0, Math.PI * 2);
           ctx.fillStyle = m.color ?? '#1f2937';
           ctx.fill();
           // Hairline border so the dot stands out on a same-colored line.
@@ -539,6 +557,7 @@ function createChartInstance(Chart: any): any {
           ctx.lineWidth = 1;
           ctx.stroke();
         }
+        ctx.globalAlpha = 1;
         ctx.restore();
       },
     }, {
@@ -640,6 +659,7 @@ function createChartInstance(Chart: any): any {
                     hidden: !props.markersVisible,
                     datasetIndex: -1,
                     _isMarkerToggle: true,
+                    _markerTag: g.tag,
                   });
                 }
               } else if (props.markersLabel) {
@@ -696,13 +716,24 @@ function createChartInstance(Chart: any): any {
           onHover(_evt: any, item: any, leg: any) {
             const c = leg?.chart;
             if (!c || typeof item?.datasetIndex !== 'number') return;
-            // The synthetic markers chip carries datasetIndex -1 (a number, so
-            // it slips past the guard above) and _isMarkerToggle. It maps to no
-            // real dataset, so the highlight logic below would dim EVERY line
-            // (highlighted = {-1} matches nothing) and leave them greyed while
-            // the cursor rests on the chip. The overlay toggle is orthogonal to
-            // line focus — skip hover-highlight for it entirely (issue #486/#579).
-            if (item.datasetIndex < 0 || item._isMarkerToggle) return;
+            // The synthetic markers chip carries datasetIndex -1 and
+            // _isMarkerToggle, mapping to no real dataset. Treat hovering it
+            // as "focus the dots": fade every LINE, and focus this chip's
+            // session's dots (its `_markerTag`; absent = single-session chip,
+            // so all dots stay full). Issue #486/#579.
+            if (item.datasetIndex < 0 || item._isMarkerToggle) {
+              markerFocusTag = item._markerTag ?? undefined;
+              for (const ds of c.data.datasets as any[]) {
+                if (ds._origBorderWidth == null) ds._origBorderWidth = ds.borderWidth ?? 2;
+                if (ds._origBorderColor == null) ds._origBorderColor = ds.borderColor;
+                ds.borderWidth = Math.max(1, (ds._origBorderWidth ?? 2) - 1);
+                const oc = ds._origBorderColor;
+                ds.borderColor = typeof oc === 'string' && oc.startsWith('#') && oc.length === 7 ? oc + '33' : oc;
+              }
+              try { c.update('none'); } catch { /* ignore */ }
+              if (c.canvas) c.canvas.style.cursor = 'pointer';
+              return;
+            }
             const hovered = item.datasetIndex;
             // Compare mode (#579): also give a medium highlight to the
             // SAME metric on other sessions — hovering `Fetching Variant
@@ -757,6 +788,12 @@ function createChartInstance(Chart: any): any {
                   typeof oc === 'string' && oc.startsWith('#') && oc.length === 7 ? oc + '33' : oc;
               }
             });
+            // A LINE is focused, not the dots — so fade ALL per-segment dots
+            // regardless of session. The dots pop only when their own session
+            // chip (applySessionHover) or the "Per segment (Sx)" marker chip
+            // is hovered; hovering any line isolates that line and fades the
+            // dots like every other non-hovered element. Issue #486.
+            markerFocusTag = null;
             try { c.update('none'); } catch { /* ignore */ }
             // Cursor cue so the user knows the label is interactive.
             if (c.canvas) c.canvas.style.cursor = 'pointer';
@@ -764,6 +801,9 @@ function createChartInstance(Chart: any): any {
           onLeave(_evt: any, _item: any, leg: any) {
             const c = leg?.chart;
             if (!c) return;
+            // Clear marker focus too (unless a session-legend hover is still
+            // active — that path manages markerFocusTag itself).
+            if (!compareCtx || !compareCtx.view.hovered.value) markerFocusTag = undefined;
             c.data.datasets.forEach((ds: any) => {
               if (ds._origBorderWidth != null) ds.borderWidth = ds._origBorderWidth;
               if (ds._origBorderColor != null) ds.borderColor = ds._origBorderColor;
