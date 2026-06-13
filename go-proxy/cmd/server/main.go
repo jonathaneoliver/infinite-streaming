@@ -6496,19 +6496,44 @@ func shouldApplyContentManipulation(session SessionData) bool {
 	return false
 }
 
+// ContentManipulation bundles the per-session master-playlist / manifest
+// manipulation knobs into one value so adding a future option is a struct
+// field rather than another positional parameter rippling through every
+// manipulate* signature and its callers. Built once from the session's
+// content_* fields via newContentManipulation.
+//
+// VariantOrder is HLS-only — manipulateDASHManifest ignores it.
+type ContentManipulation struct {
+	StripCodecs        bool
+	StripAvgBandwidth  bool
+	StripResolution    bool
+	OverstateBandwidth bool
+	LiveOffset         int
+	AllowedVariants    []string
+	VariantOrder       string
+}
+
+// newContentManipulation reads the session's content_* fields into a
+// ContentManipulation struct.
+func newContentManipulation(session SessionData) ContentManipulation {
+	return ContentManipulation{
+		StripCodecs:        getBool(session, "content_strip_codecs"),
+		StripAvgBandwidth:  getBool(session, "content_strip_average_bandwidth"),
+		StripResolution:    getBool(session, "content_strip_resolution"),
+		OverstateBandwidth: getBool(session, "content_overstate_bandwidth"),
+		LiveOffset:         getInt(session, "content_live_offset"),
+		AllowedVariants:    getStringSlice(session, "content_allowed_variants"),
+		VariantOrder:       getString(session, "content_variant_order"),
+	}
+}
+
 // applyContentManipulation modifies master playlist/manifest content based on session settings
 func (a *App) applyContentManipulation(body []byte, session SessionData, contentType string) ([]byte, error) {
-	stripCodecs := getBool(session, "content_strip_codecs")
-	stripAvgBandwidth := getBool(session, "content_strip_average_bandwidth")
-	stripResolution := getBool(session, "content_strip_resolution")
-	overstateBandwidth := getBool(session, "content_overstate_bandwidth")
-	liveOffset := getInt(session, "content_live_offset")
-	allowedVariants := getStringSlice(session, "content_allowed_variants")
-	variantOrder := getString(session, "content_variant_order")
+	cm := newContentManipulation(session)
 
 	// Handle HLS master playlists
 	if strings.Contains(strings.ToLower(contentType), "mpegurl") || strings.Contains(strings.ToLower(contentType), "m3u8") {
-		result, err := manipulateHLSMaster(body, stripCodecs, stripAvgBandwidth, stripResolution, overstateBandwidth, liveOffset, allowedVariants, variantOrder)
+		result, err := manipulateHLSMaster(body, cm)
 		if err != nil {
 			return nil, err
 		}
@@ -6517,15 +6542,15 @@ func (a *App) applyContentManipulation(body []byte, session SessionData, content
 		// notably hls.js, which would otherwise park at the oldest segment).
 		// Master EXT-X-START is rewritten inside manipulateHLSMaster; this
 		// pass handles the variant side. No-op on master playlists.
-		if liveOffset > 0 {
-			result = rewriteVariantLiveOffsetTags(result, liveOffset)
+		if cm.LiveOffset > 0 {
+			result = rewriteVariantLiveOffsetTags(result, cm.LiveOffset)
 		}
 		return result, nil
 	}
 
 	// Handle DASH manifests
 	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
-		return manipulateDASHManifest(body, stripCodecs, stripAvgBandwidth, stripResolution, overstateBandwidth, liveOffset, allowedVariants)
+		return manipulateDASHManifest(body, cm)
 	}
 
 	return body, nil
@@ -6560,7 +6585,7 @@ func variantAllowed(v *m3u8.Variant, allowed map[string]bool) bool {
 	return false
 }
 
-func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, stripResolution bool, overstateBandwidth bool, liveOffset int, allowedVariants []string, variantOrder string) ([]byte, error) {
+func manipulateHLSMaster(body []byte, cm ContentManipulation) ([]byte, error) {
 	playlist, listType, err := m3u8.DecodeFrom(bufio.NewReader(bytes.NewReader(body)), true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode HLS playlist: %w", err)
@@ -6574,10 +6599,10 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	master := playlist.(*m3u8.MasterPlaylist)
 	modified := false
 
-	// Filter variants if allowedVariants is specified
-	if len(allowedVariants) > 0 {
+	// Filter variants if allowed_variants is specified
+	if len(cm.AllowedVariants) > 0 {
 		allowedMap := make(map[string]bool)
-		for _, v := range allowedVariants {
+		for _, v := range cm.AllowedVariants {
 			allowedMap[v] = true
 		}
 
@@ -6595,7 +6620,7 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	}
 
 	// Strip codecs if requested
-	if stripCodecs {
+	if cm.StripCodecs {
 		hasCodecs := false
 		for _, variant := range master.Variants {
 			if variant != nil && variant.Codecs != "" {
@@ -6609,7 +6634,7 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	}
 
 	// Strip AVERAGE-BANDWIDTH if requested
-	if stripAvgBandwidth {
+	if cm.StripAvgBandwidth {
 		for _, variant := range master.Variants {
 			if variant != nil && variant.AverageBandwidth > 0 {
 				variant.AverageBandwidth = 0
@@ -6625,7 +6650,7 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	// payload) handle missing resolution metadata. Apple's HLS
 	// validator (mediastreamvalidator) rejects this; AVPlayer
 	// continues but loses resolution-aware ABR and UI badges.
-	if stripResolution {
+	if cm.StripResolution {
 		for _, variant := range master.Variants {
 			if variant != nil && variant.Resolution != "" {
 				variant.Resolution = ""
@@ -6635,7 +6660,7 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	}
 
 	// Overstate BANDWIDTH and AVERAGE-BANDWIDTH by 10% if requested
-	if overstateBandwidth {
+	if cm.OverstateBandwidth {
 		for _, variant := range master.Variants {
 			if variant == nil {
 				continue
@@ -6658,7 +6683,7 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	// emits EXT-X-STREAM-INF lines in slice order. EXT-X-MEDIA audio/
 	// subtitle renditions travel on each variant's Alternatives and stay
 	// glued to their owning variant, so they are unaffected.
-	switch variantOrder {
+	switch cm.VariantOrder {
 	case "ascending":
 		sortVariantsByBandwidth(master.Variants, true)
 		modified = true
@@ -6673,7 +6698,7 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	}
 
 	// Inject #EXT-X-START with negative offset for live edge positioning
-	if liveOffset > 0 {
+	if cm.LiveOffset > 0 {
 		modified = true
 	}
 
@@ -6698,9 +6723,9 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	// #EXT-X-VERSION so AVPlayer sees the version before any higher-version
 	// tags — inserting between #EXTM3U and #EXT-X-VERSION triggers -12646
 	// "playlist parse error".
-	if liveOffset > 0 {
+	if cm.LiveOffset > 0 {
 		encoded := buf.String()
-		startTag := fmt.Sprintf("#EXT-X-START:TIME-OFFSET=-%d,PRECISE=YES\n", liveOffset)
+		startTag := fmt.Sprintf("#EXT-X-START:TIME-OFFSET=-%d,PRECISE=YES\n", cm.LiveOffset)
 		if idx := strings.Index(encoded, "#EXT-X-START:"); idx >= 0 {
 			end := strings.Index(encoded[idx:], "\n")
 			if end < 0 {
@@ -6823,18 +6848,14 @@ func rewriteVariantLiveOffsetTags(body []byte, liveOffsetSecs int) []byte {
 	return body
 }
 
-// manipulateDASHManifest modifies a DASH manifest
-// Note: stripCodecs and allowedVariants parameters are reserved for future DASH implementation
-func manipulateDASHManifest(body []byte, stripCodecs bool, stripAvgBandwidth bool, stripResolution bool, overstateBandwidth bool, liveOffset int, allowedVariants []string) ([]byte, error) {
+// manipulateDASHManifest modifies a DASH manifest.
+// Note: the ContentManipulation knobs are reserved for a future DASH
+// implementation. cm.VariantOrder is HLS-only and intentionally ignored here.
+func manipulateDASHManifest(body []byte, cm ContentManipulation) ([]byte, error) {
 	// DASH manifest manipulation would require XML parsing and manipulation
 	// using libraries like encoding/xml or third-party XML processors.
 	// This is deferred to keep the initial implementation focused on HLS.
-	_ = stripCodecs        // Silence unused parameter warning
-	_ = stripAvgBandwidth  // Silence unused parameter warning
-	_ = stripResolution    // Silence unused parameter warning
-	_ = overstateBandwidth // Silence unused parameter warning
-	_ = liveOffset         // Silence unused parameter warning
-	_ = allowedVariants    // Silence unused parameter warning
+	_ = cm // Silence unused parameter warning
 	log.Printf("[GO-PROXY][CONTENT] DASH manifest manipulation not yet implemented")
 	return body, nil
 }
