@@ -10,6 +10,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
+import LabelFrequencyTable from '@/components/LabelFrequencyTable.vue';
 import ChatPanel from '@/components/chat/ChatPanel.vue';
 import { sessionViewerURL, type CompareMember } from '@/composables/urlTimeFormat';
 import { listPlays, patchPlayClassification, type PlaySummary, type Scenario } from '@/repo/v2-repo';
@@ -1375,6 +1376,8 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
         <div class="page-title">Sessions</div>
         <div class="page-subtitle">Browse archived streaming sessions. Click one to open it in the Session Viewer.</div>
       </div>
+
+      <LabelFrequencyTable style="margin-bottom: 1rem;" />
 
       <div class="panel">
         <div class="panel-header">

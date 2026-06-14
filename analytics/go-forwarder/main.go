@@ -1453,6 +1453,18 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 	// in characterization.go.
 	registerCharacterizationHandlers(mux, cfg)
 
+	// Label-frequency baseline (#772) — % of sessions per label, for
+	// population-aware triage. Defined in label_frequency.go.
+	registerLabelFrequencyHandler(mux, cfg)
+
+	// Label↔dimension association (#783) — conditional-probability lift, for
+	// "is this aberrant because of X?" attribution. Defined in label_associate.go.
+	registerLabelAssociateHandler(mux, cfg)
+
+	// Label divergence / skew (#783) — per-label max lift across dimensions,
+	// for the frequency-table skew column. Defined in label_divergence.go.
+	registerLabelDivergenceHandler(mux, cfg)
+
 	srv := &http.Server{
 		Addr:              cfg.httpListen,
 		Handler:           mux,
