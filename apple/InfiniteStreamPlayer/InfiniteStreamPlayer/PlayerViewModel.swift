@@ -357,12 +357,22 @@ final class PlayerViewModel: ObservableObject {
     private var avMetricsSubscriber: Any?
     private let metricsSessionLookupSeconds: TimeInterval = 30
     private let autoRecoveryThresholdSeconds: TimeInterval = 60
-    private let autoRecoveryBaseDelaySeconds: TimeInterval = 2
+    /// #703a — first auto-recovery backoff delay (then ×2 per attempt: 2/4/8s by
+    /// default). Settable via the `is.flag.auto_recovery_base_delay_s` launch arg
+    /// so characterization can make the restart fire late (deterministic
+    /// clear-before-restart timing) while production tunes it for UX.
+    private var autoRecoveryBaseDelaySeconds: TimeInterval = 2
     private let autoRecoveryMaxAttempts: Int = 3
     private let autoRecoveryVerifyDelaySeconds: TimeInterval = 10
     private var autoRecoveryAttempts: Int = 0
     private var autoRecoveryRestartTimer: Timer?
     private var autoRecoveryVerifyTimer: Timer?
+    /// #703a — the reason that drove the most recent recovery attempt, so the
+    /// exhaustion close-out can stamp a `<reason>_exhausted` terminal message.
+    private var lastRecoveryReason: String?
+    /// #778 — a jump-to-live seek nudge is in flight; suppresses re-entry and the
+    /// straight-to-restart path until the verify timer resolves seek vs escalate.
+    private var liveResyncInFlight = false
     private var zeroBufferStartedAt: Date?
     @Published private(set) var profileShiftCount: Int = 0
     @Published private(set) var playerRestarts: Int = 0
@@ -1077,6 +1087,19 @@ final class PlayerViewModel: ObservableObject {
         player.play()
         if goLive {
             seekToLiveEdge(item: item)
+        } else if resumingFromRestart {
+            // #703a — a restart (retry / auto-recovery) rebuilds the item AFTER
+            // the player has been stuck failing for a while, during which the
+            // live window kept advancing. Resume at the DEFAULT live offset, not
+            // the stale position the player drifted to before it failed —
+            // otherwise the rebuilt item comes back behind the (now-moved) window
+            // and wedges in buffering (fault-recovery probe Test 2). Use the
+            // configured offset when set, else snap to the live edge.
+            if liveOffsetSeconds > 0 {
+                scheduleLiveOffsetSeek(reason: "restart re-sync to live")
+            } else {
+                seekToLiveEdge(item: item)
+            }
         } else if liveOffsetSeconds > 0 {
             // User-configured custom offset — overrides the manifest's
             // HOLD-BACK on first ready-to-play. Mirrors testing-session.html.
@@ -1324,7 +1347,12 @@ final class PlayerViewModel: ObservableObject {
     /// Manual trigger for the auto-recovery path. Same call the
     /// codec-error handler and the auto-recovery branch make: replace
     /// the *same* URL on the *same* AVPlayer.
-    func retry() {
+    ///
+    /// `reason` tags the emitted `restart` event (#703a). The UI Retry button
+    /// uses the default "user_retry"; auto-recovery passes its driving reason so
+    /// the restart row carries the real cause — and emits exactly ONCE here, not
+    /// a "user_retry" from retry() plus a second row from the caller.
+    func retry(reason: String = "user_retry") {
         // Replay the REATTACH URL (proxy.* stripped), not currentURL — a
         // recovery restart must re-attach to the live shaping session, never
         // re-materialize it. If the session was reaped it comes back honestly
@@ -1349,18 +1377,74 @@ final class PlayerViewModel: ObservableObject {
         refreshed = appendStartTime(to: refreshed)
         self.currentURL = refreshed
         Task { [weak self] in
-            await self?.requestHARSnapshot(reason: "user_retry", force: true)
+            await self?.requestHARSnapshot(reason: reason, force: true)
         }
         // #603 — emit a `restart` event so the mid-play recovery is observable
         // (it wasn't before; manual retries left no mark on the events lane).
         // Same play_id, bumped attempt_id; play boundaries are play_start/play_end.
         let restartPayload = buildMetricsPayload(event: "restart", at: Date(), extra: [
-            "player_metrics_restart_reason": "user_retry",
+            "player_metrics_restart_reason": reason,
             "player_restarts": playerRestarts,
         ])
         Task { [weak self] in await self?.sendPlayerMetrics(payload: restartPayload) }
         resumingFromRestart = true
         loadStream(url: refreshed)
+    }
+
+    /// #778 — METHOD 3 of 4: cheap-first jump-to-live recovery, tried BEFORE a
+    /// restart. On a sustained live stall (`liveResyncDue`) seek toward the live
+    /// edge — the recovery AVPlayer won't do itself when the wanted segment has
+    /// rolled off the sliding window. Unlike `retry()` it KEEPS the AVPlayerItem
+    /// (no `playerRestarts`/`attempt_id` bump) — a within-item nudge, emitted as a
+    /// distinct `live_resync` event (reason `live_resync_seek`). Verify-then-
+    /// escalate: if the seek restores progress it's a method-3 recovery; if not,
+    /// escalate to METHOD 4 — `scheduleAutoRecoveryRestart(auto_recovery_live_resync)`,
+    /// a full rebuild. Gated on `autoRecovery` by the caller.
+    private func attemptLiveResyncSeek() {
+        // Don't act on a play we've already terminally closed (sticky terminal).
+        guard diagnostics.terminalStatus == nil else { return }
+        // A rebuild is already scheduled, or a prior nudge is still pending —
+        // don't pile on.
+        guard autoRecoveryRestartTimer == nil, !liveResyncInFlight else { return }
+        guard let item = player.currentItem else { return }
+        // Anti-fight guard: if AVPlayer is about to resume on its own
+        // (automaticallyWaitsToMinimizeStalling), a forced live-edge seek would
+        // needlessly drop buffered content and cause a visible jump. Let it.
+        if item.isPlaybackLikelyToKeepUp {
+            log("LIVE_RESYNC: skipped — likelyToKeepUp, AVPlayer self-recovering")
+            return
+        }
+
+        liveResyncInFlight = true
+        log("LIVE_RESYNC: nudging toward live edge (stall recovery)")
+        // Within-item observability event — distinct name so dashboards don't
+        // count it as a restart; reason matches the escalation reason below.
+        let payload = buildMetricsPayload(event: "live_resync", at: Date(), extra: [
+            "player_metrics_restart_reason": "live_resync_seek",
+        ])
+        Task { [weak self] in await self?.sendPlayerMetrics(payload: payload) }
+        // `automaticallyPreservesTimeOffsetFromLive` keeps this at the server
+        // HOLD-BACK margin, not the bleeding edge — reduces immediate re-stall.
+        seekToLiveEdge(item: item)
+
+        // Verify-then-escalate: if the nudge restored progress, treat it as a
+        // natural recovery; otherwise fall through to the rebuild ladder.
+        let scheduledAtTime = diagnostics.currentTime
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.liveResyncInFlight = false
+                guard self.diagnostics.terminalStatus == nil else { return }
+                let advanced = self.diagnostics.currentTime > scheduledAtTime + 0.5
+                if self.diagnostics.state == "playing" && advanced {
+                    self.log("LIVE_RESYNC: recovered via seek nudge")
+                    self.autoRecoveryAttempts = 0
+                    return
+                }
+                self.log("LIVE_RESYNC: seek did not restore progress — escalating to restart")
+                self.scheduleAutoRecoveryRestart(reason: "auto_recovery_live_resync")
+            }
+        }
     }
 
     /// Full tear-down + recreate. Replaces the AVPlayer instance,
@@ -1690,14 +1774,18 @@ final class PlayerViewModel: ObservableObject {
         // auto-recovery flag. AndroidView counterpart's NO_MEMORY path
         // doesn't apply here.
         statusText = "Error: \(message)"
-        // Auto-recovery is a reattach, not a fresh bootstrap: replay the
-        // proxy.*-stripped reattach URL so a reaped session comes back
-        // unconfigured rather than re-materialized at pattern step 0 (#719).
-        if autoRecovery, let url = reattachURL ?? currentURL {
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                self?.loadStream(url: url)
-            }
+        // #703a pure-.failed model: a failed item drives the EXPONENTIAL-BACKOFF
+        // restart loop (scheduleAutoRecoveryRestart → retry replays the #719
+        // proxy.*-stripped reattach URL, 2/4/8s backoff, max 3 attempts, then a
+        // clean play_end close on exhaustion) — NOT an immediate, uncapped
+        // reattach. This is the single recovery path now that the time-based
+        // detectors (frozen/segment/zero-buffer/wedge) are observability-only.
+        // The per-item `itemFatalHandled` latch (set above) resets in
+        // startPlayback when the loop's retry() builds the new item, so a
+        // .failed on the rebuilt item re-enters the loop; the loop's attempt
+        // counter bounds it and closes the play after autoRecoveryMaxAttempts.
+        if autoRecovery, reattachURL ?? currentURL != nil {
+            scheduleAutoRecoveryRestart(reason: "auto_recovery_failure")
             return
         }
         // No auto-recovery → this error is terminal. start_failure if
@@ -1751,6 +1839,16 @@ final class PlayerViewModel: ObservableObject {
                 domain: nsErr.domain,
                 details: nsErr.localizedDescription
             )
+        } else if diagnostics.lastErrorCode != 0 || !diagnostics.lastErrorDomain.isEmpty {
+            // #703a — no NSError in hand (e.g. retry-exhaustion close). Fall
+            // back to the last AVPlayerItemErrorLog entry so the terminal row
+            // still carries the classifying CoreMedia/HTTP code that drove the
+            // failure, rather than a blank terminal_error_*.
+            diagnostics.markTerminalError(
+                code: diagnostics.lastErrorCode,
+                domain: diagnostics.lastErrorDomain,
+                details: diagnostics.lastErrorLog.isEmpty ? message : diagnostics.lastErrorLog
+            )
         }
         endSession(status: status, reason: "unknown")
         NSLog("[endSession] fatal status=\(status) message=\(message) err=\((error as NSError?).map { "\($0.domain)#\($0.code)" } ?? "none")")
@@ -1771,6 +1869,11 @@ final class PlayerViewModel: ObservableObject {
     private static let flagPlayIdRotation = "is.flag.play_id_rotation_s"
     private static let flagPreviewVideoSlots = "is.flag.preview_video_slots"
     private static let flagPeakBitrate = "is.flag.peak_bitrate_mbps"
+    // #703a — characterization knobs to shorten the recovery thresholds so the
+    // detectors trip inside a test window (defaults live on PlaybackDiagnostics).
+    private static let flagLiveResyncStallS = "is.flag.live_resync_stall_s" // #778
+    private static let flagWedgeConfirmS = "is.flag.wedge_confirm_s"
+    private static let flagAutoRecoveryBaseDelayS = "is.flag.auto_recovery_base_delay_s"
     private static let flagStartsFirstVariant = "is.flag.starts_first_variant"
     private static let lastPlayedKey = "is.lastPlayed"
     private static let viewCountsKey = "is.viewCounts"
@@ -1804,6 +1907,15 @@ final class PlayerViewModel: ObservableObject {
         }
     }
 
+    /// Read a Double flag that may have been set as an NSNumber (UI/persisted)
+    /// OR a String (NSArgumentDomain launch-arg, e.g. `-is.flag.x 4`). Returns
+    /// nil when the key is absent or unparseable.
+    private static func doubleFlag(_ d: UserDefaults, _ key: String) -> Double? {
+        if let n = d.object(forKey: key) as? NSNumber { return n.doubleValue }
+        if let s = d.string(forKey: key), let v = Double(s) { return v }
+        return nil
+    }
+
     private func loadAdvancedFlags() {
         let d = UserDefaults.standard
         developerMode    = d.bool(forKey: Self.flagDevMode)
@@ -1822,6 +1934,19 @@ final class PlayerViewModel: ObservableObject {
         // and still reads the UI-persisted NSNumber correctly. Was the reason
         // the cold-start clamp never engaged on fleet sims.
         preferredPeakBitRateMbps = max(0, d.integer(forKey: Self.flagPeakBitrate))
+        // #703a — recovery-threshold overrides. NSArgumentDomain delivers a
+        // launch-arg value as a STRING, so coerce both the NSNumber (UI-set) and
+        // the string (launch-arg) forms; only apply when > 0 so an absent flag
+        // leaves the PlaybackDiagnostics defaults (6s / 120s) intact.
+        if let v = Self.doubleFlag(d, Self.flagLiveResyncStallS), v > 0 { // #778
+            diagnostics.liveResyncStallSeconds = v
+        }
+        if let v = Self.doubleFlag(d, Self.flagWedgeConfirmS), v > 0 {
+            diagnostics.wedgeConfirmSeconds = v
+        }
+        if let v = Self.doubleFlag(d, Self.flagAutoRecoveryBaseDelayS), v > 0 {
+            autoRecoveryBaseDelaySeconds = v
+        }
         startsOnFirstEligibleVariant = d.bool(forKey: Self.flagStartsFirstVariant)
         // First launch: no key yet → use the device's hardware cap so
         // the user starts with the richest preview their hardware can
@@ -1976,13 +2101,14 @@ extension PlayerViewModel {
                 guard let self, frozen else { return }
                 let payload = self.buildMetricsPayload(event: "frozen", at: Date())
                 Task { await self.sendPlayerMetrics(payload: payload) }
-                if self.autoRecovery {
-                    // The recovery timer's per-attempt HAR (force=true)
-                    // captures the same incident a moment later.
-                    self.scheduleAutoRecoveryRestart(reason: "auto_recovery_frozen")
-                } else {
-                    Task { await self.requestHARSnapshot(reason: "frozen") }
-                }
+                // #703a — pure-.failed recovery model: the time-based detectors
+                // (frozen/segment-stall/zero-buffer/wedge) are observability-only.
+                // ONLY AVPlayerItem.status==.failed (+ the failure binding) drives
+                // the exponential-backoff restart loop — so the player reaches a
+                // real failed state before we rebuild, instead of being yanked at
+                // 3s. To restore frozen→rebuild, re-add scheduleAutoRecoveryRestart
+                // ("auto_recovery_frozen") here behind `self.autoRecovery`.
+                Task { await self.requestHARSnapshot(reason: "frozen") }
             }
             .store(in: &cancellables)
 
@@ -1993,10 +2119,40 @@ extension PlayerViewModel {
                 guard let self, stalled else { return }
                 let payload = self.buildMetricsPayload(event: "segment_stall", at: Date())
                 Task { await self.sendPlayerMetrics(payload: payload) }
+                // #703a pure-.failed model: observability-only (no rebuild here).
+                Task { await self.requestHARSnapshot(reason: "segment_stall") }
+            }
+            .store(in: &cancellables)
+
+        // #778 — live-resync LADDER. `liveResyncDue` flips after a long no-progress
+        // stall (default 45s) that NEITHER the `.failed` terminal path NOR the
+        // `stallStuck` auto-pause path caught — the silent bandwidth-starvation hang
+        // (`state=stalled, rate=1`, frozen playhead) the #703a sweep surfaced for
+        // rate_choke / segment-timeout. Recovery is a two-rung ladder, both rungs
+        // tagged so the recovery METHOD is attributable:
+        //   • METHOD 3 — `attemptLiveResyncSeek()`: cheap jump-to-live seek, keeps
+        //     the item, emits `live_resync` (reason `live_resync_seek`). Tried FIRST.
+        //   • METHOD 4 — if the seek doesn't restore progress, it escalates to
+        //     `scheduleAutoRecoveryRestart(auto_recovery_live_resync)`, a full rebuild.
+        // (METHOD 1 = `.failed`→`auto_recovery_failure`, METHOD 2 = `stallStuck`→
+        // `auto_recovery_stuck`; both go straight to restart — a dead/auto-paused
+        // item can't be seek-rescued.)
+        //
+        // Guards: skip if the play is already terminal, OR if a restart is already
+        // pending (`autoRecoveryRestartTimer != nil`) — so for faults that DO reach
+        // `.failed`/`stuck`, those faster paths fire first and this never piles on.
+        // It only acts on the gap they miss.
+        diagnostics.$liveResyncDue
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] due in
+                guard let self, due else { return }
+                guard self.diagnostics.terminalStatus == nil,
+                      self.autoRecoveryRestartTimer == nil else { return }
                 if self.autoRecovery {
-                    self.scheduleAutoRecoveryRestart(reason: "auto_recovery_segment_stall")
+                    self.attemptLiveResyncSeek()
                 } else {
-                    Task { await self.requestHARSnapshot(reason: "segment_stall") }
+                    Task { await self.requestHARSnapshot(reason: "live_resync") }
                 }
             }
             .store(in: &cancellables)
@@ -2014,10 +2170,34 @@ extension PlayerViewModel {
                 guard let self, wedged else { return }
                 let payload = self.buildMetricsPayload(event: "wedge_detected", at: Date())
                 Task { await self.sendPlayerMetrics(payload: payload) }
+                // #703a pure-.failed model: the 120s wedge is observability-only.
+                // It's also largely shadowed now — without the time-based rebuilds
+                // a wedged player surfaces as .failed and the failure binding (not
+                // this) drives the restart loop. Re-add scheduleAutoRecoveryRestart
+                // ("wedge_auto_recovery") behind `self.autoRecovery` to restore.
+                Task { await self.requestHARSnapshot(reason: "wedge_detected") }
+            }
+            .store(in: &cancellables)
+
+        // #703a — player-STUCK recovery. `stallStuck` flips true when AVPlayer
+        // auto-pauses mid-stall (timeControlStatus → .paused, player.rate → 0):
+        // the buffer drained, the player gave up, and it will NOT self-recover —
+        // yet it also does NOT transition to .failed, so the pure-.failed path
+        // never fires. So this needs its own trigger into the SAME restart loop,
+        // tagged with a stuck-specific reason (distinct from the failed path's
+        // `auto_recovery_failure`). The restart's retry() rebuilds the item and
+        // re-syncs to the live offset, which is what actually un-sticks it.
+        diagnostics.$stallStuck
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] stuck in
+                guard let self, stuck else { return }
+                let payload = self.buildMetricsPayload(event: "player_stuck", at: Date())
+                Task { await self.sendPlayerMetrics(payload: payload) }
                 if self.autoRecovery {
-                    self.scheduleAutoRecoveryRestart(reason: "wedge_auto_recovery")
+                    self.scheduleAutoRecoveryRestart(reason: "auto_recovery_stuck")
                 } else {
-                    Task { await self.requestHARSnapshot(reason: "wedge_detected") }
+                    Task { await self.requestHARSnapshot(reason: "player_stuck") }
                 }
             }
             .store(in: &cancellables)
@@ -2163,9 +2343,21 @@ extension PlayerViewModel {
     }
 
     fileprivate func scheduleAutoRecoveryRestart(reason: String) {
+        // #703a — sticky terminal: once the play is closed out, never schedule
+        // more recovery work for it.
+        if diagnostics.terminalStatus != nil { return }
         if autoRecoveryRestartTimer != nil { return }
         if autoRecoveryAttempts >= autoRecoveryMaxAttempts {
-            log("Auto-recovery: exhausted after \(autoRecoveryAttempts) consecutive attempts — giving up")
+            // #703a — give-up no longer dangles the play `in_progress` until the
+            // proxy's 5-min reaper (#692). Close the play_id cleanly: emit a
+            // single terminal play_end tagged `<reason>_exhausted`, with
+            // terminal_error_* stamped from the last error-log entry (the nil
+            // error path in markFatalTerminal). Terminal is sticky (guard above
+            // + first-call-wins in markTerminalError), so a late natural
+            // recovery can't revive a play we've already closed.
+            let drivingReason = lastRecoveryReason ?? reason
+            log("Auto-recovery: exhausted after \(autoRecoveryAttempts) attempts — closing play (\(drivingReason)_exhausted)")
+            markFatalTerminal(error: nil, message: "\(drivingReason)_exhausted")
             return
         }
         let attempt = autoRecoveryAttempts + 1
@@ -2187,19 +2379,14 @@ extension PlayerViewModel {
                     return
                 }
                 self.autoRecoveryAttempts = attempt
+                self.lastRecoveryReason = reason
                 self.log("Auto-recovery: attempt \(attempt)/\(self.autoRecoveryMaxAttempts) restarting (\(reason))")
-                self.retry()
-                let restartPayload = self.buildMetricsPayload(event: "restart", at: Date(), extra: [
-                    "player_metrics_restart_reason": reason,
-                    "player_restarts": self.playerRestarts
-                ])
-                Task { [weak self] in await self?.sendPlayerMetrics(payload: restartPayload) }
-                // Each auto-recovery attempt deserves its own HAR — bypass
-                // the per-player debounce so back-to-back attempts inside
-                // the 30s window each produce a snapshot.
-                Task { [weak self] in
-                    await self?.requestHARSnapshot(reason: reason, attempt: attempt, force: true)
-                }
+                // #703a — retry(reason:) emits the single `restart` event tagged
+                // with the real reason AND its own forced HAR. No second emit
+                // here: previously every auto-recovery attempt produced BOTH a
+                // "user_retry" row (from retry()) and a real-reason row, doubling
+                // the restart count on the dashboard.
+                self.retry(reason: reason)
                 self.scheduleAutoRecoverySuccessCheck()
             }
         }
@@ -2212,6 +2399,8 @@ extension PlayerViewModel {
                 guard let self else { return }
                 self.autoRecoveryVerifyTimer = nil
                 if self.autoRecoveryRestartTimer != nil { return }
+                // #703a — don't revive a play we've already terminally closed.
+                guard self.diagnostics.terminalStatus == nil else { return }
                 let playingCleanly = self.diagnostics.state == "playing"
                     && !self.diagnostics.frozenDetected
                     && !self.diagnostics.segmentStallDetected
@@ -2238,7 +2427,11 @@ extension PlayerViewModel {
             return
         }
         if now.timeIntervalSince(zeroBufferStartedAt ?? now) >= autoRecoveryThresholdSeconds {
-            scheduleAutoRecoveryRestart(reason: "auto_recovery_zero_buffer")
+            // #703a pure-.failed model: zero-buffer is observability-only (no
+            // time-based rebuild). The restart loop is driven only by the
+            // failure/.failed path. Re-add scheduleAutoRecoveryRestart(reason:
+            // "auto_recovery_zero_buffer") here to restore the 60s watchdog.
+            log("Auto-recovery: zero-buffer \(Int(autoRecoveryThresholdSeconds))s — observability-only (pure-.failed model)")
         }
     }
 

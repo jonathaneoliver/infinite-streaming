@@ -1784,7 +1784,7 @@ function skipToEnd() {
         :from-ms="cycleBandsDomain.fromMs"
         :to-ms="cycleBandsDomain.toMs"
       />
-      <EventsTimeline :player-id="archivePlayerId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" />
+      <EventsTimeline :player-id="archivePlayerId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" :control-stream="timeseries.control" />
     </CollapsibleSection>
 
     <CollapsibleSection title="Bitrate Chart etc" :open="true" eager persist-key="bitrate-chart">

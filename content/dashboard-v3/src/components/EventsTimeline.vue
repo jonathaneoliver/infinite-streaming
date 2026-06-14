@@ -7,8 +7,8 @@
  *     - VARIANT     (per (resolution, bitrate) sub-lane)
  *     - DISPLAY RES
  *     - PLAYERSTATE
- *     - PLAYBACK    (FIRST_FRAME / RESTART / TIMEJUMP / SHIFT_UP /
- *                    SHIFT_DOWN / PLAYBACK_START)
+ *     - PLAYBACK    (FIRST_FRAME / NEW_PLAY / RESTART / LIVE_RESYNC / RATE→N /
+ *                    TIMEJUMP / SHIFT_UP / SHIFT_DOWN / PLAYBACK_START)
  *     - IMPAIRMENT  (STALL / FROZEN / SEGMENT_STALL / ERROR)
  *   CONTROL section
  *     - CONTROL     (CONTROL_CHANGE, USER_MARKED — operator + control
@@ -211,6 +211,11 @@ const props = defineProps<{
    *  consumers (live testing.html) can skip wiring it without
    *  breaking the component. */
   avmetricsStream?: Stream<Record<string, unknown>>;
+  /** control_events stream (proxy/harness/auto action log). Each row carries
+   *  `source` / `event` / `info` — what control mutation happened — which
+   *  drives the CONTROL lane markers. Optional; without it the CONTROL lane
+   *  has no points (control_revision alone only says "something changed"). */
+  controlStream?: Stream<Record<string, unknown>>;
 }>();
 const coord = useChartCoordination(toRef(props, 'playerId'));
 
@@ -228,12 +233,17 @@ interface IngestRow {
   stalls: number | null;
   droppedFrames: number | null;
   error: string;
+  errorCode: number | null;
+  errorDomain: string;
   firstFrameTimeS: number | null;
   videoStartTimeS: number | null;
   loopCountServer: number | null;
   controlRevision: string | null;
   playId: string | null;
   manifestVariants: { bandwidth?: number; resolution?: string }[] | null;
+  playerRestarts: number | null;
+  lastEvent: string;
+  playbackRate: number | null;
 }
 
 function tsOfRow(row: Record<string, unknown>): number {
@@ -284,6 +294,8 @@ function chRowToIngest(row: Record<string, unknown>): IngestRow | null {
     stalls: num(row.stalling_count) ?? num(row.stall_count),
     droppedFrames: num(row.frames_dropped),
     error: String(row.player_error ?? ''),
+    errorCode: num(row.error_code),
+    errorDomain: String(row.error_domain ?? '').trim(),
     firstFrameTimeS: num(row.video_first_frame_time_ms) != null
       ? (num(row.video_first_frame_time_ms) as number) / 1000
       : num(row.video_first_frame_time_s),
@@ -294,6 +306,9 @@ function chRowToIngest(row: Record<string, unknown>): IngestRow | null {
     controlRevision,
     playId: typeof row.play_id === 'string' ? row.play_id : null,
     manifestVariants: variants,
+    playerRestarts: num(row.player_restarts),
+    lastEvent: String(row.last_event ?? '').trim(),
+    playbackRate: num(row.playback_rate),
   };
 }
 
@@ -395,9 +410,21 @@ let prevLoopServer: number | null = null;
 let prevControlRev: string | null = null;
 let prevError: string | null = null;
 let prevPlayId: string | null = null;
+// #703a — play_ids already marked NEW PLAY, so the synthetic-play_id flicker
+// (manifest-URL churn between ticks) doesn't re-mark a play we've already seen.
+const seenPlayIds = new Set<string>();
 let prevFirstFrame: number | null = null;
 let prevVideoStart: number | null = null;
 let prevVariantMbps: number | null = null;
+// #703a — PLAYBACK-lane RESTART (player_restarts counter-diff) + LIVE RESYNC
+// (last_event transition). prevRestarts seeds on the first row so we mark only
+// increments, not the play's starting count.
+let prevRestarts: number | null = null;
+let prevLastEvent: string | null = null;
+// #703a — last playback_rate seen (rounded), so a PLAYBACK-lane "RATE → N"
+// marker drops on ANY rate change. rate 0 = AVPlayer paused/stuck; 1 = play;
+// other = trick/slow. Generic — copes with any rate, not just 0/1.
+let prevRate: number | null = null;
 // Watermark of the latest CH row already fed through `ingest()`. The
 // markers-stream watcher uses this to consume only NEW rows on each
 // version bump (the stream cache holds the full backfill + live tail).
@@ -715,6 +742,16 @@ function ingest(r: IngestRow) {
     prevLoopServer = null;
     prevError = null;
     prevFirstFrame = prevVideoStart = null;
+    prevRestarts = null;
+    prevLastEvent = null;
+    prevRate = null;
+    // #703a — PLAYBACK-lane NEW PLAY marker the first time a play_id appears
+    // (Set-deduped vs the synthetic-id flicker). Marks genuine new-play
+    // boundaries — e.g. each stop/restart-playback case in a sweep session.
+    if (r.playId && !seenPlayIds.has(r.playId)) {
+      seenPlayIds.add(r.playId);
+      pushPoint('PLAYBACK', t, 'NEW PLAY', '#0891b2', `\nplay_id ${r.playId.slice(0, 8)}…`);
+    }
   }
 
   // STATEFUL LANES — push every heartbeat as an event into a flat
@@ -791,15 +828,18 @@ function ingest(r: IngestRow) {
     pushPoint('IMPAIRMENT', t, 'FROZEN', '#4c1d95', `\n+${r.droppedFrames - prevDropped} dropped`);
   }
   if (r.error && r.error !== prevError) {
-    pushPoint('IMPAIRMENT', t, 'ERROR', '#e11d48', `\n${r.error}`);
+    // Include the NSError domain/code when present (e.g. "NSURLErrorDomain
+    // #-1008") — the message string alone rarely identifies the failure.
+    const code = (r.errorCode != null && r.errorCode !== 0)
+      ? `${r.errorDomain || 'error'} #${r.errorCode}` : '';
+    const detail = code ? `\n${r.error}\n${code}` : `\n${r.error}`;
+    pushPoint('IMPAIRMENT', t, 'ERROR', '#e11d48', detail);
     prevError = r.error;
   }
   if (r.stalls != null) prevStalls = r.stalls;
   if (r.droppedFrames != null) prevDropped = r.droppedFrames;
 
   // PLAYBACK — FIRST_FRAME + START TIME on first observation per play.
-  // (Legacy RESTART event was driven by `player_restarts`, which isn't
-  // persisted in CH; drop until the schema gains it.)
   if (r.firstFrameTimeS != null && r.firstFrameTimeS > 0 && prevFirstFrame !== r.firstFrameTimeS) {
     pushPoint('PLAYBACK', t, 'FIRST FRAME', '#14b8a6', `\n${r.firstFrameTimeS.toFixed(3)}s`);
     prevFirstFrame = r.firstFrameTimeS;
@@ -808,6 +848,37 @@ function ingest(r: IngestRow) {
     pushPoint('PLAYBACK', t, 'START TIME', '#15803d', `\n${r.videoStartTimeS.toFixed(3)}s`);
     prevVideoStart = r.videoStartTimeS;
   }
+  // PLAYBACK — RESTART on each player_restarts increment (#703a; the column is
+  // persisted via the lanes_v1 bundle). Seed silently on the first row so we
+  // mark only mid-play recoveries, not the play's starting count.
+  if (r.playerRestarts != null) {
+    if (prevRestarts != null && r.playerRestarts > prevRestarts) {
+      pushPoint('PLAYBACK', t, 'RESTART', '#f59e0b', `\n+${r.playerRestarts - prevRestarts} (total ${r.playerRestarts})`);
+    }
+    prevRestarts = r.playerRestarts;
+  }
+  // PLAYBACK — LIVE RESYNC: the #703a cheap seek-to-live nudge. It keeps the
+  // item (no player_restarts bump), so it's surfaced off the last_event
+  // transition rather than the counter.
+  if (r.lastEvent === 'live_resync' && prevLastEvent !== 'live_resync') {
+    pushPoint('PLAYBACK', t, 'LIVE RESYNC', '#0ea5e9', '\nseek toward live edge');
+  }
+  if (r.lastEvent) prevLastEvent = r.lastEvent;
+
+  // PLAYBACK — playback_rate transitions (#703a). Drop a "RATE → N" marker on
+  // ANY rate change (rounded to ignore float noise), labelled with the actual
+  // rate so it copes with anything: 0 = paused/stuck (the stuck signal that the
+  // state lane masks), 1 = play, 2 = ff, 0.5 = slow, etc. Colour: 0 red, 1
+  // green, anything else amber (trick/slow).
+  if (r.playbackRate != null) {
+    const rate = Math.round(r.playbackRate * 100) / 100;
+    if (prevRate != null && rate !== prevRate) {
+      const color = rate === 0 ? '#dc2626' : (rate === 1 ? '#16a34a' : '#f59e0b');
+      // Label IS the A→B transition (e.g. "RATE 0 → 1"); no redundant detail.
+      pushPoint('PLAYBACK', t, `RATE ${prevRate} → ${rate}`, color, '');
+    }
+    prevRate = rate;
+  }
 
   // SERVER — LOOP increments.
   if (r.loopCountServer != null && prevLoopServer != null && r.loopCountServer > prevLoopServer) {
@@ -815,10 +886,13 @@ function ingest(r: IngestRow) {
   }
   if (r.loopCountServer != null) prevLoopServer = r.loopCountServer;
 
-  // CONTROL — record any control_revision change.
-  if (r.controlRevision && r.controlRevision !== '0' && r.controlRevision !== prevControlRev) {
+  // CONTROL — fallback only. control_revision is an opaque revision stamp, so
+  // this just says "something changed". When a control_events stream is wired
+  // (SessionDisplay), the richer drainControlRows() drives the lane with the
+  // actual action (event/info/source) instead — see below.
+  if (!props.controlStream && r.controlRevision && r.controlRevision !== '0' && r.controlRevision !== prevControlRev) {
     if (prevControlRev != null && prevControlRev !== '0') {
-      pushPoint('CONTROL', t, 'CONTROL CHANGE', '#7c3aed', `\n${prevControlRev} → ${r.controlRevision}`);
+      pushPoint('CONTROL', t, 'CONTROL CHANGE', '#7c3aed', '\nrevision changed');
     }
     prevControlRev = r.controlRevision;
   }
@@ -1223,6 +1297,42 @@ watch(
   { immediate: true },
 );
 
+/* ─── control_events drain (#474) — drives the CONTROL lane with the actual
+ * action (event/info/source) instead of the opaque control_revision. Low
+ * volume, so one pushPoint per row (no AVMetrics-style sizing/reflow). */
+let lastControlIngestedMs = -Infinity;
+async function drainControlRows() {
+  const stream = props.controlStream;
+  if (!stream) return;
+  const raw = stream.inRange(
+    lastControlIngestedMs === -Infinity ? 0 : lastControlIngestedMs + 1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (!raw.length) return;
+  await ensureTimeline();
+  let highWater = lastControlIngestedMs;
+  for (const row of raw) {
+    const t = tsOfRow(row);
+    if (!Number.isFinite(t) || t <= lastControlIngestedMs) continue;
+    const event = String(row.event ?? '').trim();
+    const source = String(row.source ?? '').trim();
+    const info = String(row.info ?? '').trim();
+    if (event) {
+      // Label = what + who (e.g. "shape · harness"); tooltip detail = the
+      // info payload (rate, fault kind, pattern step, labels, …).
+      const label = source ? `${event} · ${source}` : event;
+      pushPoint('CONTROL', t, label, EVENT_LANES.CONTROL.color, info ? `\n${info}` : '');
+    }
+    if (t > highWater) highWater = t;
+  }
+  lastControlIngestedMs = highWater;
+}
+watch(
+  () => props.controlStream?.version.value ?? 0,
+  () => { void drainControlRows(); },
+  { immediate: true },
+);
+
 // Toggle the AVMETRICS lane's visibility when activity appears or
 // disappears (issue #486). Single boolean memo so we only call
 // rebuildGroups on the actual transition — every other version
@@ -1275,11 +1385,13 @@ function resetIngest() {
   pendingLiveAV.length = 0;
   lastIngestedMs = -Infinity;
   lastAVIngestedMs = -Infinity;
+  lastControlIngestedMs = -Infinity;
   prevStalls = prevDropped = null;
   prevLoopServer = null;
   prevControlRev = null;
   prevError = null;
   prevPlayId = null;
+  seenPlayIds.clear();
   prevFirstFrame = prevVideoStart = null;
   prevVariantMbps = null;
   if (itemsDS) {

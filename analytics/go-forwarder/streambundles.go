@@ -237,7 +237,21 @@ var bundleRegistry = map[string]bundleDef{
 			"stall_count",
 			"frames_dropped",
 			"player_error",
+			// #703a — error_code/_domain so the IMPAIRMENT ERROR marker can show
+			// the actual NSError code/domain (e.g. -1008 / NSURLErrorDomain), not
+			// just the message string.
+			"error_code",
+			"error_domain",
 			"last_event",
+			// #703a — player_restarts revives the PLAYBACK-lane RESTART marker
+			// (counter-diff; the column IS persisted — it's in panel_v1 too),
+			// and last_event above carries the new `live_resync` nudge event.
+			"player_restarts",
+			// #703a — playback_rate drives the PLAYBACK-lane RATE→0 / RATE→1
+			// markers (rate 0 == AVPlayer paused/stuck; distinguishes a stuck
+			// stall from a transient one, which `player_state` masks). In
+			// panel_v1 too; added here so EventsTimeline gets it per-tick.
+			"playback_rate",
 			"manifest_variants",
 			"master_manifest_consecutive_failures",
 			"manifest_consecutive_failures",

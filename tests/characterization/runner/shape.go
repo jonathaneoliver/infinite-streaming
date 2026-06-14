@@ -103,6 +103,34 @@ func (s *Session) ArmFault(ctx context.Context, shape, kind string, urlPatterns 
 	return err
 }
 
+// ArmFaultRepeating posts a SUSTAINED fault rule on the bound player: the
+// `shape` (e.g. "404", "corrupted", "request_first_byte_reset") fires on
+// `consecutive` matching `kind` requests in a row and re-arms for `frequency`
+// cycles, so every request in the window is affected — unlike ArmFault's
+// one-shot. Used by the fault-recovery probe to keep a fault on long enough to
+// drive AVPlayer toward a .failed state, then ClearFaults.
+func (s *Session) ArmFaultRepeating(ctx context.Context, shape, kind string, consecutive, frequency int, urlPatterns ...string) error {
+	if s == nil || s.PlayerID == "" {
+		return fmt.Errorf("arm fault: no player bound")
+	}
+	if shape == "" || kind == "" {
+		return fmt.Errorf("arm fault: shape and kind required")
+	}
+	args := []string{
+		"fault", "add", s.PlayerID,
+		"--type", shape,
+		"--kind", kind,
+		"--frequency", strconv.Itoa(frequency),
+		"--consecutive", strconv.Itoa(consecutive),
+		"--mode", "requests",
+	}
+	if len(urlPatterns) > 0 {
+		args = append(args, "--url-substr", strings.Join(urlPatterns, ","))
+	}
+	_, err := runHarness(ctx, args...)
+	return err
+}
+
 // ClearFaults wipes all fault rules from the bound player. The
 // abort test calls this between cycles so each cycle starts from
 // a known clean state.
