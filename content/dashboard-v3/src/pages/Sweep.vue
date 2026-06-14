@@ -34,9 +34,25 @@ interface Experiment {
   verdict: string;
   player_id: string;
   play_id: string;
+  owner: string;
+  claimed_at: string;
+  raw_json: string;
   score: number;
   created_at: string;
   updated_at: string;
+}
+
+// The full recipe-of-record stored in raw_json (the runner replays this).
+interface RawExperiment {
+  content?: string;
+  duration_s?: number;
+  reps?: number;
+  rep_group?: string;
+  fault?: Record<string, unknown>;
+  shape?: Record<string, unknown>;
+  content_manipulation?: Record<string, unknown>;
+  transfer_timeouts?: Record<string, unknown>;
+  result?: { verdict?: string; labels?: string[]; note?: string };
 }
 
 // Column order = the lifecycle flow.
@@ -182,6 +198,72 @@ const disabledCount = computed(() =>
   Object.values(scope.value).reduce(
     (n, vs) => n + Object.values(vs).filter((en) => en === false).length, 0),
 );
+
+// ── Per-job detail (click a card to expand all its fields) ───────────────────
+const expanded = ref<Set<string>>(new Set());
+function toggleExpand(id: string) {
+  const s = new Set(expanded.value);
+  s.has(id) ? s.delete(id) : s.add(id);
+  expanded.value = s;
+}
+
+// Parse the full recipe-of-record out of raw_json (legacy rows have none).
+// Cached by the raw_json string so template re-renders don't re-parse.
+const rawCache = new Map<string, RawExperiment>();
+function rawOf(e: Experiment): RawExperiment {
+  if (!e.raw_json) return {};
+  let r = rawCache.get(e.raw_json);
+  if (!r) {
+    try { r = JSON.parse(e.raw_json) as RawExperiment; } catch { r = {}; }
+    rawCache.set(e.raw_json, r);
+  }
+  return r;
+}
+
+// Render a recipe sub-object (fault/shape/…) as "k=v · k=v" for compact display.
+function kv(obj?: Record<string, unknown>): string {
+  if (!obj) return '';
+  return Object.entries(obj)
+    .filter(([, v]) => v !== '' && v !== null && v !== undefined)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(' · ');
+}
+
+function chDateToLocal(s: string): string {
+  if (!s || s.startsWith('1970')) return '—';
+  const d = new Date(s.replace(' ', 'T') + 'Z');
+  return isNaN(d.getTime()) ? s : d.toLocaleString();
+}
+
+function isStaleClaim(claimedAt: string): boolean {
+  if (!claimedAt || claimedAt.startsWith('1970')) return false;
+  const d = new Date(claimedAt.replace(' ', 'T') + 'Z');
+  return !isNaN(d.getTime()) && Date.now() - d.getTime() > 60 * 60 * 1000; // > 60 min
+}
+
+// Derived "what to do next" — a pure function of the row (the agenda logic),
+// so the page tells you how to keep going from CH state alone.
+function nextAction(e: Experiment): { label: string; tone: 'go' | 'warn' | 'muted' } {
+  switch (e.status) {
+    case 'backlog':
+      return { label: 'Claim & run', tone: 'go' };
+    case 'running':
+      if (!e.play_id) return isStaleClaim(e.claimed_at)
+        ? { label: 'Reap & re-claim (stale)', tone: 'warn' }
+        : { label: 'Running — probe in flight', tone: 'muted' };
+      if (!e.verdict) return { label: `Analyze play ${e.play_id.slice(0, 8)}`, tone: 'go' };
+      return { label: 'Analyzed — awaiting move', tone: 'muted' };
+    case 'found':
+      return { label: 'Investigate → isolate → promote', tone: 'go' };
+    case 'review':
+    case 'feedback':
+      return { label: 'Needs a human', tone: 'warn' };
+    case 'done':
+      return { label: 'Done (clean)', tone: 'muted' };
+    default:
+      return { label: '—', tone: 'muted' };
+  }
+}
 </script>
 
 <template>
@@ -252,17 +334,62 @@ const disabledCount = computed(() =>
             <span class="count">{{ byStatus[s].length }}</span>
           </h2>
           <div class="cards">
-            <article v-for="(e, i) in byStatus[s]" :key="e.exp_id" class="card" :class="'cls-' + (e.class || 'config')">
+            <article
+              v-for="(e, i) in byStatus[s]"
+              :key="e.exp_id"
+              class="card"
+              :class="['cls-' + (e.class || 'config'), { expanded: expanded.has(e.exp_id) }]"
+              @click="toggleExpand(e.exp_id)"
+            >
               <div class="row1">
                 <span class="kind" :class="'k-' + e.kind">{{ e.kind }}</span>
                 <span v-if="s === 'backlog' && i === 0" class="next" title="highest scheduler score — claimed next">next →</span>
                 <span v-if="e.verdict" class="verdict" :class="verdictClass(e.verdict)">{{ e.verdict }}</span>
                 <span class="score" :title="'scheduler score ' + e.score">{{ Math.round(e.score) }}</span>
+                <span class="chev">{{ expanded.has(e.exp_id) ? '▾' : '▸' }}</span>
               </div>
               <div class="recipe">{{ e.recipe }}</div>
               <div class="axes">{{ e.platform }} · {{ e.protocol }} · {{ e.mode }}</div>
               <div v-if="e.why" class="why" :title="e.why_text">💡 {{ e.why }}</div>
               <div v-if="e.parent" class="parent">↳ from {{ e.parent }}<span v-if="e.depth"> · d{{ e.depth }}</span></div>
+
+              <!-- expanded: all details for this job -->
+              <div v-if="expanded.has(e.exp_id)" class="detail" @click.stop>
+                <div class="na" :class="'na-' + nextAction(e).tone">
+                  <span class="na-k">next</span> {{ nextAction(e).label }}
+                </div>
+
+                <h3>Recipe</h3>
+                <dl>
+                  <div><dt>class</dt><dd>{{ e.class || 'config' }}</dd></div>
+                  <div><dt>content</dt><dd>{{ rawOf(e).content || '—' }}</dd></div>
+                  <div><dt>mode</dt><dd>{{ e.mode }}<span v-if="rawOf(e).duration_s"> · {{ rawOf(e).duration_s }}s</span></dd></div>
+                  <div v-if="rawOf(e).fault"><dt>fault</dt><dd>{{ kv(rawOf(e).fault) }}</dd></div>
+                  <div v-if="rawOf(e).shape"><dt>shape</dt><dd>{{ kv(rawOf(e).shape) }}</dd></div>
+                  <div v-if="rawOf(e).content_manipulation"><dt>content&nbsp;manip</dt><dd>{{ kv(rawOf(e).content_manipulation) }}</dd></div>
+                  <div v-if="rawOf(e).transfer_timeouts"><dt>xfer&nbsp;timeout</dt><dd>{{ kv(rawOf(e).transfer_timeouts) }}</dd></div>
+                </dl>
+
+                <h3>Provenance &amp; trigger</h3>
+                <dl>
+                  <div><dt>kind</dt><dd>{{ e.kind }}<span v-if="e.arm"> · {{ e.arm }}</span></dd></div>
+                  <div v-if="e.group_id"><dt>group</dt><dd>{{ e.group_id }}</dd></div>
+                  <div v-if="e.parent"><dt>parent</dt><dd>{{ e.parent }} · depth {{ e.depth }}</dd></div>
+                  <div v-if="rawOf(e).reps"><dt>reps</dt><dd>{{ rawOf(e).reps }}<span v-if="rawOf(e).rep_group"> · {{ rawOf(e).rep_group }}</span></dd></div>
+                  <div><dt>why</dt><dd>{{ e.why_text || e.why || '— (no trigger recorded)' }}</dd></div>
+                </dl>
+
+                <h3>Outcome</h3>
+                <dl>
+                  <div><dt>verdict</dt><dd><span v-if="e.verdict" class="verdict" :class="verdictClass(e.verdict)">{{ e.verdict }}</span><span v-else>—</span></dd></div>
+                  <div v-if="rawOf(e).result?.note"><dt>note</dt><dd>{{ rawOf(e).result?.note }}</dd></div>
+                  <div v-if="rawOf(e).result?.labels?.length"><dt>labels</dt><dd class="labels"><code v-for="l in rawOf(e).result?.labels" :key="l">{{ l }}</code></dd></div>
+                  <div v-if="e.owner"><dt>owner</dt><dd>{{ e.owner }} · claimed {{ chDateToLocal(e.claimed_at) }}</dd></div>
+                  <div v-if="e.play_id"><dt>play</dt><dd>{{ e.play_id }}</dd></div>
+                  <div><dt>created</dt><dd>{{ chDateToLocal(e.created_at) }} · updated {{ chDateToLocal(e.updated_at) }}</dd></div>
+                </dl>
+              </div>
+
               <div class="foot">
                 <code class="id">{{ e.exp_id }}</code>
                 <a
@@ -272,6 +399,7 @@ const disabledCount = computed(() =>
                   :class="{ live: s === 'running' }"
                   target="_blank"
                   rel="noopener"
+                  @click.stop
                 >{{ s === 'running' ? '▶ watch live' : '↗ viewer' }}</a>
                 <span v-else-if="s === 'running'" class="starting" title="session not bootstrapped yet">⏳ starting…</span>
               </div>
@@ -317,8 +445,25 @@ const disabledCount = computed(() =>
 .col h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary, #5f6368); margin: .2rem .2rem .6rem; display: flex; justify-content: space-between; }
 .count { background: var(--primary-blue-light, #e8f0fe); color: var(--primary-blue, #1a73e8); border-radius: 10px; padding: 0 .5rem; font-size: .75rem; }
 .cards { display: flex; flex-direction: column; gap: .5rem; }
-.card { background: var(--background, #fff); border: 1px solid var(--border-light, #e8eaed); border-left: 3px solid var(--primary-blue, #1a73e8); border-radius: 6px; padding: .5rem .6rem; font-size: .82rem; }
+.card { background: var(--background, #fff); border: 1px solid var(--border-light, #e8eaed); border-left: 3px solid var(--primary-blue, #1a73e8); border-radius: 6px; padding: .5rem .6rem; font-size: .82rem; cursor: pointer; }
+.card:hover { border-color: var(--border, #dadce0); }
+.card.expanded { box-shadow: 0 1px 6px rgba(60,64,67,.15); }
 .card.cls-fault { border-left-color: var(--warning, #f9ab00); }
+.chev { color: var(--text-disabled, #9aa0a6); font-size: .7rem; margin-left: .3rem; }
+.detail { margin: .5rem 0 .2rem; border-top: 1px solid var(--border-light, #e8eaed); padding-top: .5rem; }
+.detail h3 { font-size: .66rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary, #5f6368); margin: .55rem 0 .25rem; }
+.detail h3:first-of-type { margin-top: .4rem; }
+.detail dl { margin: 0; }
+.detail dl > div { display: flex; gap: .5rem; padding: .08rem 0; align-items: baseline; }
+.detail dt { flex: none; width: 6.5rem; color: var(--text-disabled, #9aa0a6); font-size: .72rem; }
+.detail dd { margin: 0; color: var(--text-primary, #202124); font-size: .76rem; word-break: break-word; min-width: 0; }
+.detail dd.labels { display: flex; flex-wrap: wrap; gap: .25rem; }
+.detail dd.labels code { background: var(--surface-hover, #f1f3f4); border-radius: 3px; padding: 0 .3rem; font-size: .68rem; }
+.na { border-radius: 5px; padding: .25rem .5rem; font-size: .76rem; font-weight: 600; margin-bottom: .4rem; }
+.na-k { font-size: .62rem; text-transform: uppercase; letter-spacing: .04em; opacity: .7; margin-right: .35rem; }
+.na-go { background: var(--success-light, #e6f4ea); color: var(--success, #1e8e3e); }
+.na-warn { background: var(--warning-light, #fef7e0); color: #a86a00; }
+.na-muted { background: var(--surface-hover, #f1f3f4); color: var(--text-secondary, #5f6368); }
 .row1 { display: flex; justify-content: space-between; align-items: center; gap: .4rem; }
 .kind { font-size: .68rem; text-transform: uppercase; letter-spacing: .03em; color: var(--text-secondary, #5f6368); }
 .next { font-size: .64rem; font-weight: 700; color: var(--success, #1e8e3e); background: var(--success-light, #e6f4ea); border-radius: 8px; padding: 0 .4rem; }
