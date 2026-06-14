@@ -108,6 +108,11 @@ var bundleRegistry = map[string]bundleDef{
 			"buffer_depth_s",
 			"buffer_end_s",
 			"live_offset_s",
+			// #786 — the live-offset trio so events read-API consumers can compute
+			// excess = live_offset_s - recommended_offset_s without a raw CH query
+			// (the columns are ingested for iOS + Android #782 but were panel_v1-only).
+			"recommended_offset_s",
+			"configured_offset_s",
 			"true_offset_s",
 			// FPS-derived counters
 			"frames_displayed",
