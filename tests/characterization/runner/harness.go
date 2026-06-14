@@ -28,10 +28,10 @@ var HarnessInsecure = os.Getenv("HARNESS_INSECURE") != "0"
 // The harness JSON is the source of truth — extend this struct as new
 // fields are needed rather than parsing into map[string]any everywhere.
 type PlayerRecord struct {
-	ID         string     `json:"id"`
-	LastSeenAt *time.Time `json:"last_seen_at"`
-	UserAgent  string     `json:"user_agent"`
-	Labels     map[string]string `json:"labels"`
+	ID          string            `json:"id"`
+	LastSeenAt  *time.Time        `json:"last_seen_at"`
+	UserAgent   string            `json:"user_agent"`
+	Labels      map[string]string `json:"labels"`
 	CurrentPlay *struct {
 		ID        string `json:"id"`
 		AttemptID int    `json:"attempt_id"`
@@ -46,54 +46,59 @@ type PlayerRecord struct {
 		} `json:"manifest"`
 	} `json:"current_play"`
 	PlayerMetrics *struct {
-		State                  string  `json:"state"`
-		LastEvent              string  `json:"last_event"`
-		EventTime              string  `json:"event_time"`
-		BufferDepthS           float64 `json:"buffer_depth_s"`
+		State        string  `json:"state"`
+		LastEvent    string  `json:"last_event"`
+		EventTime    string  `json:"event_time"`
+		BufferDepthS float64 `json:"buffer_depth_s"`
 		// BufferEndS is the most-distant loaded segment position, in
 		// seconds from the playhead. More reliable than BufferDepthS
 		// on AVPlayer (iOS), which often reports 0 even during normal
 		// playback — see .claude/standards/avplayer-quirks.md.
-		BufferEndS             float64 `json:"buffer_end_s"`
-		Stalls                 int     `json:"stalls"`
-		StallTimeS             float64 `json:"stall_time_s"`
-		ProfileShiftCount      int     `json:"profile_shift_count"`
-		PlayerRestarts         int     `json:"player_restarts"`
-		VideoBitrateMbps       float64 `json:"video_bitrate_mbps"`
-		VideoQualityPct        float64 `json:"video_quality_pct"`
-		VideoResolution        string  `json:"video_resolution"`
+		BufferEndS        float64 `json:"buffer_end_s"`
+		Stalls            int     `json:"stalls"`
+		StallTimeS        float64 `json:"stall_time_s"`
+		ProfileShiftCount int     `json:"profile_shift_count"`
+		PlayerRestarts    int     `json:"player_restarts"`
+		// #703a — PlaybackRate (player.rate; 0 == paused/stuck) and StallStuck
+		// (AVPlayer auto-paused mid-stall, needs intervention) let the
+		// fault-recovery sweep classify a STUCK outcome distinct from .failed.
+		PlaybackRate     float64 `json:"playback_rate"`
+		StallStuck       bool    `json:"stall_stuck"`
+		VideoBitrateMbps float64 `json:"video_bitrate_mbps"`
+		VideoQualityPct  float64 `json:"video_quality_pct"`
+		VideoResolution  string  `json:"video_resolution"`
 		// VideoFirstFrameTimeS is the player's own measurement of time
 		// from play-start to first decoded frame. Per-play (reset on
 		// new play_id). Authoritative for TTFF, vs deriving it from
 		// "first sample with bitrate > 0" which can be polluted by a
 		// previous play's residual metrics.
-		VideoFirstFrameTimeS   float64 `json:"first_frame_time_s"`
-		NetworkBitrateMbps     float64 `json:"network_bitrate_mbps"`
-		AvgNetworkBitrateMbps  float64 `json:"avg_network_bitrate_mbps"`
-		FramesDropped          int     `json:"frames_dropped"`
-		PositionS              float64 `json:"position_s"`
-		LiveEdgeS              float64 `json:"live_edge_s"`
-		LiveOffsetS            float64 `json:"live_offset_s"`
+		VideoFirstFrameTimeS  float64 `json:"first_frame_time_s"`
+		NetworkBitrateMbps    float64 `json:"network_bitrate_mbps"`
+		AvgNetworkBitrateMbps float64 `json:"avg_network_bitrate_mbps"`
+		FramesDropped         int     `json:"frames_dropped"`
+		PositionS             float64 `json:"position_s"`
+		LiveEdgeS             float64 `json:"live_edge_s"`
+		LiveOffsetS           float64 `json:"live_offset_s"`
 
 		// #550 Phase 1 residency accumulators — cumulative ms in each
 		// player state since the current play started. Phase 1
 		// columns in CH (see analytics/clickhouse/init.d/01-schema.sql).
 		// The state_residency characterization test asserts these
 		// after driving the iPad sim through targeted scenarios.
-		PlayingTimeMs       uint32 `json:"playing_time_ms"`
-		PausingTimeMs       uint32 `json:"pausing_time_ms"`
-		BufferingTimeMs     uint32 `json:"buffering_time_ms"`
-		StallingTimeMs      uint32 `json:"stalling_time_ms"`
-		IdlingTimeMs        uint32 `json:"idling_time_ms"`
-		SeekingTimeMs       uint32 `json:"seeking_time_ms"`
-		TrickplayingTimeMs  uint32 `json:"trickplaying_time_ms"`
-		PlayingCount        uint32 `json:"playing_count"`
-		PausingCount        uint32 `json:"pausing_count"`
-		BufferingCount      uint32 `json:"buffering_count"`
-		StallingCount       uint32 `json:"stalling_count"`
-		IdlingCount         uint32 `json:"idling_count"`
-		SeekingCount        uint32 `json:"seeking_count"`
-		TrickplayingCount   uint32 `json:"trickplaying_count"`
+		PlayingTimeMs      uint32 `json:"playing_time_ms"`
+		PausingTimeMs      uint32 `json:"pausing_time_ms"`
+		BufferingTimeMs    uint32 `json:"buffering_time_ms"`
+		StallingTimeMs     uint32 `json:"stalling_time_ms"`
+		IdlingTimeMs       uint32 `json:"idling_time_ms"`
+		SeekingTimeMs      uint32 `json:"seeking_time_ms"`
+		TrickplayingTimeMs uint32 `json:"trickplaying_time_ms"`
+		PlayingCount       uint32 `json:"playing_count"`
+		PausingCount       uint32 `json:"pausing_count"`
+		BufferingCount     uint32 `json:"buffering_count"`
+		StallingCount      uint32 `json:"stalling_count"`
+		IdlingCount        uint32 `json:"idling_count"`
+		SeekingCount       uint32 `json:"seeking_count"`
+		TrickplayingCount  uint32 `json:"trickplaying_count"`
 
 		// #550 Phase 2 outcome — final classification (in_progress,
 		// completed, user_stopped, start_failure, mid_stream_failure,

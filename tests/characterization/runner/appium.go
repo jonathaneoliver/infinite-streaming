@@ -168,7 +168,54 @@ func withBaselineTestFlags(args []string) []string {
 			out = append(out, kv[0], kv[1])
 		}
 	}
+	// Pin the played clip (is.lastPlayed) unless the mode already set one, so
+	// every test streams identical content by default. The clip name is config,
+	// not source: CHAR_CONTENT (shell) overrides, else it's read from .env. No
+	// hardcoded clip — if neither is set, leave the app's own lastPlayed alone.
+	if !present["-is.lastPlayed"] {
+		if clip := defaultContentClip(); clip != "" {
+			out = append(out, "-is.lastPlayed", clip)
+		}
+	}
 	return out
+}
+
+// defaultContentClip resolves the clip every appium test plays: CHAR_CONTENT
+// from the shell environment, else the CHAR_CONTENT key from the nearest .env.
+func defaultContentClip() string {
+	if v := os.Getenv("CHAR_CONTENT"); v != "" {
+		return v
+	}
+	return dotenvValue("CHAR_CONTENT")
+}
+
+// dotenvValue reads a single KEY=value from the nearest .env file found by
+// walking up from the working directory. Returns "" if not found — lets config
+// (the default content clip) live in .env rather than the source.
+func dotenvValue(key string) string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		if data, err := os.ReadFile(filepath.Join(dir, ".env")); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				if eq := strings.IndexByte(line, '='); eq >= 0 && strings.TrimSpace(line[:eq]) == key {
+					return strings.Trim(strings.TrimSpace(line[eq+1:]), `"'`)
+				}
+			}
+			return "" // found .env, no key
+		}
+		if parent := filepath.Dir(dir); parent != dir {
+			dir = parent
+		} else {
+			return "" // reached fs root
+		}
+	}
 }
 
 // intentExtrasFromLaunchArgs converts `-is.X Y` launch-arg pairs into the

@@ -197,6 +197,20 @@ final class PlaybackDiagnostics: ObservableObject {
 
     @Published var frozenDetected: Bool = false
     @Published var segmentStallDetected: Bool = false
+    /// #778 — live-resync recovery trigger. Flips true when playback has not
+    /// advanced for `liveResyncStallSeconds`, INDEPENDENT of `player.rate` and of
+    /// any -12880. This catches the silent-stall gap the #703a sweep found: a
+    /// bandwidth-starvation stall (rate_choke / segment-timeout) leaves the player
+    /// `state=stalled, rate=1` with a FROZEN playhead — it never flips to `.failed`
+    /// (no terminal path) and never auto-pauses to `rate=0` (no `stallStuck` path),
+    /// so nothing else triggers recovery and it hangs forever. The threshold is
+    /// deliberately HIGH (default 45s) so the faster detectors (`.failed`,
+    /// `stallStuck`) fire first for the faults that DO reach them — this is the
+    /// last-resort catch-all, not a front-line nudge.
+    @Published var liveResyncDue: Bool = false
+    /// Continuous no-progress (seconds) before the live-resync restart. Settable
+    /// via the `is.flag.live_resync_stall_s` launch arg.
+    var liveResyncStallSeconds: Double = 45
     /// #703 — application wedge detector. Flips true when a CoreMedia
     /// -12880 "Can not proceed after removing variants" was seen AND
     /// playback then failed to advance for `wedgeConfirmSeconds`. That's
@@ -771,6 +785,7 @@ final class PlaybackDiagnostics: ObservableObject {
         lastVariantSummaryAt = nil
         lastAccessLogEventCount = 0
         segmentStallDetected = false
+        liveResyncDue = false // #778
         wedgeDetected = false
         wedgeArmedAt = nil
         lastVariantDwellTotal = priorVariantDwellSeconds.values.reduce(0, +)
@@ -1200,6 +1215,8 @@ final class PlaybackDiagnostics: ObservableObject {
             // disarm the wedge watch and clear a prior detection.
             wedgeArmedAt = nil
             if wedgeDetected { wedgeDetected = false }
+            // #778 — any advance disarms the live-resync watch (and clears a prior fire).
+            if liveResyncDue { liveResyncDue = false }
             return
         }
         // States are lowercase ("idle"/"paused"/"stalled"/"buffering"/
@@ -1235,6 +1252,14 @@ final class PlaybackDiagnostics: ObservableObject {
                 frozenLoggedAt = now
                 print("[FROZEN] still frozen at time=\(String(format: "%.2f", time)) for \(String(format: "%.0fs", stalledFor)) state=\(state) rate=\(player?.rate ?? 0)")
             }
+        }
+        // #778 — live-resync restart trigger. Last-resort: only fires after the
+        // faster detectors (frozen 3s observability, stallStuck, .failed) have had
+        // their chance (default 45s no-progress). The binding additionally no-ops if
+        // a restart is already pending, so this only acts on the silent-stall gap.
+        if stalledFor >= liveResyncStallSeconds && !liveResyncDue {
+            liveResyncDue = true
+            print("[LIVE_RESYNC] no progress for \(String(format: "%.0fs", stalledFor)) — live-resync restart (state=\(state) rate=\(player?.rate ?? 0))")
         }
         // #703 — hard wedge: armed by a -12880 AND no progress for
         // wedgeConfirmSeconds. Distinct from frozenDetected (3s) — this is
