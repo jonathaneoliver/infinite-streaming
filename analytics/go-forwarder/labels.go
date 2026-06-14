@@ -300,12 +300,25 @@ func computeEventLabelsWithState(s *labelState, r *row) []string {
 		out = []string{SevWarning + "=timejump"}
 	case "segment_stall":
 		out = []string{SevWarning + "=stall_segment"}
+	// #703a/#778 — the jump-to-live seek nudge (METHOD 3). A recovery action,
+	// not itself a failure; keeps the item (no restart). Warning so it surfaces.
+	case "live_resync":
+		out = []string{SevWarning + "=live_resync"}
 
-	// critical — user-visible impact
+	// critical / error — user-visible impact
 	case "frozen":
 		out = []string{SevCritical + "=stall_frozen"}
 	case "user_marked":
 		out = []string{SevCritical + "=user_marked_911"}
+	// #703a — AVPlayer auto-paused mid-stall (rate→0, buffer drained): a hard
+	// stall that needs intervention and does NOT reach .failed. Error severity.
+	case "player_stuck":
+		out = []string{SevError + "=player_stuck"}
+	// #703 — confirmed hard wedge (-12880 + sustained no-progress). Observability
+	// only post-#703a (a real wedge surfaces as .failed and recovers there), but
+	// a confirmed wedge is still a play-ending fault signature → error.
+	case "wedge_detected":
+		out = []string{SevError + "=wedge_detected"}
 
 	// restart splits on reason — operator-initiated reload is
 	// informational; everything else is an involuntary recovery
@@ -322,7 +335,16 @@ func computeEventLabelsWithState(s *labelState, r *row) []string {
 			out = []string{SevWarning + "=restart_user_retry"}
 		case r.RestartReason == "reload" || r.TriggerType == "reload":
 			out = []string{SevInfo + "=restart_reload"}
-		default: // auto_recovery / unknown
+		// #703a — distinguish the auto-recovery methods so the dashboard/harness
+		// can tell which path drove the restart (failure vs stuck vs live-resync),
+		// instead of collapsing all three into one `restart_auto_recovery` chip.
+		case r.RestartReason == "auto_recovery_failure":
+			out = []string{SevCritical + "=restart_auto_recovery_failure"}
+		case r.RestartReason == "auto_recovery_stuck":
+			out = []string{SevCritical + "=restart_auto_recovery_stuck"}
+		case r.RestartReason == "auto_recovery_live_resync":
+			out = []string{SevCritical + "=restart_auto_recovery_live_resync"}
+		default: // legacy auto_recovery / unknown reason
 			out = []string{SevCritical + "=restart_auto_recovery"}
 		}
 
