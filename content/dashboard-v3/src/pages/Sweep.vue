@@ -12,48 +12,11 @@
  * gate which dimension values the sweep is allowed to claim. View filters scope
  * by class / search.
  */
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import ShellLayout from '@/components/ShellLayout.vue';
 import LabelFrequencyTable from '@/components/LabelFrequencyTable.vue';
-
-interface Experiment {
-  exp_id: string;
-  class: string;
-  status: string;
-  kind: string;
-  platform: string;
-  protocol: string;
-  mode: string;
-  recipe: string;
-  arm: string;
-  group_id: string;
-  parent: string;
-  depth: number;
-  why: string;
-  why_text: string;
-  verdict: string;
-  player_id: string;
-  play_id: string;
-  owner: string;
-  claimed_at: string;
-  raw_json: string;
-  score: number;
-  created_at: string;
-  updated_at: string;
-}
-
-// The full recipe-of-record stored in raw_json (the runner replays this).
-interface RawExperiment {
-  content?: string;
-  duration_s?: number;
-  reps?: number;
-  rep_group?: string;
-  fault?: Record<string, unknown>;
-  shape?: Record<string, unknown>;
-  content_manipulation?: Record<string, unknown>;
-  transfer_timeouts?: Record<string, unknown>;
-  result?: { verdict?: string; labels?: string[]; note?: string };
-}
+import SweepJobDetail, { type Experiment } from '@/components/SweepJobDetail.vue';
+import { ensureVisNetwork } from '@/composables/useChartJs';
 
 // Column order = the lifecycle flow.
 const STATUSES = ['backlog', 'running', 'found', 'done', 'review', 'feedback'] as const;
@@ -207,63 +170,67 @@ function toggleExpand(id: string) {
   expanded.value = s;
 }
 
-// Parse the full recipe-of-record out of raw_json (legacy rows have none).
-// Cached by the raw_json string so template re-renders don't re-parse.
-const rawCache = new Map<string, RawExperiment>();
-function rawOf(e: Experiment): RawExperiment {
-  if (!e.raw_json) return {};
-  let r = rawCache.get(e.raw_json);
-  if (!r) {
-    try { r = JSON.parse(e.raw_json) as RawExperiment; } catch { r = {}; }
-    rawCache.set(e.raw_json, r);
+// ── Lineage graph view (vis-network) ────────────────────────────────────────
+// The sweep is a DAG: parent (seed → isolation fan → bisect) + group (A/B pairs).
+// Toggle Board | Graph; nodes = experiments colored by verdict/status, edges =
+// lineage, click a node → its detail.
+const viewMode = ref<'board' | 'graph'>('board');
+const graphEl = ref<HTMLElement | null>(null);
+const selectedExpId = ref('');
+const selectedExp = computed(() => experiments.value.find((e) => e.exp_id === selectedExpId.value) || null);
+let network: any = null;
+
+function nodeColor(e: Experiment): { background: string; border: string } {
+  switch (e.verdict) {
+    case 'aberration': return { background: '#fce8e6', border: '#d93025' };
+    case 'notable': return { background: '#fef7e0', border: '#f9ab00' };
+    case 'clean': return { background: '#e6f4ea', border: '#1e8e3e' };
+    case 'inconclusive': return { background: '#f1f3f4', border: '#9aa0a6' };
   }
-  return r;
+  if (e.status === 'running') return { background: '#e6f4ea', border: '#1e8e3e' };
+  return { background: '#e8f0fe', border: '#1a73e8' }; // pending / other
 }
 
-// Render a recipe sub-object (fault/shape/…) as "k=v · k=v" for compact display.
-function kv(obj?: Record<string, unknown>): string {
-  if (!obj) return '';
-  return Object.entries(obj)
-    .filter(([, v]) => v !== '' && v !== null && v !== undefined)
-    .map(([k, v]) => `${k}=${v}`)
-    .join(' · ');
-}
-
-function chDateToLocal(s: string): string {
-  if (!s || s.startsWith('1970')) return '—';
-  const d = new Date(s.replace(' ', 'T') + 'Z');
-  return isNaN(d.getTime()) ? s : d.toLocaleString();
-}
-
-function isStaleClaim(claimedAt: string): boolean {
-  if (!claimedAt || claimedAt.startsWith('1970')) return false;
-  const d = new Date(claimedAt.replace(' ', 'T') + 'Z');
-  return !isNaN(d.getTime()) && Date.now() - d.getTime() > 60 * 60 * 1000; // > 60 min
-}
-
-// Derived "what to do next" — a pure function of the row (the agenda logic),
-// so the page tells you how to keep going from CH state alone.
-function nextAction(e: Experiment): { label: string; tone: 'go' | 'warn' | 'muted' } {
-  switch (e.status) {
-    case 'backlog':
-      return { label: 'Claim & run', tone: 'go' };
-    case 'running':
-      if (!e.play_id) return isStaleClaim(e.claimed_at)
-        ? { label: 'Reap & re-claim (stale)', tone: 'warn' }
-        : { label: 'Running — probe in flight', tone: 'muted' };
-      if (!e.verdict) return { label: `Analyze play ${e.play_id.slice(0, 8)}`, tone: 'go' };
-      return { label: 'Analyzed — awaiting move', tone: 'muted' };
-    case 'found':
-      return { label: 'Investigate → isolate → promote', tone: 'go' };
-    case 'review':
-    case 'feedback':
-      return { label: 'Needs a human', tone: 'warn' };
-    case 'done':
-      return { label: 'Done (clean)', tone: 'muted' };
-    default:
-      return { label: '—', tone: 'muted' };
+async function buildGraph() {
+  if (!graphEl.value) return;
+  const vis = await ensureVisNetwork();
+  const items = filtered.value;
+  const ids = new Set(items.map((e) => e.exp_id));
+  const nodes = items.map((e) => ({
+    id: e.exp_id,
+    label: `${e.kind}\n${e.recipe || e.mode}`,
+    color: nodeColor(e),
+    borderWidth: e.exp_id === selectedExpId.value ? 3 : 1,
+  }));
+  const edges: any[] = [];
+  for (const e of items) {
+    if (e.parent && ids.has(e.parent)) edges.push({ from: e.parent, to: e.exp_id, arrows: 'to', color: { color: '#bdc1c6' } });
   }
+  // dashed links among A/B group members (they also share a parent)
+  const groups: Record<string, string[]> = {};
+  for (const e of items) if (e.group_id) (groups[e.group_id] ??= []).push(e.exp_id);
+  for (const g of Object.values(groups)) for (let i = 1; i < g.length; i++) edges.push({ from: g[0], to: g[i], dashes: true, color: { color: '#dadce0' } });
+
+  const data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
+  const options = {
+    layout: { hierarchical: { enabled: true, direction: 'UD', sortMethod: 'directed', levelSeparation: 95, nodeSpacing: 150 } },
+    physics: false,
+    nodes: { shape: 'box', font: { size: 11, face: 'monospace', color: '#202124' }, margin: 7, widthConstraint: { maximum: 170 } },
+    edges: { smooth: { enabled: true, type: 'cubicBezier' } },
+    interaction: { hover: true, zoomView: true, dragView: true },
+  };
+  if (network) network.destroy();
+  network = new vis.Network(graphEl.value, data, options);
+  network.once('afterDrawing', () => network && network.fit({ animation: false }));
+  network.on('click', (params: any) => {
+    selectedExpId.value = params.nodes?.length ? params.nodes[0] : '';
+  });
 }
+
+watch([viewMode, experiments], () => {
+  if (viewMode.value === 'graph') nextTick(buildGraph);
+});
+onUnmounted(() => { if (network) network.destroy(); });
 </script>
 
 <template>
@@ -294,6 +261,10 @@ function nextAction(e: Experiment): { label: string; tone: 'go' | 'warn' | 'mute
           </button>
         </div>
         <input v-model="search" class="search" placeholder="filter by id / recipe / why / mode…" />
+        <div class="seg">
+          <button :class="{ on: viewMode === 'board' }" @click="viewMode = 'board'">Board</button>
+          <button :class="{ on: viewMode === 'graph' }" @click="viewMode = 'graph'">Graph</button>
+        </div>
         <button class="refresh" @click="load">↻</button>
       </div>
 
@@ -327,7 +298,19 @@ function nextAction(e: Experiment): { label: string; tone: 'go' | 'warn' | 'mute
 
       <LabelFrequencyTable class="lft-block" />
 
-      <div class="board">
+      <!-- Graph: the lineage DAG (seed → isolation fan → bisect, + A/B groups) -->
+      <div v-show="viewMode === 'graph'" class="graphwrap">
+        <div ref="graphEl" class="graph"></div>
+        <aside class="graph-side">
+          <p class="graph-hint">
+            Arrows = lineage (parent → child) · dashed = A/B group · color = verdict.
+            Click a node for details.
+          </p>
+          <SweepJobDetail v-if="selectedExp" :e="selectedExp" />
+        </aside>
+      </div>
+
+      <div v-show="viewMode === 'board'" class="board">
         <section v-for="s in STATUSES" :key="s" class="col">
           <h2>
             {{ STATUS_LABEL[s] }}
@@ -354,41 +337,7 @@ function nextAction(e: Experiment): { label: string; tone: 'go' | 'warn' | 'mute
               <div v-if="e.parent" class="parent">↳ from {{ e.parent }}<span v-if="e.depth"> · d{{ e.depth }}</span></div>
 
               <!-- expanded: all details for this job -->
-              <div v-if="expanded.has(e.exp_id)" class="detail" @click.stop>
-                <div class="na" :class="'na-' + nextAction(e).tone">
-                  <span class="na-k">next</span> {{ nextAction(e).label }}
-                </div>
-
-                <h3>Recipe</h3>
-                <dl>
-                  <div><dt>class</dt><dd>{{ e.class || 'config' }}</dd></div>
-                  <div><dt>content</dt><dd>{{ rawOf(e).content || '—' }}</dd></div>
-                  <div><dt>mode</dt><dd>{{ e.mode }}<span v-if="rawOf(e).duration_s"> · {{ rawOf(e).duration_s }}s</span></dd></div>
-                  <div v-if="rawOf(e).fault"><dt>fault</dt><dd>{{ kv(rawOf(e).fault) }}</dd></div>
-                  <div v-if="rawOf(e).shape"><dt>shape</dt><dd>{{ kv(rawOf(e).shape) }}</dd></div>
-                  <div v-if="rawOf(e).content_manipulation"><dt>content&nbsp;manip</dt><dd>{{ kv(rawOf(e).content_manipulation) }}</dd></div>
-                  <div v-if="rawOf(e).transfer_timeouts"><dt>xfer&nbsp;timeout</dt><dd>{{ kv(rawOf(e).transfer_timeouts) }}</dd></div>
-                </dl>
-
-                <h3>Provenance &amp; trigger</h3>
-                <dl>
-                  <div><dt>kind</dt><dd>{{ e.kind }}<span v-if="e.arm"> · {{ e.arm }}</span></dd></div>
-                  <div v-if="e.group_id"><dt>group</dt><dd>{{ e.group_id }}</dd></div>
-                  <div v-if="e.parent"><dt>parent</dt><dd>{{ e.parent }} · depth {{ e.depth }}</dd></div>
-                  <div v-if="rawOf(e).reps"><dt>reps</dt><dd>{{ rawOf(e).reps }}<span v-if="rawOf(e).rep_group"> · {{ rawOf(e).rep_group }}</span></dd></div>
-                  <div><dt>why</dt><dd>{{ e.why_text || e.why || '— (no trigger recorded)' }}</dd></div>
-                </dl>
-
-                <h3>Outcome</h3>
-                <dl>
-                  <div><dt>verdict</dt><dd><span v-if="e.verdict" class="verdict" :class="verdictClass(e.verdict)">{{ e.verdict }}</span><span v-else>—</span></dd></div>
-                  <div v-if="rawOf(e).result?.note"><dt>note</dt><dd>{{ rawOf(e).result?.note }}</dd></div>
-                  <div v-if="rawOf(e).result?.labels?.length"><dt>labels</dt><dd class="labels"><code v-for="l in rawOf(e).result?.labels" :key="l">{{ l }}</code></dd></div>
-                  <div v-if="e.owner"><dt>owner</dt><dd>{{ e.owner }} · claimed {{ chDateToLocal(e.claimed_at) }}</dd></div>
-                  <div v-if="e.play_id"><dt>play</dt><dd>{{ e.play_id }}</dd></div>
-                  <div><dt>created</dt><dd>{{ chDateToLocal(e.created_at) }} · updated {{ chDateToLocal(e.updated_at) }}</dd></div>
-                </dl>
-              </div>
+              <SweepJobDetail v-if="expanded.has(e.exp_id)" :e="e" @click.stop />
 
               <div class="foot">
                 <code class="id">{{ e.exp_id }}</code>
@@ -450,20 +399,12 @@ function nextAction(e: Experiment): { label: string; tone: 'go' | 'warn' | 'mute
 .card.expanded { box-shadow: 0 1px 6px rgba(60,64,67,.15); }
 .card.cls-fault { border-left-color: var(--warning, #f9ab00); }
 .chev { color: var(--text-disabled, #9aa0a6); font-size: .7rem; margin-left: .3rem; }
-.detail { margin: .5rem 0 .2rem; border-top: 1px solid var(--border-light, #e8eaed); padding-top: .5rem; }
-.detail h3 { font-size: .66rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary, #5f6368); margin: .55rem 0 .25rem; }
-.detail h3:first-of-type { margin-top: .4rem; }
-.detail dl { margin: 0; }
-.detail dl > div { display: flex; gap: .5rem; padding: .08rem 0; align-items: baseline; }
-.detail dt { flex: none; width: 6.5rem; color: var(--text-disabled, #9aa0a6); font-size: .72rem; }
-.detail dd { margin: 0; color: var(--text-primary, #202124); font-size: .76rem; word-break: break-word; min-width: 0; }
-.detail dd.labels { display: flex; flex-wrap: wrap; gap: .25rem; }
-.detail dd.labels code { background: var(--surface-hover, #f1f3f4); border-radius: 3px; padding: 0 .3rem; font-size: .68rem; }
-.na { border-radius: 5px; padding: .25rem .5rem; font-size: .76rem; font-weight: 600; margin-bottom: .4rem; }
-.na-k { font-size: .62rem; text-transform: uppercase; letter-spacing: .04em; opacity: .7; margin-right: .35rem; }
-.na-go { background: var(--success-light, #e6f4ea); color: var(--success, #1e8e3e); }
-.na-warn { background: var(--warning-light, #fef7e0); color: #a86a00; }
-.na-muted { background: var(--surface-hover, #f1f3f4); color: var(--text-secondary, #5f6368); }
+/* per-job detail styles now live in SweepJobDetail.vue (shared by board + graph) */
+.graphwrap { display: grid; grid-template-columns: 1fr minmax(260px, 340px); gap: .8rem; align-items: start; }
+.graph { height: 70vh; min-height: 420px; background: var(--surface, #f8f9fa); border: 1px solid var(--border, #dadce0); border-radius: 8px; }
+.graph-side { background: var(--surface, #f8f9fa); border: 1px solid var(--border, #dadce0); border-radius: 8px; padding: .6rem .75rem; max-height: 70vh; overflow: auto; }
+.graph-hint { color: var(--text-secondary, #5f6368); font-size: .76rem; margin: 0 0 .4rem; }
+@media (max-width: 760px) { .graphwrap { grid-template-columns: 1fr; } }
 .row1 { display: flex; justify-content: space-between; align-items: center; gap: .4rem; }
 .kind { font-size: .68rem; text-transform: uppercase; letter-spacing: .03em; color: var(--text-secondary, #5f6368); }
 .next { font-size: .64rem; font-weight: 700; color: var(--success, #1e8e3e); background: var(--success-light, #e6f4ea); border-radius: 8px; padding: 0 .4rem; }
