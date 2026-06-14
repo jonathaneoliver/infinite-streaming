@@ -296,6 +296,9 @@ watch(viewMode, () => { if (viewMode.value === 'history') loadHistory(); });
               iterations until it drains (refilling with isolation/bisect follow-ups as it finds things).</li>
             <li><strong>Backlog empty?</strong> seed it first: <code>harness sweep seed --class config</code>
               (realistic ABR / stream variation) or <code>--class fault</code> (error-recovery).</li>
+            <li><strong>Seed from this triage table</strong> — turn the high-skew labels above into experiments:
+              <code>harness sweep seed-from-triage --days 30</code> seeds a test for the controllable dimension
+              (test / platform / content) each severe, dimension-driven label concentrates on.</li>
             <li><strong>What’s next, exactly</strong> — <code>harness sweep agenda</code> prints the next action for
               every item, resumable from this database alone.</li>
           </ul>
