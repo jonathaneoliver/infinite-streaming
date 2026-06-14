@@ -152,7 +152,10 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
     continue
   fi
 
-  # analyze (mechanical oracle verdict; records run history + retention)
+  # analyze (mechanical oracle verdict; records run history + retention).
+  # Wait for the forwarder to ingest the play's labels first — analyzing
+  # immediately reads 0 labels and mis-verdicts a real hit as clean.
+  sleep 15
   verdict=$(harness sweep analyze "$exp_id" --play "$play_id" --confirm-reps 1 --json 2>/dev/null | jq -r '.verdict // ""' 2>/dev/null)
   echo "$(date) $exp_id → verdict=$verdict (play $play_id)"
 
