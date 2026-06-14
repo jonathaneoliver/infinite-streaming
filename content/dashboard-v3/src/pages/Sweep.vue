@@ -269,10 +269,11 @@ watch(viewMode, () => { if (viewMode.value === 'history') loadHistory(); });
     <div class="sweep-page">
       <header class="head">
         <div>
-          <h1>Fault Sweep</h1>
+          <h1>QE Lab</h1>
           <p class="sub">
-            Automated stream-config / fault-recovery sweep (#772). Live queue —
-            pending experiments, results, and the reasons each ran.
+            Quality engineering for the players (#772): population triage of what's
+            breaking across sessions, plus the automated sweep that finds, confirms,
+            and isolates playback bugs.
           </p>
         </div>
         <div class="meta">
@@ -280,6 +281,30 @@ watch(viewMode, () => { if (viewMode.value === 'history') loadHistory(); });
           <span v-if="loading" class="dot">●</span>
         </div>
       </header>
+
+      <details class="howto">
+        <summary>▸ How to run it</summary>
+        <div class="howto-body">
+          <p>
+            Experiments run on the dev Mac (a booted iOS sim + appium on <code>:4723</code>); this page is the
+            live queue + results. Drive it from <strong>Claude Code</strong> via the <code>sweep</code> skill:
+          </p>
+          <ul>
+            <li><strong>One step</strong> — ask Claude <em>“run a sweep step”</em>: it reads the agenda → claims the
+              top experiment → bootstraps the session → drives the probe → analyzes the verdict.</li>
+            <li><strong>Keep going</strong> — <code>/goal "drive the sweep until the backlog is empty"</code> runs
+              iterations until it drains (refilling with isolation/bisect follow-ups as it finds things).</li>
+            <li><strong>Backlog empty?</strong> seed it first: <code>harness sweep seed --class config</code>
+              (realistic ABR / stream variation) or <code>--class fault</code> (error-recovery).</li>
+            <li><strong>What’s next, exactly</strong> — <code>harness sweep agenda</code> prints the next action for
+              every item, resumable from this database alone.</li>
+          </ul>
+          <p class="howto-note">
+            Scope toggles below gate what’s claimed (disabled values stay pending, never run). Prereqs: a booted
+            iOS sim · appium on <code>:4723</code> · test-dev reachable.
+          </p>
+        </div>
+      </details>
 
       <!-- Population triage table up top; the sweep controls + viz sit together below it -->
       <LabelFrequencyTable class="lft-block" />
@@ -435,6 +460,16 @@ watch(viewMode, () => { if (viewMode.value === 'history') loadHistory(); });
 .err { color: var(--error, #d93025); }
 .empty { color: var(--text-secondary, #5f6368); }
 .empty code { background: var(--surface-hover, #f1f3f4); padding: .1rem .35rem; border-radius: 4px; }
+.howto { background: var(--primary-blue-light, #e8f0fe); border: 1px solid #c6dafc; border-radius: 8px; padding: .5rem .75rem; margin: 0 0 1rem; }
+.howto > summary { cursor: pointer; font-size: .82rem; font-weight: 600; color: var(--primary-blue, #1a73e8); list-style: none; }
+.howto > summary::-webkit-details-marker { display: none; }
+.howto[open] > summary { margin-bottom: .4rem; }
+.howto-body { font-size: .8rem; color: var(--text-primary, #202124); }
+.howto-body p { margin: .25rem 0; }
+.howto-body ul { margin: .35rem 0; padding-left: 1.1rem; }
+.howto-body li { margin: .25rem 0; }
+.howto-body code { background: #fff; border: 1px solid #c6dafc; border-radius: 4px; padding: 0 .3rem; font-size: .74rem; }
+.howto-note { color: var(--text-secondary, #5f6368); font-size: .76rem; }
 .scope { background: var(--surface, #f8f9fa); border: 1px solid var(--border, #dadce0); border-radius: 8px; padding: .6rem .75rem; margin: 0 0 1rem; }
 .scope-head { display: flex; align-items: baseline; gap: .6rem; margin-bottom: .5rem; flex-wrap: wrap; }
 .scope-head strong { font-size: .85rem; }
