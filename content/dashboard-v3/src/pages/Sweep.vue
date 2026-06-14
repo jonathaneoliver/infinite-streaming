@@ -1,14 +1,16 @@
 <script setup lang="ts">
 /**
- * Sweep.vue — live monitor for the automated fault-injection sweep (#772).
+ * Sweep.vue — live monitor + control plane for the automated fault-injection
+ * sweep (#772).
  *
- * The sweep's queue lives as local .sweep/ JSON files on the runner; the loop
- * publishes a snapshot via `harness sweep publish` → forwarder
- * /api/v2/sweep/experiments (ReplacingMergeTree by exp_id). This page polls that
- * endpoint and shows the queue as status columns — pending (backlog) → running →
- * done / found — with each experiment's recipe, the WHY (reason it ran), the
- * VERDICT (result), its lineage (parent → isolation fan), and a session-viewer
- * link when it produced a play. View filters scope by class / search.
+ * ClickHouse is the master queue (CH-master migration): the `harness sweep` CLI
+ * reads/writes /api/v2/sweep/experiments (ReplacingMergeTree by exp_id) directly,
+ * so this page is always live — no publish step. It polls that endpoint and shows
+ * the queue as status columns (pending → running → done / found) with each
+ * experiment's recipe, WHY (reason it ran), VERDICT, lineage (parent → isolation
+ * fan), and a session-viewer link. The Scope panel writes /api/v2/sweep/scope to
+ * gate which dimension values the sweep is allowed to claim. View filters scope
+ * by class / search.
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import ShellLayout from '@/components/ShellLayout.vue';
@@ -70,6 +72,7 @@ async function load() {
 
 onMounted(() => {
   load();
+  loadScope();
   timer = window.setInterval(load, 5000); // the loop is slow (~100s/play); 5s is plenty
 });
 onUnmounted(() => {
@@ -125,6 +128,60 @@ function viewerURL(e: Experiment): string | null {
   if (e.play_id) u += `&play_id=${encodeURIComponent(e.play_id)}`;
   return u;
 }
+
+// ── Scope control plane (#772 CH-master): toggle which dimension values the
+// sweep is allowed to claim. The forwarder gates the /claim candidate query on
+// sweep_scope, so disabling a value keeps its experiments pending (never run)
+// without deleting them. Only the server-controllable dimensions are here —
+// app/device are observational (filter only), so they aren't gateable.
+const SCOPE_DIMS = ['platform', 'protocol', 'class', 'mode'] as const;
+const scope = ref<Record<string, Record<string, boolean>>>({});
+
+async function loadScope() {
+  try {
+    const resp = await fetch('/analytics/api/v2/sweep/scope');
+    if (!resp.ok) return;
+    const data = (await resp.json()) as { items: { dimension: string; value: string; enabled: number }[] | null };
+    const m: Record<string, Record<string, boolean>> = {};
+    for (const row of data.items ?? []) (m[row.dimension] ??= {})[row.value] = row.enabled !== 0;
+    scope.value = m;
+  } catch { /* scope is best-effort UI */ }
+}
+
+// Distinct values for a dimension = those seen in the queue ∪ any explicitly
+// toggled (so a disabled value with no current experiments still shows).
+function scopeValues(dim: string): string[] {
+  const set = new Set<string>();
+  for (const e of experiments.value) {
+    const v = (e[dim as keyof Experiment] as string) || (dim === 'class' ? 'config' : '');
+    if (v) set.add(v);
+  }
+  for (const v of Object.keys(scope.value[dim] ?? {})) set.add(v);
+  return [...set].sort();
+}
+
+const isEnabled = (dim: string, val: string): boolean => scope.value[dim]?.[val] !== false;
+
+async function toggleScope(dim: string, val: string) {
+  const next = !isEnabled(dim, val);
+  (scope.value[dim] ??= {})[val] = next; // optimistic
+  try {
+    const resp = await fetch('/analytics/api/v2/sweep/scope', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dimension: dim, value: val, enabled: next }),
+    });
+    if (!resp.ok) throw new Error(String(resp.status));
+  } catch {
+    (scope.value[dim] ??= {})[val] = !next; // revert on failure
+  }
+  loadScope();
+}
+
+const disabledCount = computed(() =>
+  Object.values(scope.value).reduce(
+    (n, vs) => n + Object.values(vs).filter((en) => en === false).length, 0),
+);
 </script>
 
 <template>
@@ -160,8 +217,31 @@ function viewerURL(e: Experiment): string | null {
 
       <p v-if="error" class="err">Couldn't load sweep queue: {{ error }}</p>
       <p v-else-if="!experiments.length && !loading" class="empty">
-        No experiments published yet. Run <code>harness sweep publish</code> from the runner.
+        No experiments yet. Run <code>harness sweep seed</code> from the runner.
       </p>
+
+      <section class="scope">
+        <div class="scope-head">
+          <strong>Scope</strong>
+          <span class="scope-sub">
+            what the sweep is allowed to run — click to disable a value; its experiments stay
+            <em>pending</em> but are never claimed (no delete)
+          </span>
+          <span v-if="disabledCount" class="scope-badge">{{ disabledCount }} disabled</span>
+        </div>
+        <div v-for="dim in SCOPE_DIMS" :key="dim" class="scope-row">
+          <span class="scope-dim">{{ dim }}</span>
+          <button
+            v-for="val in scopeValues(dim)"
+            :key="val"
+            class="chip"
+            :class="{ off: !isEnabled(dim, val) }"
+            :title="isEnabled(dim, val) ? 'enabled — click to disable' : 'disabled — click to enable'"
+            @click="toggleScope(dim, val)"
+          >{{ val }}</button>
+          <span v-if="!scopeValues(dim).length" class="scope-empty">—</span>
+        </div>
+      </section>
 
       <LabelFrequencyTable class="lft-block" />
 
@@ -220,6 +300,17 @@ function viewerURL(e: Experiment): string | null {
 .err { color: var(--error, #d93025); }
 .empty { color: var(--text-secondary, #5f6368); }
 .empty code { background: var(--surface-hover, #f1f3f4); padding: .1rem .35rem; border-radius: 4px; }
+.scope { background: var(--surface, #f8f9fa); border: 1px solid var(--border, #dadce0); border-radius: 8px; padding: .6rem .75rem; margin: 0 0 1rem; }
+.scope-head { display: flex; align-items: baseline; gap: .6rem; margin-bottom: .5rem; flex-wrap: wrap; }
+.scope-head strong { font-size: .85rem; }
+.scope-sub { color: var(--text-secondary, #5f6368); font-size: .76rem; }
+.scope-badge { margin-left: auto; background: var(--warning-light, #fef7e0); color: #a86a00; border-radius: 10px; padding: 0 .55rem; font-size: .72rem; font-weight: 600; }
+.scope-row { display: flex; align-items: center; gap: .35rem; padding: .15rem 0; flex-wrap: wrap; }
+.scope-dim { width: 5rem; flex: none; color: var(--text-secondary, #5f6368); font-size: .76rem; text-transform: uppercase; letter-spacing: .03em; }
+.chip { background: var(--primary-blue-light, #e8f0fe); color: var(--primary-blue, #1a73e8); border: 1px solid transparent; border-radius: 12px; padding: .15rem .6rem; font-size: .76rem; cursor: pointer; }
+.chip:hover { border-color: var(--primary-blue, #1a73e8); }
+.chip.off { background: var(--background, #fff); color: var(--text-disabled, #9aa0a6); border-color: var(--border, #dadce0); text-decoration: line-through; }
+.scope-empty { color: var(--text-disabled, #9aa0a6); font-size: .76rem; }
 .lft-block { margin: 0 0 1rem; }
 .board { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .8rem; align-items: start; }
 .col { background: var(--surface, #f8f9fa); border: 1px solid var(--border, #dadce0); border-radius: 8px; padding: .5rem; }
