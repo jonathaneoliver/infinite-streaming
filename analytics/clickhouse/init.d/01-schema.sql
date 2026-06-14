@@ -879,3 +879,40 @@ ORDER BY (started_at, test_name, platform)
 TTL toDateTime(started_at) + INTERVAL 90 DAY DELETE WHERE classification = 'other',
     toDateTime(started_at) + INTERVAL 180 DAY DELETE WHERE classification = 'interesting'
 SETTINGS index_granularity = 8192;
+
+-- ── sweep_experiments ─────────────────────────────────────────────────────
+-- The automated fault-sweep's orchestration queue (issue #772), published from
+-- the local .sweep/ store via `harness sweep publish` so the dashboard's Sweep
+-- tab can show pending / running / done / found experiments with their reasons
+-- (why) and results (verdict) and lineage (parent → isolation fan). One
+-- upsertable row per experiment: ReplacingMergeTree(updated_at) ORDER BY exp_id
+-- collapses repeated publishes to the latest state. Query with FINAL (the table
+-- is small — one row per live experiment).
+CREATE TABLE IF NOT EXISTS infinite_streaming.sweep_experiments
+(
+    exp_id      String                  CODEC(ZSTD(1)),
+    class       LowCardinality(String)  CODEC(ZSTD(1)),   -- config | fault
+    status      LowCardinality(String)  CODEC(ZSTD(1)),   -- backlog|running|done|found|review|feedback
+    kind        LowCardinality(String)  CODEC(ZSTD(1)),   -- seed|isolation|hypothesis|bisect
+    platform    LowCardinality(String)  CODEC(ZSTD(1)),
+    protocol    LowCardinality(String)  CODEC(ZSTD(1)),
+    mode        LowCardinality(String)  CODEC(ZSTD(1)),
+    recipe      LowCardinality(String)  CODEC(ZSTD(1)),   -- dominant knob (recipeSlug)
+    arm         LowCardinality(String)  CODEC(ZSTD(1)),   -- control|variant|''
+    group_id    String                  CODEC(ZSTD(1)),   -- A/B group
+    parent      String                  CODEC(ZSTD(1)),   -- lineage to the originating hit
+    depth       UInt8                   DEFAULT 0,
+    why         String                  CODEC(ZSTD(1)),   -- the reason slug
+    why_text    String                  CODEC(ZSTD(3)),   -- full rationale
+    verdict     LowCardinality(String)  CODEC(ZSTD(1)),   -- clean|notable|aberration|inconclusive|''
+    player_id   String                  CODEC(ZSTD(1)),
+    play_id     String                  CODEC(ZSTD(1)),
+    score       Float64                 DEFAULT 0,
+    created_at  DateTime64(3, 'UTC')    CODEC(Delta, ZSTD(1)),
+    updated_at  DateTime64(3, 'UTC')    CODEC(Delta, ZSTD(1)),
+    INDEX idx_exp exp_id TYPE bloom_filter GRANULARITY 4
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY exp_id
+TTL toDateTime(updated_at) + INTERVAL 30 DAY
+SETTINGS index_granularity = 8192;

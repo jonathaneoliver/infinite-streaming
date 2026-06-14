@@ -1453,6 +1453,10 @@ func serveHTTP(ctx context.Context, cfg config, ring *Ring) {
 	// in characterization.go.
 	registerCharacterizationHandlers(mux, cfg)
 
+	// Sweep-experiment queue (issue #772) — POST snapshot from `harness sweep
+	// publish`, GET for the dashboard's Sweep tab. Defined in sweep_experiments.go.
+	registerSweepHandlers(mux, cfg)
+
 	// Label-frequency baseline (#772) — % of sessions per label, for
 	// population-aware triage. Defined in label_frequency.go.
 	registerLabelFrequencyHandler(mux, cfg)
