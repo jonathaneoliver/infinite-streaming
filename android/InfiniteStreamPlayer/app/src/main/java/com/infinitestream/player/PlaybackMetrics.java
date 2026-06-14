@@ -893,6 +893,26 @@ public final class PlaybackMetrics {
                 if (windowIndex >= 0 && windowIndex < tl.getWindowCount()) {
                     Timeline.Window window = new Timeline.Window();
                     tl.getWindow(windowIndex, window);
+                    // #782 — live-offset QoE parity with iOS. The forwarder gates
+                    // qoe_live_offset_concerning/_breach/holdback_deviation on a
+                    // recommended offset > 0; Android never reported one, so those
+                    // labels could never fire here (Android live-edge drift was
+                    // invisible). ExoPlayer resolves the manifest HOLD-BACK
+                    // (#EXT-X-SERVER-CONTROL) + any app LiveConfiguration into a
+                    // single targetOffsetMs — emit it as BOTH recommended and
+                    // configured (there is no separate "configured" property, so
+                    // qoe_holdback_deviation reads ~0 on Android by construction).
+                    // recommended ~= getCurrentLiveOffset() for a healthy player,
+                    // so excess = live_offset_s - recommended_offset_s ~= 0, matching
+                    // the iOS semantics the thresholds were tuned against.
+                    if (window.liveConfiguration != null
+                            && window.liveConfiguration.targetOffsetMs != C.TIME_UNSET
+                            && window.liveConfiguration.targetOffsetMs > 0) {
+                        double targetOffsetS =
+                            roundSeconds(window.liveConfiguration.targetOffsetMs / 1000.0);
+                        p.put("player_metrics_recommended_offset_s", targetOffsetS);
+                        p.put("player_metrics_configured_offset_s", targetOffsetS);
+                    }
                     if (window.windowStartTimeMs != C.TIME_UNSET) {
                         long pdtMs = window.windowStartTimeMs + currentPositionMs;
                         p.put("player_metrics_playhead_wallclock_ms", pdtMs);
