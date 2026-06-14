@@ -15,7 +15,9 @@
 set -u
 
 REPO="${QE_REPO:-/Users/jonathanoliver/Projects/smashing}"
-SIM_UDID="${QE_SIM_UDID:-4D62CB39-BAB7-4294-99D7-8E28FBCD0FF0}"   # Fleet iPhone 15 #1
+IPADSIM_UDID="${QE_IPADSIM_UDID:-6E1441F3-EEAD-43E4-ABEC-FA0BC2BEDCE2}"     # iPad (A16) — for ipad-sim experiments
+IPHONESIM_UDID="${QE_IPHONESIM_UDID:-4D62CB39-BAB7-4294-99D7-8E28FBCD0FF0}" # Fleet iPhone 15 #1 — for iphone-sim
+SIM_UDID="$IPADSIM_UDID"   # default sim (the narrow seed is ipad-sim)
 CONTENT="${QE_CONTENT:-insane_new_p200_h264}"
 DURATION="${QE_DURATION_S:-90}"
 DEADLINE_HHMM="${QE_DEADLINE:-05:00}"
@@ -104,7 +106,9 @@ if [ "${QE_SELFTEST:-0}" = 1 ]; then
 fi
 
 # --- the loop ----------------------------------------------------------------
-iters=0
+# iters counts every claim (incl. skips); runs counts items actually driven
+# (probed + analyzed). QE_RUN_TARGET stops after N driven items.
+iters=0; runs=0
 while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6min headroom for a probe
   iters=$((iters + 1))
 
@@ -134,7 +138,14 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
     launch="$ANDROIDTV_LAUNCH"; device="$ANDROIDTV_UDID"
   else
     [ "$APPIUM_OK" = 1 ] || { echo "  $platform needs appium (down) — requeueing $exp_id"; harness sweep reap --max-age-min 0 >/dev/null 2>&1; continue; }
-    launch="appium"; device="$SIM_UDID"
+    case "$platform" in
+      ipad-sim)        device="$IPADSIM_UDID" ;;
+      iphone-sim|iphone) device="$IPHONESIM_UDID" ;;
+      *)               device="$IPADSIM_UDID" ;;
+    esac
+    # ensure the chosen sim is booted (the health-check only booted the default)
+    xcrun simctl bootstatus "$device" -b >/dev/null 2>&1 || { echo "  booting sim $device…"; xcrun simctl boot "$device" 2>/dev/null; sleep 8; }
+    launch="appium"
   fi
   echo "  platform=$platform launch=$launch device=$device"
 
@@ -153,9 +164,10 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
   fi
 
   # analyze (mechanical oracle verdict; records run history + retention).
-  # Wait for the forwarder to ingest the play's labels first — analyzing
-  # immediately reads 0 labels and mis-verdicts a real hit as clean.
-  sleep 15
+  # Wait for the forwarder to ingest the play's labels first — analyzing too
+  # early reads 0 labels, classifies inconclusive, and REQUEUES the item (so the
+  # runner would re-claim the same one forever). 45s covers the batch lag.
+  sleep 45
   verdict=$(harness sweep analyze "$exp_id" --play "$play_id" --confirm-reps 1 --json 2>/dev/null | jq -r '.verdict // ""' 2>/dev/null)
   echo "$(date) $exp_id → verdict=$verdict (play $play_id)"
 
@@ -173,6 +185,12 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
     clean|"") : ;;  # clean → nothing to do
     *) echo "unexpected verdict: $verdict" ;;
   esac
+
+  runs=$((runs + 1))
+  echo "  [$runs${QE_RUN_TARGET:+/$QE_RUN_TARGET} item(s) driven]"
+  if [ -n "${QE_RUN_TARGET:-}" ] && [ "$runs" -ge "$QE_RUN_TARGET" ]; then
+    echo "$(date) reached run target $QE_RUN_TARGET"; break
+  fi
 done
 
-echo "================ $(date) qe-offhours done ($iters iterations) ================"
+echo "================ $(date) qe-offhours done ($iters iterations, $runs items driven) ================"
