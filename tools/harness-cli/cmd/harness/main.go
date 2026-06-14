@@ -67,6 +67,7 @@ Operator/CLI:
   finding add <target>         capture state+note into .claude/findings/
   procedure soak|abr-sweep|fault-soak <target>
                                multi-step composed test procedures
+  sweep seed|status|ls|next    automated fault-sweep queue (#772)
   post characterization <file> upload a characterization-test report
                                JSON to the forwarder (test framework
                                calls this from WriteReport)
@@ -161,6 +162,8 @@ func main() {
 		exit(cmdFinding(client, args[1:], g.asJSON))
 	case "procedure":
 		exit(cmdProcedure(client, args[1:], g.asJSON))
+	case "sweep":
+		exit(cmdSweep(client, args[1:], g.asJSON))
 	case "post":
 		exit(cmdPost(client, args[1:], g.asJSON))
 	case "help", "--help", "-h":

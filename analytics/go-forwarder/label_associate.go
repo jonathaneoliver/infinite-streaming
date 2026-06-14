@@ -22,9 +22,13 @@ import (
 // of its rows (session_events + network_requests + control_events) carries L.
 // Dimension values come from session_events columns (constant per play).
 
-// associateDims are the per-play dimensions we associate against — all derived
-// from session_events columns + the testing=test_* control-event tag (no
-// `platform` column; device_class / device_model proxy it, #783).
+// associateDims are the per-play dimensions we associate against. The first
+// group are session_events columns (no `platform` column — device_class /
+// device_model proxy it, #783). The sweep_* group is joined from
+// sweep_experiments (keyed by play_id) so labels can be associated against the
+// KNOWN experiment parameters — pattern/recipe, mode, class. Because the sweep
+// SET those, that association is near-causal, not just observational (the
+// pattern idea). They're empty (→ filtered) for non-sweep plays.
 var associateDims = []struct{ label, col string }{
 	{"test", "test"}, // characterization mode (pyramid/rampup/…) from the testing=test_* tag on control_events
 	{"content", "content_name"},
@@ -32,6 +36,9 @@ var associateDims = []struct{ label, col string }{
 	{"platform", "platform"}, // derived: iphone / iphone-sim / ipad / ipad-sim / androidtv
 	{"device_model", "device_model"},
 	{"device_kind", "device_kind"}, // simulator vs real (derived from device_model)
+	{"sweep_recipe", "sweep_recipe"},
+	{"sweep_mode", "sweep_mode"},
+	{"sweep_class", "sweep_class"},
 }
 
 func registerLabelAssociateHandler(mux *http.ServeMux, cfg config) {
@@ -156,8 +163,13 @@ func handleLabelAssociate(w http.ResponseWriter, r *http.Request, cfg config) {
 		            se.device_class = 'tablet', 'ipad',
 		            se.device_class = 'phone',  'iphone',
 		            se.device_class)) AS platform,
+		        any(sx.recipe) AS sweep_recipe,
+		        any(sx.mode)   AS sweep_mode,
+		        any(sx.class)  AS sweep_class,
 		        (se.play_id IN labeled) AS is_labeled
 		    FROM infinite_streaming.session_events se
+		    LEFT JOIN (SELECT play_id, recipe, mode, class FROM infinite_streaming.sweep_experiments FINAL) sx
+		      ON sx.play_id = se.play_id
 		    LEFT JOIN tests t ON t.play_id = se.play_id
 		    WHERE se.ts >= now() - INTERVAL {days:UInt32} DAY AND se.play_id != '' %s
 		    GROUP BY se.play_id

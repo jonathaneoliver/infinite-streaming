@@ -156,7 +156,7 @@ server {
     # /dashboard/v3/<page>.html keeps working for old bookmarks. Surviving
     # legacy static pages (upload, jobs, sources, playback, …) also serve
     # from the prefix location.
-    location ~ ^/dashboard/(dashboard|testing|testing-session|sessions|session-viewer|grid|characterization|ask|hello)\.html$ {
+    location ~ ^/dashboard/(dashboard|testing|testing-session|sessions|session-viewer|grid|characterization|sweep|ask|hello)\.html$ {
         ${INFINITE_STREAM_AUTH_DIRECTIVES}
         alias /content/dashboard/v3/$1.html;
     }

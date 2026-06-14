@@ -100,6 +100,28 @@ func (s *Session) ReleaseDevice(ctx context.Context) error {
 	return r.ReleaseDevice(ctx, s.Device)
 }
 
+// WaitForManifest polls the harness until the bound player's current play has
+// fetched its master playlist (variants present), or until the timeout/ctx
+// fires. The pattern builder needs the variant ladder, so the sweep probe waits
+// on this before ApplyPattern.
+func (s *Session) WaitForManifest(ctx context.Context, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		rec, err := s.PlayerState(ctx)
+		if err == nil && rec.CurrentPlay != nil && len(rec.CurrentPlay.Manifest.Variants) > 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("manifest not ready after %s", timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
 // WaitForHeartbeat polls the harness until the bound player reports
 // last_seen_at within 60s of now, or until ctx fires. Used by every
 // Launch implementation right before it returns the Session.

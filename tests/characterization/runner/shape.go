@@ -28,6 +28,29 @@ func (s *Session) ApplyRate(ctx context.Context, rateMbps float64) error {
 	return nil
 }
 
+// ApplyPattern arms a throughput pattern (pyramid / ramp_up / ramp_down /
+// square_wave / transient_shock) on the bound player. The harness builds the
+// step ladder from the player's CURRENT manifest variants, so the master must
+// already be fetched — call WaitForManifest first. This is the same path the
+// dashboard pattern panel and the characterization modes use; it's how the
+// sweep drives a config-class pattern recipe's bandwidth motion.
+func (s *Session) ApplyPattern(ctx context.Context, pattern string, stepSeconds, marginPct int) error {
+	if s == nil || s.PlayerID == "" {
+		return fmt.Errorf("apply pattern: no player bound")
+	}
+	if pattern == "" {
+		return fmt.Errorf("apply pattern: empty pattern")
+	}
+	args := []string{
+		"shape", s.PlayerID,
+		"--pattern", pattern,
+		"--step-seconds", strconv.Itoa(stepSeconds),
+		"--margin", strconv.Itoa(marginPct),
+	}
+	_, err := runHarness(ctx, args...)
+	return err
+}
+
 // ClearShape removes all shaping (rate cap, delay, loss, pattern). Used
 // at test teardown to leave the proxy in a clean state.
 func (s *Session) ClearShape(ctx context.Context) error {

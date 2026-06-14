@@ -47,6 +47,8 @@ export default defineConfig({
         // Stage 7 — characterization-run summary page. Pre-filters
         // /api/v2/plays on info=test_* labels and groups by run_id.
         characterization: resolve(__dirname, 'characterization.html'),
+        // #772 — automated fault-sweep queue monitor.
+        sweep: resolve(__dirname, 'sweep.html'),
         // Stage 8 (#497) — AI chat fleet-mode entry. Lives at
         // /dashboard/v3/ask.html. The side-panel variant of the same
         // chat is also mounted on other v3 pages.

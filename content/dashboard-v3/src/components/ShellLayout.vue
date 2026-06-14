@@ -54,7 +54,7 @@ const DEV_BACKEND = 'https://jonathanoliver-ubuntu.local:21000';
 // /v3/ in dev so links stay on the Vite dev server (HMR); legacy/unmigrated
 // pages are served by the real backend.
 const V3_PAGES =
-  /^\/dashboard\/(dashboard|testing|testing-session|sessions|session-viewer|grid|characterization|ask|hello)\.html/;
+  /^\/dashboard\/(dashboard|testing|testing-session|sessions|session-viewer|grid|characterization|sweep|ask|hello)\.html/;
 function rewriteHrefForDev(href: string): string {
   if (typeof window === 'undefined') return href;
   if (window.location.port !== DEV_PORT) return href;
@@ -188,6 +188,7 @@ const sections: NavSection[] = [
       { id: 'testing',       icon: '🧪', text: 'Testing Monitor', href: '/dashboard/testing.html' },
       { id: 'sessions',      icon: '⏪', text: 'Sessions',         href: '/dashboard/sessions.html' },
       { id: 'characterization', icon: '📈', text: 'Automated Testing', href: '/dashboard/characterization.html' },
+      { id: 'sweep',         icon: '🧹', text: 'Fault Sweep',      href: '/dashboard/sweep.html' },
       { id: 'quartet',       icon: '🎬', text: 'Quartet',          href: '/dashboard/quartet.html', alpha: true },
       { id: 'segment-duration', icon: '⏱️', text: 'Live Offset',   href: '/dashboard/segment-duration-comparison.html', alpha: true },
     ],
