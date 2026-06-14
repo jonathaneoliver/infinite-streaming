@@ -1590,6 +1590,8 @@ components:
         seekable_end_s:      { type: number, format: float, nullable: true, description: 'Player-reported end of seekable range (seconds).' }
         live_edge_s:         { type: number, format: float, nullable: true, description: 'Player-reported live edge timestamp (seconds).' }
         live_offset_s:       { type: number, format: float, nullable: true, description: 'Player-reported offset behind live edge (seconds).' }
+        recommended_offset_s: { type: number, format: float, nullable: true, description: 'Manifest-recommended target offset from live (iOS recommendedTimeOffsetFromLive / ExoPlayer liveConfiguration.targetOffsetMs). Gates the qoe_live_offset_* labels.' }
+        configured_offset_s: { type: number, format: float, nullable: true, description: 'Configured target offset from live (iOS configuredTimeOffsetFromLive; on Android equals recommended_offset_s).' }
         true_offset_s:       { type: number, format: float, nullable: true, description: 'Wall-clock offset between player position and real time (seconds).' }
         position_s:          { type: number, format: float, nullable: true, description: 'Player current position (seconds).' }
         playback_rate:       { type: number, format: float, nullable: true, description: 'Player playback rate (1.0 = normal).' }

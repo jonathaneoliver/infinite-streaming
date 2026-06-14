@@ -288,6 +288,8 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		{"player_metrics_seekable_end_s", &pm.SeekableEndS},
 		{"player_metrics_live_edge_s", &pm.LiveEdgeS},
 		{"player_metrics_live_offset_s", &pm.LiveOffsetS},
+		{"player_metrics_recommended_offset_s", &pm.RecommendedOffsetS}, // #786
+		{"player_metrics_configured_offset_s", &pm.ConfiguredOffsetS},   // #786
 		{"player_metrics_true_offset_s", &pm.TrueOffsetS},
 		{"player_metrics_position_s", &pm.PositionS},
 		{"player_metrics_playback_rate", &pm.PlaybackRate},
@@ -436,17 +438,17 @@ func serverMetricsFromSession(s map[string]any) *oapigen.ServerMetrics {
 		"client_rto_ms":              func(f float32) { sm.RtoMs = &f },
 		"client_path_ping_rtt_ms":    func(f float32) { sm.PathPingRttMs = &f },
 		// Shaper / transfer measurements (developer-mode in v1).
-		"mbps_shaper_avg":            func(f float32) { sm.MbpsShaperAvg = &f },
-		"mbps_shaper_rate":           func(f float32) { sm.MbpsShaperRate = &f },
-		"mbps_transfer_rate":         func(f float32) { sm.MbpsTransferRate = &f },
-		"mbps_transfer_complete":     func(f float32) { sm.MbpsTransferComplete = &f },
-		"mbps_in":                    func(f float32) { sm.MbpsIn = &f },
-		"mbps_out":                   func(f float32) { sm.MbpsOut = &f },
-		"mbps_in_avg":                func(f float32) { sm.MbpsInAvg = &f },
-		"mbps_in_active":             func(f float32) { sm.MbpsInActive = &f },
-		"measured_mbps":              func(f float32) { sm.MeasuredMbps = &f },
-		"measurement_window_io":      func(f float32) { sm.MeasurementWindowIo = &f },
-		"measurement_window_active":  func(f float32) { sm.MeasurementWindowActive = &f },
+		"mbps_shaper_avg":           func(f float32) { sm.MbpsShaperAvg = &f },
+		"mbps_shaper_rate":          func(f float32) { sm.MbpsShaperRate = &f },
+		"mbps_transfer_rate":        func(f float32) { sm.MbpsTransferRate = &f },
+		"mbps_transfer_complete":    func(f float32) { sm.MbpsTransferComplete = &f },
+		"mbps_in":                   func(f float32) { sm.MbpsIn = &f },
+		"mbps_out":                  func(f float32) { sm.MbpsOut = &f },
+		"mbps_in_avg":               func(f float32) { sm.MbpsInAvg = &f },
+		"mbps_in_active":            func(f float32) { sm.MbpsInActive = &f },
+		"measured_mbps":             func(f float32) { sm.MeasuredMbps = &f },
+		"measurement_window_io":     func(f float32) { sm.MeasurementWindowIo = &f },
+		"measurement_window_active": func(f float32) { sm.MeasurementWindowActive = &f },
 	} {
 		if v, ok := numericFloatTranslate(s[key]); ok {
 			set(float32(v))
