@@ -1,0 +1,47 @@
+{
+  "version": "p90-2026-06-14",
+  "_comment": "QoE thresholds set to the p90 of each observed metric across all sessions in ClickHouse (129 sessions, computed 2026-06-14). Load via FORWARDER_QOE_THRESHOLDS_PATH. Intent: each magnitude label fires on ~the worst 10% of sessions instead of 70-90%.",
+  "_warning": "NOT DEPLOYABLE AS-IS. The test-dev session population is fault/stress-dominated (fault-injection tests + config-sweep stress runs), so these p90s reflect deliberately-broken playback, not real-world QoE — they are far too lenient (e.g. cirr p90=0.74 vs Conviva-good 0.004; vst p90=4.0s). Regenerate from a clean/production baseline (real plays, no fault injection, no sweep stress) before using. Only the magnitude thresholds below were p90-derived; ratios/factors/counts/windows/grace keep the compiled defaults (count thresholds like stall_burst p90=1 would go the WRONG way — noisier — on this data).",
+  "_p90_derived": ["startup.vst_concerning_ms", "startup.vst_breach_ms", "continuity.cirr_concerning", "continuity.cirr_breach", "continuity.cirt_concerning_ms", "continuity.cirt_breach_ms"],
+  "refire_cooldown_s": 30,
+  "outcomes": {
+    "ebvs_threshold_ms": 10000,
+    "user_stopped_after_threshold_ms": 5000
+  },
+  "startup": {
+    "vst_concerning_ms": 4019,
+    "vst_breach_ms": 5320,
+    "drm_dominant_ratio": 0.5
+  },
+  "continuity": {
+    "cirr_concerning": 0.74,
+    "cirr_breach": 0.9,
+    "cirt_concerning_ms": 76140,
+    "cirt_breach_ms": 90000,
+    "stall_burst_threshold": 3,
+    "stall_burst_window_s": 60
+  },
+  "network": {
+    "ttfb_breach_ms": 500,
+    "transfer_stall_ms": 5000,
+    "rate_cap_breach_factor": 1.10,
+    "cmcd_mtp_drift_ratio": 0.5
+  },
+  "abr": {
+    "bitrate_underutilized_ratio": 0.5,
+    "abr_headroom_margin": 0.85,
+    "throughput_divergence_factor": 0.15,
+    "throughput_peak_window_s": 30,
+    "downshift_storm_threshold": 3,
+    "downshift_storm_window_s": 30,
+    "min_variant_stuck_s": 30,
+    "fps_dip_ratio": 0.2,
+    "startup_grace_ms": 10000,
+    "downshift_overshoot_rungs": 2
+  },
+  "live": {
+    "offset_concerning_margin_s": 3,
+    "offset_breach_margin_s": 10,
+    "holdback_deviation_s": 5
+  }
+}
