@@ -47,6 +47,30 @@ func (e ContentManipulationLiveOffset) Valid() bool {
 	}
 }
 
+// Defines values for ContentManipulationVariantOrder.
+const (
+	Ascending  ContentManipulationVariantOrder = "ascending"
+	Default    ContentManipulationVariantOrder = "default"
+	Descending ContentManipulationVariantOrder = "descending"
+	First4mbps ContentManipulationVariantOrder = "first_4mbps"
+)
+
+// Valid indicates whether the value is a known member of the ContentManipulationVariantOrder enum.
+func (e ContentManipulationVariantOrder) Valid() bool {
+	switch e {
+	case Ascending:
+		return true
+	case Default:
+		return true
+	case Descending:
+		return true
+	case First4mbps:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for FaultFilterRequestKind.
 const (
 	FaultFilterRequestKindAudioManifest  FaultFilterRequestKind = "audio_manifest"
@@ -188,17 +212,19 @@ func (e HeartbeatEventType) Valid() bool {
 // Defines values for PatternDefaultStepSeconds.
 const (
 	PatternDefaultStepSecondsN12  PatternDefaultStepSeconds = 12
+	PatternDefaultStepSecondsN120 PatternDefaultStepSeconds = 120
 	PatternDefaultStepSecondsN18  PatternDefaultStepSeconds = 18
 	PatternDefaultStepSecondsN24  PatternDefaultStepSeconds = 24
 	PatternDefaultStepSecondsN6   PatternDefaultStepSeconds = 6
 	PatternDefaultStepSecondsN60  PatternDefaultStepSeconds = 60
-	PatternDefaultStepSecondsN120 PatternDefaultStepSeconds = 120
 )
 
 // Valid indicates whether the value is a known member of the PatternDefaultStepSeconds enum.
 func (e PatternDefaultStepSeconds) Valid() bool {
 	switch e {
 	case PatternDefaultStepSecondsN12:
+		return true
+	case PatternDefaultStepSecondsN120:
 		return true
 	case PatternDefaultStepSecondsN18:
 		return true
@@ -207,8 +233,6 @@ func (e PatternDefaultStepSeconds) Valid() bool {
 	case PatternDefaultStepSecondsN6:
 		return true
 	case PatternDefaultStepSecondsN60:
-		return true
-	case PatternDefaultStepSecondsN120:
 		return true
 	default:
 		return false
@@ -657,38 +681,15 @@ type ContentManipulation struct {
 	// StripResolution Remove RESOLUTION attribute from EXT-X-STREAM-INF lines. Apple HLS validator rejects this; AVPlayer plays but variant.video.size becomes empty (issue #486).
 	StripResolution *bool `json:"strip_resolution,omitempty"`
 
-	// VariantOrder Re-sort the video EXT-X-STREAM-INF entries by BANDWIDTH to probe whether master-playlist order biases AVPlayer's initial-variant pick (#682).
+	// VariantOrder Re-sort the video EXT-X-STREAM-INF entries by BANDWIDTH to probe whether master-playlist order biases AVPlayer's initial-variant pick (#682). ascending = lowest first (our authoring); descending = highest first; first_4mbps = promote the variant nearest 4 Mbps to first-listed, rest ascending (initial-variant probe); default = passthrough. EXT-X-MEDIA audio/subtitle renditions are left untouched.
 	VariantOrder *ContentManipulationVariantOrder `json:"variant_order,omitempty"`
 }
 
 // ContentManipulationLiveOffset Live edge offset window in seconds. 0 = no offset.
 type ContentManipulationLiveOffset int
 
-// ContentManipulationVariantOrder Re-sort the video EXT-X-STREAM-INF entries by BANDWIDTH to probe whether master-playlist order biases AVPlayer's initial-variant pick (#682).
+// ContentManipulationVariantOrder Re-sort the video EXT-X-STREAM-INF entries by BANDWIDTH to probe whether master-playlist order biases AVPlayer's initial-variant pick (#682). ascending = lowest first (our authoring); descending = highest first; first_4mbps = promote the variant nearest 4 Mbps to first-listed, rest ascending (initial-variant probe); default = passthrough. EXT-X-MEDIA audio/subtitle renditions are left untouched.
 type ContentManipulationVariantOrder string
-
-// Defines values for ContentManipulationVariantOrder.
-const (
-	ContentManipulationVariantOrderAscending  ContentManipulationVariantOrder = "ascending"
-	ContentManipulationVariantOrderDefault    ContentManipulationVariantOrder = "default"
-	ContentManipulationVariantOrderDescending ContentManipulationVariantOrder = "descending"
-	ContentManipulationVariantOrderFirst4mbps ContentManipulationVariantOrder = "first_4mbps"
-)
-
-// Valid indicates whether the value is a known member of the ContentManipulationVariantOrder enum.
-func (e ContentManipulationVariantOrder) Valid() bool {
-	switch e {
-	case ContentManipulationVariantOrderAscending:
-		return true
-	case ContentManipulationVariantOrderDefault:
-		return true
-	case ContentManipulationVariantOrderDescending:
-		return true
-	case ContentManipulationVariantOrderFirst4mbps:
-		return true
-	}
-	return false
-}
 
 // FaultCounters Read-only. Server-maintained; never appears in PATCH bodies.
 type FaultCounters map[string]int
@@ -903,7 +904,7 @@ type NetworkLogEntry struct {
 
 // Pattern defines model for Pattern.
 type Pattern struct {
-	// DefaultStepSeconds Default per-step duration the dashboard chose when generating the step list.
+	// DefaultStepSeconds Default per-step duration the dashboard chose when generating the step list. 60 / 120 give buffer-draining holds for transient_shock-style probes.
 	DefaultStepSeconds *PatternDefaultStepSeconds `json:"default_step_seconds,omitempty"`
 
 	// MarginPct Headroom percent above the variant rate used when sizing template steps. 0 = exact (deliberate-stall footgun). 5 = default — covers TCP/IP + TLS 1.3 + HTTP/2 framing overhead on a LAN. 10 = real WiFi with retransmits. 25 / 50 = stress-test over-headroom.
@@ -913,11 +914,14 @@ type Pattern struct {
 	// Template Template that drove step-list generation. Stored verbatim
 	// so the dashboard can repaint the template radios. The kernel
 	// cycles through `steps` regardless of template; this field is
-	// metadata, not a recompute trigger.
+	// metadata, not a recompute trigger. `transient_shock` is the
+	// deepening-drop staircase (hold top, dip to each lower rung in
+	// turn, recover to top between dips) mirroring the transient_shock
+	// characterization mode.
 	Template *PatternTemplate `json:"template,omitempty"`
 }
 
-// PatternDefaultStepSeconds Default per-step duration the dashboard chose when generating the step list.
+// PatternDefaultStepSeconds Default per-step duration the dashboard chose when generating the step list. 60 / 120 give buffer-draining holds for transient_shock-style probes.
 type PatternDefaultStepSeconds int
 
 // PatternMarginPct Headroom percent above the variant rate used when sizing template steps. 0 = exact (deliberate-stall footgun). 5 = default — covers TCP/IP + TLS 1.3 + HTTP/2 framing overhead on a LAN. 10 = real WiFi with retransmits. 25 / 50 = stress-test over-headroom.
@@ -926,7 +930,10 @@ type PatternMarginPct int
 // PatternTemplate Template that drove step-list generation. Stored verbatim
 // so the dashboard can repaint the template radios. The kernel
 // cycles through `steps` regardless of template; this field is
-// metadata, not a recompute trigger.
+// metadata, not a recompute trigger. `transient_shock` is the
+// deepening-drop staircase (hold top, dip to each lower rung in
+// turn, recover to top between dips) mirroring the transient_shock
+// characterization mode.
 type PatternTemplate string
 
 // PatternStep defines model for PatternStep.
@@ -1270,6 +1277,9 @@ type PlayerMetrics struct {
 	// BufferingTimeMs #550 Phase 1: cumulative buffering time (ms).
 	BufferingTimeMs *int `json:"buffering_time_ms,omitempty"`
 
+	// ConfiguredOffsetS Configured target offset from live (iOS configuredTimeOffsetFromLive; on Android equals recommended_offset_s).
+	ConfiguredOffsetS *float32 `json:"configured_offset_s,omitempty"`
+
 	// ContentName Content title bound at metrics-start. Stamped on every payload so dashboards see "which content was playing" without joining against the upload catalogue.
 	ContentName *string `json:"content_name,omitempty"`
 
@@ -1389,6 +1399,9 @@ type PlayerMetrics struct {
 
 	// ProfileShiftCount Number of ABR rendition shifts the player has reported.
 	ProfileShiftCount *int `json:"profile_shift_count,omitempty"`
+
+	// RecommendedOffsetS Manifest-recommended target offset from live (iOS recommendedTimeOffsetFromLive / ExoPlayer liveConfiguration.targetOffsetMs). Gates the qoe_live_offset_* labels.
+	RecommendedOffsetS *float32 `json:"recommended_offset_s,omitempty"`
 
 	// SeekableEndS Player-reported end of seekable range (seconds).
 	SeekableEndS *float32 `json:"seekable_end_s,omitempty"`
