@@ -1,12 +1,14 @@
 ---
 name: sweep
-description: Drive the automated fault-injection sweep (issue #772, docs/sweep-design.md) — the unattended claim→apply→probe→analyze→isolate→promote loop over the local .sweep/ queue. Invoke under /goal ("drive the sweep until backlog is empty"), or for a single hand-run iteration. Each clean run is a mechanical oracle check (no model call); the LLM only reasons on a notable/aberration hit — picking which axes to flip for isolation and writing the finding. Runs on the Mac with the sims (drives appium/adb), against the test-dev deploy.
-last_reviewed: 2026-06-13
+description: Drive the automated fault-injection sweep (issue #772, docs/sweep-design.md) — the unattended claim→apply→probe→analyze→isolate→promote loop over the ClickHouse-master queue. Invoke under /goal ("drive the sweep until backlog is empty"), or for a single hand-run iteration. Each clean run is a mechanical oracle check (no model call); the LLM only reasons on a notable/aberration hit — picking which axes to flip for isolation and writing the finding. Runs on the Mac with the sims (drives appium/adb), against the test-dev deploy.
+last_reviewed: 2026-06-14
 ---
 
 # Sweep — drive the automated fault-injection loop
 
-This skill is the **driver** for the sweep designed in `docs/sweep-design.md` (issue #772). The queue lives in `.sweep/` (gitignored); the `harness sweep` subcommands are the mechanics. **You** (the LLM, under `/goal`) are the investigator — but only on a hit: a clean run is a pure oracle check with no reasoning, so cost scales with *findings*, not the (vast) experiment count.
+This skill is the **driver** for the sweep designed in `docs/sweep-design.md` (issue #772). **ClickHouse is the master queue** (CH-master migration) — every `harness sweep` subcommand reads/writes it over the forwarder API; there are no local files. **You** (the LLM, under `/goal`) are the investigator — but only on a hit: a clean run is a pure oracle check with no reasoning, so cost scales with *findings*, not the (vast) experiment count.
+
+> **The queue is remote.** Because the queue lives in CH on the deploy, every `harness sweep` command needs the deploy URL + self-signed-cert skip. Export `HARNESS_BASE_URL=https://dev.jeoliver.com:21000` and `HARNESS_INSECURE=1` (per `.env`) so the bare `harness sweep …` commands below resolve — or pass `--insecure --base …` inline. Operators control *what runs* by toggling scope on the dashboard Sweep tab (or `POST /api/v2/sweep/scope`); disabled platform/protocol/class/mode values stay pending but are never claimed.
 
 **Conventions:** follows `.claude/skills/CONVENTIONS.md`. Most load-bearing here:
 - **Bash discipline** — lead every command with `harness`, `go`, `gh`, or `jq` (first token matches the allowlist). Never `cd …`/`VAR=…`/`export …` prefixes; pass values inline.
@@ -36,9 +38,9 @@ Returns claims orphaned by a dead runner. Then confirm the deploy + a sim are he
 
 ### 1. Claim the top-scored experiment
 ```
-harness sweep next --claim --owner <runner-id> --json
+harness sweep next --claim --owner <runner-id>
 ```
-Atomic-rename claim (parallel-safe across worktrees). `null` ⇒ backlog empty ⇒ you're done. The `--json` gives you the full recipe (platform/protocol/mode/fault/shape/content_manipulation/why).
+Server-side concurrency-safe claim (the forwarder arbitrates a deterministic winner, so parallel runners never double-claim; scope-disabled values are skipped). `nothing to claim` ⇒ backlog empty/gated ⇒ you're done. It prints the claimed `exp_id`; `bootstrap`/`apply` reload the full recipe from CH by id — you don't need to capture it here.
 
 ### 2. Materialise the recipe, then drive the probe (config-on-connect)
 The probe is the **characterization harness**. The robust path for ANY recipe — including arbitrary fault + content_manipulation, not just shape — is **config-on-connect**: configure the session BEFORE the app launches, then launch the app bound to that same `player_id`. The cap/fault/content is live from the player's first byte, no PATCH race.

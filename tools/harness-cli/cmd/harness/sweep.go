@@ -16,8 +16,9 @@ import (
 const sweepUsage = `harness sweep <subcommand>
 
 The automated fault-injection sweep queue (issue #772, docs/sweep-design.md).
-Experiments live as JSON files under .sweep/<status>/ (override with --root or
-$SWEEP_ROOT). Findings are promoted to GitHub Issues elsewhere.
+ClickHouse is the master store: every subcommand reads/writes the queue over the
+forwarder API on the harness's --base deploy (no local files). Findings are
+promoted to GitHub Issues elsewhere.
 
 Subcommands:
   seed [--class C][--full] populate backlog/ with the starter set.
@@ -44,11 +45,8 @@ Subcommands:
                            single-rep hit instead enqueues N confirmation reps.
   promote <id>             open (or comment on) a deduped GitHub Issue for a
                            found experiment [--axis A --dry-run --from found].
-  publish                  snapshot the whole queue → the forwarder so the
-                           dashboard Sweep tab can show it. Call after each
-                           iteration to keep the tab live.
-  reap [--max-age-min N]   return running/ files orphaned by a dead runner to
-                           backlog (default 60; ~2× the longest expected run).
+  reap [--max-age-min N]   return running experiments orphaned by a dead runner
+                           to backlog (default 60; ~2× the longest expected run).
   isolate <id> --flip axis=value [--flip …]
                            materialise an OFAT isolation fan off a confirmed
                            hit (control + one variant per flip) into backlog/.
@@ -62,9 +60,9 @@ Subcommands:
                            severe, dimension-driven label concentrates on;
                            skips observational/not-runnable dims with reasons.
 
-Common flags:
-  --root DIR               sweep root (default $SWEEP_ROOT or .sweep)
-  --depth-first[=false]    prefer non-seed work in 'next' (default true)
+Common flags (global, before the subcommand):
+  --base URL               deploy whose ClickHouse holds the queue
+  --depth-first[=false]    prefer non-seed work in 'next' peek (default true)
 `
 
 func cmdSweep(client *api.Client, args []string, asJSON bool) error {
@@ -88,8 +86,6 @@ func cmdSweep(client *api.Client, args []string, asJSON bool) error {
 		return cmdSweepAnalyze(client, args[1:], asJSON)
 	case "promote":
 		return cmdSweepPromote(client, args[1:], asJSON)
-	case "publish":
-		return cmdSweepPublish(client, args[1:], asJSON)
 	case "reap":
 		return cmdSweepReap(client, args[1:], asJSON)
 	case "isolate":

@@ -137,11 +137,19 @@ So each run resolves to a **trichotomy** (three-way outcome): **`clean`** (only 
 `critical`). `notable` outcomes are surfaced and can spawn their own A/B isolation fan (§6) to characterize the
 surprise — exactly how we'd chase whether the over-downshift is iOS-specific, ladder-density-driven, etc.
 
-## 4. Experiment record + the local store
+## 4. Experiment record + the store
 
-Experiments live in a **local directory-of-JSON-files queue** (no GitHub board). All worktree agents share one
-filesystem, so this is parallel-safe via **atomic `rename`** as the claim. Layout under a repo-local `.sweep/`
-(gitignored — ephemeral working state):
+> **⚠️ Superseded — migrated to ClickHouse-master (#772 CH-master).** This section's original design (a local
+> `.sweep/` directory of JSON files, atomic-`rename` claim, `harness sweep publish` to mirror into CH) was
+> replaced: **ClickHouse is now the single master store.** The `harness sweep` CLI reads/writes the queue over
+> the forwarder API (`/api/v2/sweep/{experiments,claim,scope,delete}`); the `status` is a column, the full
+> recipe is `raw_json`, claims are arbitrated server-side (a `sweep_claims` ledger, deterministic
+> `argMin(owner)` winner — no file lock), and there is no `publish` step (the dashboard is always live). Scope
+> gating (`sweep_scope`) lets the dashboard enable/disable platform/protocol/class/mode. Wherever the text
+> below says "`.sweep/` files / atomic-rename / publish", read "CH rows / server-side claim / always-live". The
+> status *names* (backlog → running → done/found/review/feedback) and every other concept are unchanged.
+
+Experiments live in a queue keyed by `exp_id` (no GitHub board). The status buckets:
 
 ```
 .sweep/
@@ -369,7 +377,7 @@ an accepted trade-off. So the sweep treats **severity/importance as learned, not
 | Decision | Resolution |
 |---|---|
 | Work-item terminology | **experiment** (not "job"/Actions-job) |
-| Queue store | **local `.sweep/` directory of JSON files**, atomic-rename claim (no GitHub board / token) |
+| Queue store | **ClickHouse-master** (migrated from the original local `.sweep/` files) — `harness sweep` reads/writes via the forwarder API; server-side concurrency-safe claim; no publish step; dashboard scope-gating |
 | Findings | **deduped GitHub Issues** (`sweep` + `sig:*` + `sev:*` labels) |
 | Runner pool | **4 iOS sims + 1 each iPhone / Apple TV / Android TV** |
 | Launch mode | **appium for iOS-sim (WDA confirmed) + Apple TV; adb/cli for Android TV; Web → review lane** |

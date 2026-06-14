@@ -5,9 +5,9 @@
 // {platform × protocol × fault × shape × content × HLS-config × mode}
 // combination) — ephemeral working state. A confirmed failure becomes a
 // durable *finding* (a GitHub Issue) elsewhere; this package only owns the
-// experiment queue. Experiments live as one JSON file each under a
-// status-named subdirectory of `.sweep/`; the file's directory IS its status,
-// and an atomic rename between directories is the parallel-safe claim lock
+// experiment queue. The queue lives in ClickHouse (the master store, #772):
+// each experiment is one upsertable row keyed by `exp_id` with a `status`
+// column, reached over the forwarder API; the claim is arbitrated server-side
 // (§4, §7 of the design).
 package sweep
 
@@ -71,8 +71,8 @@ const (
 	VerdictInconclusive Verdict = "inconclusive" // probe/infra failure — NOT the player's fault
 )
 
-// Status is the lifecycle bucket, and also the subdirectory name under
-// `.sweep/` that holds the experiment file (§4).
+// Status is the lifecycle bucket — the `status` column on the experiment's
+// ClickHouse row (§4).
 type Status string
 
 const (
@@ -148,8 +148,9 @@ type Result struct {
 	Note    string   `json:"note,omitempty"`   // one-line human/oracle summary
 }
 
-// Experiment is one runnable recipe + its bookkeeping. JSON-serialised one
-// per file under `.sweep/<status>/<id>.json`.
+// Experiment is one runnable recipe + its bookkeeping. JSON-serialised into the
+// `raw_json` column of its ClickHouse row (the recipe of record the runner
+// replays).
 type Experiment struct {
 	ID        string `json:"id"`
 	CreatedAt string `json:"created_at"` // RFC3339 UTC; stamped by the caller (Date.now is unavailable in some contexts)
