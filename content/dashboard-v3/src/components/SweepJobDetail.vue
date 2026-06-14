@@ -42,6 +42,7 @@ interface RawExperiment {
   content_manipulation?: Record<string, unknown>;
   transfer_timeouts?: Record<string, unknown>;
   result?: { verdict?: string; labels?: string[]; note?: string };
+  issue_url?: string;
 }
 
 defineProps<{ e: Experiment }>();
@@ -146,6 +147,7 @@ function nextAction(e: Experiment): { label: string; tone: 'go' | 'warn' | 'mute
       <div v-if="rawOf(e).result?.labels?.length"><dt>labels</dt><dd class="labels"><code v-for="l in rawOf(e).result?.labels" :key="l">{{ l }}</code></dd></div>
       <div v-if="e.owner"><dt>owner</dt><dd>{{ e.owner }} · claimed {{ chDateToLocal(e.claimed_at) }}</dd></div>
       <div v-if="e.play_id"><dt>play</dt><dd>{{ e.play_id }}</dd></div>
+      <div v-if="rawOf(e).issue_url"><dt>issue</dt><dd><a :href="rawOf(e).issue_url" target="_blank" rel="noopener">{{ rawOf(e).issue_url }}</a></dd></div>
       <div><dt>created</dt><dd>{{ chDateToLocal(e.created_at) }} · updated {{ chDateToLocal(e.updated_at) }}</dd></div>
     </dl>
   </div>

@@ -30,11 +30,14 @@ Seed one class at a time: `harness sweep seed --class config` (default) or `--cl
 
 Run these in order. Under `/goal`, repeat until `harness sweep status` shows `backlog 0` (and any in-flight `running` drained), then stop — the sweep is state-driven, not clocked.
 
+> **Drive off the agenda.** `harness sweep agenda` reads CH and prints the next action for every actionable experiment (`claim & run` / `analyze` / `reap` / `isolate → promote` / `needs-human`), derived purely from CH state. Because every side effect is recorded back to CH (verdict, `issue_url`), the agenda is resumable — after a `/clear` or a fresh session, `harness sweep agenda` tells you exactly where to pick up. Use it to choose this iteration's work instead of reconstructing the state machine in your head. The steps below are what each agenda action expands to.
+
 ### 0. Reap + health-check
 ```
+harness sweep agenda            # what needs doing right now (resumes from CH alone)
 harness sweep reap --max-age-min 60
 ```
-Returns claims orphaned by a dead runner. Then confirm the deploy + a sim are healthy; if not, don't blame the player — skip this tick.
+Reap returns claims orphaned by a dead runner. Then confirm the deploy + a sim are healthy; if not, don't blame the player — skip this tick.
 
 ### 1. Claim the top-scored experiment
 ```

@@ -481,24 +481,32 @@ func cmdSweepPromote(client *api.Client, args []string, asJSON bool) error {
 	}
 	bodyFile.Close()
 
-	var result string
+	var result, issueURL string
 	if existing != "" {
 		if err := ghRun("issue", "comment", existing, "--body-file", bodyFile.Name()); err != nil {
 			return err
 		}
-		result = "commented on #" + existing
+		result, issueURL = "commented on #"+existing, existing
 	} else {
 		out, err := ghOutput("issue", "create", "--title", title, "--body-file", bodyFile.Name(),
 			"--label", strings.Join(issueLabels, ","))
 		if err != nil {
 			return err
 		}
-		result = "created " + strings.TrimSpace(out)
+		issueURL = strings.TrimSpace(out)
+		result = "created " + issueURL
+	}
+
+	// Record the Issue back onto the experiment in CH — the idempotency marker so
+	// a resumed runner sees the hit is already promoted (agenda → terminal).
+	e.IssueURL = issueURL
+	if err := s.Save(sweep.Status(*from), e); err != nil {
+		return err
 	}
 
 	if asJSON {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{
-			"experiment": e.ID, "signature": sig, "result": result,
+			"experiment": e.ID, "signature": sig, "result": result, "issue_url": issueURL,
 		})
 	}
 	fmt.Printf("%s → %s (sig %s)\n", e.ID, result, sig)

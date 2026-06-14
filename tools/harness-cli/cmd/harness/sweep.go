@@ -45,6 +45,10 @@ Subcommands:
                            single-rep hit instead enqueues N confirmation reps.
   promote <id>             open (or comment on) a deduped GitHub Issue for a
                            found experiment [--axis A --dry-run --from found].
+  agenda [--max-age-min N] the next action for every actionable experiment,
+                           derived purely from CH state (claim & run / analyze /
+                           reap / isolate / promote / needs-human) — drive the
+                           loop off this; resumes from the database alone.
   reap [--max-age-min N]   return running experiments orphaned by a dead runner
                            to backlog (default 60; ~2× the longest expected run).
   isolate <id> --flip axis=value [--flip …]
@@ -86,6 +90,8 @@ func cmdSweep(client *api.Client, args []string, asJSON bool) error {
 		return cmdSweepAnalyze(client, args[1:], asJSON)
 	case "promote":
 		return cmdSweepPromote(client, args[1:], asJSON)
+	case "agenda":
+		return cmdSweepAgenda(client, args[1:], asJSON)
 	case "reap":
 		return cmdSweepReap(client, args[1:], asJSON)
 	case "isolate":
@@ -137,6 +143,37 @@ func cmdSweepSeed(client *api.Client, args []string, asJSON bool) error {
 		mode = "full (all platforms)"
 	}
 	fmt.Printf("seeded %d %s-class experiments into backlog (%s) — %s\n", len(exps), c, s.Label(), mode)
+	return nil
+}
+
+// cmdSweepAgenda prints the next action for every actionable experiment, derived
+// purely from CH state — so a fresh runner knows what to do and can resume the
+// loop from the database alone.
+func cmdSweepAgenda(client *api.Client, args []string, asJSON bool) error {
+	fs := flag.NewFlagSet("sweep agenda", flag.ContinueOnError)
+	maxAgeMin := fs.Float64("max-age-min", 60, "minutes since claim before a running experiment is 'stale'")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	s, err := openStore(client)
+	if err != nil {
+		return err
+	}
+	all, err := s.List("") // every status
+	if err != nil {
+		return err
+	}
+	steps := sweep.Agenda(all, nowUTC(), time.Duration(*maxAgeMin*float64(time.Minute)))
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(steps)
+	}
+	if len(steps) == 0 {
+		fmt.Println("agenda empty — nothing to do (backlog drained, no open hits)")
+		return nil
+	}
+	for _, st := range steps {
+		fmt.Printf("  %-9s %-44s %-18s %s\n", st.Status, st.ID, st.Action, st.Reason)
+	}
 	return nil
 }
 

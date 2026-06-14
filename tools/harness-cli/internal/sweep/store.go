@@ -145,6 +145,7 @@ func (s *Store) List(st Status) ([]*Experiment, error) {
 	for _, it := range resp.Items {
 		var row struct {
 			RawJSON   string `json:"raw_json"`
+			Status    string `json:"status"`
 			Owner     string `json:"owner"`
 			ClaimedAt string `json:"claimed_at"`
 		}
@@ -155,6 +156,9 @@ func (s *Store) List(st Status) ([]*Experiment, error) {
 		if json.Unmarshal([]byte(row.RawJSON), &e) != nil {
 			continue
 		}
+		// status / owner / claimed_at are authoritative on the CH columns (the
+		// server claim + Move set them; raw_json may be stale).
+		e.Status = Status(row.Status)
 		// owner / claimed_at are stamped on the CH columns at claim time (the
 		// server promote doesn't rewrite raw_json), so the columns are
 		// authoritative for those runtime fields — without this, reap would see

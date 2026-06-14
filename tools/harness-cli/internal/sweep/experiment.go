@@ -153,7 +153,8 @@ type Result struct {
 // replays).
 type Experiment struct {
 	ID        string `json:"id"`
-	CreatedAt string `json:"created_at"` // RFC3339 UTC; stamped by the caller (Date.now is unavailable in some contexts)
+	CreatedAt string `json:"created_at"`      // RFC3339 UTC; stamped by the caller (Date.now is unavailable in some contexts)
+	Status    Status `json:"status,omitempty"` // lifecycle bucket; authoritative on the CH column, stamped onto the struct by Store.List
 
 	// --- the recipe (matrix axes) ---
 	Class               Class                `json:"class,omitempty"` // config (default) | fault — the sweep tier
@@ -185,4 +186,5 @@ type Experiment struct {
 	PlayerID  string  `json:"player_id,omitempty"`  // the proxy session the probe played (stamped at bootstrap)
 	PlayID    string  `json:"play_id,omitempty"`    // the play the run produced
 	Result    *Result `json:"result,omitempty"`     // filled after analysis
+	IssueURL  string  `json:"issue_url,omitempty"`  // GitHub Issue a confirmed hit was promoted to (idempotency: already promoted)
 }
