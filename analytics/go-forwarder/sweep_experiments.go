@@ -298,9 +298,14 @@ func handleSweepClaim(w http.ResponseWriter, r *http.Request, cfg config) {
 // already claimed and whose platform/protocol/class/mode aren't disabled in
 // sweep_scope (the dashboard control plane).
 func sweepSelectCandidate(ctx context.Context, cfg config) (id, raw string, err error) {
+	// Exclude only RECENTLY-claimed exp_ids (the in-flight race window). An older
+	// claim row must not exclude forever — else a reaped or re-seeded experiment
+	// could never be re-claimed. A claim that actually won leaves status='running'
+	// (already excluded above), so the window only guards concurrent in-flight claims.
 	q := `SELECT exp_id, raw_json FROM infinite_streaming.sweep_experiments FINAL
 		WHERE status = 'backlog'
-		  AND exp_id NOT IN (SELECT exp_id FROM infinite_streaming.sweep_claims)
+		  AND raw_json != ''  -- skip legacy rows published before CH-master (no recipe to replay)
+		  AND exp_id NOT IN (SELECT exp_id FROM infinite_streaming.sweep_claims WHERE claim_ts > now() - INTERVAL 30 SECOND)
 		  AND platform NOT IN (SELECT value FROM infinite_streaming.sweep_scope FINAL WHERE dimension='platform' AND enabled=0)
 		  AND protocol NOT IN (SELECT value FROM infinite_streaming.sweep_scope FINAL WHERE dimension='protocol' AND enabled=0)
 		  AND class    NOT IN (SELECT value FROM infinite_streaming.sweep_scope FINAL WHERE dimension='class'    AND enabled=0)
@@ -326,7 +331,10 @@ func sweepSelectCandidate(ctx context.Context, cfg config) (id, raw string, err 
 }
 
 func sweepClaimWinner(ctx context.Context, cfg config, expID string) (string, error) {
-	q := `SELECT argMin(owner, (claim_ts, claim_token)) AS w FROM infinite_streaming.sweep_claims WHERE exp_id = {exp:String}`
+	// Arbitrate only among the current claim burst (same window as the candidate
+	// exclusion), so a re-claim after reap isn't decided by a stale historical claim.
+	q := `SELECT argMin(owner, (claim_ts, claim_token)) AS w FROM infinite_streaming.sweep_claims
+		WHERE exp_id = {exp:String} AND claim_ts > now() - INTERVAL 30 SECOND`
 	body, err := chQueryBytes(ctx, cfg, q, map[string]string{"exp": expID})
 	if err != nil {
 		return "", err

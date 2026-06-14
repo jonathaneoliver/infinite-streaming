@@ -64,7 +64,6 @@ func labelSeverity(label string) string {
 
 func cmdSweepSeedFromTriage(client *api.Client, args []string, asJSON bool) error {
 	fs := flag.NewFlagSet("sweep seed-from-triage", flag.ContinueOnError)
-	root := fs.String("root", "", "sweep root dir")
 	days := fs.Int("days", 7, "lookback window for the triage signal")
 	top := fs.Int("top", 8, "consider the top-N labels by skew")
 	minSkew := fs.Float64("min-skew", 2.0, "only seed labels whose skew (max lift) ≥ this")
@@ -72,7 +71,7 @@ func cmdSweepSeedFromTriage(client *api.Client, args []string, asJSON bool) erro
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	s, err := openStore(*root)
+	s, err := openStore(client)
 	if err != nil {
 		return err
 	}
