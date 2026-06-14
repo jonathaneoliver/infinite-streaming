@@ -281,6 +281,9 @@ watch(viewMode, () => { if (viewMode.value === 'history') loadHistory(); });
         </div>
       </header>
 
+      <!-- Population triage table up top; the sweep controls + viz sit together below it -->
+      <LabelFrequencyTable class="lft-block" />
+
       <div class="controls">
         <div class="seg">
           <button :class="{ on: classFilter === 'all' }" @click="classFilter = 'all'">All</button>
@@ -327,8 +330,6 @@ watch(viewMode, () => { if (viewMode.value === 'history') loadHistory(); });
           <span v-if="!scopeValues(dim).length" class="scope-empty">—</span>
         </div>
       </section>
-
-      <LabelFrequencyTable class="lft-block" />
 
       <!-- Graph: the lineage DAG (seed → isolation fan → bisect, + A/B groups) -->
       <div v-show="viewMode === 'graph'" class="graphwrap">
