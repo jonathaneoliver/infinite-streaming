@@ -122,6 +122,7 @@ func cmdSweepSeed(client *api.Client, args []string, asJSON bool) error {
 	fs := flag.NewFlagSet("sweep seed", flag.ContinueOnError)
 	full := fs.Bool("full", false, "widen the seed across all platforms (default narrow depth-first)")
 	class := fs.String("class", "config", "sweep class: config (realistic stream/network) | fault (error-recovery)")
+	platform := fs.String("platform", "", "seed only this platform (e.g. androidtv); overrides --full/narrow")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -133,7 +134,12 @@ func cmdSweepSeed(client *api.Client, args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	exps := sweep.Seed(c, *full, nowUTC())
+	var exps []*sweep.Experiment
+	if *platform != "" {
+		exps = sweep.Seed(c, *full, nowUTC(), *platform)
+	} else {
+		exps = sweep.Seed(c, *full, nowUTC())
+	}
 	for _, e := range exps {
 		if err := s.Save(sweep.StatusBacklog, e); err != nil {
 			return err
@@ -145,6 +151,9 @@ func cmdSweepSeed(client *api.Client, args []string, asJSON bool) error {
 	mode := "narrow (depth-first, ipad-sim)"
 	if *full {
 		mode = "full (all platforms)"
+	}
+	if *platform != "" {
+		mode = "platform=" + *platform
 	}
 	fmt.Printf("seeded %d %s-class experiments into backlog (%s) — %s\n", len(exps), c, s.Label(), mode)
 	return nil

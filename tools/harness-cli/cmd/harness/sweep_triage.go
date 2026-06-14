@@ -27,7 +27,9 @@ import (
 //	harness sweep seed-from-triage [--days N] [--top N] [--min-skew X] [--dry-run]
 
 // runnablePlatforms are the platforms the probe can actually drive today.
-var runnablePlatforms = map[string]bool{"ipad-sim": true, "iphone-sim": true, "iphone": true}
+// androidtv via adb/cli (a physical Android TV on the runner host); the rest
+// via appium against a booted sim / attached iPhone.
+var runnablePlatforms = map[string]bool{"ipad-sim": true, "iphone-sim": true, "iphone": true, "androidtv": true}
 
 // testRecipe maps a characterization `test` value to a sweep mode + (for the
 // pattern tests) the shape pattern the probe arms.
