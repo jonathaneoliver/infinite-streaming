@@ -49,6 +49,8 @@ Subcommands:
                            derived purely from CH state (claim & run / analyze /
                            reap / isolate / promote / needs-human) — drive the
                            loop off this; resumes from the database alone.
+  annotate <id> --note "…" record the interpretation (what happened / where /
+                           how) onto Result.Note [--from found].
   reap [--max-age-min N]   return running experiments orphaned by a dead runner
                            to backlog (default 60; ~2× the longest expected run).
   isolate <id> --flip axis=value [--flip …]
@@ -92,6 +94,8 @@ func cmdSweep(client *api.Client, args []string, asJSON bool) error {
 		return cmdSweepPromote(client, args[1:], asJSON)
 	case "agenda":
 		return cmdSweepAgenda(client, args[1:], asJSON)
+	case "annotate":
+		return cmdSweepAnnotate(client, args[1:], asJSON)
 	case "reap":
 		return cmdSweepReap(client, args[1:], asJSON)
 	case "isolate":
@@ -143,6 +147,46 @@ func cmdSweepSeed(client *api.Client, args []string, asJSON bool) error {
 		mode = "full (all platforms)"
 	}
 	fmt.Printf("seeded %d %s-class experiments into backlog (%s) — %s\n", len(exps), c, s.Label(), mode)
+	return nil
+}
+
+// cmdSweepAnnotate records the LLM's interpretation (what happened / where /
+// how) onto an experiment's Result.Note — the structured "why it concluded
+// that", so the row is self-explanatory from CH alone (vs the mechanical
+// analyze note). Written during the loop's investigate step on a hit.
+func cmdSweepAnnotate(client *api.Client, args []string, asJSON bool) error {
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
+		return errors.New(`usage: harness sweep annotate <experiment-id> --note "what happened / where / how" [--from found]`)
+	}
+	id := args[0]
+	fs := flag.NewFlagSet("sweep annotate", flag.ContinueOnError)
+	from := fs.String("from", "found", "bucket holding the experiment")
+	note := fs.String("note", "", "the interpretation (what happened / where / how) — required")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*note) == "" {
+		return errors.New("--note is required")
+	}
+	s, err := openStore(client)
+	if err != nil {
+		return err
+	}
+	e, err := s.Load(sweep.Status(*from), id)
+	if err != nil {
+		return fmt.Errorf("load %s/%s: %w", *from, id, err)
+	}
+	if e.Result == nil {
+		e.Result = &sweep.Result{}
+	}
+	e.Result.Note = *note
+	if err := s.Save(sweep.Status(*from), e); err != nil {
+		return err
+	}
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"experiment": id, "note": *note})
+	}
+	fmt.Printf("annotated %s: %s\n", id, *note)
 	return nil
 }
 

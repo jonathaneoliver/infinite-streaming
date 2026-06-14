@@ -941,6 +941,35 @@ ENGINE = MergeTree
 ORDER BY exp_id
 SETTINGS index_granularity = 8192;
 
+-- ── sweep_runs ────────────────────────────────────────────────────────────
+-- Append-only run HISTORY (#772). The sweep_experiments queue is keyed by
+-- exp_id (ReplacingMergeTree), so re-running a recipe overwrites the prior run.
+-- sweep_runs keeps one row per RUN (keyed by play_id) so "everything we've ever
+-- run" survives — recipe + verdict + trigger + conclusion, one year. Written by
+-- the harness on analyze (which also marks the play `interesting` for the rich
+-- play-archive retention). Query ORDER BY run_at DESC for the dashboard History.
+CREATE TABLE IF NOT EXISTS infinite_streaming.sweep_runs
+(
+    play_id    String                  CODEC(ZSTD(1)),
+    exp_id     String                  CODEC(ZSTD(1)),
+    class      LowCardinality(String)  CODEC(ZSTD(1)),
+    kind       LowCardinality(String)  CODEC(ZSTD(1)),
+    platform   LowCardinality(String)  CODEC(ZSTD(1)),
+    protocol   LowCardinality(String)  CODEC(ZSTD(1)),
+    mode       LowCardinality(String)  CODEC(ZSTD(1)),
+    recipe     LowCardinality(String)  CODEC(ZSTD(1)),
+    verdict    LowCardinality(String)  CODEC(ZSTD(1)),
+    why        String                  CODEC(ZSTD(1)),
+    why_text   String                  CODEC(ZSTD(3)),
+    note       String                  CODEC(ZSTD(3)),
+    player_id  String                  CODEC(ZSTD(1)),
+    run_at     DateTime64(3, 'UTC')    CODEC(ZSTD(1))
+)
+ENGINE = MergeTree
+ORDER BY play_id
+TTL toDateTime(run_at) + INTERVAL 365 DAY
+SETTINGS index_granularity = 8192;
+
 -- ── sweep_scope ───────────────────────────────────────────────────────────
 -- Control-plane for "which dimensions are enabled" (#772 dashboard buttons).
 -- One row per (dimension,value) the operator has toggled; `enabled=0` gates that

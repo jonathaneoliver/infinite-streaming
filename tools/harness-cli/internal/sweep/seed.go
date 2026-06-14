@@ -98,6 +98,8 @@ func Seed(class Class, full bool, now string) []*Experiment {
 					Kind:                KindSeed,
 					Reps:                1,
 					Depth:               0,
+					Why:                 "starter_seed",
+					WhyText:             fmt.Sprintf("starter %s-class seed: %s recipe (%s) on %s/%s", class, r.family, r.mode, p, proto),
 				}
 				e.Score = w.Score(e)
 				out = append(out, e)

@@ -249,6 +249,24 @@ func (s *Store) Move(from, to Status, e *Experiment) error {
 	return s.Save(to, e)
 }
 
+// RecordRun appends e's run to the append-only history (sweep_runs) and marks
+// its play `interesting` for retention — so re-running a recipe doesn't lose the
+// prior run (the queue collapses by exp_id) and the rich play archive survives.
+func (s *Store) RecordRun(e *Experiment) error {
+	verdict, note := "", ""
+	if e.Result != nil {
+		verdict, note = string(e.Result.Verdict), e.Result.Note
+	}
+	body, _ := json.Marshal(map[string]any{
+		"play_id": e.PlayID, "exp_id": e.ID, "class": string(e.ClassOrDefault()),
+		"kind": string(e.Kind), "platform": e.Platform, "protocol": e.Protocol,
+		"mode": e.Mode, "recipe": RecipeSlug(e), "verdict": verdict,
+		"why": e.Why, "why_text": e.WhyText, "note": note, "player_id": e.PlayerID,
+	})
+	_, err := s.do(context.Background(), http.MethodPost, "/runs", body)
+	return err
+}
+
 // Delete tombstones an experiment (status='deleted'); list/claim ignore it.
 func (s *Store) Delete(id string) error {
 	body, _ := json.Marshal(map[string]string{"exp_id": id})

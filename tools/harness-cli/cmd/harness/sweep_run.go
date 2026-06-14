@@ -406,6 +406,13 @@ func cmdSweepAnalyze(client *api.Client, args []string, asJSON bool) error {
 	if err := s.Move(sweep.Status(*from), bucket, e); err != nil {
 		return err
 	}
+	// Record the run in the append-only history + mark the play interesting
+	// (best-effort: the verdict already landed; don't fail on a history hiccup).
+	if e.PlayID != "" {
+		if err := s.RecordRun(e); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: record run history: %v\n", err)
+		}
+	}
 
 	viewer := viewerURL(client.BaseURL, e.PlayerID, *play)
 	if asJSON {

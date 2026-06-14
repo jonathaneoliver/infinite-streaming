@@ -174,7 +174,7 @@ function toggleExpand(id: string) {
 // The sweep is a DAG: parent (seed → isolation fan → bisect) + group (A/B pairs).
 // Toggle Board | Graph; nodes = experiments colored by verdict/status, edges =
 // lineage, click a node → its detail.
-const viewMode = ref<'board' | 'graph'>('board');
+const viewMode = ref<'board' | 'graph' | 'history'>('board');
 const graphEl = ref<HTMLElement | null>(null);
 const selectedExpId = ref('');
 const selectedExp = computed(() => experiments.value.find((e) => e.exp_id === selectedExpId.value) || null);
@@ -231,6 +231,37 @@ watch([viewMode, experiments], () => {
   if (viewMode.value === 'graph') nextTick(buildGraph);
 });
 onUnmounted(() => { if (network) network.destroy(); });
+
+// ── Run history (sweep_runs — append-only, every run survives the queue) ─────
+interface SweepRun {
+  play_id: string; exp_id: string; class: string; kind: string;
+  platform: string; protocol: string; mode: string; recipe: string;
+  verdict: string; why: string; why_text: string; note: string;
+  player_id: string; run_at: string;
+}
+const history = ref<SweepRun[]>([]);
+const historyLoaded = ref(false);
+async function loadHistory() {
+  try {
+    const resp = await fetch('/analytics/api/v2/sweep/runs?limit=500');
+    if (!resp.ok) return;
+    const data = (await resp.json()) as { items: SweepRun[] | null };
+    history.value = data.items ?? [];
+    historyLoaded.value = true;
+  } catch { /* best-effort */ }
+}
+function runViewer(r: SweepRun): string | null {
+  if (!r.player_id) return null;
+  let u = `/dashboard/session-viewer.html?player_id=${encodeURIComponent(r.player_id)}`;
+  if (r.play_id) u += `&play_id=${encodeURIComponent(r.play_id)}`;
+  return u;
+}
+function runDate(s: string): string {
+  if (!s) return '—';
+  const d = new Date(s.replace(' ', 'T') + 'Z');
+  return isNaN(d.getTime()) ? s : d.toLocaleString();
+}
+watch(viewMode, () => { if (viewMode.value === 'history') loadHistory(); });
 </script>
 
 <template>
@@ -264,6 +295,7 @@ onUnmounted(() => { if (network) network.destroy(); });
         <div class="seg">
           <button :class="{ on: viewMode === 'board' }" @click="viewMode = 'board'">Board</button>
           <button :class="{ on: viewMode === 'graph' }" @click="viewMode = 'graph'">Graph</button>
+          <button :class="{ on: viewMode === 'history' }" @click="viewMode = 'history'">History</button>
         </div>
         <button class="refresh" @click="load">↻</button>
       </div>
@@ -308,6 +340,31 @@ onUnmounted(() => { if (network) network.destroy(); });
           </p>
           <SweepJobDetail v-if="selectedExp" :e="selectedExp" />
         </aside>
+      </div>
+
+      <!-- History: append-only log of every run (sweep_runs); re-runs don't overwrite -->
+      <div v-show="viewMode === 'history'" class="history">
+        <p class="hist-sub">
+          Every run we've made — append-only ({{ history.length }} runs, newest first). The queue collapses by
+          recipe; this keeps the full record (kept a year; plays kept 90 days).
+        </p>
+        <table v-if="history.length" class="hist-table">
+          <thead>
+            <tr><th>when</th><th>experiment</th><th>verdict</th><th>recipe</th><th>why</th><th>conclusion</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in history" :key="r.play_id">
+              <td class="nowrap">{{ runDate(r.run_at) }}</td>
+              <td><code>{{ r.exp_id }}</code><div class="hist-axes">{{ r.platform }} · {{ r.protocol }} · {{ r.mode }}</div></td>
+              <td><span v-if="r.verdict" class="verdict" :class="verdictClass(r.verdict)">{{ r.verdict }}</span><span v-else>—</span></td>
+              <td>{{ r.recipe }}</td>
+              <td class="hist-why">{{ r.why_text || r.why || '—' }}</td>
+              <td class="hist-note">{{ r.note || '—' }}</td>
+              <td><a v-if="runViewer(r)" :href="runViewer(r)!" target="_blank" rel="noopener" class="viewer">↗</a></td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else-if="historyLoaded" class="empty">No runs recorded yet. They appear here after <code>harness sweep analyze</code>.</p>
       </div>
 
       <div v-show="viewMode === 'board'" class="board">
@@ -405,6 +462,16 @@ onUnmounted(() => { if (network) network.destroy(); });
 .graph-side { background: var(--surface, #f8f9fa); border: 1px solid var(--border, #dadce0); border-radius: 8px; padding: .6rem .75rem; max-height: 70vh; overflow: auto; }
 .graph-hint { color: var(--text-secondary, #5f6368); font-size: .76rem; margin: 0 0 .4rem; }
 @media (max-width: 760px) { .graphwrap { grid-template-columns: 1fr; } }
+.history { background: var(--surface, #f8f9fa); border: 1px solid var(--border, #dadce0); border-radius: 8px; padding: .75rem 1rem; }
+.hist-sub { color: var(--text-secondary, #5f6368); font-size: .8rem; margin: 0 0 .6rem; }
+.hist-table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+.hist-table th { text-align: left; color: var(--text-secondary, #5f6368); font-size: .72rem; text-transform: uppercase; letter-spacing: .03em; border-bottom: 1px solid var(--border, #dadce0); padding: .3rem .5rem; }
+.hist-table td { padding: .4rem .5rem; border-bottom: 1px solid var(--border-light, #e8eaed); vertical-align: top; }
+.hist-table code { font-size: .72rem; color: var(--text-primary, #202124); }
+.hist-axes { color: var(--text-disabled, #9aa0a6); font-size: .7rem; margin-top: .1rem; }
+.hist-why { color: var(--text-secondary, #5f6368); max-width: 24ch; }
+.hist-note { color: var(--text-primary, #202124); max-width: 32ch; }
+.nowrap { white-space: nowrap; color: var(--text-secondary, #5f6368); }
 .row1 { display: flex; justify-content: space-between; align-items: center; gap: .4rem; }
 .kind { font-size: .68rem; text-transform: uppercase; letter-spacing: .03em; color: var(--text-secondary, #5f6368); }
 .next { font-size: .64rem; font-weight: 700; color: var(--success, #1e8e3e); background: var(--success-light, #e6f4ea); border-radius: 8px; padding: 0 .4rem; }

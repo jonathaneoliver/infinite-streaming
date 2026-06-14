@@ -71,18 +71,22 @@ go test ./tests/characterization/modes -run TestSweepProbe -count=1 -v -timeout 
 ```
 harness sweep analyze <exp-id> --play <play_id> --confirm-reps 3
 ```
-Pulls the play's QoE labels, classifies the trichotomy (`clean`→`done/`, `notable`/`aberration`→`found/`), and — on a *first* single-rep hit — enqueues 3 confirmation reps to `backlog/` (the n=1 guard, sharing a `rep_group`; reps don't recurse). A `clean` verdict ends the iteration here. **This step needs no LLM judgment.**
+Pulls the play's QoE labels, classifies the trichotomy (`clean`→`done/`, `notable`/`aberration`→`found/`), and — on a *first* single-rep hit — enqueues 3 confirmation reps to `backlog/` (the n=1 guard, sharing a `rep_group`; reps don't recurse). It also **records the run to the append-only history** (`sweep_runs`) and **marks the play `interesting`** (90-day retention), so re-running a recipe never loses the prior run and the play archive survives. A `clean` verdict ends the iteration here. **This step needs no LLM judgment.**
 
 ### 4. On a confirmed hit — investigate + insert (this is where you reason)
 A hit is *confirmed* only once the rep batch agrees (don't act on n=1). Then:
 
 1. **Recall** — grep `.claude/findings/` + `.claude/memory/` for the signature/symptom (`forensics` skill). If a prior finding explains it, say so and skip to promote.
-2. **Reason about the cause** from the evidence — *which* labels fired, *when* in the play, on *which* request kind — and pick the most-informative axes to flip. This is the OFAT isolation fan; it is **LLM-reasoned, not a fixed checklist** (a startup VSF on a 4K ladder → flip `platform` + `ladder` first; a mid-play freeze after a drop → vary drop duration + `liveoffset`, not codecs). Cheap/likely-first: Tier 1 = `platform`/`protocol` (different devices → simultaneous), Tier 2 = manifest knobs.
+2. **Record your interpretation** so the row is self-explanatory from CH alone (the dashboard detail + run history show it):
+   ```
+   harness sweep annotate <exp-id> --note "what happened / where / how — e.g. startup VSF: manifest timeout at first fetch, never reached first frame"
+   ```
+3. **Reason about the cause** from the evidence — *which* labels fired, *when* in the play, on *which* request kind — and pick the most-informative axes to flip. This is the OFAT isolation fan; it is **LLM-reasoned, not a fixed checklist** (a startup VSF on a 4K ladder → flip `platform` + `ladder` first; a mid-play freeze after a drop → vary drop duration + `liveoffset`, not codecs). Cheap/likely-first: Tier 1 = `platform`/`protocol` (different devices → simultaneous), Tier 2 = manifest knobs.
    ```
    harness sweep isolate <exp-id> --flip platform=androidtv --flip ladder=drop-top-rung --flip protocol=dash
    ```
    This materializes a `control` + one one-axis-flip `variant` per flip into `backlog/` (each enforced to differ from control in exactly one axis; capped at 8). The scheduler will pick them up *next* (they outrank seeds), so the chain runs itself.
-3. **Promote** to a deduped Issue:
+4. **Promote** to a deduped Issue (records the Issue URL back to CH — idempotency):
    ```
    harness sweep promote <exp-id> --dry-run        # inspect signature + body first
    harness sweep promote <exp-id> --axis platform  # append the attributed axis once isolation confirms it
