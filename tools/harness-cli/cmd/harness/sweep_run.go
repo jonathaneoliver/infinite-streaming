@@ -390,6 +390,26 @@ func cmdSweepAnalyze(client *api.Client, args []string, asJSON bool) error {
 
 	bucket := sweep.Analyze(e, *play, labels)
 
+	// Manipulation-check gate (epic #793): a live-offset recipe is only
+	// interpretable if changing the knob actually moved the player's ACHIEVED
+	// offset. If it didn't, the independent variable never varied — so no QoE
+	// outcome can be attributed to live_offset — override the label verdict to
+	// inconclusive and route to review instead of letting it become a finding.
+	if intended, ok := sweep.IntendedLiveOffset(e); ok {
+		evBody, evErr := client.ArchiveEvents(context.Background(), &forwarder.GetApiV2EventsParams{PlayId: &pid})
+		if evErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: manipulation check could not read offsets for %s: %v\n", *play, evErr)
+		} else if achieved := sweep.AchievedOffsetFromEvents(evBody); !sweep.ManipulationLanded(intended, achieved) {
+			got := achieved.RecommendedS
+			if got <= 0 {
+				got = achieved.TrueS
+			}
+			bucket = sweep.MarkInconclusive(e, fmt.Sprintf(
+				"manipulation check FAILED: live_offset intended %.1fs but achieved ~%.1fs — IV did not move, result not attributable to live_offset",
+				intended, got))
+		}
+	}
+
 	// n=1 guard: a first single-rep hit enqueues confirmation reps instead of
 	// being promoted straight away. The reps land in backlog; this experiment
 	// still records its verdict and moves to its bucket for the post-mortem.
