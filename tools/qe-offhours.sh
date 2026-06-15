@@ -28,7 +28,6 @@ CLAUDE="${QE_CLAUDE:-claude}"
 export HARNESS_BASE_URL="${HARNESS_BASE_URL:-https://dev.jeoliver.com:21000}"
 export HARNESS_INSECURE="${HARNESS_INSECURE:-1}"
 ANDROIDTV_UDID="${QE_ANDROIDTV_UDID:-}"          # adb serial of the physical Android TV (empty = auto-pick the one device)
-ANDROIDTV_LAUNCH="${QE_ANDROIDTV_LAUNCH:-cli}"   # LAUNCH_MODE for android-tv (cli/adb)
 OWNER="offhours-$$"
 
 mkdir -p "$(dirname "$LOG")"
@@ -49,8 +48,10 @@ stop_at=$deadline
 time_left() { echo $(( stop_at - $(date +%s) )); }
 
 # --- health: deploy (hard) + per-platform device availability (soft) ----------
-# Two runtimes now: appium+sim for iOS, adb for the physical Android TV. Probe a
-# claim's platform against whichever is up; only abort if NOTHING is runnable.
+# appium drives every platform (iOS sims + Apple TV directly, the physical
+# Android TV over its adb transport), so the appium server must be up for any
+# run; androidtv additionally needs a reachable adb device. Probe a claim's
+# platform against what's available; only abort if NOTHING is runnable.
 curl -sk --max-time 6 "$HARNESS_BASE_URL/api/sessions" -o /dev/null || { echo "FATAL: deploy $HARNESS_BASE_URL unreachable"; exit 1; }
 
 APPIUM_OK=0
@@ -70,7 +71,8 @@ if command -v adb >/dev/null 2>&1; then
   [ -n "$ANDROIDTV_UDID" ] && adb -s "$ANDROIDTV_UDID" get-state >/dev/null 2>&1 && ADB_OK=1
 fi
 echo "health: deploy OK · appium=$([ $APPIUM_OK = 1 ] && echo up || echo DOWN) · androidtv=$([ $ADB_OK = 1 ] && echo \"$ANDROIDTV_UDID\" || echo none)"
-[ "$APPIUM_OK" = 0 ] && [ "$ADB_OK" = 0 ] && { echo "FATAL: no runnable device (no appium, no adb device)"; exit 1; }
+# appium drives every platform, so it's required: no appium ⇒ nothing runnable.
+[ "$APPIUM_OK" = 0 ] && { echo "FATAL: appium is down — it drives every platform; nothing is runnable"; exit 1; }
 
 # --- selftest: a clean 2 Mbps-capped play, no fault, so a human can WATCH the
 #     sim actually stream video and confirm the whole pipeline works ----------
@@ -130,13 +132,22 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
   step=$(printf '%s' "$recipe_json" | jq -r '.shape.step_seconds // 12' 2>/dev/null)
   margin=$(printf '%s' "$recipe_json" | jq -r '.shape.margin_pct // 5' 2>/dev/null)
 
+  # Launch mode is an instruction carried on the item (seed/triage stamp
+  # launch_mode=appium); appium is the only mode TestSweepProbe supports and it
+  # drives every platform, including the physical Android TV over its adb
+  # transport. Legacy rows with no launch_mode default to appium.
+  launch=$(printf '%s' "$recipe_json" | jq -r '.launch_mode // "appium"' 2>/dev/null)
+  [ -n "$launch" ] && [ "$launch" != "null" ] || launch=appium
+
   if [ "$platform" = "androidtv" ]; then
-    # No adb device on this runner: leave the claim HELD (don't requeue) so the
-    # next claim advances past it to a runnable platform instead of re-offering
+    # Android TV is driven by appium over adb: it needs BOTH a reachable adb
+    # device AND the appium server up. With no device, leave the claim HELD
+    # (don't requeue) so the next claim advances past it instead of re-offering
     # this same item (the 30s claim window would otherwise cycle the androidtv
-    # set forever). Step-0 reap returns it for a runner that does have a device.
-    [ "$ADB_OK" = 1 ] || { echo "  androidtv not available (no adb) — leaving claimed, advancing"; continue; }
-    launch="$ANDROIDTV_LAUNCH"; device="$ANDROIDTV_UDID"
+    # set forever). Step-0 reap returns it for a runner that has the TV attached.
+    [ "$ADB_OK" = 1 ] || { echo "  androidtv not available (no adb device) — leaving claimed, advancing"; continue; }
+    [ "$APPIUM_OK" = 1 ] || { echo "  androidtv needs appium (down) — requeueing $exp_id"; harness sweep reap --max-age-min 0 >/dev/null 2>&1; continue; }
+    device="$ANDROIDTV_UDID"
   else
     [ "$APPIUM_OK" = 1 ] || { echo "  $platform needs appium (down) — requeueing $exp_id"; harness sweep reap --max-age-min 0 >/dev/null 2>&1; continue; }
     case "$platform" in
@@ -145,7 +156,6 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
       *)                 device="$IPADSIM_UDID" ;;
     esac
     xcrun simctl bootstatus "$device" -b >/dev/null 2>&1 || { echo "  booting sim $device…"; xcrun simctl boot "$device" 2>/dev/null; sleep 8; }
-    launch="appium"
   fi
   echo "  platform=$platform launch=$launch device=$device"
 
@@ -157,6 +167,7 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
   # drive the probe (mechanical; no model call)
   log=$(mktemp)
   env CHAR_PLAYER_ID="$player_id" HARNESS_BASE_URL="$HARNESS_BASE_URL" LAUNCH_MODE="$launch" \
+      CHAR_SWEEP_PLATFORM="$platform" \
       CHAR_CONTENT="$CONTENT" CHAR_SWEEP_DURATION_S="$DURATION" CHARACTERIZATION_DEVICE_UDID="$device" \
       ${pattern:+CHAR_SWEEP_PATTERN="$pattern" CHAR_SWEEP_STEP_S="$step" CHAR_SWEEP_MARGIN="$margin"} \
       go test ./tests/characterization/modes -run TestSweepProbe -count=1 -v -timeout 8m >"$log" 2>&1

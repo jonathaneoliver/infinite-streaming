@@ -93,6 +93,7 @@ func Seed(class Class, full bool, now string, platformsOverride ...string) []*Ex
 					CreatedAt:           now,
 					Class:               class,
 					Platform:            p,
+					LaunchMode:          LaunchModeAppium, // every item is driven by appium (the only mode the probe supports), incl. the physical Android TV
 					Protocol:            proto,
 					Content:             SeedContent,
 					Mode:                r.mode,

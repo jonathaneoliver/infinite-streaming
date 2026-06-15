@@ -220,7 +220,7 @@ func experimentFromTriage(label, dim, value string, skew float64, now string) (*
 		mode, pattern := testRecipe(value)
 		e := &sweep.Experiment{
 			ID: "triage-test-" + sweep.Slug(value), CreatedAt: now, Class: sweep.ClassConfig,
-			Platform: "ipad-sim", Protocol: "hls", Content: sweep.SeedContent, Mode: mode,
+			Platform: "ipad-sim", LaunchMode: sweep.LaunchModeAppium, Protocol: "hls", Content: sweep.SeedContent, Mode: mode,
 			Kind: sweep.KindSeed, Reps: 1, Why: whySlug, WhyText: whyText,
 		}
 		if pattern != "" {
@@ -233,7 +233,7 @@ func experimentFromTriage(label, dim, value string, skew float64, now string) (*
 		}
 		return &sweep.Experiment{
 			ID: "triage-platform-" + sweep.Slug(value), CreatedAt: now, Class: sweep.ClassConfig,
-			Platform: value, Protocol: "hls", Content: sweep.SeedContent, Mode: "steps",
+			Platform: value, LaunchMode: sweep.LaunchModeAppium, Protocol: "hls", Content: sweep.SeedContent, Mode: "steps",
 			Kind: sweep.KindSeed, Reps: 1, Why: whySlug, WhyText: whyText,
 		}, ""
 	case "content":

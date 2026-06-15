@@ -40,6 +40,22 @@ func (e *Experiment) ClassOrDefault() Class {
 	return e.Class
 }
 
+// LaunchModeAppium is the only launcher TestSweepProbe supports — appium drives
+// every platform (iOS sims, Apple TV, and the physical Android TV over its adb
+// transport). cli/adb modes make the probe SKIP, so this is the launch
+// instruction every item carries.
+const LaunchModeAppium = "appium"
+
+// LaunchModeOrDefault resolves the probe launch mode, defaulting empty (legacy
+// rows seeded before the field existed) to appium so the runner never falls
+// back to a mode the probe skips.
+func (e *Experiment) LaunchModeOrDefault() string {
+	if e.LaunchMode == "" {
+		return LaunchModeAppium
+	}
+	return e.LaunchMode
+}
+
 // Kind is what produced an experiment and how aggressively the scheduler
 // should prioritise it (§5). isolation/bisect/hypothesis come from a hit;
 // seed is the broad starter set.
@@ -153,15 +169,16 @@ type Result struct {
 // replays).
 type Experiment struct {
 	ID        string `json:"id"`
-	CreatedAt string `json:"created_at"`      // RFC3339 UTC; stamped by the caller (Date.now is unavailable in some contexts)
+	CreatedAt string `json:"created_at"`       // RFC3339 UTC; stamped by the caller (Date.now is unavailable in some contexts)
 	Status    Status `json:"status,omitempty"` // lifecycle bucket; authoritative on the CH column, stamped onto the struct by Store.List
 
 	// --- the recipe (matrix axes) ---
-	Class               Class                `json:"class,omitempty"` // config (default) | fault — the sweep tier
-	Platform            string               `json:"platform"`        // ipad-sim | iphone | appletv | androidtv | web
-	Protocol            string               `json:"protocol"`        // hls | dash
-	Content             string               `json:"content"`         // fixed to insane_new for now
-	Mode                string               `json:"mode"`            // steps | pyramid | downshift_severity | …
+	Class               Class                `json:"class,omitempty"`       // config (default) | fault — the sweep tier
+	Platform            string               `json:"platform"`              // ipad-sim | iphone | appletv | androidtv | web
+	LaunchMode          string               `json:"launch_mode,omitempty"` // how the probe launches the app: appium (the only mode TestSweepProbe supports). Stamped at creation; the runner passes it as LAUNCH_MODE.
+	Protocol            string               `json:"protocol"`              // hls | dash
+	Content             string               `json:"content"`               // fixed to insane_new for now
+	Mode                string               `json:"mode"`                  // steps | pyramid | downshift_severity | …
 	DurationS           int                  `json:"duration_s,omitempty"`
 	Fault               *Fault               `json:"fault,omitempty"` // fault-class only
 	Shape               *Shape               `json:"shape,omitempty"`
