@@ -120,11 +120,9 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
   [ -z "$exp_id" ] && { echo "claim parse failed: $claim"; break; }
   echo "--- $(date) iter $iters: claimed $exp_id"
 
-  boot=$(harness sweep bootstrap "$exp_id" 2>&1)
-  player_id=$(printf '%s' "$boot" | grep -oE 'player_id=[0-9a-fA-F-]+' | head -1 | cut -d= -f2)
-  [ -z "$player_id" ] && { echo "bootstrap failed: $boot"; harness sweep reap --max-age-min 0 >/dev/null 2>&1; continue; }
-
-  # read the recipe: platform (→ launch mode + device) + pattern shape.
+  # read the recipe + route BEFORE bootstrap, so an un-runnable platform (e.g.
+  # androidtv with no adb) is skipped without minting a proxy session — which
+  # otherwise wastes sessions and trips a proxy 503 under churn.
   recipe_json=$(curl -sk "$HARNESS_BASE_URL/analytics/api/v2/sweep/experiments?status=running" 2>/dev/null \
     | jq -r --arg id "$exp_id" '.items[]|select(.exp_id==$id)|.raw_json' 2>/dev/null)
   platform=$(printf '%s' "$recipe_json" | jq -r '.platform // "ipad-sim"' 2>/dev/null)
@@ -132,22 +130,25 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
   step=$(printf '%s' "$recipe_json" | jq -r '.shape.step_seconds // 12' 2>/dev/null)
   margin=$(printf '%s' "$recipe_json" | jq -r '.shape.margin_pct // 5' 2>/dev/null)
 
-  # route to the platform's runtime: android-tv → adb; everything else → appium.
   if [ "$platform" = "androidtv" ]; then
-    [ "$ADB_OK" = 1 ] || { echo "  androidtv not available (no adb device) — requeueing $exp_id"; harness sweep reap --max-age-min 0 >/dev/null 2>&1; continue; }
+    [ "$ADB_OK" = 1 ] || { echo "  androidtv not available (no adb) — requeueing $exp_id"; harness sweep reap --max-age-min 0 >/dev/null 2>&1; continue; }
     launch="$ANDROIDTV_LAUNCH"; device="$ANDROIDTV_UDID"
   else
     [ "$APPIUM_OK" = 1 ] || { echo "  $platform needs appium (down) — requeueing $exp_id"; harness sweep reap --max-age-min 0 >/dev/null 2>&1; continue; }
     case "$platform" in
-      ipad-sim)        device="$IPADSIM_UDID" ;;
+      ipad-sim)          device="$IPADSIM_UDID" ;;
       iphone-sim|iphone) device="$IPHONESIM_UDID" ;;
-      *)               device="$IPADSIM_UDID" ;;
+      *)                 device="$IPADSIM_UDID" ;;
     esac
-    # ensure the chosen sim is booted (the health-check only booted the default)
     xcrun simctl bootstatus "$device" -b >/dev/null 2>&1 || { echo "  booting sim $device…"; xcrun simctl boot "$device" 2>/dev/null; sleep 8; }
     launch="appium"
   fi
   echo "  platform=$platform launch=$launch device=$device"
+
+  # bootstrap only the runnable session (config-on-connect)
+  boot=$(harness sweep bootstrap "$exp_id" 2>&1)
+  player_id=$(printf '%s' "$boot" | grep -oE 'player_id=[0-9a-fA-F-]+' | head -1 | cut -d= -f2)
+  [ -z "$player_id" ] && { echo "bootstrap failed: $boot"; harness sweep reap --max-age-min 0 >/dev/null 2>&1; continue; }
 
   # drive the probe (mechanical; no model call)
   log=$(mktemp)
