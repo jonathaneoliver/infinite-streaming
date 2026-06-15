@@ -213,10 +213,11 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
     <p class="note">
       HLS-only. Rewrites the manifest's <code>EXT-X-START:TIME-OFFSET</code>
       (join point) and <code>EXT-X-SERVER-CONTROL:HOLD-BACK</code> (target
-      offset) to N seconds. These are <em>advisory</em>: web (hls.js) honours
-      them, but iOS AVPlayer recomputes its own 3×-max-segment floor and largely
-      ignores a rewritten value — so this does not reliably move the iOS offset
-      (use the app's Live-offset setting for that). It does NOT strip segments.
+      offset) to N seconds, on both the master <em>and</em> the variant
+      playlists. Players honour the variant <code>HOLD-BACK</code> for their
+      join offset (iOS / Android / web). Note the HLS spec requires
+      <code>HOLD-BACK ≥ 3× the max segment duration</code> — below that AVPlayer
+      rejects the playlist (<code>-12646</code>). It does NOT strip segments.
     </p>
 
     <div class="order-row" data-testid="content-variant-order">
