@@ -165,11 +165,12 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
 
   # analyze (mechanical oracle verdict; records run history + retention).
   # Wait for the forwarder to ingest the play's labels first — analyzing too
-  # early reads 0 labels, classifies inconclusive, and REQUEUES the item (so the
-  # runner would re-claim the same one forever). 45s covers the batch lag.
-  sleep 45
-  verdict=$(harness sweep analyze "$exp_id" --play "$play_id" --confirm-reps 1 --json 2>/dev/null | jq -r '.verdict // ""' 2>/dev/null)
-  echo "$(date) $exp_id → verdict=$verdict (play $play_id)"
+  # early reads 0 labels, classifies inconclusive, and REQUEUES the item. 30s
+  # covers the batch lag. (`analyze` has no --json; parse the text verdict.)
+  sleep 30
+  out=$(harness sweep analyze "$exp_id" --play "$play_id" --confirm-reps 1 2>&1)
+  verdict=$(printf '%s' "$out" | grep -oE 'verdict=[a-z]+' | head -1 | cut -d= -f2)
+  echo "$(date) $exp_id → verdict=${verdict:-<none>} (play $play_id)"
 
   # ONLY on a hit: spend tokens to investigate + isolate + promote
   case "$verdict" in
@@ -186,10 +187,15 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
     *) echo "unexpected verdict: $verdict" ;;
   esac
 
-  runs=$((runs + 1))
-  echo "  [$runs${QE_RUN_TARGET:+/$QE_RUN_TARGET} item(s) driven]"
-  if [ -n "${QE_RUN_TARGET:-}" ] && [ "$runs" -ge "$QE_RUN_TARGET" ]; then
-    echo "$(date) reached run target $QE_RUN_TARGET"; break
+  # count only items that produced a real verdict (a driven item)
+  if [ -n "$verdict" ]; then
+    runs=$((runs + 1))
+    echo "  [$runs${QE_RUN_TARGET:+/$QE_RUN_TARGET} item(s) driven]"
+    if [ -n "${QE_RUN_TARGET:-}" ] && [ "$runs" -ge "$QE_RUN_TARGET" ]; then
+      echo "$(date) reached run target $QE_RUN_TARGET"; break
+    fi
+  else
+    echo "  no verdict — not counted"
   fi
 done
 
