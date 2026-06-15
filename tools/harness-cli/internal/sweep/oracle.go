@@ -74,6 +74,51 @@ func Classify(labels []string) Verdict {
 	}
 }
 
+// ClassifyFault applies the recovery-expected envelope (§3 Oracle A.4) for the
+// fault class. A fault we INJECTED is expected to fire — so the fault's own
+// stimulus labels (http_4xx/5xx, fault_*, segment_failure, manifest_failure,
+// transport_disconnect, unexpected_*) and the recovery signal (request_retry)
+// must NOT, on their own, make a verdict. The verdict is whether the player
+// RECOVERED:
+//
+//	survived  := reached first frame, didn't fail to start, didn't wedge
+//	aberration := !survived          (failing to recover IS the finding)
+//	clean      := survived           (the fault working + the player coping
+//	                                   is the expected outcome, not a finding)
+//
+// ABR decision-quality under the fault (downshift overshoot/storm, etc.) is
+// deliberately NOT judged here — that confound is the config class's job
+// (§0: pick one class, don't mix). A survived fault run is clean.
+func ClassifyFault(labels []string) Verdict {
+	got := make(map[string]bool, len(labels))
+	for _, l := range labels {
+		_, ev := splitLabel(l)
+		got[ev] = true
+	}
+	startedPlaying := got["first_frame"]
+	// Never-started: a video/media start failure means the fault stopped
+	// playback from ever beginning.
+	startFailed := got["qoe_vsf"] || got["qoe_msf"]
+	// Wedged: the player stuck/errored, or froze with no retry to climb out.
+	// A stall that IS followed by a retry is within the recovery envelope.
+	wedged := got["player_stuck"] || got["player_error"] ||
+		(got["stall_frozen"] && !got["request_retry"])
+
+	if !startedPlaying || startFailed || wedged {
+		return VerdictAberration
+	}
+	return VerdictClean
+}
+
+// classifyFor routes to the class-appropriate oracle: fault uses the recovery
+// envelope; everything else (config) uses the QoE-severity trichotomy.
+func classifyFor(class Class, labels []string) Verdict {
+	if class == ClassFault {
+		return ClassifyFault(labels)
+	}
+	return Classify(labels)
+}
+
 // PrimaryKind returns the event of the worst label — the aberration/notable
 // "kind" slug that seeds a finding signature (§4), e.g. `vsf`, `frozen`,
 // `downshift_overshoot`. Empty when the run is clean.
