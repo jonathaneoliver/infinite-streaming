@@ -370,10 +370,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 developerMode = p.getBoolean(DEV_MODE_KEY, false),
-                allow4K           = p.getBoolean(FLAG_4K, true),
+                // #797 P2: `is.flag.4k` / `is.flag.go_live` launch overrides
+                // outrank the persisted value for this launch (not written back).
+                allow4K           = com.infinitestream.player.LaunchConfig.allow4K
+                    ?: p.getBoolean(FLAG_4K, true),
                 localProxy        = p.getBoolean(FLAG_LOCAL_PROXY, true),
                 autoRecovery      = p.getBoolean(FLAG_AUTO_RECOVERY, false),
-                goLive            = p.getBoolean(FLAG_GO_LIVE, false),
+                goLive            = com.infinitestream.player.LaunchConfig.goLive
+                    ?: p.getBoolean(FLAG_GO_LIVE, false),
                 skipHomeOnLaunch  = p.getBoolean(FLAG_SKIP_HOME, false),
                 // A launch-provided override (the `is.flag.live_offset_s` intent
                 // extra captured by MainActivity) wins over the persisted value,
@@ -393,6 +397,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 protocol = com.infinitestream.player.LaunchConfig.streamProtocol ?: it.protocol,
                 peakBitrateMbps = (com.infinitestream.player.LaunchConfig.peakBitrateMbps
                     ?: p.getInt(FLAG_PEAK_BITRATE, 0)).coerceAtLeast(0),
+                // #797 P2: codec is UI-only state (not persisted), so a launch
+                // override just seeds it for this launch. starts_first_variant
+                // IS persisted (iOS parity); a launch override outranks it.
+                codec = com.infinitestream.player.LaunchConfig.codec ?: it.codec,
+                startsFirstVariant = com.infinitestream.player.LaunchConfig.startsFirstVariant
+                    ?: p.getBoolean(FLAG_STARTS_FIRST_VARIANT, false),
                 previewVideoSlots = run {
                     // First launch (no key) → hardware default. Otherwise
                     // clamp the stored value to the device's current cap.
@@ -404,9 +414,15 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     stored.coerceIn(0, hwCap)
                 },
-                lastPlayed    = p.getString(LAST_PLAYED_KEY, "") ?: "",
+                // #797 P2: `is.lastPlayed` (the harness's content-selection arg;
+                // `is.content` is an alias) pins which clip the hero / auto-resume
+                // targets. Not persisted from launch — first-frame still writes
+                // the real lastPlayed through normally.
+                lastPlayed    = com.infinitestream.player.LaunchConfig.lastPlayed
+                    ?: (p.getString(LAST_PLAYED_KEY, "") ?: ""),
                 viewCounts    = readViewCounts(p),
-                playIdRotationSeconds = p.getInt(FLAG_PLAY_ID_ROTATION, 0).coerceAtLeast(0),
+                playIdRotationSeconds = (com.infinitestream.player.LaunchConfig.playIdRotationSeconds
+                    ?: p.getInt(FLAG_PLAY_ID_ROTATION, 0)).coerceAtLeast(0),
             )
         }
     }
@@ -469,6 +485,17 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         prefs().edit().putBoolean(FLAG_GO_LIVE, on).apply()
     }
 
+    /** #797 starts_first_variant — pin the startup rung to the lowest variant,
+     *  releasing to free ABR once the first frame renders. The analog of iOS
+     *  `AVPlayerItem.startsOnFirstEligibleVariant`. Takes effect on the next
+     *  (re)load; re-applies the selector now so a toggle while paused-idle is
+     *  consistent. Persisted alongside the other Advanced flags. */
+    fun setStartsFirstVariant(on: Boolean) {
+        _state.update { it.copy(startsFirstVariant = on) }
+        prefs().edit().putBoolean(FLAG_STARTS_FIRST_VARIANT, on).apply()
+        applyTrackSelectionParameters()
+    }
+
     fun setSkipHomeOnLaunch(on: Boolean) {
         _state.update { it.copy(skipHomeOnLaunch = on) }
         prefs().edit().putBoolean(FLAG_SKIP_HOME, on).apply()
@@ -505,21 +532,30 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         applyTrackSelectionParameters()
     }
 
+    /** #797 starts_first_variant: latched false at the start of every play,
+     *  set true once the first frame renders. While the flag is on and this
+     *  is still false, the track selector is pinned to the lowest rung. */
+    private var startupVariantLockReleased = false
+
     /**
      * Push the current flag set into ExoPlayer's track selector. `allow4K`
      * caps the resolution (1080 p when off, so the chip isn't asked to decode
      * 4K). `peakBitrateMbps` caps the bitrate of the rung ABR may select
      * (#797) — the analog of iOS `preferredPeakBitRate`; 0 leaves it
-     * uncapped.
+     * uncapped. `startsFirstVariant` forces the lowest rung until the first
+     * frame is up (the #797 analog of iOS `startsOnFirstEligibleVariant`),
+     * after which [onRenderedFirstFrame] releases the lock and ABR adapts.
      */
     private fun applyTrackSelectionParameters() {
         val cap = if (_state.value.allow4K) Int.MAX_VALUE else 1080
         // Mbps → bps. 0 (or anything that would overflow Int) = no cap.
         val peakMbps = _state.value.peakBitrateMbps
         val peakBps = if (peakMbps in 1..2000) peakMbps * 1_000_000 else Int.MAX_VALUE
+        val forceLowest = _state.value.startsFirstVariant && !startupVariantLockReleased
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setMaxVideoSize(if (_state.value.allow4K) Int.MAX_VALUE else 1920, cap)
             .setMaxVideoBitrate(peakBps)
+            .setForceLowestBitrate(forceLowest)
             .build()
     }
 
@@ -828,6 +864,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             player.stop()
             player.clearMediaItems()
         }
+        // #797 starts_first_variant: re-arm the startup low-rung lock for this
+        // play (released again at first frame). No-op when the flag is off.
+        startupVariantLockReleased = false
+        applyTrackSelectionParameters()
         // Live-edge offset policy (issues #266 / #793):
         //  - Go Live ON      → snap to the edge (seekToDefaultPosition below);
         //                      leave the offset UNSET so the manifest decides
@@ -1108,6 +1148,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             override fun onRenderedFirstFrame() {
                 tag("main player: first frame for '${_state.value.selectedContent}'")
                 metrics?.onFirstFrameRendered()
+                // #797 starts_first_variant: first frame is up on the startup
+                // (lowest) rung; release the lock so ABR can adapt upward for
+                // the rest of the play. Mirrors iOS startsOnFirstEligibleVariant.
+                if (_state.value.startsFirstVariant && !startupVariantLockReleased) {
+                    startupVariantLockReleased = true
+                    applyTrackSelectionParameters()
+                    tag("starts_first_variant: released startup low-rung lock")
+                }
                 // Successful frame = the chip allocated decoders for us
                 // and they're functioning, so wipe the codec retry
                 // counter. Next time we hit a decoder fault we get a
@@ -1251,6 +1299,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private const val FLAG_SKIP_HOME = "advanced_skip_home_on_launch"
         private const val FLAG_LIVE_OFFSET = "advanced_live_offset_s"
         private const val FLAG_PEAK_BITRATE = "advanced_peak_bitrate_mbps"
+        private const val FLAG_STARTS_FIRST_VARIANT = "advanced_starts_first_variant"
         private const val FLAG_PREVIEW_VIDEO_SLOTS = "advanced_preview_video_slots"
         private const val FLAG_PLAY_ID_ROTATION = "advanced_play_id_rotation_s"
         private const val LAST_PLAYED_KEY = "last_played_content"

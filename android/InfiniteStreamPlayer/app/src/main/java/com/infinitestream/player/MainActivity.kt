@@ -61,6 +61,33 @@ object LaunchConfig {
     var streamProtocol: com.infinitestream.player.state.Protocol? = null
     @Volatile
     var peakBitrateMbps: Int? = null
+
+    // #797 priority-2 levers, same launch-override semantics as above. codec is
+    // UI-only state (not persisted); 4k / go_live / play_id_rotation_s /
+    // starts_first_variant override their persisted Advanced flags; lastPlayed
+    // pins which clip the Continue-Watching hero / auto-resume targets (the
+    // harness drives this via `is.lastPlayed`, with `is.content` as an alias).
+    @Volatile
+    var codec: com.infinitestream.player.state.Codec? = null
+    @Volatile
+    var allow4K: Boolean? = null
+    @Volatile
+    var goLive: Boolean? = null
+    @Volatile
+    var playIdRotationSeconds: Int? = null
+    @Volatile
+    var startsFirstVariant: Boolean? = null
+    @Volatile
+    var lastPlayed: String? = null
+}
+
+/** Parse a launch-arg boolean intent extra. The harness sends booleans as
+ *  `true`/`false` strings (NSArgumentDomain on iOS); tolerate `1`/`0`/`yes`/`no`
+ *  too. null = unparseable (leave the override unset). #797. */
+private fun boolArg(raw: String): Boolean? = when (raw.trim().lowercase()) {
+    "true", "1", "yes" -> true
+    "false", "0", "no" -> false
+    else -> null
 }
 
 class MainActivity : ComponentActivity() {
@@ -121,6 +148,53 @@ class MainActivity : ComponentActivity() {
         intent?.getStringExtra("is.flag.peak_bitrate_mbps")?.toDoubleOrNull()?.let { raw ->
             LaunchConfig.peakBitrateMbps = raw.toInt().coerceAtLeast(0)
             tag("launch-arg peak_bitrate_mbps=${LaunchConfig.peakBitrateMbps}")
+        }
+        // #797 P2 codec lever — `--es is.codec hevc` (auto / h264 / hevc / av1).
+        intent?.getStringExtra("is.codec")?.let { raw ->
+            com.infinitestream.player.state.Codec.fromArg(raw)?.let { c ->
+                LaunchConfig.codec = c
+                tag("launch-arg codec=${c.label}")
+            }
+        }
+        // #797 P2 4K-ladder lever — `--es is.flag.4k true`. A baseline flag the
+        // harness sets on every launch, so honouring it stops a stale persisted
+        // 4K toggle from leaking into a run (mirrors iOS NSArgumentDomain).
+        intent?.getStringExtra("is.flag.4k")?.let { raw ->
+            boolArg(raw)?.let { on ->
+                LaunchConfig.allow4K = on
+                tag("launch-arg 4k=$on")
+            }
+        }
+        // #797 P2 Go-Live lever — `--es is.flag.go_live true` (snap to live edge).
+        intent?.getStringExtra("is.flag.go_live")?.let { raw ->
+            boolArg(raw)?.let { on ->
+                LaunchConfig.goLive = on
+                tag("launch-arg go_live=$on")
+            }
+        }
+        // #797 P2 play_id rotation lever — `--es is.flag.play_id_rotation_s 0`
+        // (seconds; 0 = one play_id per session). Soak-run knob.
+        intent?.getStringExtra("is.flag.play_id_rotation_s")?.toDoubleOrNull()?.let { raw ->
+            LaunchConfig.playIdRotationSeconds = raw.toInt().coerceAtLeast(0)
+            tag("launch-arg play_id_rotation_s=${LaunchConfig.playIdRotationSeconds}")
+        }
+        // #797 P2 startup-rung lever — `--es is.flag.starts_first_variant true`
+        // (pin the start to the lowest rung, then ABR adapts up at first frame).
+        intent?.getStringExtra("is.flag.starts_first_variant")?.let { raw ->
+            boolArg(raw)?.let { on ->
+                LaunchConfig.startsFirstVariant = on
+                tag("launch-arg starts_first_variant=$on")
+            }
+        }
+        // #797 P2 content selection — the harness pins the played clip with
+        // `--es is.lastPlayed <name>`; accept `is.content` as an alias for the
+        // name the issue uses. Seeds lastPlayed so the hero / auto-resume target
+        // that clip (iOS reads `is.lastPlayed` the same way).
+        (intent?.getStringExtra("is.lastPlayed") ?: intent?.getStringExtra("is.content"))?.let { raw ->
+            if (raw.isNotEmpty()) {
+                LaunchConfig.lastPlayed = raw
+                tag("launch-arg lastPlayed=$raw")
+            }
         }
         // Keep the screen on while playback is active — release in onStop.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
