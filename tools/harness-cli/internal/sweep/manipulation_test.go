@@ -50,24 +50,35 @@ func TestAchievedOffsetEmpty(t *testing.T) {
 }
 
 func TestManipulationLanded(t *testing.T) {
+	s6 := SegmentSlackS("s6") // 7
+	s2 := SegmentSlackS("s2") // 3
 	cases := []struct {
 		name     string
 		intended float64
 		achieved AchievedOffset
+		slack    float64
 		want     bool
 	}{
-		// The androidtv run that motivated the gate: intended 6, achieved ~21.5.
-		{"did not land (6 vs 21.5)", 6, AchievedOffset{RecommendedS: 21.5, HasData: true}, false},
-		{"landed exactly", 6, AchievedOffset{RecommendedS: 6, HasData: true}, true},
-		{"landed within abs tolerance", 6, AchievedOffset{RecommendedS: 7.5, HasData: true}, true},  // tol = max(2, 1.5) = 2
-		{"landed within frac tolerance", 24, AchievedOffset{RecommendedS: 28, HasData: true}, true}, // tol = max(2, 6) = 6
-		{"outside frac tolerance", 24, AchievedOffset{RecommendedS: 33, HasData: true}, false},      // 9 > 6
-		{"falls back to true offset", 6, AchievedOffset{TrueS: 6.5, HasData: true}, true},           // recommended 0 → use true
-		{"no data → don't false-flag", 6, AchievedOffset{HasData: false}, true},
-		{"data present but zero → don't flag", 6, AchievedOffset{HasData: true}, true},
+		// The androidtv run that motivated the gate: intended 6 on 6s segments,
+		// achieved ~21.5 (clamped to the 3×7 floor). 15.5 > slack 7 → not landed.
+		{"s6 sub-spec did not land (6 vs 21.5)", 6, AchievedOffset{RecommendedS: 21.5, HasData: true}, s6, false},
+		// s6 cross arm: intended 12, clamped to ~21 → 9 > slack 7 → not landed.
+		{"s6 cross (12 vs 21) not landed", 12, AchievedOffset{RecommendedS: 21, HasData: true}, s6, false},
+		// s6 deep arm honoured: intended 36, achieved ~36 → landed.
+		{"s6 deep honoured (36 vs 36)", 36, AchievedOffset{RecommendedS: 36, HasData: true}, s6, true},
+		// s6 deep NOT honoured: stayed ~21 → 15 > slack 7 → not landed.
+		{"s6 deep ignored (36 vs 21) not landed", 36, AchievedOffset{RecommendedS: 21, HasData: true}, s6, false},
+		// s2 cross arm legal + honoured: intended 12, achieved ~12 → landed.
+		{"s2 cross honoured (12 vs 12)", 12, AchievedOffset{RecommendedS: 12, HasData: true}, s2, true},
+		// Segment slack absorbs boundary quantization: intended 12 on s6, got 18
+		// (one 6-7s segment off) → 6 ≤ slack 7 → still counts as landed.
+		{"s6 segment-boundary slack (12 vs 18)", 12, AchievedOffset{RecommendedS: 18, HasData: true}, s6, true},
+		{"falls back to true offset", 6, AchievedOffset{TrueS: 6.5, HasData: true}, s2, true},
+		{"no data → don't false-flag", 6, AchievedOffset{HasData: false}, s6, true},
+		{"data present but zero → don't flag", 6, AchievedOffset{HasData: true}, s6, true},
 	}
 	for _, c := range cases {
-		if got := ManipulationLanded(c.intended, c.achieved); got != c.want {
+		if got := ManipulationLanded(c.intended, c.achieved, c.slack); got != c.want {
 			t.Errorf("%s: got %v want %v", c.name, got, c.want)
 		}
 	}

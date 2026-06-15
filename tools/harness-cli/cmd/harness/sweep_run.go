@@ -399,7 +399,7 @@ func cmdSweepAnalyze(client *api.Client, args []string, asJSON bool) error {
 		evBody, evErr := client.ArchiveEvents(context.Background(), &forwarder.GetApiV2EventsParams{PlayId: &pid})
 		if evErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: manipulation check could not read offsets for %s: %v\n", *play, evErr)
-		} else if achieved := sweep.AchievedOffsetFromEvents(evBody); !sweep.ManipulationLanded(intended, achieved) {
+		} else if achieved := sweep.AchievedOffsetFromEvents(evBody); !sweep.ManipulationLanded(intended, achieved, sweep.SegmentSlackS(e.Segment)) {
 			got := achieved.RecommendedS
 			if got <= 0 {
 				got = achieved.TrueS

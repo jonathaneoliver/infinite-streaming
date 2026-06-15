@@ -96,6 +96,13 @@ func TestSweepProbe(t *testing.T) {
 	if clip := strings.TrimSpace(os.Getenv("CHAR_CONTENT")); clip != "" {
 		args = append(args, "-is.lastPlayed", clip)
 	}
+	// Segment variant (#793 live-offset matrix): s2|s6|ll selects which
+	// master the app requests (master_2s/master_6s/master). Empty leaves the
+	// app default (s6). The hold-back floor scales with segment duration, so a
+	// given live_offset can be legal on one and sub-spec on another.
+	if seg := strings.TrimSpace(os.Getenv("CHAR_SWEEP_SEGMENT")); seg != "" {
+		args = append(args, "-is.segment", seg)
+	}
 	appium.SetLaunchArgs(args)
 
 	sess, err := appium.LaunchToHome(setupCtx, *picked)

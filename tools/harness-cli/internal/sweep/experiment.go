@@ -178,6 +178,7 @@ type Experiment struct {
 	LaunchMode          string               `json:"launch_mode,omitempty"` // how the probe launches the app: appium (the only mode TestSweepProbe supports). Stamped at creation; the runner passes it as LAUNCH_MODE.
 	Protocol            string               `json:"protocol"`              // hls | dash
 	Content             string               `json:"content"`               // fixed to insane_new for now
+	Segment             string               `json:"segment,omitempty"`     // master variant the probe requests via -is.segment: s2 | s6 | ll. Empty = app default (s6). Drives the segment×live-offset matrix (#793).
 	Mode                string               `json:"mode"`                  // steps | pyramid | downshift_severity | …
 	DurationS           int                  `json:"duration_s,omitempty"`
 	Fault               *Fault               `json:"fault,omitempty"` // fault-class only

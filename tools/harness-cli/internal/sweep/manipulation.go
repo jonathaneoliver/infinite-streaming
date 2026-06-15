@@ -16,12 +16,34 @@ import (
 // ExoPlayer or it rejected the sub-spec value; either way the IV didn't move.)
 
 // Offset-match tolerance: achieved counts as "landed" within whichever is
-// larger — a small absolute floor (so tiny intended offsets aren't held to an
-// impossible fraction) or a fraction of the intended value.
+// largest of — a small absolute floor (so tiny intended offsets aren't held to
+// an impossible fraction), a fraction of the intended value, and ~one max
+// segment duration (the achieved offset quantizes to segment boundaries, and
+// the hold-back floor is 3× the MAX segment duration — "6s" segments can round
+// up to 7s, so the floor sits near 21s, not 18s). The segment slack keeps a
+// legal arm that the player honours at its rounded floor from being false-
+// flagged as "didn't land".
 const (
-	OffsetToleranceAbsS = 2.0
+	OffsetToleranceAbsS = 3.0
 	OffsetToleranceFrac = 0.25
 )
+
+// SegmentSlackS returns ~one max-segment-duration of tolerance for an arm's
+// segment selection. "6s" segments can round up to 7s; "2s" to ~3s; LL is
+// sub-second but we floor it at 2s. Empty (app default) is treated as the 6s
+// worst case so we never under-tolerate.
+func SegmentSlackS(segment string) float64 {
+	switch segment {
+	case "s2":
+		return 3
+	case "ll":
+		return 2
+	case "s6", "":
+		return 7
+	default:
+		return 7
+	}
+}
 
 // IntendedLiveOffset returns the offset the recipe meant to impose and whether
 // this is a live-offset experiment at all. Non-live-offset experiments return
@@ -89,9 +111,11 @@ func AchievedOffsetFromEvents(body []byte) AchievedOffset {
 
 // ManipulationLanded reports whether the achieved offset reflects the intended
 // one within tolerance. It prefers the recommended (parsed manifest target) and
-// falls back to the true offset. With no offset data it returns true — a query
-// gap must not masquerade as "the IV didn't move" (the caller logs the gap).
-func ManipulationLanded(intended float64, a AchievedOffset) bool {
+// falls back to the true offset. `segmentSlackS` is ~one max-segment-duration
+// (from SegmentSlackS) so the segment-boundary quantization of the achieved
+// offset doesn't false-flag a legal arm. With no offset data it returns true —
+// a query gap must not masquerade as "the IV didn't move" (the caller logs it).
+func ManipulationLanded(intended float64, a AchievedOffset, segmentSlackS float64) bool {
 	if !a.HasData {
 		return true
 	}
@@ -102,7 +126,7 @@ func ManipulationLanded(intended float64, a AchievedOffset) bool {
 	if got <= 0 {
 		return true
 	}
-	tol := math.Max(OffsetToleranceAbsS, intended*OffsetToleranceFrac)
+	tol := math.Max(math.Max(OffsetToleranceAbsS, intended*OffsetToleranceFrac), segmentSlackS)
 	return math.Abs(got-intended) <= tol
 }
 
