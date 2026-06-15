@@ -372,6 +372,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 autoRecovery      = p.getBoolean(FLAG_AUTO_RECOVERY, false),
                 goLive            = p.getBoolean(FLAG_GO_LIVE, false),
                 skipHomeOnLaunch  = p.getBoolean(FLAG_SKIP_HOME, false),
+                // A launch-provided override (the `is.flag.live_offset_s` intent
+                // extra captured by MainActivity) wins over the persisted value,
+                // matching iOS where NSArgumentDomain outranks the saved default.
+                // It is NOT persisted — like an NSArgumentDomain arg it lives
+                // only for this launch, so a manual change in Settings later
+                // still writes through normally.
+                liveOffsetSeconds = (com.infinitestream.player.LaunchConfig.liveOffsetSeconds
+                    ?: p.getInt(FLAG_LIVE_OFFSET, 0)).coerceAtLeast(0),
                 previewVideoSlots = run {
                     // First launch (no key) → hardware default. Otherwise
                     // clamp the stored value to the device's current cap.
@@ -451,6 +459,19 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun setSkipHomeOnLaunch(on: Boolean) {
         _state.update { it.copy(skipHomeOnLaunch = on) }
         prefs().edit().putBoolean(FLAG_SKIP_HOME, on).apply()
+    }
+
+    /** User-driven setter for the live-edge offset (seconds). 0 disables
+     *  (manifest HOLD-BACK / Go Live decides). The offset is baked into the
+     *  MediaItem's LiveConfiguration in [loadStream], so apply a change to an
+     *  in-progress play by rebuilding + reloading the stream — mirrors how
+     *  [setLocalProxy] reloads, and gives the same immediate effect as iOS's
+     *  live re-seek. Issue #266 / #793. */
+    fun setLiveOffsetSeconds(seconds: Int) {
+        val clamped = seconds.coerceAtLeast(0)
+        _state.update { it.copy(liveOffsetSeconds = clamped) }
+        prefs().edit().putInt(FLAG_LIVE_OFFSET, clamped).apply()
+        if (_state.value.currentUrl.isNotEmpty()) buildUrlAndLoad()
     }
 
     fun setPreviewVideoSlots(value: Int) {
@@ -777,13 +798,26 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             player.stop()
             player.clearMediaItems()
         }
-        // Match iOS AVPlayer behaviour: let manifest's EXT-X-SERVER-CONTROL pick
-        // the start point, narrow the playback-speed window so ExoPlayer recovers
-        // via rate adjustment (not seeks) after a stall.
+        // Live-edge offset policy (issues #266 / #793):
+        //  - Go Live ON      → snap to the edge (seekToDefaultPosition below);
+        //                      leave the offset UNSET so the manifest decides
+        //                      the window and Go Live takes precedence — same
+        //                      ordering as iOS (goLive beats liveOffsetSeconds).
+        //  - offset > 0       → pin target/min/max to that offset so ABR
+        //                      rate-adjustment holds it rather than drifting,
+        //                      overriding the manifest's HOLD-BACK.
+        //  - otherwise        → UNSET: let manifest's EXT-X-SERVER-CONTROL pick
+        //                      the start point (default behaviour).
+        // The narrow 0.97–1.03 speed window lets ExoPlayer recover toward the
+        // target via rate adjustment (not seeks) after a stall in every case.
+        val offsetMs = if (!_state.value.goLive && _state.value.liveOffsetSeconds > 0)
+            _state.value.liveOffsetSeconds * 1000L
+        else
+            C.TIME_UNSET
         val live = MediaItem.LiveConfiguration.Builder()
-            .setTargetOffsetMs(C.TIME_UNSET)
-            .setMinOffsetMs(C.TIME_UNSET)
-            .setMaxOffsetMs(C.TIME_UNSET)
+            .setTargetOffsetMs(offsetMs)
+            .setMinOffsetMs(offsetMs)
+            .setMaxOffsetMs(offsetMs)
             .setMinPlaybackSpeed(0.97f)
             .setMaxPlaybackSpeed(1.03f)
             .build()
@@ -795,8 +829,54 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             // Snap to live edge after the manifest finishes parsing — ExoPlayer
             // honours seekToDefaultPosition() once the period is known.
             player.seekToDefaultPosition()
+        } else if (_state.value.liveOffsetSeconds > 0) {
+            // Pinning the LiveConfiguration target alone is NOT enough: ExoPlayer
+            // joins at the manifest's EXT-X-START / HOLD-BACK position (~21s for
+            // 6s segments) and then converges to the target ONLY through the
+            // narrow 0.97–1.03 speed window — ~0.03 s/s, so a 40s target takes
+            // ~10 min to reach. Seek straight to liveEdge − offset (iOS parity
+            // with scheduleLiveOffsetSeek); the pinned target/min/max then holds
+            // it there. Issue #266 / #793.
+            scheduleLiveOffsetSeek("playback started")
         }
         metrics?.onPlaybackStarted()
+    }
+
+    /** One-shot job that jumps the playhead to `liveEdge − liveOffsetSeconds`
+     *  once ExoPlayer reports a valid live offset, then lets the pinned
+     *  LiveConfiguration (target=min=max) hold it. Polls every 250 ms for up
+     *  to 20 s while the live window forms. No-op when the offset is 0 or Go
+     *  Live is on. Mirrors iOS `scheduleLiveOffsetSeek`. */
+    private var liveOffsetSeekJob: kotlinx.coroutines.Job? = null
+    private fun scheduleLiveOffsetSeek(reason: String) {
+        liveOffsetSeekJob?.cancel()
+        liveOffsetSeekJob = null
+        val targetSeconds = _state.value.liveOffsetSeconds
+        if (targetSeconds <= 0 || _state.value.goLive) return
+        val targetMs = targetSeconds * 1000L
+        liveOffsetSeekJob = viewModelScope.launch {
+            val deadline = System.currentTimeMillis() + 20_000L
+            while (System.currentTimeMillis() < deadline) {
+                val current = player.currentLiveOffset
+                if (player.isCurrentMediaItemLive && current != C.TIME_UNSET && current > 0) {
+                    // delta > 0 → sit further back (seek earlier); < 0 → closer
+                    // to live (seek later). Only act when we're meaningfully off
+                    // target so we don't fight the speed controller near the mark.
+                    val delta = targetMs - current
+                    if (kotlin.math.abs(delta) > 1000L) {
+                        val seekTo = (player.currentPosition - delta).coerceAtLeast(0L)
+                        player.seekTo(seekTo)
+                        android.util.Log.i("InfiniteStream",
+                            "LIVE OFFSET: seek to ${targetSeconds}s behind live " +
+                                "(was ${current / 1000.0}s, $reason)")
+                    }
+                    return@launch
+                }
+                kotlinx.coroutines.delay(250)
+            }
+            android.util.Log.i("InfiniteStream",
+                "LIVE OFFSET: gave up after 20s (live offset not ready)")
+        }
     }
 
     /** Clear the "currently playing" URL marker. Called by MainActivity on
@@ -1124,6 +1204,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         super.onCleared()
         playIdRotationJob?.cancel()
+        liveOffsetSeekJob?.cancel()
         metrics?.release()
         player.release()
     }
@@ -1138,6 +1219,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private const val FLAG_AUTO_RECOVERY = "advanced_auto_recovery"
         private const val FLAG_GO_LIVE = "advanced_go_live"
         private const val FLAG_SKIP_HOME = "advanced_skip_home_on_launch"
+        private const val FLAG_LIVE_OFFSET = "advanced_live_offset_s"
         private const val FLAG_PREVIEW_VIDEO_SLOTS = "advanced_preview_video_slots"
         private const val FLAG_PLAY_ID_ROTATION = "advanced_play_id_rotation_s"
         private const val LAST_PLAYED_KEY = "last_played_content"
