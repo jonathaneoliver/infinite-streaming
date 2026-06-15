@@ -142,6 +142,8 @@ func main() {
 		exit(cmdTimeouts(client, args[1:], g.asJSON))
 	case "content":
 		exit(cmdContent(client, args[1:], g.asJSON))
+	case "app-config", "appconfig":
+		exit(cmdAppConfig(client, args[1:], g.asJSON))
 	case "play":
 		exit(cmdPlay(client, args[1:], g.asJSON))
 	case "network":

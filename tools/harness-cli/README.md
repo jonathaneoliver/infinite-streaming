@@ -26,6 +26,7 @@ harness --insecure info       # smoke check
 | **`labels`** | Operator KV labels on player | `show`, `set`, `rm`, `clear` |
 | **`timeouts`** | Transfer timeouts | `<target> --active --idle [--applies-* / --show / --clear]` |
 | **`content`** | Master playlist mutators | `<target> --strip-* --overstate-* --live-offset` |
+| **`app-config`** | Client-side per-play config (#800) the player applies at its next play boundary, no relaunch | `<target> --segment --protocol --live-offset --peak-bitrate [--clear]` |
 | **`play`** | Inspect live play | `show`, `patch` |
 | **`groups`** | Player groups | `list`, `show`, `create`, `patch`, `add`, `remove`, `rm` |
 | **`tail`**, **`ts`**, **`events`** | Live SSE streams | `tail` (network), `ts` (combined), `events` (lifecycle) |

@@ -117,6 +117,26 @@ Each mode test skips with `t.Skip` if no device of its platform is reachable, so
 | `hysteresis-gap` | stairs up 0.5 → 6, then down, find gap per variant | ~6 min |
 | `emergency-downshift` | drop to 0.05 Mbps briefly, measure recovery | ~2.5 min |
 
+## Per-play client reconfig without relaunch (#800)
+
+Client-side config (segment / live_offset / protocol / peak_bitrate) is normally
+forced via a cold-start launch arg (`-is.segment` etc., #797) — one cold launch
+(~25–30 s) per matrix cell. The server-side half (cap, faults, content) already
+reconfigures per-play with no restart; #800 brings the client half in line.
+
+`runner.Session.ApplyAppConfig(ctx, runner.AppConfig{Segment: "s2", ...})` PATCHes
+the bound player's `app_config` (via `harness app-config <pid> --segment s2 …`);
+the app overlays it at its **next play boundary** with no relaunch. Use it to vary
+a client-side axis between plays of a long-running app instead of relaunching per
+cell.
+
+> **Timing.** The proxy has no session to hold `app_config` until the player's
+> first bootstrap request, so this targets *subsequent* plays of a running app —
+> the very first play still uses config-on-connect (`app.<field>` bootstrap args)
+> or the launch arg. A multi-play sweep driver that loops cells on ONE launch
+> (PATCH → fresh play → repeat) is the natural consumer; the single-play modes
+> below still cold-launch per run.
+
 ## Launch modes
 
 The framework supports three launch modes, picked by `$LAUNCH_MODE`:
