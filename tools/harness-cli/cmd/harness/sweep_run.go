@@ -404,9 +404,17 @@ func cmdSweepAnalyze(client *api.Client, args []string, asJSON bool) error {
 			if got <= 0 {
 				got = achieved.TrueS
 			}
+			// Name the direction so the review/LLM can promote a systematic cap
+			// to a finding: shallower-than-requested = the player held closer to
+			// live than asked (candidate "won't honor a deeper offset"); deeper =
+			// it lagged behind / didn't tighten to the requested offset.
+			dir := "held deeper than requested (lagged behind / didn't tighten)"
+			if got < intended {
+				dir = "held SHALLOWER than requested — closer to live than asked (candidate: player won't honor a deeper offset)"
+			}
 			bucket = sweep.MarkInconclusive(e, fmt.Sprintf(
-				"manipulation check FAILED: live_offset intended %.1fs but achieved ~%.1fs — IV did not move, result not attributable to live_offset",
-				intended, got))
+				"manipulation check FAILED: live_offset intended %.1fs but achieved ~%.1fs — IV did not move (%s); result not attributable to live_offset",
+				intended, got, dir))
 		}
 	}
 

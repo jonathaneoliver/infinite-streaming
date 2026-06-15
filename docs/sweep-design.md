@@ -164,11 +164,12 @@ is **3× the MAX segment duration**, and "6 s" segments can round up to 7 s, so 
 (~one max-segment). Consequence: the *same* offset is sub-spec on `s6` (clamped → inconclusive) but legal on `s2`
 (lands) — which is exactly the segment × offset matrix the recipe seeds (`live-offset-s{2,6}-*`).
 
-**Detection economics (label vs LLM post-mortem).** Only two live-offset dimensions carry a deterministic
-forwarder label today — drift *behind* target (`qoe_live_offset_breach`/`_concerning`) and config↔manifest
-mismatch (`qoe_holdback_deviation`). The rest (did-it-land, join accuracy, too-tight, sub-spec handling, segment
-interaction, latency↔stability, post-stall resync, TTFF, cross-platform parity) are **detectable post-mortem by
-the LLM with no new labelling/code**, because the play already emits `configured/recommended/true/live_offset_s`
+**Detection economics (label vs LLM post-mortem).** Three live-offset dimensions carry a deterministic forwarder
+label — drift *behind* target (`qoe_live_offset_breach`/`_concerning`), running *too tight* (`qoe_live_offset_tight`,
+#793 — closer to live than the manifest hold-back wants), and config↔manifest mismatch (`qoe_holdback_deviation`).
+The rest (did-it-land, join accuracy, sub-spec handling, segment interaction, latency↔stability, post-stall
+resync, TTFF, cross-platform parity) are **detectable post-mortem by the LLM with no new labelling/code**, because
+the play already emits `configured/recommended/true/live_offset_s`
 + `error_code` + `playback_rate` + `first_frame` + resolution/bitrate. So the rule of thumb: make the
 **manipulation check** deterministic (it gates every finding), and lean on the LLM investigate step for the long
 tail — don't add a label per question.
