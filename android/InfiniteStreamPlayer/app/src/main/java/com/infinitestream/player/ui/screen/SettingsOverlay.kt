@@ -434,6 +434,13 @@ private fun PickerList(
                     }
                     item {
                         PickerItem(
+                            label = "Start on lowest rung (ABR adapts up)",
+                            selected = state.startsFirstVariant,
+                            onClick = { vm.setStartsFirstVariant(!state.startsFirstVariant) },
+                        )
+                    }
+                    item {
+                        PickerItem(
                             label = "HUD",
                             selected = state.developerMode,
                             onClick = { vm.setDeveloperMode(!state.developerMode) },

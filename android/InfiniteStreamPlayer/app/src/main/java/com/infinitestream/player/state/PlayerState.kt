@@ -77,7 +77,22 @@ enum class Segment(val label: String, val suffix: String) {
         }
     }
 }
-enum class Codec(val label: String) { AUTO("Auto"), H264("H.264"), HEVC("HEVC"), AV1("AV1") }
+enum class Codec(val label: String) {
+    AUTO("Auto"), H264("H.264"), HEVC("HEVC"), AV1("AV1");
+
+    companion object {
+        /** Map an `is.codec` launch-arg / wire value (iOS `CodecFilter`
+         *  rawValue: `auto` / `h264` / `hevc` / `av1`) to the enum.
+         *  null = unrecognised. #797. */
+        fun fromArg(raw: String): Codec? = when (raw.trim().lowercase()) {
+            "auto" -> AUTO
+            "h264" -> H264
+            "hevc" -> HEVC
+            "av1" -> AV1
+            else -> null
+        }
+    }
+}
 
 /** Snapshot of UI state — observed by every screen. */
 data class UiState(
@@ -139,6 +154,14 @@ data class UiState(
      *  alongside the other Advanced flags, and drivable at launch for tests
      *  via the `is.flag.peak_bitrate_mbps` intent extra (issue #797). */
     val peakBitrateMbps: Int = 0,
+    /** Pin the *startup* rendition to the lowest rung, then let ABR adapt
+     *  upward once the first frame is on screen. Off = ABR picks the start
+     *  rung normally (default). The analog of iOS
+     *  `AVPlayerItem.startsOnFirstEligibleVariant`; on Android it's a
+     *  one-shot `setForceLowestBitrate(true)` lock released at first frame.
+     *  Persisted alongside the other Advanced flags, and drivable at launch
+     *  for tests via the `is.flag.starts_first_variant` intent extra (#797). */
+    val startsFirstVariant: Boolean = false,
     /** Skip the Home screen on cold launch when a saved server and a
      *  lastPlayed clip both exist — go straight to Playback so the user
      *  is back inside their stream without waiting for /api/content
