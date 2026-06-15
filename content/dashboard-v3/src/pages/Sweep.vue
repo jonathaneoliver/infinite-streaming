@@ -108,6 +108,24 @@ function viewerURL(e: Experiment): string | null {
   return u;
 }
 
+// The card's session link, status-aware. Once analyze stamps play_id, the
+// scoped viewer replay renders from the play_id alone (no time window needed).
+// While a job is still RUNNING there's no play_id yet, so a viewer link would
+// carry only player_id — and session-viewer is the archived-REPLAY page: with
+// no play to replay it follows the live edge, which holds no rows once the play
+// finishes/transitions, so every chart reads blank. Anchor it with the run's
+// start instead — `from=<claimed_at>` (stamped at claim, just before bootstrap)
+// and `to` absent → the viewer brushes from the run's start and follows the
+// live edge, so the same charts fill in as data streams. Fixes the QE Lab
+// "watch live" → empty-charts report (#772).
+function cardLink(e: Experiment, _status: string): string | null {
+  if (!e.player_id) return null;
+  if (e.play_id) return viewerURL(e);
+  let u = `/dashboard/session-viewer.html?player_id=${encodeURIComponent(e.player_id)}`;
+  if (e.claimed_at) u += `&from=${encodeURIComponent(e.claimed_at)}`;
+  return u;
+}
+
 // ── Scope control plane (#772 CH-master): toggle which dimension values the
 // sweep is allowed to claim. The forwarder gates the /claim candidate query on
 // sweep_scope, so disabling a value keeps its experiments pending (never run)
@@ -428,8 +446,8 @@ watch(viewMode, () => { if (viewMode.value === 'history') loadHistory(); });
               <div class="foot">
                 <code class="id">{{ e.exp_id }}</code>
                 <a
-                  v-if="viewerURL(e)"
-                  :href="viewerURL(e)!"
+                  v-if="cardLink(e, s)"
+                  :href="cardLink(e, s)!"
                   class="viewer"
                   :class="{ live: s === 'running' }"
                   target="_blank"
