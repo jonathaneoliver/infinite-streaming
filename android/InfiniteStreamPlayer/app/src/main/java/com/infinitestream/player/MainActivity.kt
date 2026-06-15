@@ -48,6 +48,19 @@ object LaunchConfig {
     // `-is.flag.live_offset_s` from NSArgumentDomain. null = no override.
     @Volatile
     var liveOffsetSeconds: Int? = null
+
+    // #797 characterization launch levers, mirroring iOS `-is.segment` /
+    // `-is.protocol` / `-is.flag.peak_bitrate_mbps`. Each captured from the
+    // launch intent so the harness can drive the test matrix without touching
+    // the Settings UI. null = no override; the VM's loadAdvancedFlags lets a
+    // non-null value outrank the default/persisted value for this launch,
+    // matching iOS NSArgumentDomain.
+    @Volatile
+    var segment: com.infinitestream.player.state.Segment? = null
+    @Volatile
+    var streamProtocol: com.infinitestream.player.state.Protocol? = null
+    @Volatile
+    var peakBitrateMbps: Int? = null
 }
 
 class MainActivity : ComponentActivity() {
@@ -84,6 +97,30 @@ class MainActivity : ComponentActivity() {
         intent?.getStringExtra("is.flag.live_offset_s")?.toDoubleOrNull()?.let { raw ->
             LaunchConfig.liveOffsetSeconds = raw.toInt().coerceAtLeast(0)
             tag("launch-arg live_offset_s=${LaunchConfig.liveOffsetSeconds}")
+        }
+        // #797 segment lever — `--es is.segment s2` (iOS rawValues ll / s2 / s6).
+        // Selects the master_2s / master_6s / LL ladder; unblocks the 2s/LL
+        // matrix on Android. Unrecognised values are ignored (no override).
+        intent?.getStringExtra("is.segment")?.let { raw ->
+            com.infinitestream.player.state.Segment.fromArg(raw)?.let { seg ->
+                LaunchConfig.segment = seg
+                tag("launch-arg segment=${seg.label}")
+            }
+        }
+        // #797 protocol lever — `--es is.protocol dash` (hls / dash). Drives
+        // Android to DASH, which the Settings-only Protocol picker couldn't.
+        intent?.getStringExtra("is.protocol")?.let { raw ->
+            com.infinitestream.player.state.Protocol.fromArg(raw)?.let { proto ->
+                LaunchConfig.streamProtocol = proto
+                tag("launch-arg protocol=${proto.label}")
+            }
+        }
+        // #797 ABR peak-bitrate cap — `--es is.flag.peak_bitrate_mbps 4` (Mbps;
+        // 0 = no cap). Parsed as a number (tolerating "4.0"). Mirrors iOS's
+        // `-is.flag.peak_bitrate_mbps` (AVPlayerItem.preferredPeakBitRate).
+        intent?.getStringExtra("is.flag.peak_bitrate_mbps")?.toDoubleOrNull()?.let { raw ->
+            LaunchConfig.peakBitrateMbps = raw.toInt().coerceAtLeast(0)
+            tag("launch-arg peak_bitrate_mbps=${LaunchConfig.peakBitrateMbps}")
         }
         // Keep the screen on while playback is active — release in onStop.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

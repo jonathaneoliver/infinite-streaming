@@ -427,6 +427,12 @@ private fun PickerList(
                         )
                     }
                     item {
+                        PeakBitrateRow(
+                            mbps = state.peakBitrateMbps,
+                            onChange = { vm.setPeakBitrateMbps(it) },
+                        )
+                    }
+                    item {
                         PickerItem(
                             label = "HUD",
                             selected = state.developerMode,
@@ -750,6 +756,62 @@ private fun PlayIdRotationRow(seconds: Int, onChange: (Int) -> Unit) {
             presets.forEachIndexed { index, (label, value) ->
                 if (index > 0) Spacer(Modifier.width(Space.s2))
                 val active = seconds == value
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (active) Tokens.accent else Tokens.bgCard)
+                        .tvFocus(cornerRadius = 8.dp)
+                        .clickable(onClick = { onChange(value) })
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        label,
+                        style = AppType.monoSm.copy(
+                            color = if (active) Tokens.bg else Tokens.fg,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Preset selector for the ABR peak-bitrate ceiling (Mbps). 0 = no cap; any
+ * other value pins the ExoPlayer track selector so it won't pick a video rung
+ * above that bitrate. The analog of the Apple peak-bitrate clamp and the
+ * `is.flag.peak_bitrate_mbps` launch lever (issue #797).
+ */
+@Composable
+private fun PeakBitrateRow(mbps: Int, onChange: (Int) -> Unit) {
+    val presets = listOf(
+        "Off" to 0,
+        "2" to 2,
+        "4" to 4,
+        "8" to 8,
+        "16" to 16,
+    )
+    val subtitle = if (mbps <= 0) "Off — ABR may pick any rung"
+                   else "Cap ABR at ${mbps} Mbps"
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Radius.row))
+            .background(Tokens.bgSoft)
+            .padding(horizontal = Space.s4, vertical = Space.s3),
+    ) {
+        Text(
+            "Peak bitrate cap (ABR ceiling)",
+            style = AppType.body.copy(color = Tokens.fg),
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(subtitle, style = AppType.monoSm.copy(color = Tokens.fgFaint))
+        Spacer(Modifier.height(Space.s2))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            presets.forEachIndexed { index, (label, value) ->
+                if (index > 0) Spacer(Modifier.width(Space.s2))
+                val active = mbps == value
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
