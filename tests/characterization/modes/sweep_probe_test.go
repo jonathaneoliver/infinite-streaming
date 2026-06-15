@@ -103,6 +103,14 @@ func TestSweepProbe(t *testing.T) {
 	if seg := strings.TrimSpace(os.Getenv("CHAR_SWEEP_SEGMENT")); seg != "" {
 		args = append(args, "-is.segment", seg)
 	}
+	// App-side live-offset override (#793): is.flag.live_offset_s sets the
+	// player's own target — it seeks to liveEdge−N and OVERRIDES the manifest
+	// HOLD-BACK when >0. Lets the sweep exercise the manifest × app-override
+	// combination matrix (the manifest offset comes from the bootstrapped
+	// session; this is the app lever on top).
+	if lo := strings.TrimSpace(os.Getenv("CHAR_SWEEP_LIVE_OFFSET")); lo != "" {
+		args = append(args, "-is.flag.live_offset_s", lo)
+	}
 	appium.SetLaunchArgs(args)
 
 	sess, err := appium.LaunchToHome(setupCtx, *picked)
