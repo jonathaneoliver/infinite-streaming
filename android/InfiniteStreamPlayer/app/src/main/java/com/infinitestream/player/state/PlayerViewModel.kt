@@ -782,7 +782,29 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         if (wasPlaying) buildUrlAndLoad()
     }
 
+    /** #800 per-play app-config push. On a true play boundary (a fresh play,
+     *  not a same-play settings reload) pull the latest server-pushed
+     *  `app_config` and overlay it before composing the URL, so a harness
+     *  PATCH / config-on-connect change takes effect on THIS next play with no
+     *  process restart — the client-side counterpart to the proxy applying
+     *  server config on the next manifest fetch. Best-effort: a fetch miss
+     *  leaves the play on its current (launch-arg / Settings) values. Same-play
+     *  reloads (rotatePlayId=false: soak rotation, settings tweak) skip the
+     *  fetch and compose synchronously as before. */
+    private var appConfigJob: kotlinx.coroutines.Job? = null
     private fun buildUrlAndLoad(rotatePlayId: Boolean = true) {
+        if (!rotatePlayId) {
+            composeUrlAndLoad(rotatePlayId = false)
+            return
+        }
+        appConfigJob?.cancel()
+        appConfigJob = viewModelScope.launch {
+            applyServerAppConfig()
+            composeUrlAndLoad(rotatePlayId = true)
+        }
+    }
+
+    private fun composeUrlAndLoad(rotatePlayId: Boolean = true) {
         val s = _state.value
         val server = s.activeServer ?: return
         if (s.selectedContent.isEmpty()) return
@@ -813,6 +835,82 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(currentUrl = url, statusText = url) }
         loadStream(url)
         schedulePlayIdRotation()
+    }
+
+    /** #800 server-pushed per-play app config (the subset the harness can vary
+     *  per play). A null field = "leave the player's own value". */
+    private data class ServerAppConfig(
+        val segment: Segment?,
+        val protocol: Protocol?,
+        val liveOffsetSeconds: Int?,
+        val peakBitrateMbps: Int?,
+    )
+
+    /** Overlay the latest server-pushed app_config onto the play-affecting
+     *  state, so the next play composed by [composeUrlAndLoad] honours it.
+     *  Best-effort and only while routing through the proxy (localProxy) — the
+     *  app_config lives on the proxy session. A fetch miss is a no-op. #800. */
+    private suspend fun applyServerAppConfig() {
+        if (!_state.value.localProxy) return
+        val cfg = fetchServerAppConfig() ?: return
+        _state.update { st ->
+            st.copy(
+                segment           = cfg.segment ?: st.segment,
+                protocol          = cfg.protocol ?: st.protocol,
+                liveOffsetSeconds = cfg.liveOffsetSeconds ?: st.liveOffsetSeconds,
+                peakBitrateMbps   = cfg.peakBitrateMbps ?: st.peakBitrateMbps,
+            )
+        }
+        // segment/protocol/live_offset ride the manifest URL + loadStream seek
+        // (read live in composeUrlAndLoad/loadStream); the peak cap is a track-
+        // selector parameter, so re-apply it now.
+        if (cfg.peakBitrateMbps != null) applyTrackSelectionParameters()
+        tag("app_config: applied server overlay seg=${cfg.segment} proto=${cfg.protocol} " +
+            "offset=${cfg.liveOffsetSeconds} peak=${cfg.peakBitrateMbps}")
+    }
+
+    /** GET the proxy's /api/sessions, find this player's entry, and parse the
+     *  nested `app_config` object (#800, set by config-on-connect or a per-play
+     *  PATCH). Same base URL + player_id match as [PlaybackMetrics]. Bounded by
+     *  a short timeout and fully best-effort: any error / missing field → null
+     *  (the play keeps its current config). Runs off the main thread. */
+    private suspend fun fetchServerAppConfig(): ServerAppConfig? {
+        val base = _state.value.activeServer?.apiUrl?.takeIf { it.isNotEmpty() } ?: return null
+        return withTimeoutOrNull(2000L) {
+            withContext(Dispatchers.IO) {
+                var conn: java.net.HttpURLConnection? = null
+                try {
+                    val url = java.net.URL("$base/api/sessions")
+                    conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                        connectTimeout = 1500
+                        readTimeout = 1500
+                    }
+                    if (conn.responseCode != 200) return@withContext null
+                    val body = conn.inputStream.bufferedReader().use { it.readText() }
+                    val arr = JSONArray(body)
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        if (o.optString("player_id") != playerId) continue
+                        val ac = o.optJSONObject("app_config") ?: return@withContext null
+                        return@withContext ServerAppConfig(
+                            segment = ac.optString("segment").takeIf { it.isNotEmpty() }
+                                ?.let { Segment.fromArg(it) },
+                            protocol = ac.optString("protocol").takeIf { it.isNotEmpty() }
+                                ?.let { Protocol.fromArg(it) },
+                            liveOffsetSeconds = if (ac.has("live_offset_s") && !ac.isNull("live_offset_s"))
+                                ac.optDouble("live_offset_s").toInt().coerceAtLeast(0) else null,
+                            peakBitrateMbps = if (ac.has("peak_bitrate_mbps") && !ac.isNull("peak_bitrate_mbps"))
+                                ac.optInt("peak_bitrate_mbps").coerceAtLeast(0) else null,
+                        )
+                    }
+                    null
+                } catch (e: Exception) {
+                    null
+                } finally {
+                    conn?.disconnect()
+                }
+            }
+        }
     }
 
     /** Cancel any pending rotation Job and (if the setting is non-zero)
@@ -1283,6 +1381,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         super.onCleared()
         playIdRotationJob?.cancel()
         liveOffsetSeekJob?.cancel()
+        appConfigJob?.cancel()
         metrics?.release()
         player.release()
     }
