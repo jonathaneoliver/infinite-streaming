@@ -211,9 +211,12 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
       </label>
     </div>
     <p class="note">
-      HLS-only. Forces the player to fall back further from the live edge by
-      stripping the most-recent N seconds of segments from the manifest.
-      Pairs well with `delay_ms` to surface live-offset-driven stalls.
+      HLS-only. Rewrites the manifest's <code>EXT-X-START:TIME-OFFSET</code>
+      (join point) and <code>EXT-X-SERVER-CONTROL:HOLD-BACK</code> (target
+      offset) to N seconds. These are <em>advisory</em>: web (hls.js) honours
+      them, but iOS AVPlayer recomputes its own 3×-max-segment floor and largely
+      ignores a rewritten value — so this does not reliably move the iOS offset
+      (use the app's Live-offset setting for that). It does NOT strip segments.
     </p>
 
     <div class="order-row" data-testid="content-variant-order">
