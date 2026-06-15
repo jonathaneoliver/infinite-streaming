@@ -1925,8 +1925,14 @@ final class PlayerViewModel: ObservableObject {
         goLive           = d.bool(forKey: Self.flagGoLive)
         skipHomeOnLaunch = d.bool(forKey: Self.flagSkipHome)
         isMuted = d.bool(forKey: Self.flagMuted)
-        liveOffsetSeconds = d.object(forKey: Self.flagLiveOffset) as? Double ?? 0
-        playIdRotationSeconds = max(0, d.object(forKey: Self.flagPlayIdRotation) as? Int ?? 0)
+        // #793 — a launch-arg (`-is.flag.live_offset_s 12`, the test rack) lands
+        // in NSArgumentDomain as the STRING "12"; `object(forKey:) as? Double`
+        // fails that cast and silently reads 0 ("Off"), so the rack-set offset
+        // never engaged (the seek in scheduleLiveOffsetSeek is guarded > 0).
+        // doubleFlag coerces both the launch-arg string and the UI-persisted
+        // NSNumber. Same latent bug fixed on play_id_rotation just below.
+        liveOffsetSeconds = Self.doubleFlag(d, Self.flagLiveOffset) ?? 0
+        playIdRotationSeconds = max(0, d.integer(forKey: Self.flagPlayIdRotation))
         // integer(forKey:) — NOT object(forKey:) as? Int — because a launch-arg
         // override (-is.flag.peak_bitrate_mbps 1, the characterization harness)
         // lands in NSArgumentDomain as the STRING "1"; `as? Int` fails that cast
