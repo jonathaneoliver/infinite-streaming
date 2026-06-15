@@ -99,6 +99,16 @@ data class UiState(
     /** Seek to the live edge on every (re)load instead of letting the
      *  manifest's EXT-X-SERVER-CONTROL HOLD-BACK pick the start point. */
     val goLive: Boolean = false,
+    /** User-configurable live-edge offset in seconds. 0 = "use whatever the
+     *  manifest's HOLD-BACK or Go Live setting picks" (default). When > 0
+     *  the player is pinned to that offset behind live via ExoPlayer's
+     *  `LiveConfiguration` target/min/max so ABR rate-adjustment holds it
+     *  rather than drifting away. Go Live takes precedence when both are on
+     *  (snap to edge). Mirrors the Apple `liveOffsetSeconds` flag and the
+     *  `live_offset_s` query param on `testing-session.html` (issues #266 /
+     *  #793). Drivable at launch for tests via the `is.flag.live_offset_s`
+     *  intent extra. */
+    val liveOffsetSeconds: Int = 0,
     /** Skip the Home screen on cold launch when a saved server and a
      *  lastPlayed clip both exist — go straight to Playback so the user
      *  is back inside their stream without waiting for /api/content

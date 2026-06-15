@@ -41,6 +41,13 @@ object LaunchConfig {
     // URL (e.g. "proxy.shape.rate_mbps=2.5"), captured from the launch intent.
     @Volatile
     var proxyQuery: String? = null
+
+    // #266 / #793 live-offset lever: a test-provided override (seconds behind
+    // live) captured from the launch intent so the harness can pin the offset
+    // at startup without driving the Settings UI. Mirrors iOS reading
+    // `-is.flag.live_offset_s` from NSArgumentDomain. null = no override.
+    @Volatile
+    var liveOffsetSeconds: Int? = null
 }
 
 class MainActivity : ComponentActivity() {
@@ -69,6 +76,14 @@ class MainActivity : ComponentActivity() {
                 LaunchConfig.proxyQuery = raw
                 tag("launch-arg proxy_query=$raw")
             }
+        }
+        // #266 / #793 live-offset lever — `--es is.flag.live_offset_s 6`. Parsed
+        // as a number (tolerating "6.0") and rounded to whole seconds; the VM's
+        // loadAdvancedFlags lets this outrank the persisted value for this
+        // launch. Mirrors iOS's `-is.flag.live_offset_s` launch arg.
+        intent?.getStringExtra("is.flag.live_offset_s")?.toDoubleOrNull()?.let { raw ->
+            LaunchConfig.liveOffsetSeconds = raw.toInt().coerceAtLeast(0)
+            tag("launch-arg live_offset_s=${LaunchConfig.liveOffsetSeconds}")
         }
         // Keep the screen on while playback is active — release in onStop.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

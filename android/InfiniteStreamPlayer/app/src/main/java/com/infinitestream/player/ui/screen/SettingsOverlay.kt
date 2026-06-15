@@ -400,6 +400,13 @@ private fun PickerList(
                         )
                     }
                     item {
+                        LiveOffsetRow(
+                            seconds = state.liveOffsetSeconds,
+                            enabled = !state.goLive,
+                            onChange = { vm.setLiveOffsetSeconds(it) },
+                        )
+                    }
+                    item {
                         PickerItem(
                             label = "Skip Home on launch (auto-resume last stream)",
                             selected = state.skipHomeOnLaunch,
@@ -653,6 +660,59 @@ private fun PreviewVideoSlotsRow(
             symbol = "+",
             enabled = slots < hardwareCap,
             onClick = { onChange(slots + 1) },
+        )
+    }
+}
+
+/**
+ * Numeric stepper for the user-configurable live-edge offset (seconds).
+ * 0 = use the manifest's HOLD-BACK / Go Live default; otherwise the player
+ * is pinned that many seconds behind the live edge. Capped at 60 s in 1 s
+ * steps. When Go Live is on it takes precedence, so the row renders disabled
+ * with an explanatory subtitle. Mirrors the Apple `LiveOffsetRow` and the
+ * `live_offset_s` query param on `testing-session.html` (issues #266 / #793).
+ */
+@Composable
+private fun LiveOffsetRow(
+    seconds: Int,
+    enabled: Boolean,
+    onChange: (Int) -> Unit,
+) {
+    val maxOffset = 60
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(60.dp)
+            .clip(RoundedCornerShape(Radius.row))
+            .background(Tokens.bgSoft)
+            .padding(horizontal = Space.s4),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "Live offset (seconds behind live)",
+                style = AppType.body.copy(color = if (enabled) Tokens.fg else Tokens.fgFaint),
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                when {
+                    !enabled -> "Overridden by Go Live (snaps to edge)"
+                    seconds <= 0 -> "Off — use manifest HOLD-BACK"
+                    else -> "${seconds}s behind live edge"
+                },
+                style = AppType.monoSm.copy(color = Tokens.fgFaint),
+            )
+        }
+        StepperButton(
+            symbol = "−",
+            enabled = enabled && seconds > 0,
+            onClick = { onChange(seconds - 1) },
+        )
+        Spacer(Modifier.width(Space.s2))
+        StepperButton(
+            symbol = "+",
+            enabled = enabled && seconds < maxOffset,
+            onClick = { onChange(seconds + 1) },
         )
     }
 }
