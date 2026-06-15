@@ -27,7 +27,9 @@ import (
 //	harness sweep seed-from-triage [--days N] [--top N] [--min-skew X] [--dry-run]
 
 // runnablePlatforms are the platforms the probe can actually drive today.
-var runnablePlatforms = map[string]bool{"ipad-sim": true, "iphone-sim": true, "iphone": true}
+// androidtv via adb/cli (a physical Android TV on the runner host); the rest
+// via appium against a booted sim / attached iPhone.
+var runnablePlatforms = map[string]bool{"ipad-sim": true, "iphone-sim": true, "iphone": true, "androidtv": true}
 
 // testRecipe maps a characterization `test` value to a sweep mode + (for the
 // pattern tests) the shape pattern the probe arms.
@@ -64,7 +66,6 @@ func labelSeverity(label string) string {
 
 func cmdSweepSeedFromTriage(client *api.Client, args []string, asJSON bool) error {
 	fs := flag.NewFlagSet("sweep seed-from-triage", flag.ContinueOnError)
-	root := fs.String("root", "", "sweep root dir")
 	days := fs.Int("days", 7, "lookback window for the triage signal")
 	top := fs.Int("top", 8, "consider the top-N labels by skew")
 	minSkew := fs.Float64("min-skew", 2.0, "only seed labels whose skew (max lift) ≥ this")
@@ -72,7 +73,7 @@ func cmdSweepSeedFromTriage(client *api.Client, args []string, asJSON bool) erro
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	s, err := openStore(*root)
+	s, err := openStore(client)
 	if err != nil {
 		return err
 	}
@@ -219,7 +220,7 @@ func experimentFromTriage(label, dim, value string, skew float64, now string) (*
 		mode, pattern := testRecipe(value)
 		e := &sweep.Experiment{
 			ID: "triage-test-" + sweep.Slug(value), CreatedAt: now, Class: sweep.ClassConfig,
-			Platform: "ipad-sim", Protocol: "hls", Content: sweep.SeedContent, Mode: mode,
+			Platform: "ipad-sim", LaunchMode: sweep.LaunchModeAppium, Protocol: "hls", Content: sweep.SeedContent, Mode: mode,
 			Kind: sweep.KindSeed, Reps: 1, Why: whySlug, WhyText: whyText,
 		}
 		if pattern != "" {
@@ -232,7 +233,7 @@ func experimentFromTriage(label, dim, value string, skew float64, now string) (*
 		}
 		return &sweep.Experiment{
 			ID: "triage-platform-" + sweep.Slug(value), CreatedAt: now, Class: sweep.ClassConfig,
-			Platform: value, Protocol: "hls", Content: sweep.SeedContent, Mode: "steps",
+			Platform: value, LaunchMode: sweep.LaunchModeAppium, Protocol: "hls", Content: sweep.SeedContent, Mode: "steps",
 			Kind: sweep.KindSeed, Reps: 1, Why: whySlug, WhyText: whyText,
 		}, ""
 	case "content":

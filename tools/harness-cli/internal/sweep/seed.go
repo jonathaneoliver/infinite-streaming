@@ -69,13 +69,18 @@ func recipesFor(class Class) []seedRecipe {
 // depth-first set (iPad-sim only); full=true widens across the physical-device
 // platforms. `now` is the RFC3339 UTC stamp for created_at (passed in so
 // callers control the clock). Scores are stamped with the default weights.
-func Seed(class Class, full bool, now string) []*Experiment {
+// Seed builds the starter experiment set. platformsOverride (optional) targets a
+// specific platform (e.g. "androidtv") instead of the narrow/full defaults.
+func Seed(class Class, full bool, now string, platformsOverride ...string) []*Experiment {
 	if class == "" {
 		class = ClassConfig
 	}
 	platforms := narrowPlatforms
 	if full {
 		platforms = fullPlatforms
+	}
+	if len(platformsOverride) > 0 {
+		platforms = platformsOverride
 	}
 	recipes := recipesFor(class)
 	w := DefaultWeights()
@@ -88,6 +93,7 @@ func Seed(class Class, full bool, now string) []*Experiment {
 					CreatedAt:           now,
 					Class:               class,
 					Platform:            p,
+					LaunchMode:          LaunchModeAppium, // every item is driven by appium (the only mode the probe supports), incl. the physical Android TV
 					Protocol:            proto,
 					Content:             SeedContent,
 					Mode:                r.mode,
@@ -98,6 +104,8 @@ func Seed(class Class, full bool, now string) []*Experiment {
 					Kind:                KindSeed,
 					Reps:                1,
 					Depth:               0,
+					Why:                 "starter_seed",
+					WhyText:             fmt.Sprintf("starter %s-class seed: %s recipe (%s) on %s/%s", class, r.family, r.mode, p, proto),
 				}
 				e.Score = w.Score(e)
 				out = append(out, e)

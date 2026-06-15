@@ -28,6 +28,7 @@ interface NavItem {
   href: string;
   warning?: boolean;
   alpha?: boolean;
+  developerOnly?: boolean; // hidden unless ?developer=1 (mirrors shared-nav.js)
 }
 
 interface NavSection {
@@ -188,7 +189,7 @@ const sections: NavSection[] = [
       { id: 'testing',       icon: '🧪', text: 'Testing Monitor', href: '/dashboard/testing.html' },
       { id: 'sessions',      icon: '⏪', text: 'Sessions',         href: '/dashboard/sessions.html' },
       { id: 'characterization', icon: '📈', text: 'Automated Testing', href: '/dashboard/characterization.html' },
-      { id: 'sweep',         icon: '🧹', text: 'Fault Sweep',      href: '/dashboard/sweep.html' },
+      { id: 'sweep',         icon: '🔬', text: 'QE Lab',           href: '/dashboard/sweep.html', developerOnly: true },
       { id: 'quartet',       icon: '🎬', text: 'Quartet',          href: '/dashboard/quartet.html', alpha: true },
       { id: 'segment-duration', icon: '⏱️', text: 'Live Offset',   href: '/dashboard/segment-duration-comparison.html', alpha: true },
     ],
@@ -461,14 +462,33 @@ function isInternalNetworkHost(hostname: string): boolean {
 const restrictContent = computed(
   () => typeof window !== 'undefined' && !isInternalNetworkHost(window.location.hostname),
 );
+
+// Developer mode — reuses the established `?developer=1` convention (shared-nav.js,
+// SessionDetails, Grid). Sticky: `?developer=1` persists to localStorage so dev-only
+// nav items survive navigation; `?developer=0` clears it.
+const isDeveloper = ref<boolean>((() => {
+  if (typeof window === 'undefined') return false;
+  try {
+    const p = new URLSearchParams(window.location.search).get('developer');
+    if (p === '1') { localStorage.setItem('ismDeveloperMode', '1'); return true; }
+    if (p === '0') { localStorage.removeItem('ismDeveloperMode'); return false; }
+    return localStorage.getItem('ismDeveloperMode') === '1';
+  } catch {
+    return false;
+  }
+})());
+
 const visibleSections = computed<NavSection[]>(() =>
   sections
     .filter((s) => !(restrictContent.value && s.title === 'CONTENT'))
-    .map((s) =>
-      restrictContent.value && s.title === 'LIVE STREAMING'
-        ? { ...s, items: s.items.filter((i) => i.id !== 'monitor') }
-        : s,
-    )
+    .map((s) => ({
+      ...s,
+      items: s.items.filter(
+        (i) =>
+          (!i.developerOnly || isDeveloper.value) &&
+          !(restrictContent.value && s.title === 'LIVE STREAMING' && i.id === 'monitor'),
+      ),
+    }))
     .filter((s) => s.items.length > 0),
 );
 

@@ -1,164 +1,275 @@
 package sweep
 
 import (
+	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io"
+	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
-// ErrAlreadyClaimed is returned by Claim when another runner won the race
-// (the atomic rename found no backlog file). The caller should try the next
-// candidate, not retry this one.
-var ErrAlreadyClaimed = errors.New("sweep: experiment already claimed")
-
-// ErrNotFound is returned when an experiment file is absent in the bucket.
+// ErrNotFound is returned when an experiment isn't present (in a status).
 var ErrNotFound = errors.New("sweep: experiment not found")
 
-// Store is the on-disk `.sweep/` queue. All worktree runners share one Store
-// on one filesystem; the atomic rename in Claim is the only synchronisation.
+// Store is the ClickHouse-backed sweep queue, reached over the forwarder API.
+// ClickHouse is the MASTER store (#772 CH-master migration) — there is no local
+// .sweep/ file store. Concurrency (the claim race) is resolved server-side by
+// the /claim endpoint, so the CLI never holds a lock.
 type Store struct {
-	Root string
+	base  string // deploy root, e.g. https://host:21000
+	httpc *http.Client
+	auth  string // "user:pass" or ""
 }
 
-// DefaultRoot is `.sweep` in the current directory, overridable via SWEEP_ROOT.
-func DefaultRoot() string {
-	if r := os.Getenv("SWEEP_ROOT"); r != "" {
-		return r
+// OpenCH builds a CH-backed Store from the harness's API connection.
+func OpenCH(base string, httpc *http.Client, auth string) *Store {
+	if httpc == nil {
+		httpc = http.DefaultClient
 	}
-	return ".sweep"
+	return &Store{base: strings.TrimRight(base, "/"), httpc: httpc, auth: auth}
 }
 
-// Open returns a Store rooted at root, creating the status subdirectories if
-// they don't exist. Safe to call repeatedly.
-func Open(root string) (*Store, error) {
-	s := &Store{Root: root}
-	for _, st := range AllStatuses {
-		if err := os.MkdirAll(s.dir(st), 0o755); err != nil {
-			return nil, fmt.Errorf("sweep: create %s dir: %w", st, err)
-		}
+// Label for human-facing messages (replaces the old .sweep/ Root path).
+func (s *Store) Label() string { return s.base + " (clickhouse)" }
+
+func (s *Store) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
 	}
-	return s, nil
+	req, err := http.NewRequestWithContext(ctx, method, s.base+"/analytics/api/v2/sweep"+path, rdr)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if s.auth != "" {
+		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(s.auth)))
+	}
+	resp, err := s.httpc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("sweep api %s %s: %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(out)))
+	}
+	return out, nil
 }
 
-func (s *Store) dir(st Status) string             { return filepath.Join(s.Root, string(st)) }
-func (s *Store) path(st Status, id string) string { return filepath.Join(s.dir(st), id+".json") }
+// expRow is the upsert wire shape: the queryable/display columns + the full
+// serialized Experiment in raw_json (the recipe of record the runner replays).
+type expRow struct {
+	ExpID     string  `json:"exp_id"`
+	Class     string  `json:"class"`
+	Status    string  `json:"status"`
+	Kind      string  `json:"kind"`
+	Platform  string  `json:"platform"`
+	Protocol  string  `json:"protocol"`
+	Mode      string  `json:"mode"`
+	Recipe    string  `json:"recipe"`
+	Arm       string  `json:"arm"`
+	GroupID   string  `json:"group_id"`
+	Parent    string  `json:"parent"`
+	Depth     int     `json:"depth"`
+	Why       string  `json:"why"`
+	WhyText   string  `json:"why_text"`
+	Verdict   string  `json:"verdict"`
+	PlayerID  string  `json:"player_id"`
+	PlayID    string  `json:"play_id"`
+	Owner     string  `json:"owner"`
+	ClaimedAt string  `json:"claimed_at"`
+	RawJSON   string  `json:"raw_json"`
+	Score     float64 `json:"score"`
+	CreatedAt string  `json:"created_at"`
+}
 
-// Save writes e into the given status bucket atomically (temp file + rename),
-// overwriting any existing file for that id in that bucket.
+// rowOf maps an Experiment to its wire row for a given status. recipe / verdict /
+// score are derived (mirrors the old `publish`); raw_json carries everything.
+func rowOf(st Status, e *Experiment) (expRow, error) {
+	raw, err := json.Marshal(e)
+	if err != nil {
+		return expRow{}, fmt.Errorf("sweep: marshal %s: %w", e.ID, err)
+	}
+	verdict := ""
+	if e.Result != nil {
+		verdict = string(e.Result.Verdict)
+	}
+	return expRow{
+		ExpID: e.ID, Class: string(e.ClassOrDefault()), Status: string(st), Kind: string(e.Kind),
+		Platform: e.Platform, Protocol: e.Protocol, Mode: e.Mode, Recipe: RecipeSlug(e), Arm: string(e.Arm),
+		GroupID: e.Group, Parent: e.Parent, Depth: e.Depth, Why: e.Why, WhyText: e.WhyText, Verdict: verdict,
+		PlayerID: e.PlayerID, PlayID: e.PlayID, Owner: e.Owner, ClaimedAt: e.ClaimedAt,
+		RawJSON: string(raw), Score: DefaultWeights().Score(e), CreatedAt: e.CreatedAt,
+	}, nil
+}
+
+// Save upserts e into CH with the given status. (ReplacingMergeTree by exp_id, so
+// this both creates and transitions.)
 func (s *Store) Save(st Status, e *Experiment) error {
-	b, err := json.MarshalIndent(e, "", "  ")
+	row, err := rowOf(st, e)
 	if err != nil {
-		return fmt.Errorf("sweep: marshal %s: %w", e.ID, err)
+		return err
 	}
-	b = append(b, '\n')
-	final := s.path(st, e.ID)
-	tmp := filepath.Join(s.dir(st), "."+e.ID+".tmp")
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return fmt.Errorf("sweep: write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, final); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("sweep: commit %s: %w", final, err)
-	}
-	return nil
+	body, _ := json.Marshal(map[string]any{"experiments": []expRow{row}})
+	_, err = s.do(context.Background(), http.MethodPost, "/experiments", body)
+	return err
 }
 
-// Load reads one experiment from a bucket.
-func (s *Store) Load(st Status, id string) (*Experiment, error) {
-	b, err := os.ReadFile(s.path(st, id))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	var e Experiment
-	if err := json.Unmarshal(b, &e); err != nil {
-		return nil, fmt.Errorf("sweep: parse %s/%s: %w", st, id, err)
-	}
-	return &e, nil
-}
-
-// List returns every experiment in a bucket, sorted by id for determinism.
-// Dotfiles (in-flight temp writes) are skipped.
+// List returns every experiment in a status (or all, if st == ""), reconstructed
+// from raw_json and sorted by id.
 func (s *Store) List(st Status) ([]*Experiment, error) {
-	entries, err := os.ReadDir(s.dir(st))
+	path := "/experiments?limit=2000"
+	if st != "" {
+		path += "&status=" + string(st)
+	}
+	body, err := s.do(context.Background(), http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
-	var out []*Experiment
-	for _, ent := range entries {
-		name := ent.Name()
-		if ent.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+	var resp struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("sweep: decode list: %w", err)
+	}
+	out := make([]*Experiment, 0, len(resp.Items))
+	for _, it := range resp.Items {
+		var row struct {
+			RawJSON   string `json:"raw_json"`
+			Status    string `json:"status"`
+			Owner     string `json:"owner"`
+			ClaimedAt string `json:"claimed_at"`
+		}
+		if json.Unmarshal(it, &row) != nil || row.RawJSON == "" {
 			continue
 		}
-		id := strings.TrimSuffix(name, ".json")
-		e, err := s.Load(st, id)
-		if err != nil {
-			return nil, err
+		var e Experiment
+		if json.Unmarshal([]byte(row.RawJSON), &e) != nil {
+			continue
 		}
-		out = append(out, e)
+		// status / owner / claimed_at are authoritative on the CH columns (the
+		// server claim + Move set them; raw_json may be stale).
+		e.Status = Status(row.Status)
+		// owner / claimed_at are stamped on the CH columns at claim time (the
+		// server promote doesn't rewrite raw_json), so the columns are
+		// authoritative for those runtime fields — without this, reap would see
+		// an empty ClaimedAt and yank a live claim (treated as stale).
+		if row.Owner != "" {
+			e.Owner = row.Owner
+		}
+		if t, err := time.Parse("2006-01-02 15:04:05.000", row.ClaimedAt); err == nil && t.Year() > 1971 {
+			e.ClaimedAt = t.UTC().Format(time.RFC3339)
+		}
+		out = append(out, &e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 
-// Counts returns the number of experiments in each bucket.
+// Load returns one experiment from a status, or ErrNotFound.
+func (s *Store) Load(st Status, id string) (*Experiment, error) {
+	es, err := s.List(st)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range es {
+		if e.ID == id {
+			return e, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+// Counts tallies experiments by status (one list call, grouped client-side).
 func (s *Store) Counts() (map[Status]int, error) {
+	body, err := s.do(context.Background(), http.MethodGet, "/experiments?limit=2000", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Items []struct {
+			Status string `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
 	counts := make(map[Status]int, len(AllStatuses))
 	for _, st := range AllStatuses {
-		es, err := s.List(st)
-		if err != nil {
-			return nil, err
-		}
-		counts[st] = len(es)
+		counts[st] = 0
+	}
+	for _, it := range resp.Items {
+		counts[Status(it.Status)]++
 	}
 	return counts, nil
 }
 
-// Claim atomically moves an experiment from backlog → running and stamps the
-// owner + claim time. The os.Rename is the lock: if two runners race for the
-// same id, only one rename succeeds; the loser gets ErrAlreadyClaimed and
-// should move on. `now` (RFC3339 UTC) is recorded as ClaimedAt so the
-// stale-claim reaper can recover files orphaned by a dead runner (§11); pass
-// "" to skip stamping (e.g. in tests that don't exercise the reaper).
-func (s *Store) Claim(id, owner, now string) (*Experiment, error) {
-	src := s.path(StatusBacklog, id)
-	dst := s.path(StatusRunning, id)
-	if err := os.Rename(src, dst); err != nil {
-		if os.IsNotExist(err) {
-			return nil, ErrAlreadyClaimed
-		}
-		return nil, err
-	}
-	// We now exclusively own the running/ file.
-	e, err := s.Load(StatusRunning, id)
+// ClaimNext atomically claims the top-scored eligible backlog experiment for
+// owner (server-side concurrency-safe claim). Returns (nil, nil) when the
+// backlog is empty / fully scope-gated. The returned Experiment is already
+// marked running in CH with owner + claim time stamped.
+func (s *Store) ClaimNext(owner string) (*Experiment, error) {
+	body, _ := json.Marshal(map[string]string{"owner": owner})
+	out, err := s.do(context.Background(), http.MethodPost, "/claim", body)
 	if err != nil {
 		return nil, err
 	}
-	e.Owner = owner
-	e.ClaimedAt = now
-	if err := s.Save(StatusRunning, e); err != nil {
-		return nil, err
+	var resp struct {
+		Experiment json.RawMessage `json:"experiment"`
+		Owner      string          `json:"owner"`
+		ClaimedAt  string          `json:"claimed_at"`
 	}
-	return e, nil
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return nil, fmt.Errorf("sweep: decode claim: %w", err)
+	}
+	if len(resp.Experiment) == 0 || string(resp.Experiment) == "null" {
+		return nil, nil
+	}
+	var e Experiment
+	if err := json.Unmarshal(resp.Experiment, &e); err != nil {
+		return nil, fmt.Errorf("sweep: decode claimed experiment: %w", err)
+	}
+	e.Owner = resp.Owner
+	e.ClaimedAt = resp.ClaimedAt
+	return &e, nil
 }
 
-// Move writes e into the `to` bucket and removes its file from the `from`
-// bucket — the post-verdict transition (running → done/found/review/feedback).
-// Unlike Claim this is not a race point: only the owning runner touches a
-// running/ file. The write-then-remove order means a crash mid-Move leaves the
-// experiment in both buckets (recoverable) rather than vanishing.
+// Move transitions e to the `to` status — an upsert (CH is keyed by exp_id, so
+// there is no physical move and `from` is informational).
 func (s *Store) Move(from, to Status, e *Experiment) error {
-	if err := s.Save(to, e); err != nil {
-		return err
+	return s.Save(to, e)
+}
+
+// RecordRun appends e's run to the append-only history (sweep_runs) and marks
+// its play `interesting` for retention — so re-running a recipe doesn't lose the
+// prior run (the queue collapses by exp_id) and the rich play archive survives.
+func (s *Store) RecordRun(e *Experiment) error {
+	verdict, note := "", ""
+	if e.Result != nil {
+		verdict, note = string(e.Result.Verdict), e.Result.Note
 	}
-	if err := os.Remove(s.path(from, e.ID)); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("sweep: remove %s/%s: %w", from, e.ID, err)
-	}
-	return nil
+	body, _ := json.Marshal(map[string]any{
+		"play_id": e.PlayID, "exp_id": e.ID, "class": string(e.ClassOrDefault()),
+		"kind": string(e.Kind), "platform": e.Platform, "protocol": e.Protocol,
+		"mode": e.Mode, "recipe": RecipeSlug(e), "verdict": verdict,
+		"why": e.Why, "why_text": e.WhyText, "note": note, "player_id": e.PlayerID,
+	})
+	_, err := s.do(context.Background(), http.MethodPost, "/runs", body)
+	return err
+}
+
+// Delete tombstones an experiment (status='deleted'); list/claim ignore it.
+func (s *Store) Delete(id string) error {
+	body, _ := json.Marshal(map[string]string{"exp_id": id})
+	_, err := s.do(context.Background(), http.MethodPost, "/delete", body)
+	return err
 }

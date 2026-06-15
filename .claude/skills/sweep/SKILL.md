@@ -1,12 +1,14 @@
 ---
 name: sweep
-description: Drive the automated fault-injection sweep (issue #772, docs/sweep-design.md) — the unattended claim→apply→probe→analyze→isolate→promote loop over the local .sweep/ queue. Invoke under /goal ("drive the sweep until backlog is empty"), or for a single hand-run iteration. Each clean run is a mechanical oracle check (no model call); the LLM only reasons on a notable/aberration hit — picking which axes to flip for isolation and writing the finding. Runs on the Mac with the sims (drives appium/adb), against the test-dev deploy.
-last_reviewed: 2026-06-13
+description: Drive the automated fault-injection sweep (issue #772, docs/sweep-design.md) — the unattended claim→apply→probe→analyze→isolate→promote loop over the ClickHouse-master queue. Invoke under /goal ("drive the sweep until backlog is empty"), or for a single hand-run iteration. Each clean run is a mechanical oracle check (no model call); the LLM only reasons on a notable/aberration hit — picking which axes to flip for isolation and writing the finding. Runs on the Mac with the sims (drives appium/adb), against the test-dev deploy.
+last_reviewed: 2026-06-14
 ---
 
 # Sweep — drive the automated fault-injection loop
 
-This skill is the **driver** for the sweep designed in `docs/sweep-design.md` (issue #772). The queue lives in `.sweep/` (gitignored); the `harness sweep` subcommands are the mechanics. **You** (the LLM, under `/goal`) are the investigator — but only on a hit: a clean run is a pure oracle check with no reasoning, so cost scales with *findings*, not the (vast) experiment count.
+This skill is the **driver** for the sweep designed in `docs/sweep-design.md` (issue #772). **ClickHouse is the master queue** (CH-master migration) — every `harness sweep` subcommand reads/writes it over the forwarder API; there are no local files. **You** (the LLM, under `/goal`) are the investigator — but only on a hit: a clean run is a pure oracle check with no reasoning, so cost scales with *findings*, not the (vast) experiment count.
+
+> **The queue is remote.** Because the queue lives in CH on the deploy, every `harness sweep` command needs the deploy URL + self-signed-cert skip. Export `HARNESS_BASE_URL=https://dev.jeoliver.com:21000` and `HARNESS_INSECURE=1` (per `.env`) so the bare `harness sweep …` commands below resolve — or pass `--insecure --base …` inline. Operators control *what runs* by toggling scope on the dashboard Sweep tab (or `POST /api/v2/sweep/scope`); disabled platform/protocol/class/mode values stay pending but are never claimed.
 
 **Conventions:** follows `.claude/skills/CONVENTIONS.md`. Most load-bearing here:
 - **Bash discipline** — lead every command with `harness`, `go`, `gh`, or `jq` (first token matches the allowlist). Never `cd …`/`VAR=…`/`export …` prefixes; pass values inline.
@@ -28,17 +30,20 @@ Seed one class at a time: `harness sweep seed --class config` (default) or `--cl
 
 Run these in order. Under `/goal`, repeat until `harness sweep status` shows `backlog 0` (and any in-flight `running` drained), then stop — the sweep is state-driven, not clocked.
 
+> **Drive off the agenda.** `harness sweep agenda` reads CH and prints the next action for every actionable experiment (`claim & run` / `analyze` / `reap` / `isolate → promote` / `needs-human`), derived purely from CH state. Because every side effect is recorded back to CH (verdict, `issue_url`), the agenda is resumable — after a `/clear` or a fresh session, `harness sweep agenda` tells you exactly where to pick up. Use it to choose this iteration's work instead of reconstructing the state machine in your head. The steps below are what each agenda action expands to.
+
 ### 0. Reap + health-check
 ```
+harness sweep agenda            # what needs doing right now (resumes from CH alone)
 harness sweep reap --max-age-min 60
 ```
-Returns claims orphaned by a dead runner. Then confirm the deploy + a sim are healthy; if not, don't blame the player — skip this tick.
+Reap returns claims orphaned by a dead runner. Then confirm the deploy + a sim are healthy; if not, don't blame the player — skip this tick.
 
 ### 1. Claim the top-scored experiment
 ```
-harness sweep next --claim --owner <runner-id> --json
+harness sweep next --claim --owner <runner-id>
 ```
-Atomic-rename claim (parallel-safe across worktrees). `null` ⇒ backlog empty ⇒ you're done. The `--json` gives you the full recipe (platform/protocol/mode/fault/shape/content_manipulation/why).
+Server-side concurrency-safe claim (the forwarder arbitrates a deterministic winner, so parallel runners never double-claim; scope-disabled values are skipped). `nothing to claim` ⇒ backlog empty/gated ⇒ you're done. It prints the claimed `exp_id`; `bootstrap`/`apply` reload the full recipe from CH by id — you don't need to capture it here.
 
 ### 2. Materialise the recipe, then drive the probe (config-on-connect)
 The probe is the **characterization harness**. The robust path for ANY recipe — including arbitrary fault + content_manipulation, not just shape — is **config-on-connect**: configure the session BEFORE the app launches, then launch the app bound to that same `player_id`. The cap/fault/content is live from the player's first byte, no PATCH race.
@@ -56,7 +61,7 @@ CHARACTERIZATION_DEVICE_UDID=<booted sim> \
 CHAR_SWEEP_PATTERN=pyramid CHAR_SWEEP_STEP_S=12 CHAR_SWEEP_MARGIN=5 \
 go test ./tests/characterization/modes -run TestSweepProbe -count=1 -v -timeout 8m
 ```
-(`LAUNCH_MODE`: `appium` for iOS-sim + Apple TV; `cli`/`adb` for Android TV.) For a **pattern recipe** (`shape.pattern` set), pass `CHAR_SWEEP_PATTERN` (+ `_STEP_S` / `_MARGIN` from the recipe's `shape`); the probe waits for the manifest then arms the pattern via `harness shape --pattern` — the same path the characterization modes use, so the cap actually sweeps. Omit `CHAR_SWEEP_PATTERN` for a plain-play recipe (rate-cap / content-only). **Verified end-to-end** against test-dev + a booted iOS sim, both plain-play and a pyramid that drove real downshifts → `analyze` → verdict.
+(**`LAUNCH_MODE=appium` on ALL platforms** — iOS sims, Apple TV, and the physical Android TV (appium drives it over its adb transport). `TestSweepProbe` only supports the appium launcher; `cli`/`adb` make it SKIP. For a non-iOS platform also pass `CHAR_SWEEP_PLATFORM=<platform>` so the probe discovers the right device. Every seeded item carries `launch_mode: appium` as an instruction, and the off-hours runner reads it.) For a **pattern recipe** (`shape.pattern` set), pass `CHAR_SWEEP_PATTERN` (+ `_STEP_S` / `_MARGIN` from the recipe's `shape`); the probe waits for the manifest then arms the pattern via `harness shape --pattern` — the same path the characterization modes use, so the cap actually sweeps. Omit `CHAR_SWEEP_PATTERN` for a plain-play recipe (rate-cap / content-only). **Verified end-to-end** against test-dev + a booted iOS sim, both plain-play and a pyramid that drove real downshifts → `analyze` → verdict.
 
 > Pattern shapes still apply post-launch via `harness shape --pattern` (they need the fetched manifest's ladder). For an ALREADY-live player, `harness sweep apply <id> --target <player>` does the reset-then-apply variant.
 
@@ -66,18 +71,22 @@ go test ./tests/characterization/modes -run TestSweepProbe -count=1 -v -timeout 
 ```
 harness sweep analyze <exp-id> --play <play_id> --confirm-reps 3
 ```
-Pulls the play's QoE labels, classifies the trichotomy (`clean`→`done/`, `notable`/`aberration`→`found/`), and — on a *first* single-rep hit — enqueues 3 confirmation reps to `backlog/` (the n=1 guard, sharing a `rep_group`; reps don't recurse). A `clean` verdict ends the iteration here. **This step needs no LLM judgment.**
+Pulls the play's QoE labels, classifies the trichotomy (`clean`→`done/`, `notable`/`aberration`→`found/`), and — on a *first* single-rep hit — enqueues 3 confirmation reps to `backlog/` (the n=1 guard, sharing a `rep_group`; reps don't recurse). It also **records the run to the append-only history** (`sweep_runs`) and **marks the play `interesting`** (90-day retention), so re-running a recipe never loses the prior run and the play archive survives. A `clean` verdict ends the iteration here. **This step needs no LLM judgment.**
 
 ### 4. On a confirmed hit — investigate + insert (this is where you reason)
 A hit is *confirmed* only once the rep batch agrees (don't act on n=1). Then:
 
 1. **Recall** — grep `.claude/findings/` + `.claude/memory/` for the signature/symptom (`forensics` skill). If a prior finding explains it, say so and skip to promote.
-2. **Reason about the cause** from the evidence — *which* labels fired, *when* in the play, on *which* request kind — and pick the most-informative axes to flip. This is the OFAT isolation fan; it is **LLM-reasoned, not a fixed checklist** (a startup VSF on a 4K ladder → flip `platform` + `ladder` first; a mid-play freeze after a drop → vary drop duration + `liveoffset`, not codecs). Cheap/likely-first: Tier 1 = `platform`/`protocol` (different devices → simultaneous), Tier 2 = manifest knobs.
+2. **Record your interpretation** so the row is self-explanatory from CH alone (the dashboard detail + run history show it):
+   ```
+   harness sweep annotate <exp-id> --note "what happened / where / how — e.g. startup VSF: manifest timeout at first fetch, never reached first frame"
+   ```
+3. **Reason about the cause** from the evidence — *which* labels fired, *when* in the play, on *which* request kind — and pick the most-informative axes to flip. This is the OFAT isolation fan; it is **LLM-reasoned, not a fixed checklist** (a startup VSF on a 4K ladder → flip `platform` + `ladder` first; a mid-play freeze after a drop → vary drop duration + `liveoffset`, not codecs). Cheap/likely-first: Tier 1 = `platform`/`protocol` (different devices → simultaneous), Tier 2 = manifest knobs.
    ```
    harness sweep isolate <exp-id> --flip platform=androidtv --flip ladder=drop-top-rung --flip protocol=dash
    ```
    This materializes a `control` + one one-axis-flip `variant` per flip into `backlog/` (each enforced to differ from control in exactly one axis; capped at 8). The scheduler will pick them up *next* (they outrank seeds), so the chain runs itself.
-3. **Promote** to a deduped Issue:
+4. **Promote** to a deduped Issue (records the Issue URL back to CH — idempotency):
    ```
    harness sweep promote <exp-id> --dry-run        # inspect signature + body first
    harness sweep promote <exp-id> --axis platform  # append the attributed axis once isolation confirms it

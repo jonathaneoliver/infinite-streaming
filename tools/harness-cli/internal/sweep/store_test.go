@@ -1,8 +1,12 @@
 package sweep
 
 import (
-	"sync"
-	"sync/atomic"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -23,11 +27,96 @@ func sampleExp(id string) *Experiment {
 	}
 }
 
-func TestSaveLoadRoundTrip(t *testing.T) {
-	s, err := Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+// mockForwarder is a minimal in-memory stand-in for the forwarder's CH-master
+// sweep endpoints, so the CH-backed Store can be unit-tested without ClickHouse.
+// (The concurrency-safe claim arbitration itself is a forwarder/CH concern,
+// verified live; here we exercise the Store's request/response round-trips.)
+func mockForwarder(t *testing.T) (*Store, func()) {
+	t.Helper()
+	rows := map[string]expRow{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/analytics/api/v2/sweep/experiments", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			var post struct {
+				Experiments []expRow `json:"experiments"`
+			}
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &post)
+			for _, row := range post.Experiments {
+				rows[row.ExpID] = row // ReplacingMergeTree upsert by exp_id
+			}
+			writeJSONTest(w, map[string]any{"stored": len(post.Experiments)})
+		case http.MethodGet:
+			status := r.URL.Query().Get("status")
+			var items []expRow
+			for _, row := range rows {
+				if row.Status == "deleted" {
+					continue
+				}
+				if status == "" || row.Status == status {
+					items = append(items, row)
+				}
+			}
+			sort.Slice(items, func(i, j int) bool { return items[i].ExpID < items[j].ExpID })
+			raw := make([]json.RawMessage, len(items))
+			for i, it := range items {
+				raw[i], _ = json.Marshal(it)
+			}
+			writeJSONTest(w, map[string]any{"items": raw})
+		}
+	})
+	mux.HandleFunc("/analytics/api/v2/sweep/claim", func(w http.ResponseWriter, r *http.Request) {
+		var post struct {
+			Owner string `json:"owner"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &post)
+		// pick the top-scored backlog row
+		var pick *expRow
+		for id := range rows {
+			row := rows[id]
+			if row.Status != "backlog" {
+				continue
+			}
+			if pick == nil || row.Score > pick.Score || (row.Score == pick.Score && row.ExpID < pick.ExpID) {
+				r := row
+				pick = &r
+			}
+		}
+		if pick == nil {
+			writeJSONTest(w, map[string]any{"experiment": nil})
+			return
+		}
+		pick.Status = "running"
+		pick.Owner = post.Owner
+		rows[pick.ExpID] = *pick
+		writeJSONTest(w, map[string]any{"experiment": json.RawMessage(pick.RawJSON), "owner": post.Owner, "claimed_at": "2026-06-13T12:00:00Z"})
+	})
+	mux.HandleFunc("/analytics/api/v2/sweep/delete", func(w http.ResponseWriter, r *http.Request) {
+		var post struct {
+			ExpID string `json:"exp_id"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &post)
+		if row, ok := rows[post.ExpID]; ok {
+			row.Status = "deleted"
+			rows[post.ExpID] = row
+		}
+		writeJSONTest(w, map[string]any{"deleted": post.ExpID})
+	})
+	srv := httptest.NewServer(mux)
+	return OpenCH(srv.URL, srv.Client(), ""), srv.Close
+}
+
+func writeJSONTest(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func TestSaveListRoundTrip(t *testing.T) {
+	s, done := mockForwarder(t)
+	defer done()
 	want := sampleExp("seed-ipad-hls-ratecap")
 	if err := s.Save(StatusBacklog, want); err != nil {
 		t.Fatal(err)
@@ -40,19 +129,21 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatalf("roundtrip mismatch: %+v", got)
 	}
 	if got.Shape == nil || got.Shape.RateMbps == nil || *got.Shape.RateMbps != 0.4 {
-		t.Fatalf("shape not preserved: %+v", got.Shape)
+		t.Fatalf("shape (from raw_json) not preserved: %+v", got.Shape)
 	}
 }
 
 func TestLoadMissing(t *testing.T) {
-	s, _ := Open(t.TempDir())
+	s, done := mockForwarder(t)
+	defer done()
 	if _, err := s.Load(StatusBacklog, "nope"); err != ErrNotFound {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }
 
-func TestListSortedSkipsDotfiles(t *testing.T) {
-	s, _ := Open(t.TempDir())
+func TestListSorted(t *testing.T) {
+	s, done := mockForwarder(t)
+	defer done()
 	for _, id := range []string{"c", "a", "b"} {
 		if err := s.Save(StatusBacklog, sampleExp(id)); err != nil {
 			t.Fatal(err)
@@ -68,7 +159,8 @@ func TestListSortedSkipsDotfiles(t *testing.T) {
 }
 
 func TestCounts(t *testing.T) {
-	s, _ := Open(t.TempDir())
+	s, done := mockForwarder(t)
+	defer done()
 	s.Save(StatusBacklog, sampleExp("a"))
 	s.Save(StatusBacklog, sampleExp("b"))
 	s.Save(StatusDone, sampleExp("c"))
@@ -81,76 +173,57 @@ func TestCounts(t *testing.T) {
 	}
 }
 
-func TestClaimStampsOwnerAndMovesBucket(t *testing.T) {
-	s, _ := Open(t.TempDir())
+func TestClaimNextStampsOwner(t *testing.T) {
+	s, done := mockForwarder(t)
+	defer done()
 	s.Save(StatusBacklog, sampleExp("x"))
-	e, err := s.Claim("x", "runner-1", "2026-06-13T12:00:00Z")
+	e, err := s.ClaimNext("runner-1")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if e == nil || e.ID != "x" {
+		t.Fatalf("claim returned %+v", e)
 	}
 	if e.Owner != "runner-1" {
 		t.Fatalf("owner not stamped: %q", e.Owner)
 	}
-	if e.ClaimedAt != "2026-06-13T12:00:00Z" {
-		t.Fatalf("claim time not stamped: %q", e.ClaimedAt)
+	// now the experiment is running, so a second claim finds nothing
+	again, err := s.ClaimNext("runner-2")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := s.Load(StatusBacklog, "x"); err != ErrNotFound {
-		t.Fatalf("backlog file should be gone, got %v", err)
-	}
-	running, err := s.Load(StatusRunning, "x")
-	if err != nil || running.Owner != "runner-1" {
-		t.Fatalf("running file missing owner: %+v err=%v", running, err)
-	}
-}
-
-func TestClaimMissingIsAlreadyClaimed(t *testing.T) {
-	s, _ := Open(t.TempDir())
-	if _, err := s.Claim("ghost", "r", ""); err != ErrAlreadyClaimed {
-		t.Fatalf("want ErrAlreadyClaimed, got %v", err)
-	}
-}
-
-// The load-bearing guarantee: N runners racing for one experiment → exactly
-// one wins, the rest get ErrAlreadyClaimed. This is the parallel-safety the
-// whole local-store design rests on (§4, §7).
-func TestConcurrentClaimExactlyOneWinner(t *testing.T) {
-	s, _ := Open(t.TempDir())
-	s.Save(StatusBacklog, sampleExp("contested"))
-
-	const racers = 16
-	var wins int64
-	var wg sync.WaitGroup
-	wg.Add(racers)
-	for i := 0; i < racers; i++ {
-		go func() {
-			defer wg.Done()
-			if _, err := s.Claim("contested", "r", ""); err == nil {
-				atomic.AddInt64(&wins, 1)
-			} else if err != ErrAlreadyClaimed {
-				t.Errorf("unexpected claim error: %v", err)
-			}
-		}()
-	}
-	wg.Wait()
-	if wins != 1 {
-		t.Fatalf("want exactly 1 winner, got %d", wins)
+	if again != nil {
+		t.Fatalf("backlog should be empty, got %+v", again)
 	}
 }
 
 func TestMoveToDone(t *testing.T) {
-	s, _ := Open(t.TempDir())
+	s, done := mockForwarder(t)
+	defer done()
 	s.Save(StatusBacklog, sampleExp("y"))
-	e, _ := s.Claim("y", "r", "")
+	e, _ := s.ClaimNext("r")
 	e.Result = &Result{Verdict: VerdictClean}
 	if err := s.Move(StatusRunning, StatusDone, e); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Load(StatusRunning, "y"); err != ErrNotFound {
-		t.Fatalf("running file should be gone, got %v", err)
+		t.Fatalf("should no longer be running, got %v", err)
 	}
-	done, err := s.Load(StatusDone, "y")
-	if err != nil || done.Result == nil || done.Result.Verdict != VerdictClean {
-		t.Fatalf("done file wrong: %+v err=%v", done, err)
+	doneExp, err := s.Load(StatusDone, "y")
+	if err != nil || doneExp.Result == nil || doneExp.Result.Verdict != VerdictClean {
+		t.Fatalf("done experiment wrong: %+v err=%v", doneExp, err)
+	}
+}
+
+func TestDeleteTombstones(t *testing.T) {
+	s, done := mockForwarder(t)
+	defer done()
+	s.Save(StatusBacklog, sampleExp("z"))
+	if err := s.Delete("z"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Load(StatusBacklog, "z"); err != ErrNotFound {
+		t.Fatalf("deleted experiment should be gone, got %v", err)
 	}
 }
 
@@ -161,3 +234,5 @@ func ids(es []*Experiment) []string {
 	}
 	return out
 }
+
+var _ = strings.TrimSpace

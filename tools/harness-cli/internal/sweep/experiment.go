@@ -5,9 +5,9 @@
 // {platform × protocol × fault × shape × content × HLS-config × mode}
 // combination) — ephemeral working state. A confirmed failure becomes a
 // durable *finding* (a GitHub Issue) elsewhere; this package only owns the
-// experiment queue. Experiments live as one JSON file each under a
-// status-named subdirectory of `.sweep/`; the file's directory IS its status,
-// and an atomic rename between directories is the parallel-safe claim lock
+// experiment queue. The queue lives in ClickHouse (the master store, #772):
+// each experiment is one upsertable row keyed by `exp_id` with a `status`
+// column, reached over the forwarder API; the claim is arbitrated server-side
 // (§4, §7 of the design).
 package sweep
 
@@ -38,6 +38,22 @@ func (e *Experiment) ClassOrDefault() Class {
 		return ClassConfig
 	}
 	return e.Class
+}
+
+// LaunchModeAppium is the only launcher TestSweepProbe supports — appium drives
+// every platform (iOS sims, Apple TV, and the physical Android TV over its adb
+// transport). cli/adb modes make the probe SKIP, so this is the launch
+// instruction every item carries.
+const LaunchModeAppium = "appium"
+
+// LaunchModeOrDefault resolves the probe launch mode, defaulting empty (legacy
+// rows seeded before the field existed) to appium so the runner never falls
+// back to a mode the probe skips.
+func (e *Experiment) LaunchModeOrDefault() string {
+	if e.LaunchMode == "" {
+		return LaunchModeAppium
+	}
+	return e.LaunchMode
 }
 
 // Kind is what produced an experiment and how aggressively the scheduler
@@ -71,8 +87,8 @@ const (
 	VerdictInconclusive Verdict = "inconclusive" // probe/infra failure — NOT the player's fault
 )
 
-// Status is the lifecycle bucket, and also the subdirectory name under
-// `.sweep/` that holds the experiment file (§4).
+// Status is the lifecycle bucket — the `status` column on the experiment's
+// ClickHouse row (§4).
 type Status string
 
 const (
@@ -148,18 +164,21 @@ type Result struct {
 	Note    string   `json:"note,omitempty"`   // one-line human/oracle summary
 }
 
-// Experiment is one runnable recipe + its bookkeeping. JSON-serialised one
-// per file under `.sweep/<status>/<id>.json`.
+// Experiment is one runnable recipe + its bookkeeping. JSON-serialised into the
+// `raw_json` column of its ClickHouse row (the recipe of record the runner
+// replays).
 type Experiment struct {
 	ID        string `json:"id"`
-	CreatedAt string `json:"created_at"` // RFC3339 UTC; stamped by the caller (Date.now is unavailable in some contexts)
+	CreatedAt string `json:"created_at"`       // RFC3339 UTC; stamped by the caller (Date.now is unavailable in some contexts)
+	Status    Status `json:"status,omitempty"` // lifecycle bucket; authoritative on the CH column, stamped onto the struct by Store.List
 
 	// --- the recipe (matrix axes) ---
-	Class               Class                `json:"class,omitempty"` // config (default) | fault — the sweep tier
-	Platform            string               `json:"platform"`        // ipad-sim | iphone | appletv | androidtv | web
-	Protocol            string               `json:"protocol"`        // hls | dash
-	Content             string               `json:"content"`         // fixed to insane_new for now
-	Mode                string               `json:"mode"`            // steps | pyramid | downshift_severity | …
+	Class               Class                `json:"class,omitempty"`       // config (default) | fault — the sweep tier
+	Platform            string               `json:"platform"`              // ipad-sim | iphone | appletv | androidtv | web
+	LaunchMode          string               `json:"launch_mode,omitempty"` // how the probe launches the app: appium (the only mode TestSweepProbe supports). Stamped at creation; the runner passes it as LAUNCH_MODE.
+	Protocol            string               `json:"protocol"`              // hls | dash
+	Content             string               `json:"content"`               // fixed to insane_new for now
+	Mode                string               `json:"mode"`                  // steps | pyramid | downshift_severity | …
 	DurationS           int                  `json:"duration_s,omitempty"`
 	Fault               *Fault               `json:"fault,omitempty"` // fault-class only
 	Shape               *Shape               `json:"shape,omitempty"`
@@ -184,4 +203,5 @@ type Experiment struct {
 	PlayerID  string  `json:"player_id,omitempty"`  // the proxy session the probe played (stamped at bootstrap)
 	PlayID    string  `json:"play_id,omitempty"`    // the play the run produced
 	Result    *Result `json:"result,omitempty"`     // filled after analysis
+	IssueURL  string  `json:"issue_url,omitempty"`  // GitHub Issue a confirmed hit was promoted to (idempotency: already promoted)
 }

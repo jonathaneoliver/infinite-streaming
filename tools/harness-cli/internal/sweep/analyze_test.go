@@ -71,6 +71,64 @@ func TestAnalyzeBucketing(t *testing.T) {
 	}
 }
 
+// TestFaultRecoveryEnvelope locks in §3 Oracle A.4: a fault-class run is a
+// finding only when the player FAILS to recover. The injected fault's own
+// stimulus labels (http_5xx, fault_*, segment_failure, …) and the recovery
+// signal (request_retry) must not, alone, produce an aberration. Cases are the
+// real label sets observed on the seeded fault recipes (#772).
+func TestFaultRecoveryEnvelope(t *testing.T) {
+	cases := []struct {
+		name   string
+		labels []string
+		want   Verdict
+	}{
+		{
+			// seg5xx: player retried, got first frame, shifted down, kept going.
+			"recovered 5xx → clean",
+			[]string{"error=http_5xx", "error=fault_other", "info=*request_retry", "info=first_frame", "info=shift_down", "warning=*qoe_downshift_overshoot", "warning=*segment_failure"},
+			VerdictClean,
+		},
+		{
+			// corrupt segments: first frame but froze with no retry, VSF.
+			"corrupt wedge → aberration",
+			[]string{"error=*qoe_vsf", "critical=stall_frozen", "warning=*segment_failure", "critical=unexpected_fault", "info=play_start"},
+			VerdictAberration,
+		},
+		{
+			// manifest timeout at startup: never reached first frame.
+			"start failure → aberration",
+			[]string{"error=*qoe_vsf", "critical=stall_frozen", "error=fault_timeout", "warning=*manifest_failure", "info=play_start"},
+			VerdictAberration,
+		},
+		{
+			// player wedged: stuck + errored even though first frame came.
+			"player wedged → aberration",
+			[]string{"info=first_frame", "error=player_stuck", "error=player_error", "error=*qoe_msf", "error=fault_timeout"},
+			VerdictAberration,
+		},
+		{
+			// stall that WAS retried out of → within envelope.
+			"stall + retry → clean",
+			[]string{"info=first_frame", "critical=stall_frozen", "info=*request_retry", "error=http_5xx"},
+			VerdictClean,
+		},
+	}
+	for _, c := range cases {
+		e := &Experiment{ID: c.name, Class: ClassFault}
+		Analyze(e, "play-x", c.labels)
+		if e.Result.Verdict != c.want {
+			t.Errorf("%s: fault verdict=%s want %s (note=%q)", c.name, e.Result.Verdict, c.want, e.Result.Note)
+		}
+	}
+	// The SAME corrupt-wedge labels under the config class still classify by
+	// severity (no envelope) — guards the class routing.
+	cfg := &Experiment{ID: "cfg", Class: ClassConfig}
+	Analyze(cfg, "play-y", []string{"error=http_5xx", "info=first_frame", "info=*request_retry"})
+	if cfg.Result.Verdict != VerdictAberration {
+		t.Errorf("config class must still flag error=http_5xx; got %s", cfg.Result.Verdict)
+	}
+}
+
 func TestNeedsConfirmation(t *testing.T) {
 	mk := func(v Verdict, reps int, repGroup string) *Experiment {
 		return &Experiment{Reps: reps, RepGroup: repGroup, Result: &Result{Verdict: v}}

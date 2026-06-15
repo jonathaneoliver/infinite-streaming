@@ -38,7 +38,6 @@ func cmdSweepApply(client *api.Client, args []string, asJSON bool) error {
 	}
 	id := args[0]
 	fs := flag.NewFlagSet("sweep apply", flag.ContinueOnError)
-	root := fs.String("root", "", "sweep root dir")
 	from := fs.String("from", "running", "bucket holding the experiment")
 	target := fs.String("target", "", "player target (id/label/ip/UA substring) — required")
 	noReset := fs.Bool("no-reset", false, "skip the pre-apply shape/fault reset (step 0)")
@@ -48,7 +47,7 @@ func cmdSweepApply(client *api.Client, args []string, asJSON bool) error {
 	if *target == "" {
 		return errors.New("--target is required")
 	}
-	s, err := openStore(*root)
+	s, err := openStore(client)
 	if err != nil {
 		return err
 	}
@@ -157,7 +156,6 @@ func cmdSweepBootstrap(client *api.Client, args []string, asJSON bool) error {
 	}
 	id := args[0]
 	fs := flag.NewFlagSet("sweep bootstrap", flag.ContinueOnError)
-	root := fs.String("root", "", "sweep root dir")
 	from := fs.String("from", "running", "bucket holding the experiment")
 	player := fs.String("player", "", "player_id to configure (default: mint a fresh UUID)")
 	group := fs.String("group", "", "group_id to born-group the session (A/B pairs)")
@@ -165,7 +163,7 @@ func cmdSweepBootstrap(client *api.Client, args []string, asJSON bool) error {
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	s, err := openStore(*root)
+	s, err := openStore(client)
 	if err != nil {
 		return err
 	}
@@ -355,7 +353,6 @@ func cmdSweepAnalyze(client *api.Client, args []string, asJSON bool) error {
 	}
 	id := args[0]
 	fs := flag.NewFlagSet("sweep analyze", flag.ContinueOnError)
-	root := fs.String("root", "", "sweep root dir")
 	from := fs.String("from", "running", "bucket holding the experiment")
 	play := fs.String("play", "", "play_id the probe produced — required")
 	confirmReps := fs.Int("confirm-reps", 3, "reps to enqueue for a first-pass hit (n=1 guard); 0 disables")
@@ -365,7 +362,7 @@ func cmdSweepAnalyze(client *api.Client, args []string, asJSON bool) error {
 	if *play == "" {
 		return errors.New("--play <play_id> is required")
 	}
-	s, err := openStore(*root)
+	s, err := openStore(client)
 	if err != nil {
 		return err
 	}
@@ -409,6 +406,13 @@ func cmdSweepAnalyze(client *api.Client, args []string, asJSON bool) error {
 	if err := s.Move(sweep.Status(*from), bucket, e); err != nil {
 		return err
 	}
+	// Record the run in the append-only history + mark the play interesting
+	// (best-effort: the verdict already landed; don't fail on a history hiccup).
+	if e.PlayID != "" {
+		if err := s.RecordRun(e); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: record run history: %v\n", err)
+		}
+	}
 
 	viewer := viewerURL(client.BaseURL, e.PlayerID, *play)
 	if asJSON {
@@ -432,20 +436,19 @@ func cmdSweepAnalyze(client *api.Client, args []string, asJSON bool) error {
 
 // --- sweep promote --------------------------------------------------------
 
-func cmdSweepPromote(_ *api.Client, args []string, asJSON bool) error {
+func cmdSweepPromote(client *api.Client, args []string, asJSON bool) error {
 	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
 		return errors.New("usage: harness sweep promote <experiment-id> [--axis A] [--from found] [--dry-run]")
 	}
 	id := args[0]
 	fs := flag.NewFlagSet("sweep promote", flag.ContinueOnError)
-	root := fs.String("root", "", "sweep root dir")
 	from := fs.String("from", "found", "bucket holding the experiment")
 	axis := fs.String("axis", "", "isolation-attributed axis, appended to the signature")
 	dryRun := fs.Bool("dry-run", false, "print the gh command + body, do not create/comment")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	s, err := openStore(*root)
+	s, err := openStore(client)
 	if err != nil {
 		return err
 	}
@@ -485,115 +488,47 @@ func cmdSweepPromote(_ *api.Client, args []string, asJSON bool) error {
 	}
 	bodyFile.Close()
 
-	var result string
+	var result, issueURL string
 	if existing != "" {
 		if err := ghRun("issue", "comment", existing, "--body-file", bodyFile.Name()); err != nil {
 			return err
 		}
-		result = "commented on #" + existing
+		result, issueURL = "commented on #"+existing, existing
 	} else {
 		out, err := ghOutput("issue", "create", "--title", title, "--body-file", bodyFile.Name(),
 			"--label", strings.Join(issueLabels, ","))
 		if err != nil {
 			return err
 		}
-		result = "created " + strings.TrimSpace(out)
+		issueURL = strings.TrimSpace(out)
+		result = "created " + issueURL
+	}
+
+	// Record the Issue back onto the experiment in CH — the idempotency marker so
+	// a resumed runner sees the hit is already promoted (agenda → terminal).
+	e.IssueURL = issueURL
+	if err := s.Save(sweep.Status(*from), e); err != nil {
+		return err
 	}
 
 	if asJSON {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{
-			"experiment": e.ID, "signature": sig, "result": result,
+			"experiment": e.ID, "signature": sig, "result": result, "issue_url": issueURL,
 		})
 	}
 	fmt.Printf("%s → %s (sig %s)\n", e.ID, result, sig)
 	return nil
 }
 
-// --- sweep publish (→ dashboard) ------------------------------------------
-
-// cmdSweepPublish snapshots the whole .sweep/ queue and POSTs it to the
-// forwarder so the dashboard's Sweep tab can show it (the .sweep/ files live on
-// the runner, not the deploy). Idempotent: the forwarder upserts by exp_id, so
-// the loop can call this after every iteration to keep the tab live.
-func cmdSweepPublish(client *api.Client, args []string, asJSON bool) error {
-	fs := flag.NewFlagSet("sweep publish", flag.ContinueOnError)
-	root := fs.String("root", "", "sweep root dir")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	s, err := openStore(*root)
-	if err != nil {
-		return err
-	}
-	// Recompute the scheduler score at publish time so the dashboard's
-	// pending order matches what actually runs next. Stored scores can be
-	// stale — isolation/bisect experiments are created with score 0 and only
-	// get their true (kind-dominated) score at live selection — so trust the
-	// scheduler, not the file.
-	w := sweep.DefaultWeights()
-	var rows []map[string]any
-	for _, st := range sweep.AllStatuses {
-		exps, err := s.List(st)
-		if err != nil {
-			return err
-		}
-		for _, e := range exps {
-			verdict := ""
-			if e.Result != nil {
-				verdict = string(e.Result.Verdict)
-			}
-			rows = append(rows, map[string]any{
-				"exp_id": e.ID, "class": string(e.ClassOrDefault()), "status": string(st),
-				"kind": string(e.Kind), "platform": e.Platform, "protocol": e.Protocol,
-				"mode": e.Mode, "recipe": sweep.RecipeSlug(e), "arm": string(e.Arm),
-				"group_id": e.Group, "parent": e.Parent, "depth": e.Depth,
-				"why": e.Why, "why_text": e.WhyText, "verdict": verdict,
-				"player_id": e.PlayerID, "play_id": e.PlayID, "score": w.Score(e),
-				"created_at": e.CreatedAt,
-			})
-		}
-	}
-
-	payload, err := json.Marshal(map[string]any{"experiments": rows})
-	if err != nil {
-		return err
-	}
-	url := strings.TrimRight(client.BaseURL, "/") + "/analytics/api/v2/sweep/experiments"
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, strings.NewReader(string(payload)))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if client.BasicAuth != "" {
-		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(client.BasicAuth)))
-	}
-	resp, err := client.HTTP.Do(req)
-	if err != nil {
-		return fmt.Errorf("publish POST %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("publish: %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	if asJSON {
-		_, _ = os.Stdout.Write(respBody)
-		return nil
-	}
-	fmt.Printf("published %d experiments → %s\n", len(rows), url)
-	return nil
-}
-
 // --- sweep reap -----------------------------------------------------------
 
-func cmdSweepReap(args []string, asJSON bool) error {
+func cmdSweepReap(client *api.Client, args []string, asJSON bool) error {
 	fs := flag.NewFlagSet("sweep reap", flag.ContinueOnError)
-	root := fs.String("root", "", "sweep root dir")
 	maxAgeMin := fs.Float64("max-age-min", 60, "minutes since claim before a running experiment is reaped")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	s, err := openStore(*root)
+	s, err := openStore(client)
 	if err != nil {
 		return err
 	}

@@ -16,8 +16,9 @@ import (
 const sweepUsage = `harness sweep <subcommand>
 
 The automated fault-injection sweep queue (issue #772, docs/sweep-design.md).
-Experiments live as JSON files under .sweep/<status>/ (override with --root or
-$SWEEP_ROOT). Findings are promoted to GitHub Issues elsewhere.
+ClickHouse is the master store: every subcommand reads/writes the queue over the
+forwarder API on the harness's --base deploy (no local files). Findings are
+promoted to GitHub Issues elsewhere.
 
 Subcommands:
   seed [--class C][--full] populate backlog/ with the starter set.
@@ -44,11 +45,14 @@ Subcommands:
                            single-rep hit instead enqueues N confirmation reps.
   promote <id>             open (or comment on) a deduped GitHub Issue for a
                            found experiment [--axis A --dry-run --from found].
-  publish                  snapshot the whole queue → the forwarder so the
-                           dashboard Sweep tab can show it. Call after each
-                           iteration to keep the tab live.
-  reap [--max-age-min N]   return running/ files orphaned by a dead runner to
-                           backlog (default 60; ~2× the longest expected run).
+  agenda [--max-age-min N] the next action for every actionable experiment,
+                           derived purely from CH state (claim & run / analyze /
+                           reap / isolate / promote / needs-human) — drive the
+                           loop off this; resumes from the database alone.
+  annotate <id> --note "…" record the interpretation (what happened / where /
+                           how) onto Result.Note [--from found].
+  reap [--max-age-min N]   return running experiments orphaned by a dead runner
+                           to backlog (default 60; ~2× the longest expected run).
   isolate <id> --flip axis=value [--flip …]
                            materialise an OFAT isolation fan off a confirmed
                            hit (control + one variant per flip) into backlog/.
@@ -62,9 +66,9 @@ Subcommands:
                            severe, dimension-driven label concentrates on;
                            skips observational/not-runnable dims with reasons.
 
-Common flags:
-  --root DIR               sweep root (default $SWEEP_ROOT or .sweep)
-  --depth-first[=false]    prefer non-seed work in 'next' (default true)
+Common flags (global, before the subcommand):
+  --base URL               deploy whose ClickHouse holds the queue
+  --depth-first[=false]    prefer non-seed work in 'next' peek (default true)
 `
 
 func cmdSweep(client *api.Client, args []string, asJSON bool) error {
@@ -73,13 +77,13 @@ func cmdSweep(client *api.Client, args []string, asJSON bool) error {
 	}
 	switch args[0] {
 	case "seed":
-		return cmdSweepSeed(args[1:], asJSON)
+		return cmdSweepSeed(client, args[1:], asJSON)
 	case "status":
-		return cmdSweepStatus(args[1:], asJSON)
+		return cmdSweepStatus(client, args[1:], asJSON)
 	case "ls":
-		return cmdSweepLs(args[1:], asJSON)
+		return cmdSweepLs(client, args[1:], asJSON)
 	case "next":
-		return cmdSweepNext(args[1:], asJSON)
+		return cmdSweepNext(client, args[1:], asJSON)
 	case "bootstrap":
 		return cmdSweepBootstrap(client, args[1:], asJSON)
 	case "apply":
@@ -88,12 +92,14 @@ func cmdSweep(client *api.Client, args []string, asJSON bool) error {
 		return cmdSweepAnalyze(client, args[1:], asJSON)
 	case "promote":
 		return cmdSweepPromote(client, args[1:], asJSON)
-	case "publish":
-		return cmdSweepPublish(client, args[1:], asJSON)
+	case "agenda":
+		return cmdSweepAgenda(client, args[1:], asJSON)
+	case "annotate":
+		return cmdSweepAnnotate(client, args[1:], asJSON)
 	case "reap":
-		return cmdSweepReap(args[1:], asJSON)
+		return cmdSweepReap(client, args[1:], asJSON)
 	case "isolate":
-		return cmdSweepIsolate(args[1:], asJSON)
+		return cmdSweepIsolate(client, args[1:], asJSON)
 	case "seed-from-triage":
 		return cmdSweepSeedFromTriage(client, args[1:], asJSON)
 	case "help", "--help", "-h":
@@ -104,20 +110,19 @@ func cmdSweep(client *api.Client, args []string, asJSON bool) error {
 	}
 }
 
-func openStore(root string) (*sweep.Store, error) {
-	if root == "" {
-		root = sweep.DefaultRoot()
-	}
-	return sweep.Open(root)
+// openStore returns the ClickHouse-backed sweep queue (the master store, #772),
+// reached over the forwarder API on the harness's configured deploy.
+func openStore(client *api.Client) (*sweep.Store, error) {
+	return sweep.OpenCH(client.BaseURL, client.HTTP, client.BasicAuth), nil
 }
 
 func nowUTC() string { return time.Now().UTC().Format(time.RFC3339) }
 
-func cmdSweepSeed(args []string, asJSON bool) error {
+func cmdSweepSeed(client *api.Client, args []string, asJSON bool) error {
 	fs := flag.NewFlagSet("sweep seed", flag.ContinueOnError)
-	root := fs.String("root", "", "sweep root dir")
 	full := fs.Bool("full", false, "widen the seed across all platforms (default narrow depth-first)")
 	class := fs.String("class", "config", "sweep class: config (realistic stream/network) | fault (error-recovery)")
+	platform := fs.String("platform", "", "seed only this platform (e.g. androidtv); overrides --full/narrow")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -125,11 +130,16 @@ func cmdSweepSeed(args []string, asJSON bool) error {
 	if c != sweep.ClassConfig && c != sweep.ClassFault {
 		return fmt.Errorf("invalid --class %q: config|fault", *class)
 	}
-	s, err := openStore(*root)
+	s, err := openStore(client)
 	if err != nil {
 		return err
 	}
-	exps := sweep.Seed(c, *full, nowUTC())
+	var exps []*sweep.Experiment
+	if *platform != "" {
+		exps = sweep.Seed(c, *full, nowUTC(), *platform)
+	} else {
+		exps = sweep.Seed(c, *full, nowUTC())
+	}
 	for _, e := range exps {
 		if err := s.Save(sweep.StatusBacklog, e); err != nil {
 			return err
@@ -142,17 +152,90 @@ func cmdSweepSeed(args []string, asJSON bool) error {
 	if *full {
 		mode = "full (all platforms)"
 	}
-	fmt.Printf("seeded %d %s-class experiments into %s/backlog — %s\n", len(exps), c, s.Root, mode)
+	if *platform != "" {
+		mode = "platform=" + *platform
+	}
+	fmt.Printf("seeded %d %s-class experiments into backlog (%s) — %s\n", len(exps), c, s.Label(), mode)
 	return nil
 }
 
-func cmdSweepStatus(args []string, asJSON bool) error {
-	fs := flag.NewFlagSet("sweep status", flag.ContinueOnError)
-	root := fs.String("root", "", "sweep root dir")
+// cmdSweepAnnotate records the LLM's interpretation (what happened / where /
+// how) onto an experiment's Result.Note — the structured "why it concluded
+// that", so the row is self-explanatory from CH alone (vs the mechanical
+// analyze note). Written during the loop's investigate step on a hit.
+func cmdSweepAnnotate(client *api.Client, args []string, asJSON bool) error {
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
+		return errors.New(`usage: harness sweep annotate <experiment-id> --note "what happened / where / how" [--from found]`)
+	}
+	id := args[0]
+	fs := flag.NewFlagSet("sweep annotate", flag.ContinueOnError)
+	from := fs.String("from", "found", "bucket holding the experiment")
+	note := fs.String("note", "", "the interpretation (what happened / where / how) — required")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*note) == "" {
+		return errors.New("--note is required")
+	}
+	s, err := openStore(client)
+	if err != nil {
+		return err
+	}
+	e, err := s.Load(sweep.Status(*from), id)
+	if err != nil {
+		return fmt.Errorf("load %s/%s: %w", *from, id, err)
+	}
+	if e.Result == nil {
+		e.Result = &sweep.Result{}
+	}
+	e.Result.Note = *note
+	if err := s.Save(sweep.Status(*from), e); err != nil {
+		return err
+	}
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"experiment": id, "note": *note})
+	}
+	fmt.Printf("annotated %s: %s\n", id, *note)
+	return nil
+}
+
+// cmdSweepAgenda prints the next action for every actionable experiment, derived
+// purely from CH state — so a fresh runner knows what to do and can resume the
+// loop from the database alone.
+func cmdSweepAgenda(client *api.Client, args []string, asJSON bool) error {
+	fs := flag.NewFlagSet("sweep agenda", flag.ContinueOnError)
+	maxAgeMin := fs.Float64("max-age-min", 60, "minutes since claim before a running experiment is 'stale'")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	s, err := openStore(*root)
+	s, err := openStore(client)
+	if err != nil {
+		return err
+	}
+	all, err := s.List("") // every status
+	if err != nil {
+		return err
+	}
+	steps := sweep.Agenda(all, nowUTC(), time.Duration(*maxAgeMin*float64(time.Minute)))
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(steps)
+	}
+	if len(steps) == 0 {
+		fmt.Println("agenda empty — nothing to do (backlog drained, no open hits)")
+		return nil
+	}
+	for _, st := range steps {
+		fmt.Printf("  %-9s %-44s %-18s %s\n", st.Status, st.ID, st.Action, st.Reason)
+	}
+	return nil
+}
+
+func cmdSweepStatus(client *api.Client, args []string, asJSON bool) error {
+	fs := flag.NewFlagSet("sweep status", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	s, err := openStore(client)
 	if err != nil {
 		return err
 	}
@@ -173,19 +256,16 @@ func cmdSweepStatus(args []string, asJSON bool) error {
 	return nil
 }
 
-func cmdSweepLs(args []string, asJSON bool) error {
-	// status is the leading positional; pull it before parsing flags so
-	// `ls found --root X` works (Go's flag package stops at the positional).
+func cmdSweepLs(client *api.Client, args []string, asJSON bool) error {
 	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
-		return errors.New("usage: harness sweep ls <status> [--root DIR]")
+		return errors.New("usage: harness sweep ls <status>")
 	}
 	status := args[0]
 	fs := flag.NewFlagSet("sweep ls", flag.ContinueOnError)
-	root := fs.String("root", "", "sweep root dir")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	s, err := openStore(*root)
+	s, err := openStore(client)
 	if err != nil {
 		return err
 	}
@@ -220,7 +300,7 @@ func (f *flipList) Set(v string) error {
 	return nil
 }
 
-func cmdSweepIsolate(args []string, asJSON bool) error {
+func cmdSweepIsolate(client *api.Client, args []string, asJSON bool) error {
 	// The experiment id is the first positional; Go's flag package stops at
 	// the first non-flag token, so pull it out before parsing the flags.
 	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
@@ -228,14 +308,13 @@ func cmdSweepIsolate(args []string, asJSON bool) error {
 	}
 	id := args[0]
 	fs := flag.NewFlagSet("sweep isolate", flag.ContinueOnError)
-	root := fs.String("root", "", "sweep root dir")
 	from := fs.String("from", "found", "bucket holding the parent experiment")
 	var flips flipList
 	fs.Var(&flips, "flip", "axis=value (repeatable)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	s, err := openStore(*root)
+	s, err := openStore(client)
 	if err != nil {
 		return err
 	}
@@ -263,42 +342,46 @@ func cmdSweepIsolate(args []string, asJSON bool) error {
 	return nil
 }
 
-func cmdSweepNext(args []string, asJSON bool) error {
+func cmdSweepNext(client *api.Client, args []string, asJSON bool) error {
 	fs := flag.NewFlagSet("sweep next", flag.ContinueOnError)
-	root := fs.String("root", "", "sweep root dir")
-	depthFirst := fs.Bool("depth-first", true, "prefer non-seed work")
-	claim := fs.Bool("claim", false, "atomically claim the selected experiment")
+	depthFirst := fs.Bool("depth-first", true, "prefer non-seed work (peek only; --claim uses server score order)")
+	claim := fs.Bool("claim", false, "atomically claim the top eligible experiment (server-side)")
 	owner := fs.String("owner", "", "owner id to stamp on claim")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	s, err := openStore(*root)
+	s, err := openStore(client)
 	if err != nil {
 		return err
 	}
-	backlog, err := s.List(sweep.StatusBacklog)
-	if err != nil {
-		return err
-	}
-	w := sweep.DefaultWeights()
-	pick := w.SelectNext(backlog, *depthFirst)
-	if pick == nil {
-		if asJSON {
-			fmt.Println("null")
-		} else {
-			fmt.Println("backlog empty")
-		}
-		return nil
-	}
+
+	// --claim delegates the pick+claim to the server (concurrency-safe + scope-
+	// gated). Without --claim we peek: list the backlog and run the local
+	// scheduler so the operator sees what would run next.
+	var pick *sweep.Experiment
 	if *claim {
 		if *owner == "" {
 			return errors.New("--claim requires --owner")
 		}
-		claimed, err := s.Claim(pick.ID, *owner, nowUTC())
-		if err != nil {
-			return fmt.Errorf("claim %s: %w", pick.ID, err)
+		if pick, err = s.ClaimNext(*owner); err != nil {
+			return fmt.Errorf("claim: %w", err)
 		}
-		pick = claimed
+	} else {
+		backlog, err := s.List(sweep.StatusBacklog)
+		if err != nil {
+			return err
+		}
+		pick = sweep.DefaultWeights().SelectNext(backlog, *depthFirst)
+	}
+	if pick == nil {
+		if asJSON {
+			fmt.Println("null")
+		} else if *claim {
+			fmt.Println("nothing to claim (backlog empty or scope-gated)")
+		} else {
+			fmt.Println("backlog empty")
+		}
+		return nil
 	}
 	if asJSON {
 		return json.NewEncoder(os.Stdout).Encode(pick)
@@ -306,7 +389,7 @@ func cmdSweepNext(args []string, asJSON bool) error {
 	fmt.Printf("%s  kind=%s platform=%s protocol=%s mode=%s score=%.1f\n",
 		pick.ID, pick.Kind, pick.Platform, pick.Protocol, pick.Mode, pick.Score)
 	if *claim {
-		fmt.Printf("claimed by %s → running/\n", pick.Owner)
+		fmt.Printf("claimed by %s → running\n", pick.Owner)
 	}
 	return nil
 }

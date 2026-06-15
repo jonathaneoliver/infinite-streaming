@@ -56,12 +56,12 @@ func LabelsFromPlayHistogram(body []byte) ([]string, error) {
 // inconclusive is never produced here — it's an infra/probe verdict the runner
 // sets when there's no play_id at all (§11), distinct from "the player coped".
 func Analyze(e *Experiment, playID string, labels []string) Status {
-	v := Classify(labels)
+	v := classifyFor(e.Class, labels)
 	e.PlayID = playID
 	e.Result = &Result{
 		Verdict: v,
 		Labels:  labels,
-		Note:    analysisNote(v, labels),
+		Note:    analysisNote(e.Class, v, labels),
 	}
 	switch v {
 	case VerdictNotable, VerdictAberration:
@@ -71,7 +71,17 @@ func Analyze(e *Experiment, playID string, labels []string) Status {
 	}
 }
 
-func analysisNote(v Verdict, labels []string) string {
+func analysisNote(class Class, v Verdict, labels []string) string {
+	// Fault-class verdicts are about recovery — say what the player did with
+	// the injected fault, not just the worst label it produced.
+	if class == ClassFault {
+		switch v {
+		case VerdictClean:
+			return "recovered: survived the injected fault (first frame + no wedge)"
+		case VerdictAberration:
+			return "failed to recover: " + faultFailureReason(labels)
+		}
+	}
 	switch v {
 	case VerdictNotable, VerdictAberration:
 		if k := PrimaryKind(labels); k != "" {
@@ -79,6 +89,26 @@ func analysisNote(v Verdict, labels []string) string {
 		}
 	}
 	return string(v)
+}
+
+// faultFailureReason names the specific non-recovery mode the envelope tripped
+// on, for the fault-class aberration note.
+func faultFailureReason(labels []string) string {
+	got := make(map[string]bool, len(labels))
+	for _, l := range labels {
+		_, ev := splitLabel(l)
+		got[ev] = true
+	}
+	switch {
+	case got["qoe_vsf"] || got["qoe_msf"] || !got["first_frame"]:
+		return "never reached first frame (start failure)"
+	case got["player_stuck"] || got["player_error"]:
+		return "player wedged (stuck/errored)"
+	case got["stall_frozen"]:
+		return "froze with no retry to recover"
+	default:
+		return "no recovery evidence"
+	}
 }
 
 // NeedsConfirmation reports whether a first-pass hit should be re-run before

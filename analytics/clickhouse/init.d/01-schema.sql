@@ -881,13 +881,15 @@ TTL toDateTime(started_at) + INTERVAL 90 DAY DELETE WHERE classification = 'othe
 SETTINGS index_granularity = 8192;
 
 -- ── sweep_experiments ─────────────────────────────────────────────────────
--- The automated fault-sweep's orchestration queue (issue #772), published from
--- the local .sweep/ store via `harness sweep publish` so the dashboard's Sweep
--- tab can show pending / running / done / found experiments with their reasons
--- (why) and results (verdict) and lineage (parent → isolation fan). One
--- upsertable row per experiment: ReplacingMergeTree(updated_at) ORDER BY exp_id
--- collapses repeated publishes to the latest state. Query with FINAL (the table
--- is small — one row per live experiment).
+-- The automated fault-sweep's orchestration queue (issue #772). ClickHouse is
+-- the MASTER store (#772 CH-master migration): the `harness sweep` CLI reads and
+-- writes here over the forwarder API — there is no local .sweep/ file store. The
+-- typed columns drive the dashboard's Sweep tab (pending / running / done /
+-- found with reasons, results, lineage) AND scope filtering; `raw_json` carries
+-- the FULL experiment (shape / fault / content_manipulation / reps / …) so the
+-- runner can reconstruct the exact recipe to bootstrap + probe. One upsertable
+-- row per experiment: ReplacingMergeTree(updated_at) ORDER BY exp_id collapses
+-- writes to the latest state. Query with FINAL (the table is small).
 CREATE TABLE IF NOT EXISTS infinite_streaming.sweep_experiments
 (
     exp_id      String                  CODEC(ZSTD(1)),
@@ -907,6 +909,9 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.sweep_experiments
     verdict     LowCardinality(String)  CODEC(ZSTD(1)),   -- clean|notable|aberration|inconclusive|''
     player_id   String                  CODEC(ZSTD(1)),
     play_id     String                  CODEC(ZSTD(1)),
+    owner       String                  CODEC(ZSTD(1)),   -- runner that holds a running claim
+    claimed_at  DateTime64(3, 'UTC')    DEFAULT toDateTime64(0, 3),  -- when claimed (reap stale)
+    raw_json    String                  CODEC(ZSTD(3)),   -- full serialized Experiment (recipe of record)
     score       Float64                 DEFAULT 0,
     created_at  DateTime64(3, 'UTC')    CODEC(Delta, ZSTD(1)),
     updated_at  DateTime64(3, 'UTC')    CODEC(Delta, ZSTD(1)),
@@ -914,5 +919,70 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.sweep_experiments
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY exp_id
-TTL toDateTime(updated_at) + INTERVAL 30 DAY
+TTL toDateTime(updated_at) + INTERVAL 90 DAY  -- master store: keep resolved experiments a quarter
+SETTINGS index_granularity = 8192;
+
+-- ── sweep_claims ──────────────────────────────────────────────────────────
+-- Concurrency-safe claim ledger for the CH-master queue (#772). ClickHouse has
+-- no SELECT…FOR UPDATE, so a claim is resolved by DETERMINISTIC arbitration: a
+-- runner appends a claim row, settles briefly, then the winner of an exp_id is
+-- argMin(owner) over (claim_ts, claim_token) — the earliest claimant, ties broken
+-- by token, so every reader agrees on one winner regardless of read timing. The
+-- `next` selector excludes exp_ids already present here, so contention only
+-- arises on two runners grabbing the same top candidate in the same instant.
+CREATE TABLE IF NOT EXISTS infinite_streaming.sweep_claims
+(
+    exp_id      String                  CODEC(ZSTD(1)),
+    owner       String                  CODEC(ZSTD(1)),
+    claim_ts    DateTime64(3, 'UTC')    CODEC(ZSTD(1)),  -- ms; claim_token breaks sub-ms ties
+    claim_token String                  CODEC(ZSTD(1))
+)
+ENGINE = MergeTree
+ORDER BY exp_id
+SETTINGS index_granularity = 8192;
+
+-- ── sweep_runs ────────────────────────────────────────────────────────────
+-- Append-only run HISTORY (#772). The sweep_experiments queue is keyed by
+-- exp_id (ReplacingMergeTree), so re-running a recipe overwrites the prior run.
+-- sweep_runs keeps one row per RUN (keyed by play_id) so "everything we've ever
+-- run" survives — recipe + verdict + trigger + conclusion, one year. Written by
+-- the harness on analyze (which also marks the play `interesting` for the rich
+-- play-archive retention). Query ORDER BY run_at DESC for the dashboard History.
+CREATE TABLE IF NOT EXISTS infinite_streaming.sweep_runs
+(
+    play_id    String                  CODEC(ZSTD(1)),
+    exp_id     String                  CODEC(ZSTD(1)),
+    class      LowCardinality(String)  CODEC(ZSTD(1)),
+    kind       LowCardinality(String)  CODEC(ZSTD(1)),
+    platform   LowCardinality(String)  CODEC(ZSTD(1)),
+    protocol   LowCardinality(String)  CODEC(ZSTD(1)),
+    mode       LowCardinality(String)  CODEC(ZSTD(1)),
+    recipe     LowCardinality(String)  CODEC(ZSTD(1)),
+    verdict    LowCardinality(String)  CODEC(ZSTD(1)),
+    why        String                  CODEC(ZSTD(1)),
+    why_text   String                  CODEC(ZSTD(3)),
+    note       String                  CODEC(ZSTD(3)),
+    player_id  String                  CODEC(ZSTD(1)),
+    run_at     DateTime64(3, 'UTC')    CODEC(ZSTD(1))
+)
+ENGINE = MergeTree
+ORDER BY play_id
+TTL toDateTime(run_at) + INTERVAL 365 DAY
+SETTINGS index_granularity = 8192;
+
+-- ── sweep_scope ───────────────────────────────────────────────────────────
+-- Control-plane for "which dimensions are enabled" (#772 dashboard buttons).
+-- One row per (dimension,value) the operator has toggled; `enabled=0` gates that
+-- value out of seeding + claiming. The dashboard writes here; `seed` and `next`
+-- read it (a value absent from the table defaults to enabled). ReplacingMergeTree
+-- so toggles upsert. dimension ∈ platform|protocol|class|mode|fault_type.
+CREATE TABLE IF NOT EXISTS infinite_streaming.sweep_scope
+(
+    dimension   LowCardinality(String)  CODEC(ZSTD(1)),
+    value       String                  CODEC(ZSTD(1)),
+    enabled     UInt8                   DEFAULT 1,
+    updated_at  DateTime64(3, 'UTC')    CODEC(Delta, ZSTD(1))
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (dimension, value)
 SETTINGS index_granularity = 8192;
