@@ -1909,11 +1909,11 @@ export interface components {
              */
             variant_order: "default" | "ascending" | "descending" | "first_4mbps";
             /**
-             * @description Live edge offset window in seconds. 0 = no offset. Values 2/4/12/36/42 added (#793) for the segment×live-offset matrix.
+             * @description Live edge offset window in seconds. 0 = no offset. Values 2/4/12/30/36/42 added (#793) for the segment×live-offset matrix.
              * @default 0
              * @enum {integer}
              */
-            live_offset: 0 | 2 | 4 | 6 | 12 | 18 | 24 | 36 | 42;
+            live_offset: 0 | 2 | 4 | 6 | 12 | 18 | 24 | 30 | 36 | 42;
         };
         Manifest: {
             /** Format: uri */

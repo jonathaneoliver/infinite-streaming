@@ -30,6 +30,7 @@ const (
 	ContentManipulationLiveOffsetN18 ContentManipulationLiveOffset = 18
 	ContentManipulationLiveOffsetN2  ContentManipulationLiveOffset = 2
 	ContentManipulationLiveOffsetN24 ContentManipulationLiveOffset = 24
+	ContentManipulationLiveOffsetN30 ContentManipulationLiveOffset = 30
 	ContentManipulationLiveOffsetN36 ContentManipulationLiveOffset = 36
 	ContentManipulationLiveOffsetN4  ContentManipulationLiveOffset = 4
 	ContentManipulationLiveOffsetN42 ContentManipulationLiveOffset = 42
@@ -48,6 +49,8 @@ func (e ContentManipulationLiveOffset) Valid() bool {
 	case ContentManipulationLiveOffsetN2:
 		return true
 	case ContentManipulationLiveOffsetN24:
+		return true
+	case ContentManipulationLiveOffsetN30:
 		return true
 	case ContentManipulationLiveOffsetN36:
 		return true
@@ -681,7 +684,7 @@ type ContentManipulation struct {
 	// AllowedVariants When non-empty, only the listed variant URIs are kept in the master playlist.
 	AllowedVariants *[]string `json:"allowed_variants,omitempty"`
 
-	// LiveOffset Live edge offset window in seconds. 0 = no offset. Values 2/4/12/36/42 added (#793) for the segment×live-offset matrix.
+	// LiveOffset Live edge offset window in seconds. 0 = no offset. Values 2/4/12/30/36/42 added (#793) for the segment×live-offset matrix.
 	LiveOffset *ContentManipulationLiveOffset `json:"live_offset,omitempty"`
 
 	// OverstateBandwidth Inflate BANDWIDTH attribute by 10%.
@@ -700,7 +703,7 @@ type ContentManipulation struct {
 	VariantOrder *ContentManipulationVariantOrder `json:"variant_order,omitempty"`
 }
 
-// ContentManipulationLiveOffset Live edge offset window in seconds. 0 = no offset. Values 2/4/12/36/42 added (#793) for the segment×live-offset matrix.
+// ContentManipulationLiveOffset Live edge offset window in seconds. 0 = no offset. Values 2/4/12/30/36/42 added (#793) for the segment×live-offset matrix.
 type ContentManipulationLiveOffset int
 
 // ContentManipulationVariantOrder Re-sort the video EXT-X-STREAM-INF entries by BANDWIDTH to probe whether master-playlist order biases AVPlayer's initial-variant pick (#682). ascending = lowest first (our authoring); descending = highest first; first_4mbps = promote the variant nearest 4 Mbps to first-listed, rest ascending (initial-variant probe); default = passthrough. EXT-X-MEDIA audio/subtitle renditions are left untouched.

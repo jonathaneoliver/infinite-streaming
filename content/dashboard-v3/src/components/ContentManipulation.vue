@@ -20,7 +20,7 @@ const variants = computed(() => {
   return rawVariants.value.slice().sort((a, b) => (b.bandwidth ?? 0) - (a.bandwidth ?? 0));
 });
 
-const LIVE_OFFSET_CHOICES = [0, 2, 4, 6, 12, 18, 24, 36, 42] as const;
+const LIVE_OFFSET_CHOICES = [0, 2, 4, 6, 12, 18, 24, 30, 36, 42] as const;
 type LiveOffset = (typeof LIVE_OFFSET_CHOICES)[number];
 
 const VARIANT_ORDER_CHOICES = [

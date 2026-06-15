@@ -632,7 +632,7 @@ func toProxyContent(cm *sweep.ContentManipulation, allowedVariants []string) (*p
 	if cm.LiveOffset != nil {
 		off := proxy.ContentManipulationLiveOffset(int(*cm.LiveOffset))
 		if !off.Valid() {
-			return nil, fmt.Errorf("live_offset %g is not a supported window (0|2|4|6|12|18|24|36|42)", *cm.LiveOffset)
+			return nil, fmt.Errorf("live_offset %g is not a supported window (0|2|4|6|12|18|24|30|36|42)", *cm.LiveOffset)
 		}
 		out.LiveOffset = &off
 	}
