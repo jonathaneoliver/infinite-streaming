@@ -131,7 +131,11 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
   margin=$(printf '%s' "$recipe_json" | jq -r '.shape.margin_pct // 5' 2>/dev/null)
 
   if [ "$platform" = "androidtv" ]; then
-    [ "$ADB_OK" = 1 ] || { echo "  androidtv not available (no adb) — requeueing $exp_id"; harness sweep reap --max-age-min 0 >/dev/null 2>&1; continue; }
+    # No adb device on this runner: leave the claim HELD (don't requeue) so the
+    # next claim advances past it to a runnable platform instead of re-offering
+    # this same item (the 30s claim window would otherwise cycle the androidtv
+    # set forever). Step-0 reap returns it for a runner that does have a device.
+    [ "$ADB_OK" = 1 ] || { echo "  androidtv not available (no adb) — leaving claimed, advancing"; continue; }
     launch="$ANDROIDTV_LAUNCH"; device="$ANDROIDTV_UDID"
   else
     [ "$APPIUM_OK" = 1 ] || { echo "  $platform needs appium (down) — requeueing $exp_id"; harness sweep reap --max-age-min 0 >/dev/null 2>&1; continue; }
