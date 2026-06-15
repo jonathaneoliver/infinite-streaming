@@ -464,6 +464,9 @@ func applyPatchToSession(srv *Server, s map[string]any, patch map[string]any) er
 	if c, hasC := patch["content"]; hasC {
 		applyContentPatch(s, c)
 	}
+	if ac, hasAC := patch["app_config"]; hasAC {
+		applyAppConfigPatch(s, ac)
+	}
 	return nil
 }
 
@@ -548,6 +551,88 @@ func applyContentPatch(s map[string]any, c any) {
 			s["content_variant_order"] = str
 		}
 	}
+}
+
+// applyAppConfigPatch — projects the v2 app_config patch (#800: client-side
+// behaviour the player applies at its NEXT play boundary) onto the session map
+// as a nested "app_config" object. Unlike the flat content_*/shape_* fields,
+// app_config is stored nested because it is read back verbatim by the player
+// off GET /api/sessions (the proxy never acts on it server-side — it's a
+// pass-through the client overlays onto its own segment/protocol/offset/peak
+// state). JSON Merge Patch semantics: app_config:null clears the whole object;
+// a field set to null drops just that field; an omitted field is untouched, so
+// a partial patch (e.g. only segment) preserves the rest. Enum fields keep only
+// valid values so a malformed arg can't poison the object the client trusts.
+func applyAppConfigPatch(s map[string]any, c any) {
+	if c == nil {
+		delete(s, "app_config")
+		return
+	}
+	m, ok := c.(map[string]any)
+	if !ok {
+		return
+	}
+	out, _ := s["app_config"].(map[string]any)
+	if out == nil {
+		out = map[string]any{}
+	}
+	setEnum := func(key string, v any, allowed ...string) {
+		if v == nil {
+			delete(out, key)
+			return
+		}
+		str, ok := v.(string)
+		if !ok {
+			return
+		}
+		for _, a := range allowed {
+			if str == a {
+				out[key] = str
+				return
+			}
+		}
+	}
+	if v, present := m["segment"]; present {
+		setEnum("segment", v, "ll", "s2", "s6")
+	}
+	if v, present := m["protocol"]; present {
+		setEnum("protocol", v, "hls", "dash")
+	}
+	if v, present := m["live_offset_s"]; present {
+		if v == nil {
+			delete(out, "live_offset_s")
+		} else {
+			out["live_offset_s"] = toFloatZero(v)
+		}
+	}
+	if v, present := m["peak_bitrate_mbps"]; present {
+		if v == nil {
+			delete(out, "peak_bitrate_mbps")
+		} else {
+			out["peak_bitrate_mbps"] = toIntZero(v)
+		}
+	}
+	if len(out) == 0 {
+		delete(s, "app_config")
+		return
+	}
+	s["app_config"] = out
+}
+
+// toFloatZero coerces a JSON-decoded numeric (float64 from encoding/json, or an
+// int form) to float64, defaulting to 0 for anything else.
+func toFloatZero(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	}
+	return 0
 }
 
 func toIntZero(v any) int {

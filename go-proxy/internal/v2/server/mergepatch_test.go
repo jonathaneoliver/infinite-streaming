@@ -124,3 +124,66 @@ func TestDecodePatch_RejectsNonObject(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyAppConfigPatch covers the #800 app_config translation: store nested,
+// merge partials, drop a field via null, clear the object via null, and reject
+// out-of-vocab enum values.
+func TestApplyAppConfigPatch(t *testing.T) {
+	t.Run("stores nested", func(t *testing.T) {
+		s := map[string]any{}
+		applyAppConfigPatch(s, map[string]any{
+			"segment": "s2", "protocol": "dash",
+			"live_offset_s": 12.0, "peak_bitrate_mbps": 4.0,
+		})
+		want := map[string]any{
+			"segment": "s2", "protocol": "dash",
+			"live_offset_s": 12.0, "peak_bitrate_mbps": 4,
+		}
+		if !reflect.DeepEqual(s["app_config"], want) {
+			t.Fatalf("app_config = %#v, want %#v", s["app_config"], want)
+		}
+	})
+
+	t.Run("partial patch merges (preserves untouched)", func(t *testing.T) {
+		s := map[string]any{"app_config": map[string]any{"segment": "s2", "protocol": "hls"}}
+		applyAppConfigPatch(s, map[string]any{"segment": "ll"})
+		want := map[string]any{"segment": "ll", "protocol": "hls"}
+		if !reflect.DeepEqual(s["app_config"], want) {
+			t.Fatalf("merge = %#v, want %#v", s["app_config"], want)
+		}
+	})
+
+	t.Run("field null drops just that field", func(t *testing.T) {
+		s := map[string]any{"app_config": map[string]any{"segment": "s2", "protocol": "hls"}}
+		applyAppConfigPatch(s, map[string]any{"segment": nil})
+		want := map[string]any{"protocol": "hls"}
+		if !reflect.DeepEqual(s["app_config"], want) {
+			t.Fatalf("field-null = %#v, want %#v", s["app_config"], want)
+		}
+	})
+
+	t.Run("whole null clears object", func(t *testing.T) {
+		s := map[string]any{"app_config": map[string]any{"segment": "s2"}}
+		applyAppConfigPatch(s, nil)
+		if _, present := s["app_config"]; present {
+			t.Fatalf("app_config still present after null: %#v", s["app_config"])
+		}
+	})
+
+	t.Run("last field nulled clears object", func(t *testing.T) {
+		s := map[string]any{"app_config": map[string]any{"segment": "s2"}}
+		applyAppConfigPatch(s, map[string]any{"segment": nil})
+		if _, present := s["app_config"]; present {
+			t.Fatalf("empty app_config should be removed, got %#v", s["app_config"])
+		}
+	})
+
+	t.Run("rejects bad enum, keeps valid sibling", func(t *testing.T) {
+		s := map[string]any{}
+		applyAppConfigPatch(s, map[string]any{"segment": "nope", "protocol": "dash"})
+		want := map[string]any{"protocol": "dash"}
+		if !reflect.DeepEqual(s["app_config"], want) {
+			t.Fatalf("bad-enum = %#v, want %#v", s["app_config"], want)
+		}
+	})
+}
