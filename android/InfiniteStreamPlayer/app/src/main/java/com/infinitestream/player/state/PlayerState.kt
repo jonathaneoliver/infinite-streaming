@@ -49,9 +49,33 @@ data class ContentItem(
     val thumbnailPathLarge: String? = null,
 )
 
-enum class Protocol(val label: String) { HLS("HLS"), DASH("DASH") }
+enum class Protocol(val label: String) {
+    HLS("HLS"), DASH("DASH");
+
+    companion object {
+        /** Map an `is.protocol` launch-arg / wire value (iOS `StreamProtocol`
+         *  rawValue: `hls` / `dash`) to the enum. null = unrecognised. #797. */
+        fun fromArg(raw: String): Protocol? = when (raw.trim().lowercase()) {
+            "hls" -> HLS
+            "dash" -> DASH
+            else -> null
+        }
+    }
+}
 enum class Segment(val label: String, val suffix: String) {
-    LL("LL", ""), TWO("2s", "_2s"), SIX("6s", "_6s")
+    LL("LL", ""), TWO("2s", "_2s"), SIX("6s", "_6s");
+
+    companion object {
+        /** Map an `is.segment` launch-arg / wire value (iOS `SegmentLength`
+         *  rawValue: `ll` / `s2` / `s6`) to the enum; tolerates the `2s`/`6s`
+         *  label form too. null = unrecognised. #797. */
+        fun fromArg(raw: String): Segment? = when (raw.trim().lowercase()) {
+            "ll" -> LL
+            "s2", "2s" -> TWO
+            "s6", "6s" -> SIX
+            else -> null
+        }
+    }
 }
 enum class Codec(val label: String) { AUTO("Auto"), H264("H.264"), HEVC("HEVC"), AV1("AV1") }
 
@@ -109,6 +133,12 @@ data class UiState(
      *  #793). Drivable at launch for tests via the `is.flag.live_offset_s`
      *  intent extra. */
     val liveOffsetSeconds: Int = 0,
+    /** ABR peak-bitrate ceiling in Mbps. 0 = no cap (default). When > 0 the
+     *  ExoPlayer track selector won't pick a video rung whose bitrate exceeds
+     *  this — the analog of iOS `AVPlayerItem.preferredPeakBitRate`. Persisted
+     *  alongside the other Advanced flags, and drivable at launch for tests
+     *  via the `is.flag.peak_bitrate_mbps` intent extra (issue #797). */
+    val peakBitrateMbps: Int = 0,
     /** Skip the Home screen on cold launch when a saved server and a
      *  lastPlayed clip both exist — go straight to Playback so the user
      *  is back inside their stream without waiting for /api/content

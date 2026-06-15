@@ -324,6 +324,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         loadAdvancedFlags()
+        // Re-push the (now-default) flags into the track selector so a cleared
+        // peak-bitrate cap / 4K setting actually takes effect (#797).
+        applyTrackSelectionParameters()
     }
 
     /** Returns the index of the (possibly newly-added) server, or -1. */
@@ -380,6 +383,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 // still writes through normally.
                 liveOffsetSeconds = (com.infinitestream.player.LaunchConfig.liveOffsetSeconds
                     ?: p.getInt(FLAG_LIVE_OFFSET, 0)).coerceAtLeast(0),
+                // #797 characterization launch levers. segment/protocol are not
+                // persisted on Android (UI-only state), so a launch override
+                // just seeds the initial value for this launch; absent one the
+                // current default stands. peak_bitrate_mbps IS persisted (iOS
+                // parity) — a launch override outranks the stored value and is
+                // not written back. 0 Mbps = no ABR ceiling.
+                segment  = com.infinitestream.player.LaunchConfig.segment ?: it.segment,
+                protocol = com.infinitestream.player.LaunchConfig.streamProtocol ?: it.protocol,
+                peakBitrateMbps = (com.infinitestream.player.LaunchConfig.peakBitrateMbps
+                    ?: p.getInt(FLAG_PEAK_BITRATE, 0)).coerceAtLeast(0),
                 previewVideoSlots = run {
                     // First launch (no key) → hardware default. Otherwise
                     // clamp the stored value to the device's current cap.
@@ -480,16 +493,33 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         prefs().edit().putInt(FLAG_PREVIEW_VIDEO_SLOTS, clamped).apply()
     }
 
+    /** #797 ABR peak-bitrate ceiling (Mbps; 0 = no cap). Maps to ExoPlayer's
+     *  track selector `setMaxVideoBitrate` — the analog of iOS
+     *  `AVPlayerItem.preferredPeakBitRate`. The selector parameter is mutable
+     *  mid-play, so re-applying it takes effect on the next ABR decision
+     *  without a reload. Persisted like the other Advanced flags. */
+    fun setPeakBitrateMbps(mbps: Int) {
+        val clamped = mbps.coerceAtLeast(0)
+        _state.update { it.copy(peakBitrateMbps = clamped) }
+        prefs().edit().putInt(FLAG_PEAK_BITRATE, clamped).apply()
+        applyTrackSelectionParameters()
+    }
+
     /**
-     * Push the current flag set into ExoPlayer's track selector. Today only
-     * `allow4K` matters here — when off we cap to 1080 p so the chip's
-     * decoder isn't asked to do 4K H.264 if the network would otherwise
-     * pull the top rung of the ladder.
+     * Push the current flag set into ExoPlayer's track selector. `allow4K`
+     * caps the resolution (1080 p when off, so the chip isn't asked to decode
+     * 4K). `peakBitrateMbps` caps the bitrate of the rung ABR may select
+     * (#797) — the analog of iOS `preferredPeakBitRate`; 0 leaves it
+     * uncapped.
      */
     private fun applyTrackSelectionParameters() {
         val cap = if (_state.value.allow4K) Int.MAX_VALUE else 1080
+        // Mbps → bps. 0 (or anything that would overflow Int) = no cap.
+        val peakMbps = _state.value.peakBitrateMbps
+        val peakBps = if (peakMbps in 1..2000) peakMbps * 1_000_000 else Int.MAX_VALUE
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setMaxVideoSize(if (_state.value.allow4K) Int.MAX_VALUE else 1920, cap)
+            .setMaxVideoBitrate(peakBps)
             .build()
     }
 
@@ -1220,6 +1250,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private const val FLAG_GO_LIVE = "advanced_go_live"
         private const val FLAG_SKIP_HOME = "advanced_skip_home_on_launch"
         private const val FLAG_LIVE_OFFSET = "advanced_live_offset_s"
+        private const val FLAG_PEAK_BITRATE = "advanced_peak_bitrate_mbps"
         private const val FLAG_PREVIEW_VIDEO_SLOTS = "advanced_preview_video_slots"
         private const val FLAG_PLAY_ID_ROTATION = "advanced_play_id_rotation_s"
         private const val LAST_PLAYED_KEY = "last_played_content"
