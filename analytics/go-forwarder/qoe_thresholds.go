@@ -115,11 +115,14 @@ type QoEThresholds struct {
 		DownshiftOvershootRungs int `json:"downshift_overshoot_rungs"`
 	} `json:"abr"`
 
-	// Live-edge label thresholds (#553). Margins are seconds BEYOND the
-	// manifest-recommended offset.
+	// Live-edge label thresholds (#553). Concerning/Breach margins are seconds
+	// BEYOND the manifest-recommended offset (player drifting behind live).
+	// TightMargin is seconds BELOW it (player running closer to live than the
+	// manifest's hold-back wants → less buffer; #793).
 	Live struct {
 		OffsetConcerningMarginS float64 `json:"offset_concerning_margin_s"`
 		OffsetBreachMarginS     float64 `json:"offset_breach_margin_s"`
+		OffsetTightMarginS      float64 `json:"offset_tight_margin_s"`
 		HoldbackDeviationS      float64 `json:"holdback_deviation_s"`
 	} `json:"live"`
 }
@@ -156,6 +159,7 @@ func qoeDefaults() *QoEThresholds {
 	t.ABR.DownshiftOvershootRungs = 2 // ≥2 rungs below the cap-supported ceiling ⇒ overshoot (#669)
 	t.Live.OffsetConcerningMarginS = 3
 	t.Live.OffsetBreachMarginS = 10
+	t.Live.OffsetTightMarginS = 3 // ≥3s CLOSER to live than the manifest target ⇒ tight (#793)
 	t.Live.HoldbackDeviationS = 2
 	return t
 }
@@ -271,6 +275,9 @@ func loadQoEThresholds(path string) *QoEThresholds {
 	}
 	if override.Live.OffsetBreachMarginS != 0 {
 		cfg.Live.OffsetBreachMarginS = override.Live.OffsetBreachMarginS
+	}
+	if override.Live.OffsetTightMarginS != 0 {
+		cfg.Live.OffsetTightMarginS = override.Live.OffsetTightMarginS
 	}
 	if override.Live.HoldbackDeviationS != 0 {
 		cfg.Live.HoldbackDeviationS = override.Live.HoldbackDeviationS

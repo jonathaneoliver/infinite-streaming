@@ -137,6 +137,43 @@ So each run resolves to a **trichotomy** (three-way outcome): **`clean`** (only 
 `critical`). `notable` outcomes are surfaced and can spawn their own A/B isolation fan (§6) to characterize the
 surprise — exactly how we'd chase whether the over-downshift is iOS-specific, ladder-density-driven, etc.
 
+### 3.1 Manipulation check — the independent-variable must actually move (the validity gate, #793)
+
+The oracle classifies QoE *outcomes*. But a recipe that varies a manifest **input** (a config-class IV like
+`content_manipulation.live_offset`) is only interpretable if that input demonstrably *took effect*. Otherwise a
+run is attributing an outcome to a cause that never varied. This is a **manipulation check**, and it runs
+*before* the verdict counts:
+
+1. **The IV must have moved.** Compare the player's *achieved* value (read from the play's telemetry) to the
+   recipe's *intended* value, within tolerance. If it didn't move, the run is **`inconclusive`** (→ `review`),
+   never `found`/`done` — it says nothing about the hypothesis.
+2. **Only then does the effect comparison mean anything.** Compare outcomes across arms whose *achieved* IVs
+   genuinely differ. Two arms that both land at the default (because neither manipulation took) are not
+   comparable at all.
+
+Corollary: if, on a platform, *no available lever* moves the IV, the hypothesis is **untestable there** until a
+lever lands — and the gate surfaces that automatically (every such arm returns inconclusive) instead of letting
+it masquerade as findings.
+
+**Worked instance — live-offset (the motivating case).** `live_offset` is a load-time/session property
+(`EXT-X-START` + `HOLD-BACK`, read at join), so it can't be swept mid-play like bandwidth — **each value is its
+own little job** (one clean IV per run), and the arms share a per-platform comparison group. The achieved offset
+the gate reads is `recommended_offset_s` / `true_offset_s` (median of steady-state samples). The hold-back floor
+is **3× the MAX segment duration**, and "6 s" segments can round up to 7 s, so the floor sits near **21 s, not
+18 s**; the achieved offset also quantizes to segment boundaries — so the gate's tolerance is **segment-aware**
+(~one max-segment). Consequence: the *same* offset is sub-spec on `s6` (clamped → inconclusive) but legal on `s2`
+(lands) — which is exactly the segment × offset matrix the recipe seeds (`live-offset-s{2,6}-*`).
+
+**Detection economics (label vs LLM post-mortem).** Three live-offset dimensions carry a deterministic forwarder
+label — drift *behind* target (`qoe_live_offset_breach`/`_concerning`), running *too tight* (`qoe_live_offset_tight`,
+#793 — closer to live than the manifest hold-back wants), and config↔manifest mismatch (`qoe_holdback_deviation`).
+The rest (did-it-land, join accuracy, sub-spec handling, segment interaction, latency↔stability, post-stall
+resync, TTFF, cross-platform parity) are **detectable post-mortem by the LLM with no new labelling/code**, because
+the play already emits `configured/recommended/true/live_offset_s`
++ `error_code` + `playback_rate` + `first_frame` + resolution/bitrate. So the rule of thumb: make the
+**manipulation check** deterministic (it gates every finding), and lean on the LLM investigate step for the long
+tail — don't add a label per question.
+
 ## 4. Experiment record + the store
 
 > **⚠️ Superseded — migrated to ClickHouse-master (#772 CH-master).** This section's original design (a local

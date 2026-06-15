@@ -52,8 +52,9 @@ func TestSelectNextEmpty(t *testing.T) {
 
 func TestSeedNarrowConfigClass(t *testing.T) {
 	es := Seed(ClassConfig, false, "2026-06-13T00:00:00Z")
-	// 1 platform × len(seedProtocols) × len(configRecipes)
-	want := len(seedProtocols) * len(configRecipes)
+	// 1 platform × len(seedProtocols) × the full config recipe set
+	// (configRecipes + the live-offset matrix, via recipesFor).
+	want := len(seedProtocols) * len(recipesFor(ClassConfig))
 	if len(es) != want {
 		t.Fatalf("narrow config seed want %d, got %d", want, len(es))
 	}
@@ -78,6 +79,43 @@ func TestSeedNarrowConfigClass(t *testing.T) {
 	}
 }
 
+func TestLiveOffsetMatrixArms(t *testing.T) {
+	es := Seed(ClassConfig, false, "2026-06-13T00:00:00Z")
+	var segs, offs int
+	segSeen := map[string]bool{}
+	groupSeen := map[string]bool{}
+	for _, e := range es {
+		if e.Segment == "" {
+			continue // non-matrix config arm
+		}
+		segs++
+		segSeen[e.Segment] = true
+		if e.Group == "" {
+			t.Errorf("live-offset arm %s has a segment but no comparison group", e.ID)
+		}
+		groupSeen[e.Group] = true
+		if e.ContentManipulation == nil || e.ContentManipulation.LiveOffset == nil {
+			t.Errorf("live-offset arm %s missing live_offset", e.ID)
+		} else {
+			offs++
+		}
+		if e.WhyText == "" || e.LaunchMode != LaunchModeAppium {
+			t.Errorf("arm %s: why_text/launch_mode not stamped", e.ID)
+		}
+	}
+	if segs != 4 || offs != 4 {
+		t.Fatalf("want 4 live-offset matrix arms with offsets, got segs=%d offs=%d", segs, offs)
+	}
+	// Both segment sizes present (the cross-segment comparison), one shared
+	// per-platform group (ipad-sim narrow seed).
+	if !segSeen["s2"] || !segSeen["s6"] {
+		t.Fatalf("matrix must cover both s2 and s6: %v", segSeen)
+	}
+	if len(groupSeen) != 1 {
+		t.Fatalf("narrow matrix arms should share ONE per-platform group, got %v", groupSeen)
+	}
+}
+
 func TestSeedFaultClass(t *testing.T) {
 	es := Seed(ClassFault, false, "2026-06-13T00:00:00Z")
 	want := len(seedProtocols) * len(faultRecipes)
@@ -93,7 +131,7 @@ func TestSeedFaultClass(t *testing.T) {
 
 func TestSeedFullWidens(t *testing.T) {
 	es := Seed(ClassConfig, true, "2026-06-13T00:00:00Z")
-	want := len(fullPlatforms) * len(seedProtocols) * len(configRecipes)
+	want := len(fullPlatforms) * len(seedProtocols) * len(recipesFor(ClassConfig))
 	if len(es) != want {
 		t.Fatalf("full seed want %d, got %d", want, len(es))
 	}

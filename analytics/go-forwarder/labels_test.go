@@ -503,6 +503,7 @@ func TestQoELiveOffset(t *testing.T) {
 	}
 	concerning := qoeLabel(SevWarning, "qoe_live_offset_concerning")
 	breach := qoeLabel(SevCritical, "qoe_live_offset_breach")
+	tight := qoeLabel(SevWarning, "qoe_live_offset_tight")
 	holdback := qoeLabel(SevWarning, "qoe_holdback_deviation")
 	// excess 2 < 3 → none; configured == recommended → no holdback.
 	if got := mk(7, 5); hasLabel(got, concerning) || hasLabel(got, breach) || hasLabel(got, holdback) {
@@ -519,6 +520,14 @@ func TestQoELiveOffset(t *testing.T) {
 	// configured 8 vs recommended 5 → dev 3 > 2 → holdback.
 	if got := mk(5, 8); !hasLabel(got, holdback) {
 		t.Fatalf("holdback dev 3 should fire: %v", got)
+	}
+	// #793 tight direction: excess -2 (off 3 < rec 5) → within tight margin, clean.
+	if got := mk(3, 5); hasLabel(got, tight) || hasLabel(got, concerning) || hasLabel(got, breach) {
+		t.Fatalf("excess -2 should not fire any offset label: %v", got)
+	}
+	// excess -3 (off 2 < rec 5) → tight, and NOT concerning/breach.
+	if got := mk(2, 5); !hasLabel(got, tight) || hasLabel(got, concerning) || hasLabel(got, breach) {
+		t.Fatalf("excess -3 should be tight only: %v", got)
 	}
 }
 

@@ -506,6 +506,11 @@ func liveOffsetLabels(cfg *QoEThresholds, r *row) []string {
 			out = append(out, qoeLabel(SevCritical, "qoe_live_offset_breach"))
 		case excess >= cfg.Live.OffsetConcerningMarginS:
 			out = append(out, qoeLabel(SevWarning, "qoe_live_offset_concerning"))
+		case cfg.Live.OffsetTightMarginS > 0 && excess <= -cfg.Live.OffsetTightMarginS:
+			// Player is running CLOSER to live than the manifest's hold-back
+			// target wants — less buffer than the stream specified, a latency-
+			// for-stability trade the manifest didn't ask for (#793).
+			out = append(out, qoeLabel(SevWarning, "qoe_live_offset_tight"))
 		}
 	}
 	if cfgd := float64(r.ConfiguredOffsetS); cfgd > 0 && math.Abs(cfgd-rec) > cfg.Live.HoldbackDeviationS {

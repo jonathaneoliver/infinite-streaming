@@ -131,6 +131,7 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
   pattern=$(printf '%s' "$recipe_json" | jq -r '.shape.pattern // empty' 2>/dev/null)
   step=$(printf '%s' "$recipe_json" | jq -r '.shape.step_seconds // 12' 2>/dev/null)
   margin=$(printf '%s' "$recipe_json" | jq -r '.shape.margin_pct // 5' 2>/dev/null)
+  segment=$(printf '%s' "$recipe_json" | jq -r '.segment // empty' 2>/dev/null)  # s2|s6|ll → master variant (#793 live-offset matrix)
 
   # Launch mode is an instruction carried on the item (seed/triage stamp
   # launch_mode=appium); appium is the only mode TestSweepProbe supports and it
@@ -169,6 +170,7 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
   env CHAR_PLAYER_ID="$player_id" HARNESS_BASE_URL="$HARNESS_BASE_URL" LAUNCH_MODE="$launch" \
       CHAR_SWEEP_PLATFORM="$platform" \
       CHAR_CONTENT="$CONTENT" CHAR_SWEEP_DURATION_S="$DURATION" CHARACTERIZATION_DEVICE_UDID="$device" \
+      ${segment:+CHAR_SWEEP_SEGMENT="$segment"} \
       ${pattern:+CHAR_SWEEP_PATTERN="$pattern" CHAR_SWEEP_STEP_S="$step" CHAR_SWEEP_MARGIN="$margin"} \
       go test ./tests/characterization/modes -run TestSweepProbe -count=1 -v -timeout 8m >"$log" 2>&1
   play_id=$(grep -oE 'play_id: +[0-9a-fA-F-]+' "$log" | head -1 | awk '{print $2}')
