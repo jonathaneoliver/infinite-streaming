@@ -31,9 +31,13 @@ import (
 type streamKind string
 
 const (
-	streamEvents  streamKind = "events"
-	streamNetwork streamKind = "network"
-	streamControl streamKind = "control"
+	streamEvents    streamKind = "events"
+	streamNetwork   streamKind = "network"
+	streamControl   streamKind = "control"
+	// streamAVMetrics — iOS 18 AVMetrics raw events (issue #486 spike).
+	// Sibling of streamControl: low-volume CH-only stream (no ring),
+	// backfill via SQL + live continuation via a poller.
+	streamAVMetrics streamKind = "avmetrics"
 )
 
 func parseStreamKind(s string) (streamKind, bool) {
@@ -44,6 +48,8 @@ func parseStreamKind(s string) (streamKind, bool) {
 		return streamNetwork, true
 	case "control":
 		return streamControl, true
+	case "avmetrics":
+		return streamAVMetrics, true
 	}
 	return "", false
 }
@@ -76,6 +82,7 @@ var bundleRegistry = map[string]bundleDef{
 		Columns: []string{
 			"ts",
 			"session_id", "play_id", "player_id",
+			"start_time", // client play start (#587) → rail left edge
 			"event_time",
 			// Bandwidth chart series (server + player side)
 			"video_bitrate_mbps",
@@ -93,14 +100,23 @@ var bundleRegistry = map[string]bundleDef{
 			"client_rtt_max_ms",
 			"client_path_ping_rtt_ms",
 			"client_rto_ms",
+			// Client-side RTT proxy from AVMetrics TTFB (issue #486).
+			// Sits alongside the server-side TCP_INFO RTT on the
+			// chart so gaps between the two views are visible.
+			"client_rtt_avmetrics_ms",
 			// Buffer & offsets
 			"buffer_depth_s",
 			"buffer_end_s",
 			"live_offset_s",
+			// #786 — the live-offset trio so events read-API consumers can compute
+			// excess = live_offset_s - recommended_offset_s without a raw CH query
+			// (the columns are ingested for iOS + Android #782 but were panel_v1-only).
+			"recommended_offset_s",
+			"configured_offset_s",
 			"true_offset_s",
 			// FPS-derived counters
 			"frames_displayed",
-			"dropped_frames",
+			"frames_dropped",
 			"stall_count",
 			"stall_time_s",
 			// Player + manifest identity (used by hover tooltips +
@@ -145,6 +161,11 @@ var bundleRegistry = map[string]bundleDef{
 	// projection (SessionDisplay → chRowToPlayerRecord → archive cache)
 	// can only fill ~19 of the 28 PlayerMetrics labels, and the panel
 	// shows "—" for fields the data actually has.
+	// panel_v1 — fills the PlayerMetrics grid + PlayLog chip rows
+	// with extended player_metrics fields. Issue #486 added
+	// `time_per_variant_s` (iOS per-variant watch-time breakdown,
+	// a JSON-string keyed by `<res>@<kbps>kbps` → seconds) so
+	// PlayLog's JSON-field expansion can render one chip per variant.
 	"panel_v1": {
 		Name:   "panel_v1",
 		Stream: streamEvents,
@@ -157,12 +178,48 @@ var bundleRegistry = map[string]bundleDef{
 			"live_edge_s",
 			"metrics_source",
 			"loop_count_player",
-			"last_stall_time_s",
+			"loop_count_delta",
+			"state_from",
+			"state_to",
+			"content_name",
+			"user_marked_at",
+			"frames_rate",
 			"video_quality_pct",
+			"video_quality_60s_pct",
+			"video_quality_avg_pct",
 			"playhead_wallclock_ms",
 			"trigger_type",
 			"player_restarts",
 			"profile_shift_count",
+			"time_per_variant_s",
+			// Issue #486 follow-up: manifest HOLD-BACK + active
+			// variant nominal fps. PlayLog renders them as chips;
+			// future "true offset" chart can derive
+			// live_offset_s + recommended_offset_s.
+			"recommended_offset_s",
+			"configured_offset_s",
+			"frames_rate",
+			// #550 Phase 1: residency accumulators + sticky durations
+			// + ms-renamed video startup. PlayerMetrics panel reads
+			// these via chRowAdapter; without them the per-state
+			// tiles render as "—" in the session viewer.
+			"playing_time_ms", "playing_count",
+			"pausing_time_ms", "pausing_count",
+			"buffering_time_ms", "buffering_count",
+			"stalling_time_ms", "stalling_count",
+			"idling_time_ms", "idling_count",
+			"seeking_time_ms", "seeking_count",
+			"trickplaying_time_ms", "trickplaying_count",
+			"stall_duration_ms",
+			"buffering_duration_ms",
+			"video_first_frame_time_ms",
+			"video_start_time_ms",
+			// #550 Phase 2: outcome + error fields (per-snapshot;
+			// SessionDetails + PlayerMetrics both consume).
+			"playback_status", "playback_reason",
+			"error_code", "error_domain",
+			"terminal_error_code", "terminal_error_domain",
+			"error_count",
 		},
 	},
 
@@ -181,10 +238,25 @@ var bundleRegistry = map[string]bundleDef{
 			"video_resolution",
 			"video_bitrate_mbps",
 			"display_resolution",
+			"fetching_resolution",
 			"stall_count",
-			"dropped_frames",
+			"frames_dropped",
 			"player_error",
+			// #703a — error_code/_domain so the IMPAIRMENT ERROR marker can show
+			// the actual NSError code/domain (e.g. -1008 / NSURLErrorDomain), not
+			// just the message string.
+			"error_code",
+			"error_domain",
 			"last_event",
+			// #703a — player_restarts revives the PLAYBACK-lane RESTART marker
+			// (counter-diff; the column IS persisted — it's in panel_v1 too),
+			// and last_event above carries the new `live_resync` nudge event.
+			"player_restarts",
+			// #703a — playback_rate drives the PLAYBACK-lane RATE→0 / RATE→1
+			// markers (rate 0 == AVPlayer paused/stuck; distinguishes a stuck
+			// stall from a transient one, which `player_state` masks). In
+			// panel_v1 too; added here so EventsTimeline gets it per-tick.
+			"playback_rate",
 			"manifest_variants",
 			"master_manifest_consecutive_failures",
 			"manifest_consecutive_failures",
@@ -211,12 +283,33 @@ var bundleRegistry = map[string]bundleDef{
 			"content_id",
 			"user_agent",
 			"manifest_url",
+			// master_manifest_url is the player-loaded MASTER playlist;
+			// manifest_url above is the most-recently-fetched VARIANT.
+			// SessionDetails' "Master Manifest URL" tile reads the
+			// master — was missing here so it showed a variant URL.
+			"master_manifest_url",
 			"last_request_url",
 			"player_state",
 			"player_error",
 			"last_event",
 			"classification",
 			"control_revision",
+			// Identity fields SessionDetails reads at top level —
+			// were missing from the projection so the panel showed
+			// "—" for User Agent / Player IP / Port even though the
+			// CH row had them. (Fix: projection-gap parity with the
+			// Testing dashboard's PlayerRecord shape.)
+			"player_ip", "origination_ip",
+			"session_number",
+			"attempt_id",
+			"x_forwarded_port", "x_forwarded_port_external",
+			"server_received_at_ms",
+			// #550 Phase 4: device taxonomy — per-session stable
+			// fields. SessionDetails.vue renders them alongside
+			// identity tiles. Costs are minimal: LowCardinality
+			// columns compress repeats to near-nothing.
+			"device_class", "device_model", "player_tech", "player_tech_version",
+			"app_version", "os_version_major", "os_version_minor",
 		},
 	},
 
@@ -251,6 +344,20 @@ var bundleRegistry = map[string]bundleDef{
 			"ts", "play_id", "player_id", "session_id",
 			"attempt_id", "source", "event", "info", "labels",
 			"event_fingerprint",
+		},
+	},
+
+	// avmetrics — iOS 18 AVMetrics raw event stream (issue #486 spike).
+	// Sibling of `control` — low-volume CH-only stream, surfaced on
+	// the same brush rail so the comparison "what AVMetrics says vs
+	// what the heartbeat says" reads at a glance.
+	"avmetrics": {
+		Name:   "avmetrics",
+		Stream: streamAVMetrics,
+		Columns: []string{
+			"ts", "play_id", "player_id", "session_id",
+			"attempt_id", "event_type", "event_ts_ms", "raw_json",
+			"labels", "event_fingerprint",
 		},
 	},
 }
@@ -401,6 +508,8 @@ func mandatoryColumns(stream streamKind) []string {
 		return []string{"ts", "session_id", "play_id", "player_id", "attempt_id", "labels", "entry_fingerprint"}
 	case streamControl:
 		return []string{"ts", "play_id", "player_id", "session_id", "attempt_id", "labels", "event_fingerprint"}
+	case streamAVMetrics:
+		return []string{"ts", "play_id", "player_id", "session_id", "attempt_id", "labels", "event_fingerprint", "event_type"}
 	}
 	return nil
 }

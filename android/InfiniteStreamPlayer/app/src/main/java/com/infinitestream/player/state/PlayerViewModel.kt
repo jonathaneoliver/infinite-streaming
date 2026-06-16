@@ -52,7 +52,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
-    val playerId: String = UUID.randomUUID().toString()
+    // #714 config-on-connect: honor a harness-provided player_id (captured from
+    // the launch intent extra by MainActivity) so the app inherits the
+    // pre-configured proxy session; otherwise mint a fresh per-launch id.
+    val playerId: String =
+        com.infinitestream.player.LaunchConfig.playerId ?: UUID.randomUUID().toString()
 
     /**
      * `play_id` (issue #280) — a UUID regenerated at every fresh
@@ -63,8 +67,27 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var currentPlayId: String = UUID.randomUUID().toString()
 
+    /**
+     * `start_time` (#587) — client-supplied, play-scoped play start
+     * (ISO-8601 UTC). Minted with `currentPlayId` and rotated at the SAME
+     * boundaries; threaded through every URL as `?start_time=...` so the
+     * play's start is play-scoped end-to-end (the server-derived
+     * `started_at` is session-scoped and goes stale on a play rotation).
+     */
+    private var currentStartTime: String = java.time.Instant.now().toString()
+
     private fun regeneratePlayId() {
         currentPlayId = UUID.randomUUID().toString()
+        // Rotate the play-scoped start with the play_id (#587).
+        currentStartTime = java.time.Instant.now().toString()
+        // Fresh play boundary — reset the per-play counters so the new play's
+        // metrics start from zero. Every play_id rotation (content switch,
+        // segment/filter swap, soak rotation, reload) funnels through here.
+        // reload() additionally recreates the metrics instance; this makes the
+        // reuse-the-instance boundaries consistent. retry() keeps play_id
+        // stable and never calls this, so recovery attempts still preserve
+        // counters via snapshotForRestart().
+        metrics?.resetForFreshPlay()
     }
 
     /** Rotation Job armed after every successful loadStream and
@@ -83,7 +106,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         playIdLastActivityAt = System.currentTimeMillis()
     }
 
-    /** Replace any existing `play_id` query param with `currentPlayId`. */
+    /** Replace any existing `play_id` + `start_time` query params with the
+     *  current play's values (#587 — start_time travels with play_id). */
     private fun withPlayId(url: String): String {
         if (url.isEmpty()) return url
         val (base, query) = url.split("?", limit = 2).let {
@@ -91,7 +115,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
         val params = if (query.isEmpty()) mutableListOf() else query.split("&").toMutableList()
         params.removeAll { it.startsWith("play_id=") }
+        params.removeAll { it.startsWith("start_time=") }
         params.add("play_id=$currentPlayId")
+        params.add("start_time=$currentStartTime")
         return "$base?${params.joinToString("&")}"
     }
 
@@ -144,6 +170,22 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         player.clearMediaItems()
     }
     fun onActivityStarted() { _appStopped.value = false }
+
+    /** Wired from MainActivity's BackHandler when leaving the Playback
+     *  route. Picks user_stopped vs abandoned_start based on first-frame
+     *  + elapsed-since-play-start (EBVS). Forwards to PlaybackMetrics
+     *  which classifies ended_buffering / ended_stalling refinement
+     *  client-side before emitting play_end. */
+    fun endSessionForUserBack() {
+        metrics?.endSessionForUserBack()
+    }
+
+    /** App-terminated path — fired from MainActivity's onDestroy /
+     *  the process-lifecycle owner. Best-effort: if the OS reaps us
+     *  before the POST completes, the row stays in_progress. */
+    fun endSessionAsAppTerminated() {
+        metrics?.endSession("user_stopped", "app_terminated")
+    }
 
     fun acquireDecoderLease() { _decoderLeases.update { it + 1 } }
     fun releaseDecoderLease() {
@@ -282,6 +324,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         loadAdvancedFlags()
+        // Re-push the (now-default) flags into the track selector so a cleared
+        // peak-bitrate cap / 4K setting actually takes effect (#797).
+        applyTrackSelectionParameters()
     }
 
     /** Returns the index of the (possibly newly-added) server, or -1. */
@@ -325,11 +370,39 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 developerMode = p.getBoolean(DEV_MODE_KEY, false),
-                allow4K           = p.getBoolean(FLAG_4K, true),
+                // #797 P2: `is.flag.4k` / `is.flag.go_live` launch overrides
+                // outrank the persisted value for this launch (not written back).
+                allow4K           = com.infinitestream.player.LaunchConfig.allow4K
+                    ?: p.getBoolean(FLAG_4K, true),
                 localProxy        = p.getBoolean(FLAG_LOCAL_PROXY, true),
                 autoRecovery      = p.getBoolean(FLAG_AUTO_RECOVERY, false),
-                goLive            = p.getBoolean(FLAG_GO_LIVE, false),
+                goLive            = com.infinitestream.player.LaunchConfig.goLive
+                    ?: p.getBoolean(FLAG_GO_LIVE, false),
                 skipHomeOnLaunch  = p.getBoolean(FLAG_SKIP_HOME, false),
+                // A launch-provided override (the `is.flag.live_offset_s` intent
+                // extra captured by MainActivity) wins over the persisted value,
+                // matching iOS where NSArgumentDomain outranks the saved default.
+                // It is NOT persisted — like an NSArgumentDomain arg it lives
+                // only for this launch, so a manual change in Settings later
+                // still writes through normally.
+                liveOffsetSeconds = (com.infinitestream.player.LaunchConfig.liveOffsetSeconds
+                    ?: p.getInt(FLAG_LIVE_OFFSET, 0)).coerceAtLeast(0),
+                // #797 characterization launch levers. segment/protocol are not
+                // persisted on Android (UI-only state), so a launch override
+                // just seeds the initial value for this launch; absent one the
+                // current default stands. peak_bitrate_mbps IS persisted (iOS
+                // parity) — a launch override outranks the stored value and is
+                // not written back. 0 Mbps = no ABR ceiling.
+                segment  = com.infinitestream.player.LaunchConfig.segment ?: it.segment,
+                protocol = com.infinitestream.player.LaunchConfig.streamProtocol ?: it.protocol,
+                peakBitrateMbps = (com.infinitestream.player.LaunchConfig.peakBitrateMbps
+                    ?: p.getInt(FLAG_PEAK_BITRATE, 0)).coerceAtLeast(0),
+                // #797 P2: codec is UI-only state (not persisted), so a launch
+                // override just seeds it for this launch. starts_first_variant
+                // IS persisted (iOS parity); a launch override outranks it.
+                codec = com.infinitestream.player.LaunchConfig.codec ?: it.codec,
+                startsFirstVariant = com.infinitestream.player.LaunchConfig.startsFirstVariant
+                    ?: p.getBoolean(FLAG_STARTS_FIRST_VARIANT, false),
                 previewVideoSlots = run {
                     // First launch (no key) → hardware default. Otherwise
                     // clamp the stored value to the device's current cap.
@@ -341,9 +414,15 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     stored.coerceIn(0, hwCap)
                 },
-                lastPlayed    = p.getString(LAST_PLAYED_KEY, "") ?: "",
+                // #797 P2: `is.lastPlayed` (the harness's content-selection arg;
+                // `is.content` is an alias) pins which clip the hero / auto-resume
+                // targets. Not persisted from launch — first-frame still writes
+                // the real lastPlayed through normally.
+                lastPlayed    = com.infinitestream.player.LaunchConfig.lastPlayed
+                    ?: (p.getString(LAST_PLAYED_KEY, "") ?: ""),
                 viewCounts    = readViewCounts(p),
-                playIdRotationSeconds = p.getInt(FLAG_PLAY_ID_ROTATION, 0).coerceAtLeast(0),
+                playIdRotationSeconds = (com.infinitestream.player.LaunchConfig.playIdRotationSeconds
+                    ?: p.getInt(FLAG_PLAY_ID_ROTATION, 0)).coerceAtLeast(0),
             )
         }
     }
@@ -406,9 +485,33 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         prefs().edit().putBoolean(FLAG_GO_LIVE, on).apply()
     }
 
+    /** #797 starts_first_variant — pin the startup rung to the lowest variant,
+     *  releasing to free ABR once the first frame renders. The analog of iOS
+     *  `AVPlayerItem.startsOnFirstEligibleVariant`. Takes effect on the next
+     *  (re)load; re-applies the selector now so a toggle while paused-idle is
+     *  consistent. Persisted alongside the other Advanced flags. */
+    fun setStartsFirstVariant(on: Boolean) {
+        _state.update { it.copy(startsFirstVariant = on) }
+        prefs().edit().putBoolean(FLAG_STARTS_FIRST_VARIANT, on).apply()
+        applyTrackSelectionParameters()
+    }
+
     fun setSkipHomeOnLaunch(on: Boolean) {
         _state.update { it.copy(skipHomeOnLaunch = on) }
         prefs().edit().putBoolean(FLAG_SKIP_HOME, on).apply()
+    }
+
+    /** User-driven setter for the live-edge offset (seconds). 0 disables
+     *  (manifest HOLD-BACK / Go Live decides). The offset is baked into the
+     *  MediaItem's LiveConfiguration in [loadStream], so apply a change to an
+     *  in-progress play by rebuilding + reloading the stream — mirrors how
+     *  [setLocalProxy] reloads, and gives the same immediate effect as iOS's
+     *  live re-seek. Issue #266 / #793. */
+    fun setLiveOffsetSeconds(seconds: Int) {
+        val clamped = seconds.coerceAtLeast(0)
+        _state.update { it.copy(liveOffsetSeconds = clamped) }
+        prefs().edit().putInt(FLAG_LIVE_OFFSET, clamped).apply()
+        if (_state.value.currentUrl.isNotEmpty()) buildUrlAndLoad()
     }
 
     fun setPreviewVideoSlots(value: Int) {
@@ -417,16 +520,42 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         prefs().edit().putInt(FLAG_PREVIEW_VIDEO_SLOTS, clamped).apply()
     }
 
+    /** #797 ABR peak-bitrate ceiling (Mbps; 0 = no cap). Maps to ExoPlayer's
+     *  track selector `setMaxVideoBitrate` — the analog of iOS
+     *  `AVPlayerItem.preferredPeakBitRate`. The selector parameter is mutable
+     *  mid-play, so re-applying it takes effect on the next ABR decision
+     *  without a reload. Persisted like the other Advanced flags. */
+    fun setPeakBitrateMbps(mbps: Int) {
+        val clamped = mbps.coerceAtLeast(0)
+        _state.update { it.copy(peakBitrateMbps = clamped) }
+        prefs().edit().putInt(FLAG_PEAK_BITRATE, clamped).apply()
+        applyTrackSelectionParameters()
+    }
+
+    /** #797 starts_first_variant: latched false at the start of every play,
+     *  set true once the first frame renders. While the flag is on and this
+     *  is still false, the track selector is pinned to the lowest rung. */
+    private var startupVariantLockReleased = false
+
     /**
-     * Push the current flag set into ExoPlayer's track selector. Today only
-     * `allow4K` matters here — when off we cap to 1080 p so the chip's
-     * decoder isn't asked to do 4K H.264 if the network would otherwise
-     * pull the top rung of the ladder.
+     * Push the current flag set into ExoPlayer's track selector. `allow4K`
+     * caps the resolution (1080 p when off, so the chip isn't asked to decode
+     * 4K). `peakBitrateMbps` caps the bitrate of the rung ABR may select
+     * (#797) — the analog of iOS `preferredPeakBitRate`; 0 leaves it
+     * uncapped. `startsFirstVariant` forces the lowest rung until the first
+     * frame is up (the #797 analog of iOS `startsOnFirstEligibleVariant`),
+     * after which [onRenderedFirstFrame] releases the lock and ABR adapts.
      */
     private fun applyTrackSelectionParameters() {
         val cap = if (_state.value.allow4K) Int.MAX_VALUE else 1080
+        // Mbps → bps. 0 (or anything that would overflow Int) = no cap.
+        val peakMbps = _state.value.peakBitrateMbps
+        val peakBps = if (peakMbps in 1..2000) peakMbps * 1_000_000 else Int.MAX_VALUE
+        val forceLowest = _state.value.startsFirstVariant && !startupVariantLockReleased
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setMaxVideoSize(if (_state.value.allow4K) Int.MAX_VALUE else 1920, cap)
+            .setMaxVideoBitrate(peakBps)
+            .setForceLowestBitrate(forceLowest)
             .build()
     }
 
@@ -537,6 +666,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     codec = o.optString("codec", ""),
                     segmentDuration = if (o.isNull("segmentDuration")) null
                                       else o.optInt("segmentDuration", -1).takeIf { it >= 0 },
+                    segmentDurations = o.optJSONArray("segmentDurations")?.let { ja ->
+                        (0 until ja.length()).map { ja.getInt(it) }
+                    },
+                    hasLL = if (o.has("hasLL")) o.optBoolean("hasLL") else null,
                     thumbnailPath = o.optString("thumbnailPath", "").ifEmpty { null },
                     thumbnailPathSmall = o.optString("thumbnailPathSmall", "").ifEmpty { null },
                     thumbnailPathLarge = o.optString("thumbnailPathLarge", "").ifEmpty { null },
@@ -555,6 +688,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 put("clipId", c.clipId)
                 put("codec", c.codec)
                 if (c.segmentDuration != null) put("segmentDuration", c.segmentDuration)
+                c.segmentDurations?.let { put("segmentDurations", JSONArray(it)) }
+                c.hasLL?.let { put("hasLL", it) }
                 c.thumbnailPath?.let { put("thumbnailPath", it) }
                 c.thumbnailPathSmall?.let { put("thumbnailPathSmall", it) }
                 c.thumbnailPathLarge?.let { put("thumbnailPathLarge", it) }
@@ -605,6 +740,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                         codec = o.optString("codec", "").lowercase(),
                         segmentDuration = if (o.isNull("segment_duration")) null
                                           else o.optInt("segment_duration", -1).takeIf { it >= 0 },
+                        segmentDurations = o.optJSONArray("segment_durations")?.let { ja ->
+                            (0 until ja.length()).map { ja.getInt(it) }
+                        },
+                        hasLL = if (o.has("has_ll")) o.optBoolean("has_ll") else null,
                         thumbnailPath = o.optString("thumbnail_url", "").ifEmpty { null },
                         thumbnailPathSmall = o.optString("thumbnail_url_small", "").ifEmpty { null },
                         thumbnailPathLarge = o.optString("thumbnail_url_large", "").ifEmpty { null },
@@ -643,7 +782,29 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         if (wasPlaying) buildUrlAndLoad()
     }
 
-    private fun buildUrlAndLoad() {
+    /** #800 per-play app-config push. On a true play boundary (a fresh play,
+     *  not a same-play settings reload) pull the latest server-pushed
+     *  `app_config` and overlay it before composing the URL, so a harness
+     *  PATCH / config-on-connect change takes effect on THIS next play with no
+     *  process restart — the client-side counterpart to the proxy applying
+     *  server config on the next manifest fetch. Best-effort: a fetch miss
+     *  leaves the play on its current (launch-arg / Settings) values. Same-play
+     *  reloads (rotatePlayId=false: soak rotation, settings tweak) skip the
+     *  fetch and compose synchronously as before. */
+    private var appConfigJob: kotlinx.coroutines.Job? = null
+    private fun buildUrlAndLoad(rotatePlayId: Boolean = true) {
+        if (!rotatePlayId) {
+            composeUrlAndLoad(rotatePlayId = false)
+            return
+        }
+        appConfigJob?.cancel()
+        appConfigJob = viewModelScope.launch {
+            applyServerAppConfig()
+            composeUrlAndLoad(rotatePlayId = true)
+        }
+    }
+
+    private fun composeUrlAndLoad(rotatePlayId: Boolean = true) {
         val s = _state.value
         val server = s.activeServer ?: return
         if (s.selectedContent.isEmpty()) return
@@ -654,17 +815,102 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // stream). Same /go-live route in both cases.
         val port = if (s.localProxy) server.port else server.apiPort
         // Fresh play_id at every loadStream boundary (issue #280) so
-        // go-proxy can scope its network log per play.
-        regeneratePlayId()
+        // go-proxy can scope its network log per play. reload() rotates the
+        // id itself (so play_start carries the new id) and passes false here
+        // to avoid minting a second id the play_start row wouldn't match.
+        if (rotatePlayId) regeneratePlayId()
         // Anchor the age clock for the soak-rotation timer. Every
         // fresh loadStream resets the boundary; the Job is rescheduled
         // below once the player has been handed off.
         playIdMintedAt = System.currentTimeMillis()
         playIdLastActivityAt = 0L
-        val url = "${server.scheme}://${server.host}:$port/go-live/${s.selectedContent}/$manifest?player_id=$playerId&play_id=$currentPlayId"
+        var url = "${server.scheme}://${server.host}:$port/go-live/${s.selectedContent}/$manifest?player_id=$playerId&play_id=$currentPlayId&start_time=$currentStartTime"
+        // #714 Approach B (config-on-connect driven by the player): append a
+        // launch-provided raw proxy.* query fragment so the proxy materializes
+        // the session config on THIS bootstrap request — no pre-flight curl.
+        // Mirrors iOS Models.playbackURL; the 302 strips proxy.* for children.
+        com.infinitestream.player.LaunchConfig.proxyQuery?.let { pq ->
+            if (pq.isNotEmpty()) url += "&$pq"
+        }
         _state.update { it.copy(currentUrl = url, statusText = url) }
         loadStream(url)
         schedulePlayIdRotation()
+    }
+
+    /** #800 server-pushed per-play app config (the subset the harness can vary
+     *  per play). A null field = "leave the player's own value". */
+    private data class ServerAppConfig(
+        val segment: Segment?,
+        val protocol: Protocol?,
+        val liveOffsetSeconds: Int?,
+        val peakBitrateMbps: Int?,
+    )
+
+    /** Overlay the latest server-pushed app_config onto the play-affecting
+     *  state, so the next play composed by [composeUrlAndLoad] honours it.
+     *  Best-effort and only while routing through the proxy (localProxy) — the
+     *  app_config lives on the proxy session. A fetch miss is a no-op. #800. */
+    private suspend fun applyServerAppConfig() {
+        if (!_state.value.localProxy) return
+        val cfg = fetchServerAppConfig() ?: return
+        _state.update { st ->
+            st.copy(
+                segment           = cfg.segment ?: st.segment,
+                protocol          = cfg.protocol ?: st.protocol,
+                liveOffsetSeconds = cfg.liveOffsetSeconds ?: st.liveOffsetSeconds,
+                peakBitrateMbps   = cfg.peakBitrateMbps ?: st.peakBitrateMbps,
+            )
+        }
+        // segment/protocol/live_offset ride the manifest URL + loadStream seek
+        // (read live in composeUrlAndLoad/loadStream); the peak cap is a track-
+        // selector parameter, so re-apply it now.
+        if (cfg.peakBitrateMbps != null) applyTrackSelectionParameters()
+        tag("app_config: applied server overlay seg=${cfg.segment} proto=${cfg.protocol} " +
+            "offset=${cfg.liveOffsetSeconds} peak=${cfg.peakBitrateMbps}")
+    }
+
+    /** GET the proxy's /api/sessions, find this player's entry, and parse the
+     *  nested `app_config` object (#800, set by config-on-connect or a per-play
+     *  PATCH). Same base URL + player_id match as [PlaybackMetrics]. Bounded by
+     *  a short timeout and fully best-effort: any error / missing field → null
+     *  (the play keeps its current config). Runs off the main thread. */
+    private suspend fun fetchServerAppConfig(): ServerAppConfig? {
+        val base = _state.value.activeServer?.apiUrl?.takeIf { it.isNotEmpty() } ?: return null
+        return withTimeoutOrNull(2000L) {
+            withContext(Dispatchers.IO) {
+                var conn: java.net.HttpURLConnection? = null
+                try {
+                    val url = java.net.URL("$base/api/sessions")
+                    conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                        connectTimeout = 1500
+                        readTimeout = 1500
+                    }
+                    if (conn.responseCode != 200) return@withContext null
+                    val body = conn.inputStream.bufferedReader().use { it.readText() }
+                    val arr = JSONArray(body)
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        if (o.optString("player_id") != playerId) continue
+                        val ac = o.optJSONObject("app_config") ?: return@withContext null
+                        return@withContext ServerAppConfig(
+                            segment = ac.optString("segment").takeIf { it.isNotEmpty() }
+                                ?.let { Segment.fromArg(it) },
+                            protocol = ac.optString("protocol").takeIf { it.isNotEmpty() }
+                                ?.let { Protocol.fromArg(it) },
+                            liveOffsetSeconds = if (ac.has("live_offset_s") && !ac.isNull("live_offset_s"))
+                                ac.optDouble("live_offset_s").toInt().coerceAtLeast(0) else null,
+                            peakBitrateMbps = if (ac.has("peak_bitrate_mbps") && !ac.isNull("peak_bitrate_mbps"))
+                                ac.optInt("peak_bitrate_mbps").coerceAtLeast(0) else null,
+                        )
+                    }
+                    null
+                } catch (e: Exception) {
+                    null
+                } finally {
+                    conn?.disconnect()
+                }
+            }
+        }
     }
 
     /** Cancel any pending rotation Job and (if the setting is non-zero)
@@ -716,13 +962,30 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             player.stop()
             player.clearMediaItems()
         }
-        // Match iOS AVPlayer behaviour: let manifest's EXT-X-SERVER-CONTROL pick
-        // the start point, narrow the playback-speed window so ExoPlayer recovers
-        // via rate adjustment (not seeks) after a stall.
+        // #797 starts_first_variant: re-arm the startup low-rung lock for this
+        // play (released again at first frame). No-op when the flag is off.
+        startupVariantLockReleased = false
+        applyTrackSelectionParameters()
+        // Live-edge offset policy (issues #266 / #793):
+        //  - Go Live ON      → snap to the edge (seekToDefaultPosition below);
+        //                      leave the offset UNSET so the manifest decides
+        //                      the window and Go Live takes precedence — same
+        //                      ordering as iOS (goLive beats liveOffsetSeconds).
+        //  - offset > 0       → pin target/min/max to that offset so ABR
+        //                      rate-adjustment holds it rather than drifting,
+        //                      overriding the manifest's HOLD-BACK.
+        //  - otherwise        → UNSET: let manifest's EXT-X-SERVER-CONTROL pick
+        //                      the start point (default behaviour).
+        // The narrow 0.97–1.03 speed window lets ExoPlayer recover toward the
+        // target via rate adjustment (not seeks) after a stall in every case.
+        val offsetMs = if (!_state.value.goLive && _state.value.liveOffsetSeconds > 0)
+            _state.value.liveOffsetSeconds * 1000L
+        else
+            C.TIME_UNSET
         val live = MediaItem.LiveConfiguration.Builder()
-            .setTargetOffsetMs(C.TIME_UNSET)
-            .setMinOffsetMs(C.TIME_UNSET)
-            .setMaxOffsetMs(C.TIME_UNSET)
+            .setTargetOffsetMs(offsetMs)
+            .setMinOffsetMs(offsetMs)
+            .setMaxOffsetMs(offsetMs)
             .setMinPlaybackSpeed(0.97f)
             .setMaxPlaybackSpeed(1.03f)
             .build()
@@ -734,8 +997,54 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             // Snap to live edge after the manifest finishes parsing — ExoPlayer
             // honours seekToDefaultPosition() once the period is known.
             player.seekToDefaultPosition()
+        } else if (_state.value.liveOffsetSeconds > 0) {
+            // Pinning the LiveConfiguration target alone is NOT enough: ExoPlayer
+            // joins at the manifest's EXT-X-START / HOLD-BACK position (~21s for
+            // 6s segments) and then converges to the target ONLY through the
+            // narrow 0.97–1.03 speed window — ~0.03 s/s, so a 40s target takes
+            // ~10 min to reach. Seek straight to liveEdge − offset (iOS parity
+            // with scheduleLiveOffsetSeek); the pinned target/min/max then holds
+            // it there. Issue #266 / #793.
+            scheduleLiveOffsetSeek("playback started")
         }
         metrics?.onPlaybackStarted()
+    }
+
+    /** One-shot job that jumps the playhead to `liveEdge − liveOffsetSeconds`
+     *  once ExoPlayer reports a valid live offset, then lets the pinned
+     *  LiveConfiguration (target=min=max) hold it. Polls every 250 ms for up
+     *  to 20 s while the live window forms. No-op when the offset is 0 or Go
+     *  Live is on. Mirrors iOS `scheduleLiveOffsetSeek`. */
+    private var liveOffsetSeekJob: kotlinx.coroutines.Job? = null
+    private fun scheduleLiveOffsetSeek(reason: String) {
+        liveOffsetSeekJob?.cancel()
+        liveOffsetSeekJob = null
+        val targetSeconds = _state.value.liveOffsetSeconds
+        if (targetSeconds <= 0 || _state.value.goLive) return
+        val targetMs = targetSeconds * 1000L
+        liveOffsetSeekJob = viewModelScope.launch {
+            val deadline = System.currentTimeMillis() + 20_000L
+            while (System.currentTimeMillis() < deadline) {
+                val current = player.currentLiveOffset
+                if (player.isCurrentMediaItemLive && current != C.TIME_UNSET && current > 0) {
+                    // delta > 0 → sit further back (seek earlier); < 0 → closer
+                    // to live (seek later). Only act when we're meaningfully off
+                    // target so we don't fight the speed controller near the mark.
+                    val delta = targetMs - current
+                    if (kotlin.math.abs(delta) > 1000L) {
+                        val seekTo = (player.currentPosition - delta).coerceAtLeast(0L)
+                        player.seekTo(seekTo)
+                        android.util.Log.i("InfiniteStream",
+                            "LIVE OFFSET: seek to ${targetSeconds}s behind live " +
+                                "(was ${current / 1000.0}s, $reason)")
+                    }
+                    return@launch
+                }
+                kotlinx.coroutines.delay(250)
+            }
+            android.util.Log.i("InfiniteStream",
+                "LIVE OFFSET: gave up after 20s (live offset not ready)")
+        }
     }
 
     /** Clear the "currently playing" URL marker. Called by MainActivity on
@@ -750,20 +1059,30 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      * when the player has stalled or surfaced an error and you want the
      * built-in retry kicked off without waiting for it.
      */
-    fun retry() {
+    fun retry(reason: String = "user_retry") {
         val url = _state.value.currentUrl
         if (url.isEmpty()) return
-        // A retry is a new playback episode — fresh play_id so the
-        // proxy's network log scopes the next round of requests
-        // separately from the one that just failed. Issue #280.
-        regeneratePlayId()
-        val refreshed = withPlayId(url)
-        _state.update { it.copy(currentUrl = refreshed, statusText = refreshed) }
-        // User-driven Retry deserves its own HAR — bypass per-player debounce.
-        metrics?.requestHarSnapshot("user_retry", 0, /* force= */ true)
+        // #550 retry contract — recovery attempt WITHIN the same play.
+        // Mirrors iOS PlayerViewModel.retry():
+        //   - play_id stays stable (do NOT rotate)
+        //   - residency + variant-dwell counters preserved across the
+        //     player_item replacement via metrics.snapshotForRestart()
+        //   - the next resetResidency() (inside loadStream's
+        //     onPlaybackStarted) restores from those priors rather
+        //     than zeroing
+        // Reload (separate UI action) rotates play_id + clears priors;
+        // the proxy's network log scopes the new round of requests
+        // accordingly.
+        metrics?.snapshotForRestart()
+        // #603 — emit a `restart` event (reason=user_retry) so the mid-play
+        // recovery is observable; onRestart also fires the user-driven HAR.
+        // markRestartPending() makes onPlaybackStarted preserve the play's
+        // video_start_time + fold the re-prepare wait into residency.
+        metrics?.onRestart(reason)
+        metrics?.markRestartPending()
         player.stop()
         player.clearMediaItems()
-        loadStream(refreshed)
+        loadStream(url)
     }
 
     /**
@@ -793,9 +1112,32 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun reload() {
-        metrics?.onRestart("reload")
+        // #566 — terminate the OUTGOING play first so it gets an outcome
+        // row + QoE labels instead of dangling `in_progress`. sendEvent
+        // snapshots the payload synchronously, so the play_end row carries
+        // the OLD play_id + final state even though the POST is async; the
+        // play_id only rotates on the regeneratePlayId() below. status=
+        // user_stopped, reason=reloaded (distinct from a back-tap's
+        // user_quit).
+        metrics?.endSession("user_stopped", "reloaded")
+        // #603 — rotate to the NEW play_id BEFORE emitting play_start so the
+        // play-open boundary carries the new play's id (iOS parity). buildUrlAndLoad
+        // below is told NOT to rotate again so the stream URL uses this same id.
+        // regeneratePlayId() also zeroes the per-play accumulators (variant dwell
+        // etc.) on the still-bound metrics instance — the new PlaybackMetrics built
+        // in bindMetrics() starts empty anyway, but this guards a cached reference.
+        regeneratePlayId()
+        playIdMintedAt = System.currentTimeMillis()
+        playIdLastActivityAt = 0L
+        // #603 — a reload opens a NEW play, so emit play_start (the play-open
+        // boundary, symmetric to play_end), NOT restart. `restart` is reserved
+        // for mid-play recovery (retry / auto-recovery). Emitted on the still-live
+        // metrics instance whose payload reads currentPlayId live → carries the
+        // new id just minted above, with zeroed residency.
+        metrics?.onPlayStart()
         metrics?.release()
         metrics = null
+        boundPlayerView = null
         player.release()
         bandwidthMeter = DefaultBandwidthMeter.Builder(getApplication()).build()
         player = ExoPlayer.Builder(getApplication<Application>())
@@ -804,34 +1146,62 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         attachPlayerListeners()
         applyTrackSelectionParameters()
         _state.update { it.copy(currentUrl = "", playerEpoch = it.playerEpoch + 1) }
-        buildUrlAndLoad()
+        buildUrlAndLoad(rotatePlayId = false)
     }
 
     // -- Metrics binding -----------------------------------------------------
 
     /**
-     * Bound from the playback screen once the [PlayerView] is composed. We
-     * re-create [PlaybackMetrics] each time because it captures the PlayerView
-     * for display-resolution reads.
+     * Bound from the playback screen once the [PlayerView] is composed.
+     *
+     * IMPORTANT: AndroidView.update fires on every Compose recomposition,
+     * so this gets called many times per second during normal interaction.
+     * It MUST be idempotent — recreating PlaybackMetrics on every call
+     * zeroes the residency / variant-dwell / counters mid-play, which the
+     * dashboard sees as Playing Time / Pausing Time inexplicably resetting.
+     *
+     * We compare PlayerView identity to detect a genuinely-new view (e.g.
+     * after vm.reload() rebuilds the player) and only recreate then.
      */
     fun bindMetrics(view: PlayerView) {
+        if (metrics != null && boundPlayerView === view) return
         metrics?.release()
+        boundPlayerView = view
         metrics = PlaybackMetrics(
             player, view, bandwidthMeter, playerId,
             { _state.value.activeServer?.apiUrl ?: "" },
             { _state.value.currentUrl },
+            // Read selectedContent LIVE per emit (urlProvider pattern)
+            // so a late-arriving content pick lands on the next heartbeat
+            // instead of staying empty if bindMetrics fired before
+            // selectedContent was set.
+            { _state.value.selectedContent },
+            // #603 — pin play-scoped ids onto metrics POST URLs (iOS parity).
+            // Read live per emit; PlaybackMetrics captures them synchronously in
+            // buildPayload at fire time, so a play_end at a reload boundary keeps
+            // the OLD play_id even though the POST is async + play_id later rotates.
+            object : PlaybackMetrics.PlayContextProvider {
+                override fun currentPlayId() = currentPlayId
+                override fun currentStartTime() = currentStartTime
+            },
         ).also { it.start() }
     }
+
+    /** Cached PlayerView reference used by bindMetrics() to short-circuit
+     *  no-op rebinds during Compose recompositions. Reset to null on
+     *  unbindMetrics + reload so the next bind genuinely creates fresh. */
+    private var boundPlayerView: PlayerView? = null
 
     fun unbindMetrics() {
         metrics?.release()
         metrics = null
+        boundPlayerView = null
     }
 
     private fun attachPlayerListeners() {
         player.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
-                metrics?.onPlayerError(error.message)
+                metrics?.onPlayerError(error)
                 markPlayIdActivity()
                 // Retry on any MediaCodec decoder failure — covers both
                 // NO_MEMORY init failures (lease-counting in
@@ -852,7 +1222,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     viewModelScope.launch {
                         kotlinx.coroutines.delay(backoff)
-                        retry()
+                        retry("auto_recovery")
                     }
                     return
                 }
@@ -863,13 +1233,27 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 if (_state.value.autoRecovery && _state.value.currentUrl.isNotEmpty()) {
                     viewModelScope.launch {
                         kotlinx.coroutines.delay(500)
-                        retry()
+                        retry("auto_recovery")
                     }
+                    return
                 }
+                // No auto-recovery → this error is terminal. Phase 2:
+                // metrics emits a play_end with start_failure (no
+                // first frame yet) or mid_stream_failure (post-first-
+                // frame), stamping playback_status into CH.
+                metrics?.markFatalTerminal(error.message ?: "")
             }
             override fun onRenderedFirstFrame() {
                 tag("main player: first frame for '${_state.value.selectedContent}'")
                 metrics?.onFirstFrameRendered()
+                // #797 starts_first_variant: first frame is up on the startup
+                // (lowest) rung; release the lock so ABR can adapt upward for
+                // the rest of the play. Mirrors iOS startsOnFirstEligibleVariant.
+                if (_state.value.startsFirstVariant && !startupVariantLockReleased) {
+                    startupVariantLockReleased = true
+                    applyTrackSelectionParameters()
+                    tag("starts_first_variant: released startup low-rung lock")
+                }
                 // Successful frame = the chip allocated decoders for us
                 // and they're functioning, so wipe the codec retry
                 // counter. Next time we hit a decoder fault we get a
@@ -918,11 +1302,19 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 metrics?.onTimeJump(old.positionMs, new.positionMs, name)
             }
+            override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
+                // Source looped — fire loop counter increment for the
+                // player_metrics_loop_count_player payload field.
+                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
+                    || reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                    metrics?.onLoop()
+                }
+            }
         })
         player.addAnalyticsListener(object : AnalyticsListener {
             override fun onDroppedVideoFrames(
                 eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long
-            ) { metrics?.onDroppedFrames(droppedFrames) }
+            ) { metrics?.onFramesDropped(droppedFrames) }
 
             override fun onVideoInputFormatChanged(
                 eventTime: AnalyticsListener.EventTime, format: Format,
@@ -988,6 +1380,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         super.onCleared()
         playIdRotationJob?.cancel()
+        liveOffsetSeekJob?.cancel()
+        appConfigJob?.cancel()
         metrics?.release()
         player.release()
     }
@@ -1002,6 +1396,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private const val FLAG_AUTO_RECOVERY = "advanced_auto_recovery"
         private const val FLAG_GO_LIVE = "advanced_go_live"
         private const val FLAG_SKIP_HOME = "advanced_skip_home_on_launch"
+        private const val FLAG_LIVE_OFFSET = "advanced_live_offset_s"
+        private const val FLAG_PEAK_BITRATE = "advanced_peak_bitrate_mbps"
+        private const val FLAG_STARTS_FIRST_VARIANT = "advanced_starts_first_variant"
         private const val FLAG_PREVIEW_VIDEO_SLOTS = "advanced_preview_video_slots"
         private const val FLAG_PLAY_ID_ROTATION = "advanced_play_id_rotation_s"
         private const val LAST_PLAYED_KEY = "last_played_content"

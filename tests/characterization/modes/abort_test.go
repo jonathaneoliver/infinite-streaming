@@ -151,9 +151,9 @@ func runAbort(t *testing.T, p runner.Platform) {
 	if err != nil {
 		t.Fatalf("PlayerState (post-warmup): %v", err)
 	}
-	variants, err := runner.VariantRatesDesc(rec, 0)
+	variants, err := runner.StandardLadderRates(rec)
 	if err != nil {
-		t.Fatalf("VariantRatesDesc: %v", err)
+		t.Fatalf("StandardLadderRates: %v", err)
 	}
 	topResolutions := []string{variants[0].Resolution}
 	t.Logf("top variant: %s (%.3f Mbps avg)", topResolutions[0], float64(variants[0].AvgBps)/1_000_000)

@@ -47,8 +47,16 @@ Length: one page rendered. If it grows past that, split.
   transfer_abandoned, buffer metric reporting gaps)
 - `abr-decision-model.md` — how a player chooses variants, why
   downshift cascades, what triggers timejump
+- `abr-ladder.md` — peak vs average per player/phase, the dual-rung
+  filled limit ladder, manifest ladder hazards
 - `codec-strings.md` — avc1/hev1/mp4a profile-level-tier, what
   platforms require what, common stripping bugs
+- `qoe-metrics.md` — CIRR/CIRT/VST/EBVS definitions (Conviva
+  provenance, not standards), our label math, the seek-exclusion
+  caveat
+- `invariants.md` — operating manual for the aberration-crawl rule
+  catalogue (`tests/aberration_crawl/invariants.yaml`): validity
+  windows, census-before-assert, documented NON-rules
 
 ## When to add a new one
 

@@ -281,7 +281,7 @@ export interface PlaySummary {
   net_errors?: number;
   net_faults?: number;
   stalls?: number;
-  dropped_frames?: number;
+  frames_dropped?: number;
   master_manifest_failures?: number;
   manifest_failures?: number;
   segment_failures?: number;
@@ -305,7 +305,31 @@ export interface PlaySummary {
   label_histogram?: [string, number][];
   labels_total?: number;
   labels_distinct_count?: number;
+  // #678 — run-identity object, built server-side from the typed summary
+  // columns + testing= label tails. Absent when a play carries none of them.
+  scenario?: Scenario;
   [k: string]: unknown;
+}
+
+/**
+ * Run IDENTITY of a play — "what it IS" (test/platform/device/versions), as
+ * distinct from event labels ("what HAPPENED"). See forwarder.yaml § Scenario
+ * and analytics/go-forwarder/internal/plays/scenario.go. Every field optional.
+ */
+export interface Scenario {
+  test?: string;
+  platform?: string;
+  run_id?: string;
+  device_class?: string;
+  device_model?: string;
+  player_tech?: string;
+  player_tech_version?: string;
+  app_version?: string;
+  os_version?: string;
+  content_id?: string;
+  // #679 — server-side run identity.
+  manifest_variant?: string; // 'll' | '2s' | '6s'
+  server_build?: string;
 }
 
 export interface ListPlaysParams {

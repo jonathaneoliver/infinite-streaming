@@ -71,6 +71,10 @@ Optional Arguments:
   --segment-duration <s> Segment duration in seconds (default: 6)
   --partial-duration <s> Partial/GOP duration in seconds (default: 0.2)
   --gop-duration <s>     GOP/keyframe duration in seconds (default: 1.0)
+  --byteranges           Emit .byteranges sidecar files (Phase 6). Default OFF —
+                         LL-HLS embeds #EXT-X-PART inline and DASH uses the MPD,
+                         so the sidecars go unread unless a consumer needs the
+                         fallback.
   --bitrate-override-hevc <map> Override HEVC ladder kbps by resolution (e.g. 360p=1367,540p=2617)
   --bitrate-override-h264 <map> Override H264 ladder kbps by resolution (e.g. 360p=1421,540p=2762)
   --vmaf-lookup-csv <p>  CSV from crf_bandwidth_sweep.py for estimated VMAF burn-in
@@ -191,6 +195,11 @@ DEFAULT_VMAF_LOOKUP_CSV="${SCRIPT_DIR}/crf_bandwidth_sweep_newer.csv"
 RESUME_PACKAGE_FROM=""    # Optional path to existing abr_ladder temp dir
 RESUME_MODE=false
 FRAGMENT_PARSER_SCRIPT="" # Auto-detected path to parse_fmp4_fragments.py
+# Phase 6 .byteranges sidecars — default OFF (#762). LL-HLS embeds the partial
+# byte ranges inline as #EXT-X-PART (go-live's authoritative source; the sidecar
+# is only a fallback) and DASH addresses via the MPD's SegmentList — so nothing
+# reads these by default. Re-enable with --byteranges for the fallback path.
+EMIT_BYTERANGES=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -276,6 +285,10 @@ while [[ $# -gt 0 ]]; do
         --gop-duration)
             GOP_DURATION="$2"
             shift 2
+            ;;
+        --byteranges)
+            EMIT_BYTERANGES=true
+            shift
             ;;
         --bitrate-override-hevc)
             BITRATE_OVERRIDE_HEVC="$2"
@@ -472,12 +485,27 @@ NC='\033[0m' # No Color
 
 # All possible resolution tiers (filtered based on source resolution)
 # Format: name:width:height:bitrate_h265_kbps:bitrate_h264_kbps:bitrate_av1_kbps:preset:fontsize_tc:fontsize_label:x:y_tc:y_label
+# Geometric (~√2) ladder, ONE variant per unique height (#762). The original
+# 6 rungs are UNCHANGED (★) — they are the 2× "skip every other" subset the
+# proxy synthesises live (content.skip_alternate_variants), so they must stay
+# byte-for-byte. The 5 NEW rungs (432/648/900/1296/1800p) are the ~1.41× fills,
+# interleaved at the ODD indices, each bitrate = geometric mean √(a·b) of its
+# two existing neighbours per codec. Keep them in ascending height order — the
+# alternating fill/★ pattern is what makes the proxy's keep-even-index skip
+# yield exactly the original ladder (incl. floor + ceiling). Fill bitrates are
+# provisional (tune via crf_bandwidth_sweep / VMAF, --vmaf-lookup-mode sw).
+# Format: name:width:height:h265_kbps:h264_kbps:av1_kbps:preset:fs_tc:fs_label:x:y_tc:y_label
 declare -a ALL_RESOLUTION_TIERS=(
     "360p:640:360:300:600:300:medium:20:16:10:10:30"
+    "432p:768:432:520:850:520:medium:22:18:10:10:32"
     "540p:960:540:900:1200:900:medium:24:20:10:10:34"
+    "648p:1152:648:1162:1700:1162:medium:26:22:10:10:36"
     "720p:1280:720:1500:2400:1500:medium:28:24:10:10:38"
+    "900p:1600:900:2600:3460:2600:medium:32:28:10:10:41"
     "1080p:1920:1080:4500:5000:4500:medium:36:32:10:10:45"
+    "1296p:2304:1296:5810:7420:5810:medium:39:34:10:10:48"
     "1440p:2560:1440:7500:11000:7500:medium:42:36:10:10:52"
+    "1800p:3200:1800:10610:15450:10610:medium:48:42:10:10:58"
     "2160p:3840:2160:15000:21700:15000:medium:54:48:10:10:64"
 )
 
@@ -635,6 +663,14 @@ get_resolution_name() {
         640)  echo "360p" ;;
         2560) echo "1440p" ;;
         3840) echo "2160p" ;;
+        # Distinct-height fill rungs (#762): each 16:9 width is unique, so the
+        # width→height-name map stays unambiguous. Without these the `*)`
+        # fallback would misname e.g. 768 as "768p" instead of "432p".
+        768)  echo "432p" ;;
+        1152) echo "648p" ;;
+        1600) echo "900p" ;;
+        2304) echo "1296p" ;;
+        3200) echo "1800p" ;;
         *)    echo "${width}p" ;;
     esac
 }
@@ -643,10 +679,15 @@ get_resolution_height() {
     local res_name=$1
     case "$res_name" in
         "360p") echo "360" ;;
+        "432p") echo "432" ;;
         "540p") echo "540" ;;
+        "648p") echo "648" ;;
         "720p") echo "720" ;;
+        "900p") echo "900" ;;
         "1080p") echo "1080" ;;
+        "1296p") echo "1296" ;;
         "1440p") echo "1440" ;;
+        "1800p") echo "1800" ;;
         "2160p") echo "2160" ;;
         *) echo "0" ;;
     esac
@@ -1422,12 +1463,14 @@ check_prerequisites() {
     fi
     log_success "Font available"
 
-    # Check fMP4 fragment parser helper (used in Phase 6).
-    if detect_fragment_parser_script; then
-        log_success "Fragment parser: $FRAGMENT_PARSER_SCRIPT"
-    else
-        log_warn "Fragment parser script not found (parse_fmp4_fragments.py)"
-        log_warn "Phase 6 (.byteranges generation) will be skipped"
+    # Check fMP4 fragment parser helper (used in Phase 6 — only when --byteranges).
+    if [[ "$EMIT_BYTERANGES" == true ]]; then
+        if detect_fragment_parser_script; then
+            log_success "Fragment parser: $FRAGMENT_PARSER_SCRIPT"
+        else
+            log_warn "Fragment parser script not found (parse_fmp4_fragments.py)"
+            log_warn "Phase 6 (.byteranges generation) will be skipped"
+        fi
     fi
     
     echo ""
@@ -3797,8 +3840,15 @@ main() {
         export_mezzanine_files "av1" "$OUTPUT_DIR_AV1"
     fi
     
-    # Generate fragment metadata (.byteranges files) for LL-HLS support
-    parse_fmp4_fragments
+    # Generate fragment metadata (.byteranges files) for LL-HLS support — default
+    # OFF (#762): LL-HLS embeds #EXT-X-PART inline (go-live's authoritative source)
+    # and DASH uses the MPD's SegmentList, so the sidecars go unread. --byteranges
+    # re-enables them for any consumer that needs the fallback.
+    if [[ "$EMIT_BYTERANGES" == true ]]; then
+        parse_fmp4_fragments
+    else
+        log "Skipping .byteranges sidecars (default; pass --byteranges to emit)"
+    fi
     
     # Generate HLS manifests
     generate_hls_manifests

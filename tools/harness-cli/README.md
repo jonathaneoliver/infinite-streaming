@@ -26,6 +26,7 @@ harness --insecure info       # smoke check
 | **`labels`** | Operator KV labels on player | `show`, `set`, `rm`, `clear` |
 | **`timeouts`** | Transfer timeouts | `<target> --active --idle [--applies-* / --show / --clear]` |
 | **`content`** | Master playlist mutators | `<target> --strip-* --overstate-* --live-offset` |
+| **`app-config`** | Client-side per-play config (#800) the player applies at its next play boundary, no relaunch | `<target> --segment --protocol --live-offset --peak-bitrate [--clear]` |
 | **`play`** | Inspect live play | `show`, `patch` |
 | **`groups`** | Player groups | `list`, `show`, `create`, `patch`, `add`, `remove`, `rm` |
 | **`tail`**, **`ts`**, **`events`** | Live SSE streams | `tail` (network), `ts` (combined), `events` (lifecycle) |
@@ -71,8 +72,8 @@ echo "$out" | jq …
 - **Label filters are `--label-has` / `--label-not`, NOT `--label`.** Used by every `query` subcommand. Repeatable (AND semantics):
     ```sh
     harness --insecure --json query plays \
-        --label-has info=test_rampup \
-        --label-has info=platform_iphone \
+        --label-has testing=test_rampup \
+        --label-has testing=platform_iphone \
         --limit 20
     ```
 - **`harness query control <play_id>`** parses a play_id positionally but the underlying endpoint requires `player_id`. Until that's fixed, use:
@@ -88,10 +89,10 @@ echo "$out" | jq …
 
 1. Lives on the player record (visible via `harness labels show`).
 2. Emits a `label_changed` control event (the proxy fix in #487 made this work on the v2 PATCH path).
-3. The forwarder turns each KV pair into an `info=<key>_<value>` row label on the control_events table.
-4. The Sessions dashboard's Labels column renders them as chips on the current play.
+3. The forwarder turns each KV pair into a `testing=<key>_<value>` row label on the control_events table (the `testing` tier, #571 — was `info=` before that; legacy rows persist for the ≤30-day TTL).
+4. The Sessions dashboard's Labels column renders them as chips on the current play, grouped under the Testing tier.
 
-**Encoding gotcha:** `test=rampup` on the player → `info=test_rampup` on the row. The filter is `query plays --label-has info=test_rampup`, NOT `--label-has test=rampup`.
+**Encoding gotcha:** `test=rampup` on the player → `testing=test_rampup` on the row. The filter is `query plays --label-has testing=test_rampup`, NOT `--label-has test=rampup`. (For rows written before #571, use the legacy `--label-has info=test_rampup`.)
 
 ## Common patterns
 
@@ -108,8 +109,8 @@ harness --insecure ts 3bff77d6 --streams events,network,control
 
 # Find every play tagged by a characterization run
 harness --insecure --json query plays \
-    --label-has info=test_rampup \
-    --label-has info=platform_iphone \
+    --label-has testing=test_rampup \
+    --label-has testing=platform_iphone \
     --limit 20
 
 # Inspect one play's events + label histogram

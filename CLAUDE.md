@@ -122,7 +122,7 @@ Shared modules (`content/shared/`):
 
 ### Analytics sidecar (`analytics/`)
 
-Three ClickHouse tables after issue #474, each carrying a `labels Array(LowCardinality(String))` column with the same `<severity>=<event>` vocab (synthesized entries prefixed `*`, severities `error|critical|warning|info`):
+Three ClickHouse tables after issue #474, each carrying a `labels Array(LowCardinality(String))` column with the same `<severity>=<event>` vocab (synthesized entries prefixed `*`, severities `error|critical|warning|info`, plus the unranked `testing` tier for operator/test-harness KV metadata — #571):
 
 - `session_events` — one row per player metrics POST (was `session_snapshots` pre-#472).
 - `network_requests` — one row per HTTP request the proxy handled.
@@ -150,6 +150,14 @@ Defaults: 6s segment, 200ms partial, 1s GOP.
 
 - `apple/InfiniteStreamPlayer/` — SwiftUI iOS/tvOS app
 - `roku/InfiniteStreamPlayer/` — BrightScript Roku channel
+
+## Git Workflow
+
+- **Origin, not local, for status questions.** When answering ahead/behind or merge-status questions, `git fetch` first and compare against the `origin/*` refs — never reason from stale local refs. State explicitly which refs you compared.
+- **Never push or fast-forward `dev`/`main` directly.** All changes land via a PR. Do not move, fast-forward, or push these branches even if asked to "push to local dev" — open a PR instead.
+- **Verify the base branch off origin before creating any branch or PR.** Branch from the correct, freshly-fetched origin base; don't assume the current checkout is the right base.
+- **Scope edits to exactly what was requested.** Don't broaden into refactors (framework migrations, MVC restructures, etc.) without confirming first.
+- **"Open a new Claude session/instance in a separate terminal"** means set up the branch/worktree and hand back a paste-ready recap — do NOT spawn a subagent unless explicitly asked. Working directory can't change mid-session, so the recap is how work carries into the new terminal.
 
 ## GitHub Workflow
 

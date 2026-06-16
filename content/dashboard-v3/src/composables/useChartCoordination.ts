@@ -52,6 +52,11 @@ export interface ChartCoordinationState {
    *  position so the operator can see exactly where the prev/next
    *  selected event sits across all panels. null = no cursor. */
   cursorMs: number | null;
+  /** Operator-facing label for the cursor — set alongside `cursorMs`
+   *  by `setCursor`. Surfaces in the hover tooltip on every chart's
+   *  vertical marker so the operator never has to guess what the
+   *  pinned event was. Issue #486. */
+  cursorLabel: string | null;
 
   /** The single source of truth for "what range is currently
    *  displayed". null → operator is following live (chart x-axis is
@@ -83,6 +88,7 @@ function freshState(): ChartCoordinationState {
     lastSampleMs: 0,
     bandwidthYMax: undefined,
     cursorMs: null,
+    cursorLabel: null,
     range: null,
     liveSpan: DEFAULT_FOCUS_MS,
   });
@@ -202,6 +208,25 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
    *  hide it. */
   function setCursorMs(ms: number | null) {
     cur().cursorMs = ms;
+    if (ms == null) cur().cursorLabel = null;
+  }
+  /** Set position AND label in one call. Use this from callers that
+   *  know which event the cursor represents (SessionDisplay's
+   *  prev/next navigator); use `setCursorMs` from callers that only
+   *  know the timestamp. Issue #486. */
+  function setCursor(ms: number | null, label: string | null) {
+    // Set the highlighted-event cursor only. Does NOT touch the live/pinned
+    // range: user event-navigation pins the window via recenterOnNav()
+    // (setRange) — that is what keeps a *user-selected* row on screen (#662).
+    // Previously (#663) setCursor itself dropped out of Live whenever ms was
+    // set while live; but the navigator AUTO-advances to each new event on a
+    // live view, so that fired on every incoming event and made the page
+    // unable to stay in Live (testing.html + in-progress session-viewer both
+    // snapped to a 10-min window around the oldest event). Auto-advance must
+    // not drop live; only explicit navigation (recenterOnNav) pins.
+    const s = cur();
+    s.cursorMs = ms;
+    s.cursorLabel = ms == null ? null : label;
   }
 
   return {
@@ -220,6 +245,7 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
     toggleExpanded,
     setBandwidthYMax,
     setCursorMs,
+    setCursor,
   };
 }
 

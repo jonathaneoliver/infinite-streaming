@@ -117,6 +117,26 @@ Each mode test skips with `t.Skip` if no device of its platform is reachable, so
 | `hysteresis-gap` | stairs up 0.5 → 6, then down, find gap per variant | ~6 min |
 | `emergency-downshift` | drop to 0.05 Mbps briefly, measure recovery | ~2.5 min |
 
+## Per-play client reconfig without relaunch (#800)
+
+Client-side config (segment / live_offset / protocol / peak_bitrate) is normally
+forced via a cold-start launch arg (`-is.segment` etc., #797) — one cold launch
+(~25–30 s) per matrix cell. The server-side half (cap, faults, content) already
+reconfigures per-play with no restart; #800 brings the client half in line.
+
+`runner.Session.ApplyAppConfig(ctx, runner.AppConfig{Segment: "s2", ...})` PATCHes
+the bound player's `app_config` (via `harness app-config <pid> --segment s2 …`);
+the app overlays it at its **next play boundary** with no relaunch. Use it to vary
+a client-side axis between plays of a long-running app instead of relaunching per
+cell.
+
+> **Timing.** The proxy has no session to hold `app_config` until the player's
+> first bootstrap request, so this targets *subsequent* plays of a running app —
+> the very first play still uses config-on-connect (`app.<field>` bootstrap args)
+> or the launch arg. A multi-play sweep driver that loops cells on ONE launch
+> (PATCH → fresh play → repeat) is the natural consumer; the single-play modes
+> below still cold-launch per run.
+
 ## Launch modes
 
 The framework supports three launch modes, picked by `$LAUNCH_MODE`:
@@ -133,6 +153,24 @@ The `-launch-mode` flag is preferred over the env var — keeps `go` as the firs
 
 The CLI launcher expects each player app to be built with `skipHomeOnLaunch=true` so a cold launch picks up `lastPlayed` automatically — that's how it can recover from a wedged player without driving UI.
 
+### Device Farm (`CHAR_DEVICE_FARM=1`)
+
+Layered on top of `appium` mode: instead of the harness hand-picking a UDID and offsetting WDA/MJPEG ports, the [`appium-device-farm`](../../tools/appium-device-farm/) plugin arbitrates devices — capability-based allocation, queuing, and auto port assignment (like Selenium Grid for browsers). Turn it on with `CHAR_DEVICE_FARM=1` alongside `-launch-mode=appium`. The plain-appium path stays the default.
+
+Under the flag the harness requests a device by capability (`platformName` + latest `platformVersion` for sims, overridable via `CHAR_DF_IOS_VERSION` / `CHAR_DF_TVOS_VERSION`; real hardware unconstrained), reads back the allocated UDID, and builds the fleet roster as N **logical** devices (`CHAR_FLEET_COUNT`, default 1) — no UDID pinning, port offsets, `staggerFleetLaunch`, or per-UDID `seedFleetServer` (the server is set by the app's server-picker navigation). `CHAR_FLEET_UDIDS` identities are ignored under DF.
+
+Workflow:
+
+```sh
+tools/appium-device-farm/boot-pool.sh   # boot N latest-OS sims + verify app + warm WDA
+tools/appium-device-farm/run.sh         # start the DF server on :4723
+CHAR_DEVICE_FARM=1 go test -C tests/characterization ./modes/... \
+  -run TestStartupIPadSim -launch-mode=appium -timeout 20m
+# or: CHAR_DEVICE_FARM=1 make characterize-ipad-sim   (overnight.sh boots the pool for you)
+```
+
+DF only allocates among already-booted sims, so `boot-pool.sh` is the required first step for sim pools; it also warms each sim's WebDriverAgent so the first session doesn't cold-build WDA inside a launch timeout. See [`tools/appium-device-farm/README.md`](../../tools/appium-device-farm/README.md).
+
 ### Bundle IDs (overridable via `BundleIDs[platform]`)
 
 | Platform | Bundle ID |
@@ -148,8 +186,15 @@ The CLI launcher expects each player app to be built with `skipHomeOnLaunch=true
 | `HARNESS_BIN` | `harness` | path to the harness CLI binary |
 | `HARNESS_INSECURE` | unset (=on) | disable with `HARNESS_INSECURE=0` against a public-cert deploy |
 | `LAUNCH_MODE` | `cli` | `manual` \| `cli` \| `appium` |
+| `CHAR_DEVICE_FARM` | unset | `1` routes `appium` launches through the device-farm plugin (capability allocation; see **Device Farm** above) |
+| `CHAR_DF_IOS_VERSION` | latest installed | override the iOS `platformVersion` DF pins for sims (major.minor, e.g. `26.4`) |
+| `CHAR_DF_TVOS_VERSION` | unset | pin a tvOS `platformVersion` under DF (sims only) |
+| `CHAR_FLEET_COUNT` | `1` | fleet size — N parallel devices. Under DF these are logical (DF allocates); without DF, the first N booted sims of the platform |
 | `CHARACTERIZATION_OUTDIR` | `t.TempDir()` | persistent artifacts directory (set for CI / aggregator use) |
 | `CHARACTERIZATION_DEVICE_UDID` | unset = first-match | target a specific device by UDID. Use to run parallel tests across multiple sims of the same platform — each terminal exports its own UDID, no race for the same device. |
+| `CHAR_RAMPUP_REPS` | `3` | rampup cycles per run, on ONE live play. Between cycles the cap drops top→floor and the player re-climbs — the inter-cycle transition is the instructive part. |
+| `CHAR_RAMPDOWN_REPS` | `3` | rampdown cycles per run, on ONE live play. Between cycles the cap jumps floor→top and the player re-descends (buffer + variant carry across). |
+| `CHAR_PYRAMID_REPS` | `2` | pyramid (up-then-down) cycles per run, on ONE live play. Confirms climb/descent behaviour is stable run-to-run. |
 | `CHAR_OTEL_ENDPOINT` | unset | OTLP HTTP collector URL — e.g. `http://localhost:4318`. When set, every cycle emits an OpenTelemetry span to the configured backend (alongside the cycle_id label PATCH). See **Tracing** below. |
 | `CHAR_OTEL_STDOUT` | unset | non-empty enables the stdout span exporter (verbose, debug only). |
 | `CHAR_OTEL_DISABLE` | unset | non-empty forces the no-op tracer regardless of `CHAR_OTEL_ENDPOINT`. |

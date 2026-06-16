@@ -168,6 +168,9 @@ interface Row {
   // entry instead of on NetworkLogEntry itself because the OpenAPI-
   // generated type doesn't know about labels yet.
   labels: string[];
+  // #506 — batch-derived per-row token (V_SEG(ΔP,ΔS), V_PROBE, …)
+  // LEFT-JOINed onto the row by the forwarder. Empty for un-scored rows.
+  token: string;
 }
 
 function num(v: unknown): number {
@@ -175,7 +178,7 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function buildRow(e: NetworkLogEntry, labels: string[]): Row | null {
+function buildRow(e: NetworkLogEntry, labels: string[], token: string): Row | null {
   const ts = e.timestamp ? Date.parse(e.timestamp) : NaN;
   if (!Number.isFinite(ts)) return null;
   const dns = Math.max(0, num(e.dns_ms));
@@ -189,7 +192,7 @@ function buildRow(e: NetworkLogEntry, labels: string[]): Row | null {
   const transfer = Math.max(0, num(e.transfer_ms));
   let duration = num(e.total_ms);
   if (duration <= 0) duration = dns + connect + tls + wait + transfer;
-  return { entry: e, ts, duration, dns, connect, tls, wait, transfer, labels };
+  return { entry: e, ts, duration, dns, connect, tls, wait, transfer, labels, token };
 }
 
 // Per-label rendering helpers — mirror PlayLog so chips look the
@@ -235,7 +238,10 @@ const allRows = computed<Row[]>(() => {
     const labels = Array.isArray((obj as { labels?: unknown }).labels)
       ? ((obj as { labels: unknown[] }).labels).filter((x): x is string => typeof x === 'string')
       : [];
-    const r = buildRow(entry, labels);
+    const token = typeof (obj as { token?: unknown }).token === 'string'
+      ? ((obj as { token: string }).token)
+      : '';
+    const r = buildRow(entry, labels, token);
     if (!r) continue;
     built.push(r);
   }
@@ -243,7 +249,14 @@ const allRows = computed<Row[]>(() => {
 });
 
 const rows = computed<Row[]>(() => {
+  // Follow the focus bar (issue #586): only rows within the coordinated
+  // visible window, so the Network Log lines up with the charts +
+  // timeline. effectiveRange is the live tail when live, or the pinned
+  // window when the operator pans back. (The summary line below stays a
+  // full-log tally on purpose.)
+  const w = coord.effectiveRange.value;
   return allRows.value.filter((r) => {
+    if (w && (r.ts < w.min || r.ts > w.max)) return false;
     if (faultedOnly.value && !r.entry.faulted) return false;
     if (hideSuccessful.value && isSuccessful(r.entry)) return false;
     return true;
@@ -623,6 +636,7 @@ function onRowsWheel(e: WheelEvent) {
         <div class="cell c-time sortable" @click="clickSort('time')">Time<span class="arr">{{ arrow('time') }}</span></div>
         <div class="cell c-flags">⚑</div>
         <div class="cell c-labels">Labels</div>
+        <div class="cell c-token">Token</div>
         <div class="cell c-method sortable" @click="clickSort('method')">M<span class="arr">{{ arrow('method') }}</span></div>
         <div class="cell c-path sortable" @click="clickSort('path')">Path<span class="arr">{{ arrow('path') }}</span></div>
         <div class="cell c-bytes sortable" @click="clickSort('bytes')">KB<span class="arr">{{ arrow('bytes') }}</span></div>
@@ -651,6 +665,10 @@ function onRowsWheel(e: WheelEvent) {
               :title="l"
             >{{ labelName(l) }}</span>
             <span v-if="!r.labels.length" class="dash">—</span>
+          </div>
+          <div class="cell c-token" :title="r.token">
+            <span v-if="r.token" class="nl-token">{{ r.token }}</span>
+            <span v-else class="dash">—</span>
           </div>
           <div class="cell c-method">{{ r.entry.method ?? '?' }}</div>
           <div class="cell c-path" :title="r.entry.url ?? r.entry.path ?? ''">
@@ -797,6 +815,7 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-time, 96px)
     var(--c-flags, 28px)
     var(--c-labels, minmax(120px, 1fr))
+    var(--c-token, minmax(110px, 0.8fr))
     var(--c-method, 44px)
     var(--c-path, minmax(140px, 1fr))
     var(--c-bytes, 64px)
@@ -828,6 +847,9 @@ function onRowsWheel(e: WheelEvent) {
 }
 
 .rows {
+  /* position:relative makes this the offsetParent so the cursor
+     auto-scroll's target.offsetTop is measured against THIS container. */
+  position: relative;
   max-height: 480px;
   overflow-y: auto;
 }
@@ -863,6 +885,16 @@ function onRowsWheel(e: WheelEvent) {
 }
 .c-time { color: #6b7280; }
 .c-flags { text-align: center; font-weight: 700; }
+.c-token { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.nl-token {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 10px;
+  color: #3730a3;
+  background: #eef2ff;
+  border: 1px solid #e0e7ff;
+  border-radius: 3px;
+  padding: 0 4px;
+}
 .c-labels {
   display: flex; flex-wrap: wrap; gap: 3px;
   align-items: center; min-width: 0;

@@ -28,6 +28,29 @@ func (s *Session) ApplyRate(ctx context.Context, rateMbps float64) error {
 	return nil
 }
 
+// ApplyPattern arms a throughput pattern (pyramid / ramp_up / ramp_down /
+// square_wave / transient_shock) on the bound player. The harness builds the
+// step ladder from the player's CURRENT manifest variants, so the master must
+// already be fetched — call WaitForManifest first. This is the same path the
+// dashboard pattern panel and the characterization modes use; it's how the
+// sweep drives a config-class pattern recipe's bandwidth motion.
+func (s *Session) ApplyPattern(ctx context.Context, pattern string, stepSeconds, marginPct int) error {
+	if s == nil || s.PlayerID == "" {
+		return fmt.Errorf("apply pattern: no player bound")
+	}
+	if pattern == "" {
+		return fmt.Errorf("apply pattern: empty pattern")
+	}
+	args := []string{
+		"shape", s.PlayerID,
+		"--pattern", pattern,
+		"--step-seconds", strconv.Itoa(stepSeconds),
+		"--margin", strconv.Itoa(marginPct),
+	}
+	_, err := runHarness(ctx, args...)
+	return err
+}
+
 // ClearShape removes all shaping (rate cap, delay, loss, pattern). Used
 // at test teardown to leave the proxy in a clean state.
 func (s *Session) ClearShape(ctx context.Context) error {
@@ -94,6 +117,34 @@ func (s *Session) ArmFault(ctx context.Context, shape, kind string, urlPatterns 
 		"--kind", kind,
 		"--frequency", "0",
 		"--consecutive", "1",
+		"--mode", "requests",
+	}
+	if len(urlPatterns) > 0 {
+		args = append(args, "--url-substr", strings.Join(urlPatterns, ","))
+	}
+	_, err := runHarness(ctx, args...)
+	return err
+}
+
+// ArmFaultRepeating posts a SUSTAINED fault rule on the bound player: the
+// `shape` (e.g. "404", "corrupted", "request_first_byte_reset") fires on
+// `consecutive` matching `kind` requests in a row and re-arms for `frequency`
+// cycles, so every request in the window is affected — unlike ArmFault's
+// one-shot. Used by the fault-recovery probe to keep a fault on long enough to
+// drive AVPlayer toward a .failed state, then ClearFaults.
+func (s *Session) ArmFaultRepeating(ctx context.Context, shape, kind string, consecutive, frequency int, urlPatterns ...string) error {
+	if s == nil || s.PlayerID == "" {
+		return fmt.Errorf("arm fault: no player bound")
+	}
+	if shape == "" || kind == "" {
+		return fmt.Errorf("arm fault: shape and kind required")
+	}
+	args := []string{
+		"fault", "add", s.PlayerID,
+		"--type", shape,
+		"--kind", kind,
+		"--frequency", strconv.Itoa(frequency),
+		"--consecutive", strconv.Itoa(consecutive),
 		"--mode", "requests",
 	}
 	if len(urlPatterns) > 0 {

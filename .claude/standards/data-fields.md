@@ -293,15 +293,21 @@ measured_mbps
 
 video_quality_pct
   type:        Float32
-  units:       percent 0–100
-  populated:   forwarder (derived from variant_idx and the manifest's
-               variant ladder)
+  units:       percent 0–100 (nominal; see gotchas)
+  populated:   player-SDK (player_metrics_video_quality_pct — NOT
+               forwarder-derived; verified against the main.go getF32
+               mapping during #607 Phase 1)
   meaning:     position in the variant ladder. 100% = top variant,
-               smaller values = lower variants. Computed at ingest.
+               smaller values = lower variants.
   gotchas:     "3.35%" doesn't mean playback is 3% of full quality
                visually — it means the player is on the lowest of N
                variants where the bottom is mapped to ~floor pct. Read
                as a relative position, not perceptual quality.
+               Top-variant rows routinely read 100.01 (player-side
+               float overshoot; ~70% of archive rows) — treat <=101 as
+               in-range. Values far above 100 (rare; observed up to
+               457) occur on early-play rows before the ladder is
+               known; video_resolution/content_id are empty on them.
 
 video_first_frame_time_s
   type:        Float32
@@ -315,43 +321,141 @@ video_start_time_s
   type:        Float32
   units:       seconds (since playback intent)
   populated:   player-SDK
-  meaning:     time until the player committed to a variant. Always <=
-               video_first_frame_time_s.
+  meaning:     time until AVPlayer's timeControlStatus first flipped to
+               .playing — "playing smoothly", the Conviva-style VST
+               signal (PlayerViewModel.markPlayingStarted).
+  gotchas:     NO ordering contract vs video_first_frame_time_s. The
+               two are independent KVO observables; measured per-play
+               over the full archive (#607, 2026-06-04): 44% ttff
+               after vst, 40% before, 6% equal (n=1,326). An earlier
+               revision claimed "always vst <= ttff" and the iOS source
+               comment claims first-frame-typically-first — both are
+               contradicted by data. Use each on its own terms.
 ```
 
 ### 1.c Stalls, errors, lifecycle counters
 
+#### Legacy stall fields (DEPRECATED — replaced in #550)
+
+`stall_count` / `stall_time_s` / `last_stall_time_s` / `last_buffering_time_s`
+are kept as deprecated mirrors during the soft-cutover window. The
+forwarder mirror-writes from the new canonical Phase 1 fields
+(`stalling_count` / `stalling_time_ms` / `stall_duration_ms` /
+`buffering_duration_ms`) so legacy consumers still get fresh data.
+Prefer the new names in any new query. Old fields will be dropped in
+a follow-up PR once consumers migrate.
+
+#### #550 Phase 1 — state residency (per-state cumulative ms)
+
 ```
-stall_count
+playing_time_ms / pausing_time_ms / buffering_time_ms /
+stalling_time_ms / idling_time_ms / seeking_time_ms /
+trickplaying_time_ms
+  type:        UInt32 (DoubleDelta + ZSTD)
+  units:       milliseconds (cumulative since play start)
+  populated:   player-SDK (iOS state-machine residency tick)
+  meaning:     total time the player has spent in each player_state.
+               Sum across all states ≈ wall-clock since play started.
+  gotchas:     resets to 0 at every play_id boundary. For per-snapshot
+               deltas the forwarder also writes paired *_delta columns
+               (already-computed, no lag() needed).
+
+playing_count / pausing_count / buffering_count / stalling_count /
+idling_count / seeking_count / trickplaying_count
   type:        UInt32
-  populated:   player-SDK (monotonic)
-  meaning:     cumulative count of distinct stall events on this play
-               so far. Goes up on every new stall; never resets within
-               a play.
-  gotchas:     to find stalls in a time window, take delta:
-               max(stall_count) - min(stall_count) over the window.
+  populated:   player-SDK (state-machine entry counter)
+  meaning:     count of distinct entries into each state. Goes up
+               every time player_state transitions INTO the named state.
 
-stall_time_s
-  type:        Float32
-  units:       seconds (cumulative)
-  populated:   player-SDK
-  meaning:     total time spent in stall states this play. Cumulative.
+playing_time_ms_delta / *_delta
+  type:        UInt32 (DoubleDelta)
+  populated:   forwarder (computed from per-play state cache)
+  meaning:     per-row delta of the paired cumulative *_time_ms.
+               Use this instead of `x - lag(x) OVER (...)` — it's
+               populated server-side already, bloom-filter-indexable,
+               and the "who's buffering RIGHT NOW" tile is a one-liner:
+               `WHERE buffering_time_ms_delta > 0 AND ts > now() - 5s`.
 
-last_stall_time_s
-  type:        Float32
-  units:       seconds (duration of last stall only)
-  populated:   player-SDK
-  meaning:     duration of the most recent stall event.
+stall_duration_ms / buffering_duration_ms
+  type:        UInt32
+  populated:   player-SDK (set on the last_event='stall_end' /
+               'buffering_end' row; sticky on subsequent heartbeats)
+  meaning:     duration of the MOST RECENT stall / buffer event.
+               Use for "longest single event in play" queries:
+               `WHERE buffering_duration_ms > 5000 AND last_event =
+               'buffering_end'`.
+```
 
-last_buffering_time_s
-  type:        Float32
-  units:       seconds
-  populated:   player-SDK (iOS only, on buffering_end POSTs)
-  meaning:     authoritative duration of the most recent buffering pair.
-               When non-zero, prefer this over forwarder-side derivations.
-  gotchas:     0 for older clients (pre-#474 milestone A) — the
-               forwarder's labels.go cache fills in the gap via
-               end_ts - start_ts derivation when this is 0.
+#### #550 Phase 2 — outcome status + structured errors
+
+```
+playback_status
+  type:        LowCardinality(String)
+  populated:   player-SDK (iOS) or forwarder default
+  meaning:     terminal outcome enum. One of:
+               - 'in_progress' (default, mid-session)
+               - 'completed'   (natural EOF / clean exit)
+               - 'user_stopped'
+               - 'start_failure'      (VSF — fatal before first frame)
+               - 'abandoned_start'    (EBVS — > threshold without start)
+               - 'mid_stream_failure' (MSF — fatal after first frame)
+  gotchas:     Sessions that never get a session_end POST stay
+               'in_progress' until TTL ageout. Triage queries should
+               filter `WHERE playback_status != 'in_progress'` for
+               clean success-rate metrics.
+
+playback_reason
+  type:        LowCardinality(String)
+  populated:   mirrors player_state during in_progress; classifier-
+               derived on terminal rows
+  meaning:     controlled-vocab reason per status. Examples per status:
+               completed → natural_eof / loop_complete
+               user_stopped → user_quit / app_backgrounded
+               *_failure → drm_license_failed / segment_404 /
+                           manifest_5xx / network_timeout / unknown / ...
+
+error_code, error_domain, error_details
+  type:        Int32 / LowCardinality(String) / String (JSON)
+  populated:   player-SDK on every error-bearing row
+  meaning:     per-row error context. Populated on `last_event='error'`
+               events AND on terminal-failure session_end rows.
+
+terminal_error_code, terminal_error_domain, terminal_error_details
+  type:        Int32 / LowCardinality(String) / String (JSON)
+  populated:   ONLY on terminal failure rows
+  meaning:     SQL-safe terminal cause. Querying
+               `WHERE terminal_error_code != 0` returns only plays that
+               actually failed — never transient codes from recovered
+               errors. Use this for failure-rate dashboards.
+
+error_count, error_count_delta
+  type:        UInt32 / UInt32 (DoubleDelta)
+  populated:   player-SDK / forwarder (delta)
+  meaning:     cumulative error observations across the play + per-row
+               delta. High error_count even with playback_status =
+               'completed' = the play recovered through hiccups.
+```
+
+#### #550 Phase 4 — device / platform / version taxonomy
+
+```
+device_class, device_model, player_tech, app_version,
+os_version_major, os_version_minor, screen_width_px,
+screen_height_px, screen_density
+  type:        LowCardinality(String) / String / LowCardinality(String)
+               / UInt16 / UInt16 / UInt16 / UInt16 / Float32
+  populated:   player-SDK (DeviceInfo.swift on iOS) or go-proxy UA
+               parser for external HLS players (VLC / ffplay / hls.js)
+  meaning:     splits the conflated v1 `platform` field into the
+               Conviva / Bitmovin canonical taxonomy. Stamped on every
+               row (LowCardinality compresses the repeats); session-
+               stable in practice, so `argMax(field, ts)` in plays-
+               aggregation queries gives a clean per-play value.
+  gotchas:     external HLS players get partial coverage from
+               User-Agent parsing; fields default to empty when the
+               UA doesn't match a known pattern. iOS app is the
+               canonical source — when present, its values override
+               go-proxy's UA-parsed defaults via setIfEmpty merge.
 
 frames_displayed
   type:        UInt64
@@ -620,7 +724,7 @@ Read via:
              routing only)
 ```
 
-**Note on `transfer_ms`:** it's NOT the wire-delivery time to the player; it's proxy→upstream. See §2.d for the full gotcha. This is the most-misread field in this table.
+**Note on `transfer_ms`:** it IS the downstream write+flush time to the player (client-perceived receive) — but `dns/connect/tls/ttfb` are upstream-scoped, and `total_ms` is unreliably maintained. See §2.d; this family is the most-misread in the table (including by an earlier revision of this doc).
 
 ### 2.a Identity
 
@@ -663,14 +767,16 @@ query_string
 
 ```
 request_kind
-  type:        LowCardinality(String) — 'manifest' | 'segment' | 'init' | 'other'
+  type:        LowCardinality(String) — 'master_manifest' | 'manifest' |
+               'segment' | 'init' | 'other'
   populated:   proxy (heuristic from URL path)
-  meaning:     what KIND of HTTP request this is, semantically. 'manifest'
-               = .m3u8 / .mpd; 'segment' = .m4s / .ts / .mp4; 'init' =
-               init.mp4 / .init.m4s; 'other' = everything else.
-  gotchas:     'manifest' covers BOTH master and variant playlists — use
-               URL pattern matching to distinguish (master usually has
-               `master_` prefix; variant has `playlist_6s_<variant>`).
+  meaning:     what KIND of HTTP request this is, semantically.
+               'master_manifest' = the master playlist; 'manifest' =
+               variant playlists; 'segment' = .m4s / .ts / .mp4; 'init'
+               = init.mp4 / .init.m4s; 'other' = everything else.
+  gotchas:     an earlier revision said 'manifest' covered both master
+               and variant playlists — stale: master_manifest is its
+               own value (5,163 archive rows; #607 Phase 2 census).
 
 status
   type:        UInt16
@@ -750,24 +856,33 @@ transfer_ms
   type:        Float32
   units:       ms
   populated:   proxy
-  meaning:     UPSTREAM transfer time — time between ttfb and the last
-               byte received from upstream.
-  gotchas:     **this is NOT the wire-delivery time to the player.**
-               If the proxy is shaping egress with tc, transfer_ms can
-               be sub-millisecond (upstream is local) while the actual
-               wire delivery takes tens of seconds. To compute the
-               actual wire-delivery time, derive from consecutive `ts`
-               deltas. This was misinterpreted in a 2026-05-25 chat
-               investigation; carrying the lesson forward as a top-tier
-               gotcha.
+  meaning:     DOWNSTREAM write+flush time to the player — the
+               client-perceived `receive` phase, where traffic-shaping
+               backpressure appears (streamToClientMeasured /
+               NetworkLogEntry doc comment in go-proxy main.go).
+  gotchas:     this entry previously claimed transfer_ms was UPSTREAM
+               transfer time and "NOT wire-delivery to the player" —
+               that described pre-2026-02-13 semantics (the field was
+               re-pointed downstream in 9fb686d) and was corrected
+               during #607 Phase 1 source-verification. Under shaping,
+               transfer_ms DOES grow with the cap (e.g. ~103ms segment
+               writes under a 100 Mbps cap on test-dev). dns/connect/
+               tls/ttfb remain UPSTREAM-scoped — the table mixes the
+               two views; read each field's scope individually.
 
 total_ms
   type:        Float32
   units:       ms
   populated:   proxy
-  meaning:     dns + connect + tls + ttfb + transfer — total upstream
-               request time. Same gotcha as transfer_ms: NOT
-               wire-to-player time.
+  meaning:     nominally max(time-to-upstream-headers, ttfb + transfer)
+               — initially set when upstream headers complete, then
+               lifted by mergeTotalTiming() to ttfb_ms + transfer_ms.
+  gotchas:     the lift is NOT applied on every code path: ~26% of
+               archive rows have total_ms ≈ ttfb_ms while transfer_ms
+               is 100x larger (#607 Phase 1 census). Until that's
+               fixed, prefer ttfb_ms + transfer_ms over total_ms for
+               request duration. The old formula documented here
+               (dns+connect+tls+ttfb+transfer) never matched the code.
 
 client_wait_ms
   type:        Float32
@@ -780,7 +895,7 @@ client_wait_ms
                total_ms stays sub-ms.
 ```
 
-**Rule of thumb for "how long did the player wait":** `client_wait_ms` is closest to truth, but for shaped delivery it can still underestimate because the proxy may have started writing to the socket before all bytes are on the wire. The most accurate wire time = (ts of THIS request - ts of NEXT same-variant segment request) under steady fetch cadence.
+**Rule of thumb for "how long did the player wait":** `client_wait_ms` (time to first response byte) + `transfer_ms` (downstream write+flush) covers the request end-to-end from the player's side; the final kernel-buffer flush can still trail the last write, so for exact wire time under heavy shaping use (ts of THIS request - ts of NEXT same-variant segment request) under steady fetch cadence.
 
 ### 2.e Fault injection
 
@@ -875,8 +990,9 @@ source
                  'proxy'   = runtime auto-transition (fault loop, pattern
                              step advance, loop_server detection,
                              proxy-detected session_end)
-                 'auto'    = automated test runner (placeholder; no emit
-                             path yet)
+                 'auto'    = server-driven lifecycle, not operator or
+                             runtime-transition. Today: server_start
+                             (proxy boot marker, #671).
   gotchas:     'harness' events are the ones to subpoena when investigating
                "why did the network change at 15:42:30" — they're the
                operator-or-script-driven mutations. 'proxy' events are
@@ -1012,6 +1128,27 @@ session_start                [harness | proxy]
 session_end                  [harness | proxy]
   meaning:     session lifecycle ended. Last row for this session.
   label:       info=*session_end
+
+server_start                 [auto]
+  meaning:     the go-proxy process (re)started. Emitted once on boot
+               after shape restoration. GLOBAL — no player_id/play_id/
+               session_id, so it does NOT attach to any one play's
+               timeline; query it session-less (see gotchas).
+  info:        restored=N;skipped=M;baseline_mbps=B — the
+               restoreShapeApplication counts (how many sessions had
+               their tc cap re-installed on boot).
+  label:       info=*server_start
+  gotchas:     this is the marker to correlate a ~line-rate throughput
+               spike against: between boot and shape restoration, session
+               ports run unshaped (no tc filter yet) → a spike landing
+               just after a server_start is a redeploy artifact, not a
+               shaper bug (#671). It has no player_id, so query it by event
+               (the control_events read path no longer requires player_id
+               when an event/label filter is given, #671):
+                 `harness query control --event server_start`
+               or `harness raw GET "/analytics/api/v2/control_events?event=server_start"`.
+               (`harness query control <play>` is the per-player form; a
+               session-less event won't appear under any play.)
 
 control_change               [harness | proxy] [debug]
   meaning:     generic fallback when the changed field hasn't been
@@ -1259,10 +1396,11 @@ Labels are `<severity>=<event>` strings attached to **every row** of `session_ev
 The `*` (synthMark) before `<event>` is the only difference between the two flavours.
 
 **Severities** (in escalating order, used for the dashboard's severity filter):
+- `testing`  — operator/test-harness KV metadata, **not playback signal** (e.g. `testing=run_id_20260530T141942Z`, `testing=test_rampup`, `testing=platform_iphone`). Set by the automated test code via `LabelPlay`; emitted by `kvLabelsFromInfo`. **Unranked** — excluded from `worstSeverity`, so it never tints a row or bumps classification. Groups under its own dashboard tier (#571).
 - `info`     — informational; not a failure (e.g. `info=*pattern_step`)
 - `warning`  — concerning; possibly a failure (e.g. `warning=segment_stall`, `warning=*fault_on`)
 - `error`    — failure (e.g. `error=stall_recovery_timeout`)
-- `critical` — severe failure (e.g. `critical=frozen`, `critical=*stall_severe_startup`)
+- `critical` — severe failure (e.g. `critical=frozen`, `critical=*qoe_stall_severe_startup`)
 
 **Find what labels actually exist** by calling `list_labels(from=..., to=..., like='%...%')`. **DO NOT GUESS** label strings when constructing `find_plays(labels_has=[...])` filters — see [[reference_labelplay_value_encoding]] for why guessed labels silently match zero rows.
 
@@ -1390,7 +1528,7 @@ Pattern for synth labels: they fold a `position bucket` (startup / midplay / scr
 
 ### 5.d Severity precedence
 
-When the dashboard rolls up multiple labels on one play, severity precedence is `critical > error > warning > info`. The dashboard's "worst signal" chip shows the highest-severity label present.
+When the dashboard rolls up multiple labels on one play, severity precedence is `critical > error > warning > info`. The dashboard's "worst signal" chip shows the highest-severity label present. (`testing` is **not** in this precedence — it's test-harness metadata, never the worst chip and never tints a row.)
 
 ---
 

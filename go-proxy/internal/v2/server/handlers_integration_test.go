@@ -179,16 +179,16 @@ func TestGet_PlayersByID_Projections_Telemetry(t *testing.T) {
 	pid := uuid.New().String()
 	a.addPlayer(pid, "rev1", map[string]any{
 		// Player metrics
-		"player_metrics_video_resolution":     "1920x1080",
-		"player_metrics_video_bitrate_mbps":   5.5,
-		"player_metrics_video_quality_pct":    72.5,
-		"player_metrics_buffer_depth_s":       12.3,
-		"player_metrics_stalls":               2,
-		"player_metrics_loop_count_player":    7,
-		"player_metrics_loop_count_increment": 1,
-		"player_metrics_profile_shift_count":  4,
-		"player_metrics_last_event":           "playing",
-		"player_metrics_source":               "avplayer-ios",
+		"player_metrics_video_resolution":    "1920x1080",
+		"player_metrics_video_bitrate_mbps":  5.5,
+		"player_metrics_video_quality_pct":   72.5,
+		"player_metrics_buffer_depth_s":      12.3,
+		"player_metrics_stalls":              2,
+		"player_metrics_loop_count_player":   7,
+		"player_metrics_loop_count_delta":    1,
+		"player_metrics_profile_shift_count": 4,
+		"player_metrics_last_event":          "playing",
+		"player_metrics_source":              "avplayer-ios",
 		// Server metrics (TCP_INFO + ICMP + bytes)
 		"client_rtt_ms":           42.0,
 		"client_rtt_min_ms":       12.0,
@@ -295,9 +295,9 @@ func TestGet_PlayersByID_Projections_TransferTimeouts(t *testing.T) {
 	a, _, ts := newTestServer(t)
 	pid := uuid.New().String()
 	a.addPlayer(pid, "rev1", map[string]any{
-		"transfer_active_timeout_seconds":   12,
-		"transfer_idle_timeout_seconds":     5,
-		"transfer_timeout_applies_segments": true,
+		"transfer_active_timeout_seconds":    12,
+		"transfer_idle_timeout_seconds":      5,
+		"transfer_timeout_applies_segments":  true,
 		"transfer_timeout_applies_manifests": true,
 	})
 	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
@@ -345,10 +345,10 @@ func TestGet_PlayersByID_Projections_Content(t *testing.T) {
 	a, _, ts := newTestServer(t)
 	pid := uuid.New().String()
 	a.addPlayer(pid, "rev1", map[string]any{
-		"content_strip_codecs":     true,
+		"content_strip_codecs":        true,
 		"content_overstate_bandwidth": true,
-		"content_live_offset":      18,
-		"content_allowed_variants": []any{"720p", "1080p"},
+		"content_live_offset":         18,
+		"content_allowed_variants":    []any{"720p", "1080p"},
 	})
 	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
 	var rec map[string]any
@@ -946,6 +946,128 @@ func TestPatch_GroupedMember_Broadcasts(t *testing.T) {
 	if r1 != r2 {
 		t.Errorf("control_revision mismatch after broadcast: p1=%q p2=%q", r1, r2)
 	}
+}
+
+// TestPatch_DisplayOnlyGroup_NoBroadcast covers the connect-param display-only
+// group: two sessions share a group_id but were born with group_broadcast=false
+// (the startup fleet path). A PATCH to one member must NOT mirror to the other —
+// each device is shaped/labelled independently, even though the dashboard charts
+// them together by group_id.
+func TestPatch_DisplayOnlyGroup_NoBroadcast(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	p1, p2 := uuid.New().String(), uuid.New().String()
+	rev := "2020-01-01T00:00:00.000000000Z"
+	// Born-grouped display-only (what the proxy's connect path writes when the
+	// bootstrap carries group_id=G1&group_broadcast=false).
+	a.addSession(map[string]any{
+		"player_id": p1, "session_id": "s1", "control_revision": rev,
+		"group_id": "G1", "group_broadcast": false,
+	})
+	a.addSession(map[string]any{
+		"player_id": p2, "session_id": "s2", "control_revision": rev,
+		"group_id": "G1", "group_broadcast": false,
+	})
+
+	// PATCH p1's labels — must NOT reach p2.
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+p1,
+		`{"labels":{"only":"p1"}}`,
+		map[string]string{"If-Match": `"` + rev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("PATCH p1 %d body=%s", status, respBody)
+	}
+	stored2, _ := a.SessionByPlayerID(p2)
+	l2, _ := stored2["_v2_labels"].(map[string]any)
+	if l2["only"] == "p1" {
+		t.Errorf("p2 received p1's label — display-only group still broadcast: %v", l2)
+	}
+}
+
+// TestPatch_BroadcastOverride covers the per-mutation ?broadcast=true|false
+// query param (#766). The override wins over the group's connect-time default
+// for a single PATCH: it can suppress fan-out on a broadcast=true group, and it
+// can force fan-out on a display-only (group_broadcast=false) group. Drives both
+// directions; mirrors TestPatch_GroupedMember_Broadcasts' labels-based assert.
+func TestPatch_BroadcastOverride(t *testing.T) {
+	// labelOf reads a member's stored _v2_labels[key].
+	labelOf := func(a *fakeAdapter, pid, key string) any {
+		stored, _ := a.SessionByPlayerID(pid)
+		l, _ := stored["_v2_labels"].(map[string]any)
+		return l[key]
+	}
+
+	// newBroadcastGroup wires p1+p2 into a real broadcast=true group (the POST
+	// path) and returns p1's post-grouping control_revision for the If-Match.
+	newBroadcastGroup := func(t *testing.T, a *fakeAdapter, ts *httptest.Server) (p1, p2, rev1 string) {
+		p1, p2 = uuid.New().String(), uuid.New().String()
+		a.addPlayer(p1, "rev1", nil)
+		a.addPlayer(p2, "rev2", nil)
+		body, _ := json.Marshal(map[string]any{"member_player_ids": []string{p1, p2}})
+		mustDo(t, ts, "POST", "/api/v2/player-groups", string(body), nil)
+		stored1, _ := a.SessionByPlayerID(p1)
+		return p1, p2, asString(stored1["control_revision"])
+	}
+
+	t.Run("broadcast_group/override_false_isolates", func(t *testing.T) {
+		a, _, ts := newTestServer(t)
+		p1, p2, rev1 := newBroadcastGroup(t, a, ts)
+
+		// ?broadcast=false on a broadcast=true group → THIS patch must not fan out.
+		status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+p1+"?broadcast=false",
+			`{"labels":{"only":"p1"}}`,
+			map[string]string{"If-Match": `"` + rev1 + `"`})
+		if status != http.StatusOK {
+			t.Fatalf("PATCH p1 %d body=%s", status, respBody)
+		}
+		if got := labelOf(a, p1, "only"); got != "p1" {
+			t.Errorf("p1 label = %v, want only=p1", got)
+		}
+		if got := labelOf(a, p2, "only"); got == "p1" {
+			t.Errorf("p2 received p1's label despite ?broadcast=false: %v", got)
+		}
+	})
+
+	t.Run("broadcast_group/override_true_fans_out", func(t *testing.T) {
+		a, _, ts := newTestServer(t)
+		p1, p2, rev1 := newBroadcastGroup(t, a, ts)
+
+		// ?broadcast=true matches the group default → still fans out (override
+		// is a no-op relative to the connect-time mode here).
+		status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+p1+"?broadcast=true",
+			`{"labels":{"only":"p1"}}`,
+			map[string]string{"If-Match": `"` + rev1 + `"`})
+		if status != http.StatusOK {
+			t.Fatalf("PATCH p1 %d body=%s", status, respBody)
+		}
+		if got := labelOf(a, p2, "only"); got != "p1" {
+			t.Errorf("p2 label = %v, want only=p1 (override-true should broadcast)", got)
+		}
+	})
+
+	t.Run("display_only_group/override_true_forces_broadcast", func(t *testing.T) {
+		a, _, ts := newTestServer(t)
+		p1, p2 := uuid.New().String(), uuid.New().String()
+		rev := "2020-01-01T00:00:00.000000000Z"
+		// Born display-only (group_broadcast=false) — the startup-fleet path.
+		a.addSession(map[string]any{
+			"player_id": p1, "session_id": "s1", "control_revision": rev,
+			"group_id": "G1", "group_broadcast": false,
+		})
+		a.addSession(map[string]any{
+			"player_id": p2, "session_id": "s2", "control_revision": rev,
+			"group_id": "G1", "group_broadcast": false,
+		})
+
+		// ?broadcast=true overrides the display-only default → forces fan-out to p2.
+		status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+p1+"?broadcast=true",
+			`{"labels":{"only":"p1"}}`,
+			map[string]string{"If-Match": `"` + rev + `"`})
+		if status != http.StatusOK {
+			t.Fatalf("PATCH p1 %d body=%s", status, respBody)
+		}
+		if got := labelOf(a, p2, "only"); got != "p1" {
+			t.Errorf("p2 label = %v, want only=p1 (?broadcast=true should force fan-out)", got)
+		}
+	})
 }
 
 // ----- Plays --------------------------------------------------------------

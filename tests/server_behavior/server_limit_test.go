@@ -420,7 +420,7 @@ func postMetrics(
 		"player_metrics_network_bitrate_mbps":     round2(netInstantMbps),
 		"player_metrics_avg_network_bitrate_mbps": round2(netAvgMbps),
 		"player_metrics_buffer_depth_s":           0,
-		"player_metrics_dropped_frames":           0,
+		"player_metrics_frames_dropped":           0,
 		"player_metrics_stalls":                   0,
 	}
 	body, _ := json.Marshal(map[string]any{"set": set})

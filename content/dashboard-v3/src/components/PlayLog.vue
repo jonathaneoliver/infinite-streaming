@@ -38,6 +38,10 @@ const props = defineProps<{
   eventsStream: Stream<Record<string, unknown>>;
   networkStream: Stream<Record<string, unknown>>;
   controlStream: Stream<Record<string, unknown>>;
+  /** iOS 18 AVMetrics raw event stream (issue #486 spike). Renders as
+   *  a fourth source on the timeline so the operator can read the
+   *  AVFoundation-side signal next to today's heartbeat-derived one. */
+  avmetricsStream: Stream<Record<string, unknown>>;
 }>();
 
 const playerIdRef = toRef(props, 'playerId');
@@ -70,6 +74,7 @@ function realPlayerId(): string {
 const showEvents = ref(true);
 const showNetwork = ref(true);
 const showControl = ref(true);
+const showAVMetrics = ref(true);
 
 /** Follow-latest mirrors the page-level focus bar's "Live" state.
  *  When the operator drags the brush back to a historical window,
@@ -131,7 +136,7 @@ const sortDir = ref<SortDir>('asc');
 
 const rowsScrollRef = ref<HTMLDivElement | null>(null);
 
-type Source = 'event' | 'network' | 'control';
+type Source = 'event' | 'network' | 'control' | 'avmetrics';
 interface Row {
   ts: number;          // epoch ms
   source: Source;
@@ -298,6 +303,25 @@ function buildEventRow(raw: Record<string, unknown>): Row | null {
   };
 }
 
+/** ios_avmetric_events row (issue #486 spike). `event_type` is the
+ *  AVFoundation subclass name (e.g. AVMetricPlayerItemLikelyToKeepUpEvent).
+ *  The unmodified SDK payload is in `raw_json`; default field display
+ *  surfaces it as a string chip — CSS truncates long values, hover
+ *  shows the full content. */
+function buildAVMetricsRow(raw: Record<string, unknown>): Row | null {
+  const ts = tsOf(raw);
+  if (!Number.isFinite(ts)) return null;
+  return {
+    ts,
+    source: 'avmetrics',
+    playerId: asLowerId(raw.player_id ?? realPlayerId()),
+    playId: asLowerId(raw.play_id ?? props.playId ?? ''),
+    attemptId: asStr(raw.attempt_id),
+    raw,
+    eventName: pickEventName(raw, ['event_type', 'type', 'event']),
+  };
+}
+
 /** Look up the first non-empty string field from a fallback chain.
  *  Lets the event_name column survive future renames — when the
  *  storage column is renamed to `event_name`, that key wins; until
@@ -313,6 +337,16 @@ function pickEventName(raw: Record<string, unknown>, keys: string[]): string {
 
 /** Render a single field value to a short display string. JSON-stringify
  *  nested values; trim floats; tolerate everything else. */
+/** Extract the integer kbps part from a variant key. Handles both
+ *  `<resolution>@<N>kbps` (e.g. `1080p@7060kbps`) and the
+ *  bitrate-only fallback `<N>kbps` (issue #486 — emitted when no
+ *  variant resolution matched). Returns 0 if the key doesn't match
+ *  so unmatched keys fall to the bottom of the sort. */
+function kbpsFromVariantKey(key: string): number {
+  const m = key.match(/(\d+)kbps/);
+  return m ? Number(m[1]) : 0;
+}
+
 function formatValue(v: unknown): string {
   if (v == null) return '';
   if (typeof v === 'string') return v;
@@ -342,6 +376,89 @@ function fieldsFromRaw(raw: Record<string, unknown>, extraSkip?: Set<string>): D
     if (extraSkip && extraSkip.has(k)) continue;
     const v = raw[k];
     if (v == null) continue;
+    // player_metrics_time_per_variant_s (issue #486 per-variant watch
+    // time): each inner key is a `<resolution>@<kbps>kbps` label, the
+    // value is seconds. Render as one chip per variant, value
+    // formatted as `<seconds>s (<pct>%)` so the operator sees both
+    // absolute time and share of the play at a glance. Sorted by
+    // time descending so dominant variants lead.
+    // CH projection drops the `player_metrics_` prefix; check both
+    // the raw heartbeat field name and the CH column name so this
+    // expansion works whether the row came straight off the SSE
+    // session map or through the timeseries bundle projection.
+    if ((k === 'time_per_variant_s' || k === 'player_metrics_time_per_variant_s')
+        && typeof v === 'string' && v.length > 2 && v.charAt(0) === '{') {
+      try {
+        const parsed = JSON.parse(v);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const entries: [string, number][] = [];
+          let total = 0;
+          for (const ik of Object.keys(parsed as Record<string, unknown>)) {
+            const iv = Number((parsed as Record<string, unknown>)[ik]);
+            if (!Number.isFinite(iv) || iv <= 0) continue;
+            entries.push([ik, iv]);
+            total += iv;
+          }
+          // Emit a SINGLE chip carrying every variant's seconds + %.
+          // Issue #486 follow-up: when each variant was its own chip
+          // the "by-change-rate" field ordering re-sorted them by how
+          // often the seconds value moved, which scrambled the
+          // ladder. Joining them into one value freezes the
+          // bitrate-descending order regardless of the field-order
+          // mode. Bitrate descending so the ladder reads top→bottom
+          // of the manifest regardless of which variant dominates.
+          entries.sort((a, b) => kbpsFromVariantKey(b[0]) - kbpsFromVariantKey(a[0]));
+          const parts = entries.map(([ik, seconds]) => {
+            const pct = total > 0 ? Math.round((seconds / total) * 100) : 0;
+            return `${ik}=${seconds.toFixed(1)}s(${pct}%)`;
+          });
+          if (parts.length) {
+            out.push({ name: 'time_per_variant', value: parts.join(' · ') });
+          }
+          // Cumulative + 60s quality chips — read straight off the row.
+          // iOS computes both (log-bitrate, 0.20 floor) and the
+          // forwarder persists them as `video_quality_avg_pct` /
+          // `video_quality_60s_pct`. Single source of truth: same
+          // numbers in PlayerMetrics tile, PlayLog chips, and CH
+          // forever. 0 means "no iOS payload yet" (Float32 default).
+          const avgQ = Number(raw.video_quality_avg_pct);
+          if (Number.isFinite(avgQ) && avgQ > 0) {
+            out.push({
+              name: 'quality_pct',
+              value: `${avgQ.toFixed(1)}% (log-bitrate, cumulative)`,
+            });
+          }
+          const q60 = Number(raw.video_quality_60s_pct);
+          if (Number.isFinite(q60) && q60 > 0) {
+            out.push({
+              name: 'quality_pct_60s',
+              value: `${q60.toFixed(1)}% (log-bitrate, 60s window)`,
+            });
+          }
+          continue;
+        }
+      } catch { /* fall through */ }
+    }
+    // raw_json (issue #486 AVMetrics rows): the value is a JSON-object
+    // string holding the AVMetric event's full Obj-C property dump. A
+    // single chip with 2000 chars overflows the column. Parse it and
+    // emit one chip per inner key — matches the visual density of
+    // every other row source.
+    if (k === 'raw_json' && typeof v === 'string' && v.length > 2 && v.charAt(0) === '{') {
+      try {
+        const parsed = JSON.parse(v);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          for (const ik of Object.keys(parsed as Record<string, unknown>).sort()) {
+            const iv = (parsed as Record<string, unknown>)[ik];
+            if (iv == null) continue;
+            const formatted = formatValue(iv);
+            if (formatted === '') continue;
+            out.push({ name: ik, value: formatted });
+          }
+          continue;
+        }
+      } catch { /* fall through to single-chip rendering */ }
+    }
     const formatted = formatValue(v);
     if (formatted === '') continue;
     out.push({ name: k, value: formatted });
@@ -383,6 +500,19 @@ function rowLabels(r: Row): string[] {
   // control_events rows carry their own labels[] (see
   // computeControlLabels in labels.go) so no synthesis is needed.
   return [];
+}
+
+/** #506 batch-derived per-row token, LEFT-JOINed by the forwarder
+ *  (analytics/tools/derive_tokens.py + the read-path merge in
+ *  v2_handlers.go / timeseries.go). Network rows carry segment/playlist
+ *  tokens (V_SEG/A_SEG/V_PL/…, FAULT); session_events rows carry
+ *  lifecycle tokens (STALL_*, RATE_*, BUF_*, FIRST_FRAME). Control and
+ *  avmetric rows return '' by design — the token model has no vocabulary
+ *  for them (the one control signal that matters, fault injection, is
+ *  already a FAULT token on the network request it breaks). */
+function rowToken(r: Row): string {
+  const t = r.raw?.token;
+  return typeof t === 'string' ? t : '';
 }
 
 /** Pull the severity prefix from a label like 'critical=stall_frozen'.
@@ -505,6 +635,7 @@ const allRows = computed<Row[]>(() => {
   void props.eventsStream.version.value;
   void props.networkStream.version.value;
   void props.controlStream.version.value;
+  void props.avmetricsStream.version.value;
   const built: Row[] = [];
   if (showEvents.value) {
     for (const raw of props.eventsStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
@@ -524,6 +655,12 @@ const allRows = computed<Row[]>(() => {
       if (r) built.push(r);
     }
   }
+  if (showAVMetrics.value) {
+    for (const raw of props.avmetricsStream.inRange(0, Number.MAX_SAFE_INTEGER)) {
+      const r = buildAVMetricsRow(raw);
+      if (r) built.push(r);
+    }
+  }
   return built;
 });
 
@@ -532,6 +669,18 @@ function sortValue(r: Row, c: SortCol): number | string {
     case 'time': return r.ts;
     case 'source': return r.source;
   }
+}
+
+/** Flatten a row's fields to a single `k=v, k=v` string (#586). Rendered
+ *  as one text node instead of one chip element per field — the dominant
+ *  per-row DOM cost. */
+function fieldsToString(fields: DisplayedField[]): string {
+  let s = '';
+  for (let i = 0; i < fields.length; i++) {
+    if (i) s += ', ';
+    s += fields[i].name + '=' + fields[i].value;
+  }
+  return s;
 }
 
 /** Row + the field list to render. Computed in chronological order
@@ -633,11 +782,68 @@ function sortFields(fields: DisplayedField[], source: Source): DisplayedField[] 
   });
 }
 
+/** Rows within the coordinated focus window (issue #586). The logs now
+ *  "follow the focus bar": effectiveRange is the live tail when live, or
+ *  the pinned window when the operator pans back — so the Play Log lines
+ *  up with the charts and the Player State timeline instead of always
+ *  showing the entire cache. */
+const windowedFull = computed<Row[]>(() => {
+  const r = coord.effectiveRange.value;
+  if (!r) return allRows.value;
+  return allRows.value.filter((row) => row.ts >= r.min && row.ts <= r.max);
+});
+
+// Render every row in the focus window — no cap. The focus window already
+// bounds the row count, each row collapses to ~8 DOM nodes, and this matches
+// NetworkLog (uncapped), so a selected event never gets clipped. If a very
+// wide window ever janks, virtualize the list rather than re-introduce a cap.
+const windowedRows = computed<Row[]>(() => windowedFull.value);
+
+/** Highlight the row matching the synchronized "selected event" cursor
+ *  (coord.state.cursorMs) — same coordination NetworkLog uses, so picking
+ *  an event lights up the corresponding Play Log line too. Rows are point
+ *  events, so we light the containing/predecessor row: the latest row at or
+ *  before the cursor (successor if the cursor precedes the first row).
+ *  Rows sharing that ts all highlight. */
+const cursorRowTs = computed<number | null>(() => {
+  const ms = coord.state.cursorMs;
+  if (ms == null || !Number.isFinite(ms)) return null;
+  let pred = -Infinity, succ = Infinity;
+  for (const r of windowedFull.value) {
+    if (r.ts <= ms) { if (r.ts > pred) pred = r.ts; }
+    else if (r.ts < succ) succ = r.ts;
+  }
+  if (pred !== -Infinity) return pred;
+  if (succ !== Infinity) return succ;
+  return null;
+});
+
+// Scroll the highlighted row into view inside the inner container only (no
+// outer page scroll), mirroring NetworkLog's cursor follow.
+watch(
+  () => coord.state.cursorMs,
+  () => {
+    if (cursorRowTs.value == null) return;
+    nextTick(() => {
+      const el = rowsScrollRef.value;
+      if (!el) return;
+      const target = el.querySelector('.row.cursor-current') as HTMLElement | null;
+      if (!target) return;
+      const top = el.scrollTop;
+      const bottom = top + el.clientHeight;
+      const rTop = target.offsetTop;
+      const rBottom = rTop + target.offsetHeight;
+      if (rTop < top) el.scrollTop = rTop;
+      else if (rBottom > bottom) el.scrollTop = rBottom - el.clientHeight;
+    });
+  },
+);
+
 const rowsWithFields = computed<RowWithFields[]>(() => {
   // Build chronological copy so the diff against the previous
   // snapshot is well-defined regardless of the display sort
   // direction the operator picks below.
-  const chrono = allRows.value.slice().sort((a, b) => a.ts - b.ts);
+  const chrono = windowedRows.value.slice().sort((a, b) => a.ts - b.ts);
   const mode = displayMode.value;
   // Only snapshots participate in the diff — every network /
   // event row is unique by construction so a per-row diff is
@@ -675,6 +881,9 @@ const rowsWithFields = computed<RowWithFields[]>(() => {
       fields = fieldsFromRaw(r.raw, EVENT_SKIP);
     }
     fields = sortFields(fields, r.source);
+    // 60s window quality chip is now appended inline above from
+    // `raw.video_quality_60s_pct` (iOS-canonical). No client-side
+    // walk-back / diff needed.
     out[i] = { ...r, fields };
     if (r.source === 'event') prevSnapshot = r.raw;
   }
@@ -698,13 +907,29 @@ const sortedRows = computed<RowWithFields[]>(() => {
 });
 
 const counts = computed(() => {
-  let evt = 0, net = 0, ctl = 0;
-  for (const r of allRows.value) {
+  // Counts reflect the full focus window (issue #586), not the capped
+  // render set, so the toolbar tallies match what's in the window.
+  let evt = 0, net = 0, ctl = 0, avm = 0;
+  for (const r of windowedFull.value) {
     if (r.source === 'event') evt++;
     else if (r.source === 'network') net++;
+    else if (r.source === 'avmetrics') avm++;
     else ctl++;
   }
-  return { evt, net, ctl, total: allRows.value.length };
+  return { evt, net, ctl, avm, total: windowedFull.value.length };
+});
+
+/** True when the active player has any AVMetrics rows in the cached
+ *  window. Hides the AVMetrics filter checkbox on non-iOS devices
+ *  (Android, Roku, Web) so the toolbar doesn't carry a permanently-
+ *  empty row count. Independent of `showAVMetrics` — checks the
+ *  underlying stream directly so the toggle being off doesn't fool
+ *  the test. Issue #486. */
+const hasAVMetrics = computed(() => {
+  void props.avmetricsStream.version.value;
+  const bounds = props.avmetricsStream.rangeBounds.value;
+  if (bounds && (bounds.max ?? 0) > 0) return true;
+  return props.avmetricsStream.inRange(0, Number.MAX_SAFE_INTEGER).length > 0;
 });
 
 function clickSort(col: SortCol) {
@@ -807,6 +1032,7 @@ function onRowsWheel(e: WheelEvent) {
       <label class="opt"><input type="checkbox" v-model="showEvents" /> Events ({{ counts.evt }})</label>
       <label class="opt"><input type="checkbox" v-model="showNetwork" /> Network ({{ counts.net }})</label>
       <label class="opt"><input type="checkbox" v-model="showControl" /> Control ({{ counts.ctl }})</label>
+      <label v-if="hasAVMetrics" class="opt" title="iOS 18 AVMetrics raw events (issue #486 spike). Parallel observation stream from AVFoundation — compare side-by-side against today's heartbeat-derived Events."><input type="checkbox" v-model="showAVMetrics" /> AVMetrics ({{ counts.avm }})</label>
       <label class="opt"><input type="checkbox" v-model="showRaw" /> Raw</label>
       <span class="count">{{ counts.total }} row{{ counts.total === 1 ? '' : 's' }}</span>
       <button
@@ -857,6 +1083,7 @@ function onRowsWheel(e: WheelEvent) {
         <div class="cell c-play">play_id</div>
         <div class="cell c-attempt">attempt_id</div>
         <div class="cell c-eventname">event_name</div>
+        <div class="cell c-token" title="#506 batch-derived per-row token (V_SEG(ΔP,ΔS), V_PROBE, …). Network rows only; LEFT-JOINed from derived_tokens by the forwarder.">token</div>
         <div class="cell c-fields">fields</div>
         <div v-if="showRaw" class="cell c-raw">raw</div>
       </div>
@@ -866,7 +1093,7 @@ function onRowsWheel(e: WheelEvent) {
           v-for="(r, i) in sortedRows"
           :key="i"
           class="row"
-          :class="[`src-${r.source}`, rowSeverityClass(r)]"
+          :class="[`src-${r.source}`, rowSeverityClass(r), { 'cursor-current': cursorRowTs !== null && r.ts === cursorRowTs }]"
           :title="rowTooltip(r)"
         >
           <div class="cell c-time">{{ fmtTime(r.ts) }}</div>
@@ -895,14 +1122,19 @@ function onRowsWheel(e: WheelEvent) {
             >{{ r.eventName }}</span>
             <span v-else class="event-name-empty">—</span>
           </div>
+          <div class="cell c-token" :title="rowToken(r)">
+            <span v-if="rowToken(r)" class="pl-token">{{ rowToken(r) }}</span>
+            <span v-else class="event-name-empty">—</span>
+          </div>
           <div class="cell c-fields">
             <span v-if="r.fields.length === 0" class="kv-empty">—</span>
-            <span
-              v-for="f in r.fields"
-              :key="f.name"
-              class="kv"
-              :title="f.name + '=' + f.value"
-            ><span class="kv-name">{{ f.name }}</span>=<span class="kv-value">{{ f.value }}</span></span>
+            <!-- Fields rendered as one compact `k=v, k=v` string instead
+                 of one chip element per field (#586). Each chip was 3 DOM
+                 nodes; a dense row had ~30+ fields → ~100 nodes/row. The
+                 single text node keeps PlayLog light enough to render the
+                 whole window. Full per-field detail stays in the Raw
+                 column. -->
+            <span v-else class="kv-compact" :title="fieldsToString(r.fields)">{{ fieldsToString(r.fields) }}</span>
           </div>
           <div v-if="showRaw" class="cell c-raw" :title="rawValueFor(r)">
             <pre class="raw-pre">{{ rawValueFor(r) }}</pre>
@@ -1009,6 +1241,7 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-play, 90px)
     var(--c-attempt, 90px)
     var(--c-eventname, minmax(140px, 280px))
+    var(--c-token, minmax(120px, 0.9fr))
     var(--c-fields, minmax(280px, 4fr));
   gap: 8px;
   padding: 4px 8px;
@@ -1018,6 +1251,22 @@ function onRowsWheel(e: WheelEvent) {
   border-top: 1px solid #f3f4f6;
 }
 .c-flags { text-align: center; font-weight: 700; }
+.c-token { overflow: hidden; }
+.pl-token {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 10px;
+  color: #3730a3;
+  background: #eef2ff;
+  border: 1px solid #e0e7ff;
+  border-radius: 3px;
+  padding: 0 4px;
+}
 
 /* When the Raw column is toggled on, the row grid grows by one slot
  * and the fields column tightens so the raw cell has room. */
@@ -1031,6 +1280,7 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-play, 90px)
     var(--c-attempt, 90px)
     var(--c-eventname, minmax(140px, 280px))
+    var(--c-token, minmax(120px, 0.9fr))
     var(--c-fields, minmax(200px, 2fr))
     var(--c-raw, minmax(280px, 3fr));
 }
@@ -1051,17 +1301,35 @@ function onRowsWheel(e: WheelEvent) {
 }
 
 .rows {
-  max-height: 480px;
+  /* position:relative makes this the offsetParent so the cursor
+     auto-scroll's target.offsetTop is measured against THIS container. */
+  position: relative;
+  max-height: 960px;
   overflow-y: auto;
 }
 
 .row:hover { background: #f9fafb; }
+/* Synchronized "selected event" cursor — mirrors NetworkLog so picking an
+   event highlights the matching Play Log line. The .rows ancestor lifts
+   specificity above the .row.src-* tints defined below. */
+.rows .row.cursor-current {
+  background: rgba(29, 78, 216, 0.14);
+  border-top: 2px dashed #1d4ed8;
+  border-bottom: 2px dashed #1d4ed8;
+  box-shadow: inset 4px 0 0 #1d4ed8;
+}
+.rows .row.cursor-current:hover { background: rgba(29, 78, 216, 0.20); }
 
 .row.src-event { background: #fafafa; }
 .row.src-event:hover { background: #f3f4f6; }
 .row.src-network  { background: #ffffff; }
 .row.src-control    { background: #fef9c3; }
 .row.src-control:hover { background: #fef08a; }
+/* AVMetrics: cool indigo so it reads as "parallel observation stream"
+ * — distinct from the warm yellow Control rail without competing with
+ * the severity tints. Issue #486 spike. */
+.row.src-avmetrics    { background: #ede9fe; }
+.row.src-avmetrics:hover { background: #ddd6fe; }
 
 /* Row tints by severity (issue #473). Driven by the worst label on
  * the row; placed AFTER the .row.src-* rules so source order breaks
@@ -1110,6 +1378,7 @@ function onRowsWheel(e: WheelEvent) {
 .label-critical { background: #fecaca; color: #7f1d1d; border-color: #fca5a5; }
 .label-warning  { background: #fde68a; color: #854d0e; border-color: #fcd34d; }
 .label-info     { background: #d1fae5; color: #14532d; border-color: #a7f3d0; }
+.label-testing  { background: #e2e8f0; color: #475569; border-color: #cbd5e1; }
 
 .cell {
   white-space: nowrap;
@@ -1132,9 +1401,11 @@ function onRowsWheel(e: WheelEvent) {
   letter-spacing: 0.4px;
   border: 1px solid transparent;
 }
-.tag-event   { background: #e5e7eb; color: #374151; border-color: #d1d5db; }
-.tag-network { background: #dbeafe; color: #1e3a8a; border-color: #bfdbfe; }
-.tag-marker  { background: #fde68a; color: #92400e; border-color: #fcd34d; }
+.tag-event    { background: #e5e7eb; color: #374151; border-color: #d1d5db; }
+.tag-network  { background: #dbeafe; color: #1e3a8a; border-color: #bfdbfe; }
+.tag-marker   { background: #fde68a; color: #92400e; border-color: #fcd34d; }
+.tag-control  { background: #fde68a; color: #92400e; border-color: #fcd34d; }
+.tag-avmetrics { background: #c4b5fd; color: #4c1d95; border-color: #a78bfa; }
 
 .sortable { cursor: pointer; user-select: none; }
 .sortable:hover { color: #1f2937; }
@@ -1173,6 +1444,17 @@ function onRowsWheel(e: WheelEvent) {
 .kv-empty {
   color: #9ca3af;
   font-size: 10px;
+}
+/* Compact single-string field rendering (#586) — one text node instead
+ * of N chip elements. Wraps within the column; full value also in title. */
+.kv-compact {
+  font-size: 10px;
+  line-height: 1.5;
+  color: #374151;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* event_name column — dedicated cell after attempt_id. Lifted out

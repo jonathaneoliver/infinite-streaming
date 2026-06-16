@@ -17,7 +17,7 @@
  * the legacy used (`ismSidebarCollapsed`) so the user's collapsed/
  * expanded preference survives the legacy/v3 transition.
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 const props = defineProps<{ activePage: string }>();
 
@@ -28,6 +28,7 @@ interface NavItem {
   href: string;
   warning?: boolean;
   alpha?: boolean;
+  developerOnly?: boolean; // hidden unless ?developer=1 (mirrors shared-nav.js)
 }
 
 interface NavSection {
@@ -54,7 +55,7 @@ const DEV_BACKEND = 'https://jonathanoliver-ubuntu.local:21000';
 // /v3/ in dev so links stay on the Vite dev server (HMR); legacy/unmigrated
 // pages are served by the real backend.
 const V3_PAGES =
-  /^\/dashboard\/(dashboard|testing|testing-session|sessions|session-viewer|grid|characterization|ask|hello)\.html/;
+  /^\/dashboard\/(dashboard|testing|testing-session|sessions|session-viewer|grid|characterization|sweep|ask|hello)\.html/;
 function rewriteHrefForDev(href: string): string {
   if (typeof window === 'undefined') return href;
   if (window.location.port !== DEV_PORT) return href;
@@ -188,6 +189,7 @@ const sections: NavSection[] = [
       { id: 'testing',       icon: '🧪', text: 'Testing Monitor', href: '/dashboard/testing.html' },
       { id: 'sessions',      icon: '⏪', text: 'Sessions',         href: '/dashboard/sessions.html' },
       { id: 'characterization', icon: '📈', text: 'Automated Testing', href: '/dashboard/characterization.html' },
+      { id: 'sweep',         icon: '🔬', text: 'QE Lab',           href: '/dashboard/sweep.html', developerOnly: true },
       { id: 'quartet',       icon: '🎬', text: 'Quartet',          href: '/dashboard/quartet.html', alpha: true },
       { id: 'segment-duration', icon: '⏱️', text: 'Live Offset',   href: '/dashboard/segment-duration-comparison.html', alpha: true },
     ],
@@ -460,14 +462,33 @@ function isInternalNetworkHost(hostname: string): boolean {
 const restrictContent = computed(
   () => typeof window !== 'undefined' && !isInternalNetworkHost(window.location.hostname),
 );
+
+// Developer mode — reuses the established `?developer=1` convention (shared-nav.js,
+// SessionDetails, Grid). Sticky: `?developer=1` persists to localStorage so dev-only
+// nav items survive navigation; `?developer=0` clears it.
+const isDeveloper = ref<boolean>((() => {
+  if (typeof window === 'undefined') return false;
+  try {
+    const p = new URLSearchParams(window.location.search).get('developer');
+    if (p === '1') { localStorage.setItem('ismDeveloperMode', '1'); return true; }
+    if (p === '0') { localStorage.removeItem('ismDeveloperMode'); return false; }
+    return localStorage.getItem('ismDeveloperMode') === '1';
+  } catch {
+    return false;
+  }
+})());
+
 const visibleSections = computed<NavSection[]>(() =>
   sections
     .filter((s) => !(restrictContent.value && s.title === 'CONTENT'))
-    .map((s) =>
-      restrictContent.value && s.title === 'LIVE STREAMING'
-        ? { ...s, items: s.items.filter((i) => i.id !== 'monitor') }
-        : s,
-    )
+    .map((s) => ({
+      ...s,
+      items: s.items.filter(
+        (i) =>
+          (!i.developerOnly || isDeveloper.value) &&
+          !(restrictContent.value && s.title === 'LIVE STREAMING' && i.id === 'monitor'),
+      ),
+    }))
     .filter((s) => s.items.length > 0),
 );
 
@@ -693,9 +714,28 @@ const whatsNewUrl = computed(() => `https://github.com/${REPO_SLUG}/releases/tag
 const latestUrl = computed(() => `https://github.com/${REPO_SLUG}/releases/latest`);
 
 function dismissWhatsNew() {
+  // localStorage is already marked on first impression (watcher
+  // below); the × button only needs to hide the banner in this
+  // window. Set is harmless / idempotent so we keep it.
   localStorage.setItem('ismWhatsNewSeen', runningVersion.value);
   whatsNewDismissed.value = true;
 }
+
+// Auto-mark the "what's new" banner as seen on first display so it
+// doesn't reappear in every new tab/window until manually dismissed.
+// User can still click × in the current window to hide it; but
+// localStorage is set the moment the banner becomes visible, which
+// means the very next tab/window check passes and the banner stays
+// hidden until the next deploy bumps `runningVersion`. The computed
+// `whatsNewVisible` doesn't re-evaluate on localStorage writes (it
+// reads localStorage non-reactively), so the banner remains visible
+// in THIS window until the user explicitly dismisses or navigates
+// away.
+watch(whatsNewVisible, (visible) => {
+  if (visible && runningVersion.value) {
+    localStorage.setItem('ismWhatsNewSeen', runningVersion.value);
+  }
+});
 function dismissUpgrade() {
   localStorage.setItem('ismUpgradeDismissed', latestVersion.value);
   upgradeDismissed.value = true;

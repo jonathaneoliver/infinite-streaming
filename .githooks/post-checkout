@@ -1,0 +1,37 @@
+#!/bin/sh
+# post-checkout — ensure content/dashboard-v3/node_modules exists in this
+# worktree so `make test-deploy-dev` / `make test-deploy-frontend` can build
+# the Vue dashboard.
+#
+# node_modules is gitignored, so a fresh `git worktree add` never brings it.
+# That bit a #740 deploy on 2026-06-11: `make test-deploy-dev`'s rsync --delete
+# wiped the test-dev box, THEN the Vue build failed for lack of node_modules,
+# leaving the box half-updated. This hook seeds deps on every worktree add.
+#
+# Idempotent and quiet: no-op when deps are already present or when
+# dashboard-v3 isn't part of the checked-out tree. Never fails the checkout.
+#
+# Install into the active hooks dir with `make install-hooks`.
+
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+dir="$top/content/dashboard-v3"
+[ -f "$dir/package.json" ] || exit 0
+[ -d "$dir/node_modules/.bin" ] && exit 0
+
+# Prefer copying from a sibling worktree whose lockfile matches — fast
+# (same machine) and exact. Fall back to `npm ci` only when no match exists.
+git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}' | while read -r wt; do
+	[ "$wt" = "$top" ] && continue
+	src="$wt/content/dashboard-v3"
+	[ -d "$src/node_modules/.bin" ] || continue
+	if cmp -s "$src/package-lock.json" "$dir/package-lock.json" 2>/dev/null; then
+		echo "[post-checkout] seeding dashboard-v3/node_modules from $wt (lockfile match)"
+		cp -R "$src/node_modules" "$dir/node_modules" 2>/dev/null && exit 0
+	fi
+done
+# `exit 0` inside the while runs in a subshell (pipe), so check again here.
+[ -d "$dir/node_modules/.bin" ] && exit 0
+
+echo "[post-checkout] no matching sibling node_modules; running npm ci in dashboard-v3"
+( cd "$dir" && npm ci ) || echo "[post-checkout] npm ci failed — run it manually before deploying"
+exit 0

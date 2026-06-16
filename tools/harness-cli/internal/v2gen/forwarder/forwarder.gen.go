@@ -4,6 +4,7 @@
 package forwarder
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,27 @@ import (
 const (
 	BasicAuthScopes basicAuthContextKey = "basicAuth.Scopes"
 )
+
+// Defines values for AVMetricEventRowClassification.
+const (
+	AVMetricEventRowClassificationFavourite   AVMetricEventRowClassification = "favourite"
+	AVMetricEventRowClassificationInteresting AVMetricEventRowClassification = "interesting"
+	AVMetricEventRowClassificationOther       AVMetricEventRowClassification = "other"
+)
+
+// Valid indicates whether the value is a known member of the AVMetricEventRowClassification enum.
+func (e AVMetricEventRowClassification) Valid() bool {
+	switch e {
+	case AVMetricEventRowClassificationFavourite:
+		return true
+	case AVMetricEventRowClassificationInteresting:
+		return true
+	case AVMetricEventRowClassificationOther:
+		return true
+	default:
+		return false
+	}
+}
 
 // Defines values for BundleCatalogueStreamsStream.
 const (
@@ -277,6 +299,27 @@ func (e PlaySummaryClassification) Valid() bool {
 	}
 }
 
+// Defines values for ScenarioManifestVariant.
+const (
+	Ll  ScenarioManifestVariant = "ll"
+	N2s ScenarioManifestVariant = "2s"
+	N6s ScenarioManifestVariant = "6s"
+)
+
+// Valid indicates whether the value is a known member of the ScenarioManifestVariant enum.
+func (e ScenarioManifestVariant) Valid() bool {
+	switch e {
+	case Ll:
+		return true
+	case N2s:
+		return true
+	case N6s:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for Classification.
 const (
 	ClassificationFavourite   Classification = "favourite"
@@ -408,14 +451,38 @@ func (e GetApiV2PlaysParamsClassification) Valid() bool {
 
 // Defines values for GetApiV2PlaysAggregateParamsClassification.
 const (
-	Favourite   GetApiV2PlaysAggregateParamsClassification = "favourite"
-	Interesting GetApiV2PlaysAggregateParamsClassification = "interesting"
-	Other       GetApiV2PlaysAggregateParamsClassification = "other"
+	GetApiV2PlaysAggregateParamsClassificationFavourite   GetApiV2PlaysAggregateParamsClassification = "favourite"
+	GetApiV2PlaysAggregateParamsClassificationInteresting GetApiV2PlaysAggregateParamsClassification = "interesting"
+	GetApiV2PlaysAggregateParamsClassificationOther       GetApiV2PlaysAggregateParamsClassification = "other"
 )
 
 // Valid indicates whether the value is a known member of the GetApiV2PlaysAggregateParamsClassification enum.
 func (e GetApiV2PlaysAggregateParamsClassification) Valid() bool {
 	switch e {
+	case GetApiV2PlaysAggregateParamsClassificationFavourite:
+		return true
+	case GetApiV2PlaysAggregateParamsClassificationInteresting:
+		return true
+	case GetApiV2PlaysAggregateParamsClassificationOther:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification.
+const (
+	Auto        PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "auto"
+	Favourite   PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "favourite"
+	Interesting PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "interesting"
+	Other       PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification = "other"
+)
+
+// Valid indicates whether the value is a known member of the PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification enum.
+func (e PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification) Valid() bool {
+	switch e {
+	case Auto:
+		return true
 	case Favourite:
 		return true
 	case Interesting:
@@ -426,6 +493,52 @@ func (e GetApiV2PlaysAggregateParamsClassification) Valid() bool {
 		return false
 	}
 }
+
+// AVMetricEventRow One archived `ios_avmetric_events` row — a single iOS 18 AVMetrics
+// event. Issue #693.
+type AVMetricEventRow struct {
+	// AttemptId Sticky per-attempt counter. 0 when unknown.
+	AttemptId *int64 `json:"attempt_id,omitempty"`
+
+	// Classification Retention tier — same lifecycle as the parent session.
+	Classification *AVMetricEventRowClassification `json:"classification,omitempty"`
+
+	// EventFingerprint FNV-64a hash over (session, event_ts_ms, event_type). Stable
+	// dedupe key for SSE reconnects.
+	EventFingerprint *string `json:"event_fingerprint,omitempty"`
+
+	// EventTsMs AVMetrics-side timeline stamp (ms), separate from `ts` so
+	// causality plots don't mix clocks. 0 when absent.
+	EventTsMs *int64 `json:"event_ts_ms,omitempty"`
+
+	// EventType AVMetric subclass name as published by AVFoundation —
+	// e.g. `HLSPlaylistRequestEvent`, `HLSMediaSegmentRequestEvent`,
+	// `VariantSwitchStartEvent`, `ContentKeyRequestEvent`.
+	EventType string `json:"event_type"`
+
+	// Labels Severity-tagged `<severity>=<event>` strings (same vocab as the
+	// other tables). Empty until an AVMetric classifier lands.
+	Labels *[]string `json:"labels,omitempty"`
+
+	// PlayId Owning play (empty when not yet stamped).
+	PlayId *string `json:"play_id,omitempty"`
+
+	// PlayerId Owning player.
+	PlayerId *openapi_types.UUID `json:"player_id,omitempty"`
+
+	// RawJson Unmodified SDK payload as a JSON string — parse client-side.
+	// Carries the CoreMedia error code, byte ranges, etc.
+	RawJson *string `json:"raw_json,omitempty"`
+
+	// SessionId Owning proxy session.
+	SessionId *string `json:"session_id,omitempty"`
+
+	// Ts Forwarder ingest time.
+	Ts time.Time `json:"ts"`
+}
+
+// AVMetricEventRowClassification Retention tier — same lifecycle as the parent session.
+type AVMetricEventRowClassification string
 
 // AggregateResult Group-by output. `groups` is one row per distinct combination of
 // the requested `group_by` keys; each group has the requested metrics
@@ -520,7 +633,8 @@ type ControlEventRow struct {
 
 	// Event Closed-set action name. See issue #474 for the full vocab —
 	// e.g. `fault_on`, `pattern_step`, `loop_server`,
-	// `fault_rule_enabled`, `session_start`, `session_end`.
+	// `fault_rule_enabled`, `session_start`, `session_end`,
+	// `server_start`.
 	Event string `json:"event"`
 
 	// EventFingerprint FNV-64a hash over (player, play, ts_ms, source, event, info).
@@ -868,7 +982,6 @@ type PlayDetail struct {
 	Classification *PlayDetailClassification `json:"classification,omitempty"`
 	ContentId      *string                   `json:"content_id,omitempty"`
 	Downshifts     *int                      `json:"downshifts,omitempty"`
-	DroppedFrames  *int                      `json:"dropped_frames,omitempty"`
 
 	// ErrorEventCount Explicit player_error events.
 	ErrorEventCount *int `json:"error_event_count,omitempty"`
@@ -879,6 +992,7 @@ type PlayDetail struct {
 	// FirstFrameS Time-to-first-frame, seconds.
 	FirstFrameS     *float32 `json:"first_frame_s,omitempty"`
 	FramesDisplayed *int     `json:"frames_displayed,omitempty"`
+	FramesDropped   *int     `json:"frames_dropped,omitempty"`
 
 	// FrozenCount Renderer-frozen events (≠ buffer stalls).
 	FrozenCount *int `json:"frozen_count,omitempty"`
@@ -942,18 +1056,34 @@ type PlayDetail struct {
 	ResolutionChanges *int               `json:"resolution_changes,omitempty"`
 
 	// RestartCount Mid-play player-recovery restarts.
-	RestartCount    *int `json:"restart_count,omitempty"`
-	SegmentFailures *int `json:"segment_failures,omitempty"`
+	RestartCount *int `json:"restart_count,omitempty"`
+
+	// Scenario Run IDENTITY of a play — "what it IS" (test, platform, device,
+	// versions), as distinct from the event labels which are "what
+	// HAPPENED during it". Issue #678 promoted this off the dashboard
+	// (it was assembled client-side in Sessions.vue) into the API so the
+	// Sessions list, Session Viewer header, and chat tools share one shape.
+	//
+	// Hybrid-sourced: device/player/app/os/content from the authoritative
+	// typed summary columns; test/platform/run_id from the `testing=`
+	// label tier (no typed column exists for those). Every field is
+	// optional — a play absent all of them omits the whole object rather
+	// than emitting `{}`.
+	Scenario        *Scenario `json:"scenario,omitempty"`
+	SegmentFailures *int      `json:"segment_failures,omitempty"`
 
 	// SegmentStallCount Stalls waiting on a segment fetch.
 	SegmentStallCount *int `json:"segment_stall_count,omitempty"`
 
 	// SessionId Per-player numeric session counter ('1', '2', …). Empty when archive predates session_id stamping.
-	SessionId         *string   `json:"session_id,omitempty"`
-	Stalls            *int      `json:"stalls,omitempty"`
-	StartedAt         time.Time `json:"started_at"`
-	TransportFailures *int      `json:"transport_failures,omitempty"`
-	Upshifts          *int      `json:"upshifts,omitempty"`
+	SessionId *string `json:"session_id,omitempty"`
+	Stalls    *int    `json:"stalls,omitempty"`
+
+	// StartTime Client-supplied play start (ISO-8601 UTC), play-scoped — minted by the player with play_id and rotated with it. See PlayRecord.start_time in proxy.yaml. Null when the client didn't send it (web/Roku).
+	StartTime         *time.Time `json:"start_time,omitempty"`
+	StartedAt         time.Time  `json:"started_at"`
+	TransportFailures *int       `json:"transport_failures,omitempty"`
+	Upshifts          *int       `json:"upshifts,omitempty"`
 
 	// UserMarkedCount Operator pressed the 911 button N times.
 	UserMarkedCount *int `json:"user_marked_count,omitempty"`
@@ -989,7 +1119,7 @@ type PlayDetail_LabelHistogram_Item struct {
 // Field groups:
 //   - identifiers (play_id, player_id, session_id, content_id, …)
 //   - timing (started_at, last_seen_at)
-//   - quality (stalls, downshifts, dropped_frames, avg_quality_pct)
+//   - quality (stalls, downshifts, frames_dropped, avg_quality_pct)
 //   - failure counters (master_manifest_failures, …, transport_failures)
 //   - signal counters (frozen_count, restart_count, …) used by the
 //     dashboard's "interesting" filter
@@ -1020,7 +1150,6 @@ type PlaySummary struct {
 	Classification *PlaySummaryClassification `json:"classification,omitempty"`
 	ContentId      *string                    `json:"content_id,omitempty"`
 	Downshifts     *int                       `json:"downshifts,omitempty"`
-	DroppedFrames  *int                       `json:"dropped_frames,omitempty"`
 
 	// ErrorEventCount Explicit player_error events.
 	ErrorEventCount *int `json:"error_event_count,omitempty"`
@@ -1028,6 +1157,7 @@ type PlaySummary struct {
 	// FirstFrameS Time-to-first-frame, seconds.
 	FirstFrameS     *float32 `json:"first_frame_s,omitempty"`
 	FramesDisplayed *int     `json:"frames_displayed,omitempty"`
+	FramesDropped   *int     `json:"frames_dropped,omitempty"`
 
 	// FrozenCount Renderer-frozen events (≠ buffer stalls).
 	FrozenCount *int `json:"frozen_count,omitempty"`
@@ -1086,18 +1216,34 @@ type PlaySummary struct {
 	ResolutionChanges *int               `json:"resolution_changes,omitempty"`
 
 	// RestartCount Mid-play player-recovery restarts.
-	RestartCount    *int `json:"restart_count,omitempty"`
-	SegmentFailures *int `json:"segment_failures,omitempty"`
+	RestartCount *int `json:"restart_count,omitempty"`
+
+	// Scenario Run IDENTITY of a play — "what it IS" (test, platform, device,
+	// versions), as distinct from the event labels which are "what
+	// HAPPENED during it". Issue #678 promoted this off the dashboard
+	// (it was assembled client-side in Sessions.vue) into the API so the
+	// Sessions list, Session Viewer header, and chat tools share one shape.
+	//
+	// Hybrid-sourced: device/player/app/os/content from the authoritative
+	// typed summary columns; test/platform/run_id from the `testing=`
+	// label tier (no typed column exists for those). Every field is
+	// optional — a play absent all of them omits the whole object rather
+	// than emitting `{}`.
+	Scenario        *Scenario `json:"scenario,omitempty"`
+	SegmentFailures *int      `json:"segment_failures,omitempty"`
 
 	// SegmentStallCount Stalls waiting on a segment fetch.
 	SegmentStallCount *int `json:"segment_stall_count,omitempty"`
 
 	// SessionId Per-player numeric session counter ('1', '2', …). Empty when archive predates session_id stamping.
-	SessionId         *string   `json:"session_id,omitempty"`
-	Stalls            *int      `json:"stalls,omitempty"`
-	StartedAt         time.Time `json:"started_at"`
-	TransportFailures *int      `json:"transport_failures,omitempty"`
-	Upshifts          *int      `json:"upshifts,omitempty"`
+	SessionId *string `json:"session_id,omitempty"`
+	Stalls    *int    `json:"stalls,omitempty"`
+
+	// StartTime Client-supplied play start (ISO-8601 UTC), play-scoped — minted by the player with play_id and rotated with it. See PlayRecord.start_time in proxy.yaml. Null when the client didn't send it (web/Roku).
+	StartTime         *time.Time `json:"start_time,omitempty"`
+	StartedAt         time.Time  `json:"started_at"`
+	TransportFailures *int       `json:"transport_failures,omitempty"`
+	Upshifts          *int       `json:"upshifts,omitempty"`
 
 	// UserMarkedCount Operator pressed the 911 button N times.
 	UserMarkedCount *int `json:"user_marked_count,omitempty"`
@@ -1180,6 +1326,58 @@ type SampleRow struct {
 	Ts                   time.Time              `json:"ts"`
 	AdditionalProperties map[string]interface{} `json:"-"`
 }
+
+// Scenario Run IDENTITY of a play — "what it IS" (test, platform, device,
+// versions), as distinct from the event labels which are "what
+// HAPPENED during it". Issue #678 promoted this off the dashboard
+// (it was assembled client-side in Sessions.vue) into the API so the
+// Sessions list, Session Viewer header, and chat tools share one shape.
+//
+// Hybrid-sourced: device/player/app/os/content from the authoritative
+// typed summary columns; test/platform/run_id from the `testing=`
+// label tier (no typed column exists for those). Every field is
+// optional — a play absent all of them omits the whole object rather
+// than emitting `{}`.
+type Scenario struct {
+	// AppVersion Client app version. From the typed column.
+	AppVersion *string `json:"app_version,omitempty"`
+
+	// ContentId Content identifier — duplicated here so the object is self-contained for the viewer header.
+	ContentId *string `json:"content_id,omitempty"`
+
+	// DeviceClass Device taxonomy class (phone|tablet|tv|…). From the typed column (#550 Phase 4).
+	DeviceClass *string `json:"device_class,omitempty"`
+
+	// DeviceModel Device model identifier (e.g. 'iPhone15,2'). From the typed column.
+	DeviceModel *string `json:"device_model,omitempty"`
+
+	// ManifestVariant Manifest the player loaded, derived from the master URL: 'll' (low-latency), '2s', or '6s'. Issue #679.
+	ManifestVariant *ScenarioManifestVariant `json:"manifest_variant,omitempty"`
+
+	// OsVersion OS version, 'major.minor' (or just 'major'), joined from os_version_major/os_version_minor.
+	OsVersion *string `json:"os_version,omitempty"`
+
+	// Platform Harness-stamped platform, from testing=platform_* (e.g. 'ipad-sim'). Distinct from device_* below. Harness runs only.
+	Platform *string `json:"platform,omitempty"`
+
+	// PlayerTech Player technology (e.g. 'AVPlayer'). From the typed column.
+	PlayerTech *string `json:"player_tech,omitempty"`
+
+	// PlayerTechVersion Player engine version, paired with player_tech (Media3/ExoPlayer lib version on Android; OS version on iOS). From the typed column.
+	PlayerTechVersion *string `json:"player_tech_version,omitempty"`
+
+	// RunId Characterization run id, from testing=run_id_* (compact UTC, e.g. '20260524T070148Z'). Groups plays into a run. Harness runs only.
+	RunId *string `json:"run_id,omitempty"`
+
+	// ServerBuild go-live build that served the play, from the X-Served-By response header (the build the proxy captured). Empty for dev builds with no -ldflags stamp. Issue #679.
+	ServerBuild *string `json:"server_build,omitempty"`
+
+	// Test Characterization test mode, from testing=test_* (e.g. 'rampup'). Harness runs only.
+	Test *string `json:"test,omitempty"`
+}
+
+// ScenarioManifestVariant Manifest the player loaded, derived from the master URL: 'll' (low-latency), '2s', or '6s'. Issue #679.
+type ScenarioManifestVariant string
 
 // StreamErrorEvent Emitted on transport / CH failures after the initial `meta`
 // frame. The connection closes shortly after; the client may
@@ -1273,6 +1471,41 @@ type Problem = ProblemDetails
 
 // basicAuthContextKey is the context key for basicAuth security scheme
 type basicAuthContextKey string
+
+// GetApiV2AvmetricEventsParams defines parameters for GetApiV2AvmetricEvents.
+type GetApiV2AvmetricEventsParams struct {
+	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
+
+	// PlayId Filter to one play. Player-supplied UUID; rotates only on
+	// content-selection / fresh app or page load. Stable across
+	// in-app restart events.
+	PlayId *PlayIdFilter `form:"play_id,omitempty" json:"play_id,omitempty"`
+
+	// From ISO 8601 lower bound on the row timestamp. Inclusive.
+	From *From `form:"from,omitempty" json:"from,omitempty"`
+
+	// To ISO 8601 upper bound on the row timestamp. Exclusive.
+	To *To `form:"to,omitempty" json:"to,omitempty"`
+
+	// EventType Filter to specific AVMetric subclass names. Multiple values OR'd.
+	// Examples: `event_type=HLSPlaylistRequestEvent&event_type=VariantSwitchStartEvent`.
+	EventType *[]string `form:"event_type,omitempty" json:"event_type,omitempty"`
+
+	// LabelHas Row-level label inclusion filter. Repeatable; every value
+	// must be present in the row's `labels[]` (AND-within-includes).
+	// Format `<severity>=<event>` (with `*` prefix for synthesized
+	// labels). Example:
+	// `?label_has=warning%3Dhttp_4xx&label_has=info%3D%2Apattern_step`.
+	LabelHas *LabelHasFilter `form:"label_has,omitempty" json:"label_has,omitempty"`
+
+	// LabelNot Row-level label exclusion filter. Repeatable; none of the
+	// values may be present in the row's `labels[]`
+	// (AND-within-excludes). Combine with `label_has` for queries
+	// like *"has http_4xx AND has-not fault_rule_enabled"*. Same
+	// format as `label_has`.
+	LabelNot *LabelNotFilter `form:"label_not,omitempty" json:"label_not,omitempty"`
+	Limit    *Limit          `form:"limit,omitempty" json:"limit,omitempty"`
+}
 
 // GetApiV2ControlEventsParams defines parameters for GetApiV2ControlEvents.
 type GetApiV2ControlEventsParams struct {
@@ -1586,6 +1819,14 @@ type GetApiV2PlaysAggregateParams struct {
 // GetApiV2PlaysAggregateParamsClassification defines parameters for GetApiV2PlaysAggregate.
 type GetApiV2PlaysAggregateParamsClassification string
 
+// PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBody defines parameters for PatchApiV2PlaysPlayId.
+type PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBody struct {
+	Classification *PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification `json:"classification,omitempty"`
+}
+
+// PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification defines parameters for PatchApiV2PlaysPlayId.
+type PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBodyClassification string
+
 // GetApiV2SessionHeatmapParams defines parameters for GetApiV2SessionHeatmap.
 type GetApiV2SessionHeatmapParams struct {
 	PlayerId *PlayerIdFilter `form:"player_id,omitempty" json:"player_id,omitempty"`
@@ -1687,6 +1928,9 @@ type GetTimeseriesParams struct {
 	// the last known row).
 	LastEventID *TimeseriesLastEventId `json:"Last-Event-ID,omitempty"`
 }
+
+// PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody defines body for PatchApiV2PlaysPlayId for application/merge-patch+json ContentType.
+type PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONBody
 
 // Getter for additional properties for LegacyEventRow. Returns the specified
 // element and whether it was found
@@ -2638,6 +2882,9 @@ func WithRequestEditorFn(fn RequestEditorFn) ClientOption {
 
 // The interface specification for the client above.
 type ClientInterface interface {
+	// GetApiV2AvmetricEvents request
+	GetApiV2AvmetricEvents(ctx context.Context, params *GetApiV2AvmetricEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetBundles request
 	GetBundles(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -2665,6 +2912,11 @@ type ClientInterface interface {
 	// GetApiV2PlaysPlayId request
 	GetApiV2PlaysPlayId(ctx context.Context, playId PlayId, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PatchApiV2PlaysPlayIdWithBody request with any body
+	PatchApiV2PlaysPlayIdWithBody(ctx context.Context, playId PlayId, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PatchApiV2PlaysPlayIdWithApplicationMergePatchPlusJSONBody(ctx context.Context, playId PlayId, body PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetApiV2PlaysPlayIdBundle request
 	GetApiV2PlaysPlayIdBundle(ctx context.Context, playId PlayId, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -2673,6 +2925,18 @@ type ClientInterface interface {
 
 	// GetTimeseries request
 	GetTimeseries(ctx context.Context, params *GetTimeseriesParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+}
+
+func (c *Client) GetApiV2AvmetricEvents(ctx context.Context, params *GetApiV2AvmetricEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetApiV2AvmetricEventsRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
 }
 
 func (c *Client) GetBundles(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -2783,6 +3047,30 @@ func (c *Client) GetApiV2PlaysPlayId(ctx context.Context, playId PlayId, reqEdit
 	return c.Client.Do(req)
 }
 
+func (c *Client) PatchApiV2PlaysPlayIdWithBody(ctx context.Context, playId PlayId, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchApiV2PlaysPlayIdRequestWithBody(c.Server, playId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PatchApiV2PlaysPlayIdWithApplicationMergePatchPlusJSONBody(ctx context.Context, playId PlayId, body PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchApiV2PlaysPlayIdRequestWithApplicationMergePatchPlusJSONBody(c.Server, playId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) GetApiV2PlaysPlayIdBundle(ctx context.Context, playId PlayId, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetApiV2PlaysPlayIdBundleRequest(c.Server, playId)
 	if err != nil {
@@ -2817,6 +3105,144 @@ func (c *Client) GetTimeseries(ctx context.Context, params *GetTimeseriesParams,
 		return nil, err
 	}
 	return c.Client.Do(req)
+}
+
+// NewGetApiV2AvmetricEventsRequest generates requests for GetApiV2AvmetricEvents
+func NewGetApiV2AvmetricEventsRequest(server string, params *GetApiV2AvmetricEventsParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v2/avmetric_events")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.PlayerId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "player_id", *params.PlayerId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.PlayId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "play_id", *params.PlayId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "uuid"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.From != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "from", *params.From, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.To != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "to", *params.To, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "date-time"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.EventType != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "event_type", *params.EventType, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.LabelHas != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_has", *params.LabelHas, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.LabelNot != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_not", *params.LabelNot, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
 }
 
 // NewGetBundlesRequest generates requests for GetBundles
@@ -3828,6 +4254,53 @@ func NewGetApiV2PlaysPlayIdRequest(server string, playId PlayId) (*http.Request,
 	return req, nil
 }
 
+// NewPatchApiV2PlaysPlayIdRequestWithApplicationMergePatchPlusJSONBody calls the generic PatchApiV2PlaysPlayId builder with application/merge-patch+json body
+func NewPatchApiV2PlaysPlayIdRequestWithApplicationMergePatchPlusJSONBody(server string, playId PlayId, body PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPatchApiV2PlaysPlayIdRequestWithBody(server, playId, "application/merge-patch+json", bodyReader)
+}
+
+// NewPatchApiV2PlaysPlayIdRequestWithBody generates requests for PatchApiV2PlaysPlayId with any type of body
+func NewPatchApiV2PlaysPlayIdRequestWithBody(server string, playId PlayId, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "play_id", playId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v2/plays/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPatch, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewGetApiV2PlaysPlayIdBundleRequest generates requests for GetApiV2PlaysPlayIdBundle
 func NewGetApiV2PlaysPlayIdBundleRequest(server string, playId PlayId) (*http.Request, error) {
 	var err error
@@ -4180,6 +4653,9 @@ func WithBaseURL(baseURL string) ClientOption {
 
 // ClientWithResponsesInterface is the interface specification for the client with responses above.
 type ClientWithResponsesInterface interface {
+	// GetApiV2AvmetricEventsWithResponse request
+	GetApiV2AvmetricEventsWithResponse(ctx context.Context, params *GetApiV2AvmetricEventsParams, reqEditors ...RequestEditorFn) (*GetApiV2AvmetricEventsResponse, error)
+
 	// GetBundlesWithResponse request
 	GetBundlesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetBundlesResponse, error)
 
@@ -4207,6 +4683,11 @@ type ClientWithResponsesInterface interface {
 	// GetApiV2PlaysPlayIdWithResponse request
 	GetApiV2PlaysPlayIdWithResponse(ctx context.Context, playId PlayId, reqEditors ...RequestEditorFn) (*GetApiV2PlaysPlayIdResponse, error)
 
+	// PatchApiV2PlaysPlayIdWithBodyWithResponse request with any body
+	PatchApiV2PlaysPlayIdWithBodyWithResponse(ctx context.Context, playId PlayId, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchApiV2PlaysPlayIdResponse, error)
+
+	PatchApiV2PlaysPlayIdWithApplicationMergePatchPlusJSONBodyWithResponse(ctx context.Context, playId PlayId, body PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchApiV2PlaysPlayIdResponse, error)
+
 	// GetApiV2PlaysPlayIdBundleWithResponse request
 	GetApiV2PlaysPlayIdBundleWithResponse(ctx context.Context, playId PlayId, reqEditors ...RequestEditorFn) (*GetApiV2PlaysPlayIdBundleResponse, error)
 
@@ -4215,6 +4696,35 @@ type ClientWithResponsesInterface interface {
 
 	// GetTimeseriesWithResponse request
 	GetTimeseriesWithResponse(ctx context.Context, params *GetTimeseriesParams, reqEditors ...RequestEditorFn) (*GetTimeseriesResponse, error)
+}
+
+type GetApiV2AvmetricEventsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r GetApiV2AvmetricEventsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetApiV2AvmetricEventsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetApiV2AvmetricEventsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
 }
 
 type GetBundlesResponse struct {
@@ -4486,6 +4996,38 @@ func (r GetApiV2PlaysPlayIdResponse) ContentType() string {
 	return ""
 }
 
+type PatchApiV2PlaysPlayIdResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *PlaySummary
+	ApplicationproblemJSON400 *Problem
+	ApplicationproblemJSON501 *Problem
+}
+
+// Status returns HTTPResponse.Status
+func (r PatchApiV2PlaysPlayIdResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PatchApiV2PlaysPlayIdResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r PatchApiV2PlaysPlayIdResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type GetApiV2PlaysPlayIdBundleResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -4579,6 +5121,15 @@ func (r GetTimeseriesResponse) ContentType() string {
 	return ""
 }
 
+// GetApiV2AvmetricEventsWithResponse request returning *GetApiV2AvmetricEventsResponse
+func (c *ClientWithResponses) GetApiV2AvmetricEventsWithResponse(ctx context.Context, params *GetApiV2AvmetricEventsParams, reqEditors ...RequestEditorFn) (*GetApiV2AvmetricEventsResponse, error) {
+	rsp, err := c.GetApiV2AvmetricEvents(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetApiV2AvmetricEventsResponse(rsp)
+}
+
 // GetBundlesWithResponse request returning *GetBundlesResponse
 func (c *ClientWithResponses) GetBundlesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetBundlesResponse, error) {
 	rsp, err := c.GetBundles(ctx, reqEditors...)
@@ -4660,6 +5211,23 @@ func (c *ClientWithResponses) GetApiV2PlaysPlayIdWithResponse(ctx context.Contex
 	return ParseGetApiV2PlaysPlayIdResponse(rsp)
 }
 
+// PatchApiV2PlaysPlayIdWithBodyWithResponse request with arbitrary body returning *PatchApiV2PlaysPlayIdResponse
+func (c *ClientWithResponses) PatchApiV2PlaysPlayIdWithBodyWithResponse(ctx context.Context, playId PlayId, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchApiV2PlaysPlayIdResponse, error) {
+	rsp, err := c.PatchApiV2PlaysPlayIdWithBody(ctx, playId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePatchApiV2PlaysPlayIdResponse(rsp)
+}
+
+func (c *ClientWithResponses) PatchApiV2PlaysPlayIdWithApplicationMergePatchPlusJSONBodyWithResponse(ctx context.Context, playId PlayId, body PatchApiV2PlaysPlayIdApplicationMergePatchPlusJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchApiV2PlaysPlayIdResponse, error) {
+	rsp, err := c.PatchApiV2PlaysPlayIdWithApplicationMergePatchPlusJSONBody(ctx, playId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePatchApiV2PlaysPlayIdResponse(rsp)
+}
+
 // GetApiV2PlaysPlayIdBundleWithResponse request returning *GetApiV2PlaysPlayIdBundleResponse
 func (c *ClientWithResponses) GetApiV2PlaysPlayIdBundleWithResponse(ctx context.Context, playId PlayId, reqEditors ...RequestEditorFn) (*GetApiV2PlaysPlayIdBundleResponse, error) {
 	rsp, err := c.GetApiV2PlaysPlayIdBundle(ctx, playId, reqEditors...)
@@ -4685,6 +5253,22 @@ func (c *ClientWithResponses) GetTimeseriesWithResponse(ctx context.Context, par
 		return nil, err
 	}
 	return ParseGetTimeseriesResponse(rsp)
+}
+
+// ParseGetApiV2AvmetricEventsResponse parses an HTTP response from a GetApiV2AvmetricEventsWithResponse call
+func ParseGetApiV2AvmetricEventsResponse(rsp *http.Response) (*GetApiV2AvmetricEventsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetApiV2AvmetricEventsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
 }
 
 // ParseGetBundlesResponse parses an HTTP response from a GetBundlesWithResponse call
@@ -4902,6 +5486,46 @@ func ParseGetApiV2PlaysPlayIdResponse(rsp *http.Response) (*GetApiV2PlaysPlayIdR
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePatchApiV2PlaysPlayIdResponse parses an HTTP response from a PatchApiV2PlaysPlayIdWithResponse call
+func ParsePatchApiV2PlaysPlayIdResponse(rsp *http.Response) (*PatchApiV2PlaysPlayIdResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PatchApiV2PlaysPlayIdResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PlaySummary
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest Problem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
+		var dest Problem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON501 = &dest
 
 	}
 

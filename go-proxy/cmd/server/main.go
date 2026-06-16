@@ -95,8 +95,6 @@ type tcStatsCache struct {
 	backlog int64
 }
 
-
-
 // HeaderPair is a single name/value pair, used to carry HTTP request /
 // response headers and query parameters in NetworkLogEntry. Mirrors the
 // HAR 1.2 NameValue shape so a HAR consumer can drop these straight into
@@ -324,63 +322,70 @@ func (rb *NetworkLogRingBuffer) GetAll() []NetworkLogEntry {
 }
 
 type App struct {
-	sessionsMu               sync.Mutex
-	sessionsSnap             atomic.Pointer[[]SessionData]
-	throughputMu             sync.RWMutex
-	throughputData           map[int]map[string]interface{}
-	sessionEvents            *SessionEventStore
-	traffic                  *TcTrafficManager
-	upstreamHost             string
-	upstreamPort             string
-	maxSessions              int
+	// #740: the in-memory session list is now mutated lock-free via
+	// mutateSessions (immutable copy-on-write + CompareAndSwap). The former
+	// sessionsMu (guarded only the publish, never the read-modify-write) and
+	// createMu (#739 bootstrap-allocation lock, subsumed by reserve-then-fill)
+	// are gone — see mutateSessions and the handleProxy reserve CAS.
+	sessionsSnap   atomic.Pointer[[]SessionData]
+	throughputMu   sync.RWMutex
+	throughputData map[int]map[string]interface{}
+	sessionEvents  *SessionEventStore
+	traffic        *TcTrafficManager
+	upstreamHost   string
+	upstreamPort   string
+	maxSessions    int
 	// defaultRateMbps is the baseline rate cap (Mbps) applied to every
 	// new player session via setDefault on `nftables_bandwidth_mbps` in
 	// normalizeSessionsForResponse. Read once at boot from
 	// INFINITE_STREAM_DEFAULT_RATE_MBPS. 0 = no cap (today's behaviour);
 	// non-zero = the deployment's interpretation of "no operator
 	// override." See issue #480.
-	defaultRateMbps          int
-	client                   *http.Client
-	portMap                  PortMapping
-	shapeMu                  sync.Mutex
-	shapeLoops               map[int]context.CancelFunc
-	shapeStates              map[int]NftShapePattern
-	shapeApplyMu             sync.Mutex
-	shapeApply               map[int]ShapeApplyState
-	faultMu                  sync.Mutex
-	faultLoops               map[int]context.CancelFunc
-	networkLogsMu            sync.RWMutex
-	networkLogs              map[string]*NetworkLogRingBuffer // sessionId -> ring buffer
-	loopStateMu              sync.Mutex
-	loopStateBySession       map[string]ServerLoopState
-	sessionsHub              *SessionEventHub
+	defaultRateMbps    int
+	client             *http.Client
+	portMap            PortMapping
+	shapeMu            sync.Mutex
+	shapeLoops         map[int]context.CancelFunc
+	shapeStates        map[int]NftShapePattern
+	shapeApplyMu       sync.Mutex
+	shapeApply         map[int]ShapeApplyState
+	faultMu            sync.Mutex
+	faultLoops         map[int]context.CancelFunc
+	networkLogsMu      sync.RWMutex
+	networkLogs        map[string]*NetworkLogRingBuffer // sessionId -> ring buffer
+	loopStateMu        sync.Mutex
+	loopStateBySession map[string]ServerLoopState
+	sessionsHub        *SessionEventHub
 	// Monotonic revision stamped on each /api/sessions/stream frame
 	// (handleSessionStream initial frame + emitSessionEvent per-event
 	// frames). Was named sessionsBroadcastSeq when the debounced
 	// full-state broadcast lived here; kept stable as the wire
 	// revision is consumer-visible.
-	sessionsBroadcastSeq     uint64
-	networkHub               *NetworkEventHub
+	sessionsBroadcastSeq uint64
+	networkHub           *NetworkEventHub
 	// controlHub broadcasts proxy/harness control events to subscribers
 	// (forwarder + any dashboard SSE client). Issue #474 Milestone B.
-	controlHub               *ControlEventHub
-	uiStateVersionSeq        uint64
-	segmentFlightMu          sync.Mutex
-	segmentFlight            map[int]segmentFlightInfo // internal port -> segment transfer info
-	segmentFlightSeq         uint64                    // atomic generation counter for flight IDs
-	segmentRunMu             sync.Mutex
-	segmentRun               map[int]segmentRunRecord // internal port -> last completed run record
-	drainActiveMu            sync.Mutex
-	drainActive              map[int]bool // per-port: true while awaitSocketDrain is running
-	tcSamplesMu              sync.Mutex
-	tcSamples                map[int][]tcSample
-	wireRateMu               sync.Mutex
-	wireRate                 map[int]wireRateSample // latest byte-change-gated rate per port
-	tcCacheMu                sync.Mutex
-	tcCache                  map[int]*tcStatsCache // per-port TC stats cache
-	transferCompleteMu           sync.Mutex
-	transferCompleteMbps         map[int]float64   // latest completed segment Mbps per port
-	transferCompleteAt           map[int]time.Time // when the drain completed
+	controlHub *ControlEventHub
+	// avmetricsHub broadcasts iOS 18 AVMetrics raw events posted by the
+	// player to dashboard + forwarder subscribers. Issue #486 spike.
+	avmetricsHub         *AVMetricEventHub
+	uiStateVersionSeq    uint64
+	segmentFlightMu      sync.Mutex
+	segmentFlight        map[int]segmentFlightInfo // internal port -> segment transfer info
+	segmentFlightSeq     uint64                    // atomic generation counter for flight IDs
+	segmentRunMu         sync.Mutex
+	segmentRun           map[int]segmentRunRecord // internal port -> last completed run record
+	drainActiveMu        sync.Mutex
+	drainActive          map[int]bool // per-port: true while awaitSocketDrain is running
+	tcSamplesMu          sync.Mutex
+	tcSamples            map[int][]tcSample
+	wireRateMu           sync.Mutex
+	wireRate             map[int]wireRateSample // latest byte-change-gated rate per port
+	tcCacheMu            sync.Mutex
+	tcCache              map[int]*tcStatsCache // per-port TC stats cache
+	transferCompleteMu   sync.Mutex
+	transferCompleteMbps map[int]float64   // latest completed segment Mbps per port
+	transferCompleteAt   map[int]time.Time // when the drain completed
 	// metricsPostMu serialises `handlePostSessionMetrics` per session_id.
 	// Without this, two near-simultaneous POSTs run in independent
 	// goroutines that race for `sessionsMu`; the loser writes after the
@@ -390,7 +395,7 @@ type App struct {
 	// arrival order — Go's sync.Mutex grants in approximately FIFO
 	// order under contention since 1.9, which is what TCP delivery
 	// guarantees per connection. Issue #403 follow-up.
-	metricsPostMu                sync.Map // session_id -> *sync.Mutex
+	metricsPostMu sync.Map // session_id -> *sync.Mutex
 }
 
 // sessionStateMu serialises read-modify-write on the session map
@@ -549,6 +554,13 @@ type ControlEventHub struct {
 	mu      sync.Mutex
 	nextID  int
 	clients map[int]*ControlClient
+	// lastServerStart holds the most recent server_start boot marker so it
+	// can be replayed to clients that subscribe AFTER boot. The restart
+	// that produces the marker is the same event that drops the forwarder's
+	// SSE subscription, and Broadcast to zero clients is a no-op — so
+	// without replay the marker would be lost before the forwarder
+	// reconnects. Set via BroadcastServerStart, replayed in AddClient. #671.
+	lastServerStart *ControlEvent
 }
 
 type ControlClient struct {
@@ -583,6 +595,15 @@ func (h *ControlEventHub) AddClient(buffer int) (int, <-chan ControlEvent) {
 	id := h.nextID
 	c := &ControlClient{ch: make(chan ControlEvent, buffer)}
 	h.clients[id] = c
+	// Replay the sticky boot marker so a forwarder reconnecting after a
+	// restart still archives the server_start. The channel was just created
+	// with room, so this never blocks. #671.
+	if h.lastServerStart != nil {
+		select {
+		case c.ch <- *h.lastServerStart:
+		default:
+		}
+	}
 	return id, c.ch
 }
 
@@ -599,6 +620,104 @@ func (h *ControlEventHub) RemoveClient(id int) {
 }
 
 func (h *ControlEventHub) Broadcast(ev ControlEvent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.clients) == 0 {
+		return
+	}
+	for _, c := range h.clients {
+		select {
+		case c.ch <- ev:
+		default:
+			select {
+			case <-c.ch:
+				c.dropped++
+			default:
+			}
+			select {
+			case c.ch <- ev:
+			default:
+				c.dropped++
+			}
+		}
+	}
+}
+
+// BroadcastServerStart records the boot marker as sticky (replayed to every
+// future subscriber by AddClient) and broadcasts it to any client already
+// connected. Separate from Broadcast so only the boot marker is retained —
+// ordinary control events are not stickied. #671.
+func (h *ControlEventHub) BroadcastServerStart(ev ControlEvent) {
+	h.mu.Lock()
+	stored := ev
+	h.lastServerStart = &stored
+	h.mu.Unlock()
+	h.Broadcast(ev)
+}
+
+// AVMetricEventHub fans out iOS 18 AVMetrics raw events (issue #486) to
+// dashboard + forwarder subscribers. Parallel to ControlEventHub so the
+// spike's comparison stream stays separable from existing channels. Same
+// drop-oldest fanout policy: slow clients lose old events rather than
+// blocking the proxy hot path.
+type AVMetricEventHub struct {
+	mu      sync.Mutex
+	nextID  int
+	clients map[int]*AVMetricClient
+}
+
+type AVMetricClient struct {
+	ch      chan AVMetricEvent
+	dropped uint64
+}
+
+// AVMetricEvent is one row's worth of an AVMetrics-emitted event. The
+// raw subclass name (e.g. AVMetricPlayerItemLikelyToKeepUpEvent) is in
+// `EventType`; the unmodified SDK payload is in `Raw` so the forwarder
+// can persist it verbatim and the dashboard can project new fields
+// without an iOS rebuild. `EventTsMs` is the AVMetrics-side timeline
+// stamp (separate from `Ts` so causality plots don't mix clocks).
+type AVMetricEvent struct {
+	Ts        time.Time       `json:"ts"`
+	SessionID string          `json:"session_id"`
+	PlayerID  string          `json:"player_id"`
+	PlayID    string          `json:"play_id"`
+	AttemptID uint32          `json:"attempt_id"`
+	EventType string          `json:"event_type"`
+	EventTsMs int64           `json:"event_ts_ms"`
+	Raw       json.RawMessage `json:"raw"`
+}
+
+func NewAVMetricEventHub() *AVMetricEventHub {
+	return &AVMetricEventHub{clients: map[int]*AVMetricClient{}}
+}
+
+func (h *AVMetricEventHub) AddClient(buffer int) (int, <-chan AVMetricEvent) {
+	if buffer <= 0 {
+		buffer = 256
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nextID++
+	id := h.nextID
+	c := &AVMetricClient{ch: make(chan AVMetricEvent, buffer)}
+	h.clients[id] = c
+	return id, c.ch
+}
+
+func (h *AVMetricEventHub) RemoveClient(id int) {
+	h.mu.Lock()
+	c, ok := h.clients[id]
+	if ok {
+		delete(h.clients, id)
+	}
+	h.mu.Unlock()
+	if ok {
+		close(c.ch)
+	}
+}
+
+func (h *AVMetricEventHub) Broadcast(ev AVMetricEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if len(h.clients) == 0 {
@@ -684,6 +803,25 @@ type TcTrafficManager struct {
 	nlMu          sync.Mutex
 	nlHandle      *netlink.Handle // persistent netlink handle, created lazily
 	nlLink        netlink.Link    // resolved once from interfaceName
+	// tcMu serialises ALL tc tree mutations — the shared-root ensure (root
+	// qdisc 1: + root class 1:1), the per-port leaf HTB class add/change, the
+	// per-port filter install, and the per-port clear sweep. Every one of these
+	// is a check-then-act against the SAME tc tree, so concurrent
+	// config-on-connects otherwise interleave and wipe each other's leaf
+	// classes: a leaf-class add racing a clear (or another port's root ensure)
+	// leaves that port running uncapped through the 10 Gbps default class.
+	// Guarding only the shared root (the pre-#746 scope) was not enough — the
+	// leaf add/change, filter install, and ClearPortShaping all ran OUTSIDE the
+	// lock and clobbered each other. This was masked pre-#740 by the bootstrap
+	// createMu (held across the kernel apply); the reserve-then-fill that
+	// replaced it removed that serialization. See #745 / #746.
+	//
+	// Deadlock-free by construction: Go sync.Mutex is NOT reentrant, so we use
+	// the public-wrapper / lock-free-core split. Public methods acquire tcMu
+	// once and delegate to a lock-free *Core helper; *Core helpers NEVER take
+	// the lock and only call other lock-free helpers — never a public (locking)
+	// method.
+	tcMu sync.Mutex
 	// Per-port ICMP filter state (issue #404). Tracks the last
 	// player_ip we installed an ICMP-routing filter for so the
 	// path-ping sampler's per-tick ApplyPlayerICMPFilter call
@@ -709,6 +847,21 @@ func (a *App) getShapeApplyState(port int) (ShapeApplyState, bool) {
 func (a *App) setShapeApplyState(port int, state ShapeApplyState) {
 	a.shapeApplyMu.Lock()
 	a.shapeApply[port] = state
+	a.shapeApplyMu.Unlock()
+}
+
+// clearShapeApplyState forgets the last-applied shaping for a port. It MUST be
+// called whenever the port's kernel tc rule is wiped out-of-band (ClearPortShaping
+// at session-start / session-delete on a reused port). Otherwise the cached
+// state still matches a subsequent apply of the same rate and applyShapeIfChanged
+// SKIPS the re-install — leaving the port uncapped (config present, no kernel
+// rule). This bit config-on-connect (#712), which clears the port then re-applies
+// the materialized cap before the 302: on a reused port whose prior session had
+// the same rate (e.g. the pyramid's 1.048 Mbps floor every run), the re-apply was
+// skipped and the player cold-started unshaped on 4K.
+func (a *App) clearShapeApplyState(port int) {
+	a.shapeApplyMu.Lock()
+	delete(a.shapeApply, port)
 	a.shapeApplyMu.Unlock()
 }
 
@@ -885,6 +1038,94 @@ func (a *App) recordSessionEnd(session SessionData, reason string) {
 		source = "harness"
 	}
 	a.emitControlEventForSession(sessionID, source, "session_end", reason)
+
+	// #556 — for a silent death (the player stopped POSTing without a
+	// clean client play-terminal event), synthesize a terminal
+	// session_events frame from the last-known snapshot so the play still
+	// gets an outcome row + QoE outcome labels (vsf/msf/ebvs/tier). Only
+	// for inactive_timeout: operator delete/clear is administrative
+	// teardown, not a play outcome, and a clean client play_end (or legacy
+	// session_end) already covers the happy path (and is deduped below).
+	if reason == "inactive_timeout" {
+		a.synthesizeTerminalSessionEvent(session, reason)
+	}
+}
+
+// synthesizeTerminalSessionEvent publishes one session_events frame
+// stamped as the play's terminal row, derived from the last-known
+// session snapshot. No-op when the client already delivered its own
+// play-terminal event (dedupe on last_event) so we never double-stamp.
+//
+// playback_status: respect a terminal status the client managed to set
+// before going silent; otherwise classify by whether playback ever
+// started — pre-first-frame => abandoned_start (qoe_ebvs), post-first-
+// frame => user_stopped. We deliberately do NOT fabricate a failure
+// (mid_stream_failure): the proxy can't prove one, and a silent
+// disappearance is almost always the user leaving.
+func (a *App) synthesizeTerminalSessionEvent(session SessionData, reason string) {
+	if a == nil {
+		return
+	}
+	if frame, ok := terminalFrameForSession(session, reason); ok {
+		a.emitSessionEvent(frame)
+	}
+}
+
+// terminalFrameForSession derives the synthesized terminal frame from a
+// last-known session snapshot. Pure (no App state) so it's unit-testable.
+// Returns ok=false when no frame should be emitted: a nil session, or
+// the client already delivered its own play-terminal event (dedupe on
+// last_event).
+//
+// #554: the play-terminal event is `play_end` (renamed from
+// `session_end`). The dedupe accepts BOTH names so a client that ended
+// cleanly with either is not double-stamped — clients migrate one at a
+// time and historical rows still carry `session_end`. The synthesized
+// frame itself stamps the new canonical `play_end`. (Distinct from the
+// proxy session-lifecycle `session_end` CONTROL event in
+// recordSessionEnd, which is unchanged.)
+func terminalFrameForSession(session SessionData, reason string) (SessionData, bool) {
+	if session == nil {
+		return nil, false
+	}
+	if isPlayTerminalLastEvent(getString(session, "player_metrics_last_event")) {
+		return nil, false // client ended cleanly — don't double-stamp
+	}
+	frame := cloneSession(session)
+	frame["player_metrics_last_event"] = "play_end"
+	frame["player_metrics_trigger_type"] = "play_end"
+	// #634 — the cloned snapshot still carries the dead session's FINAL
+	// HEARTBEAT event_time. Emitting the terminal frame at that exact
+	// instant ties with the real heartbeat row in session_events (the
+	// forwarder anchors `ts` to event_time), and the plays aggregate's
+	// argMax(playback_status, ts) then breaks the tie arbitrarily —
+	// playback_status flaps between in_progress and user_stopped from
+	// one read to the next. Stamp the synthetic row 1ms after the
+	// snapshot so it strictly wins ordering, without distorting the
+	// play's timeline by the reap delay (~60s). Unparseable/missing
+	// event_time is left alone — the merge chokepoint and the forwarder
+	// fallback already stamp wall clock in that case.
+	if t, ok := parseEventTime(getString(session, "player_metrics_event_time")); ok {
+		frame["player_metrics_event_time"] = t.Add(time.Millisecond).UTC().Format(time.RFC3339Nano)
+	}
+	if status := getString(session, "player_metrics_playback_status"); status == "" || status == "in_progress" {
+		if getInt(session, "player_metrics_video_first_frame_time_ms") > 0 {
+			frame["player_metrics_playback_status"] = "user_stopped"
+		} else {
+			frame["player_metrics_playback_status"] = "abandoned_start"
+		}
+		frame["player_metrics_playback_reason"] = reason
+	}
+	return frame, true
+}
+
+// isPlayTerminalLastEvent reports whether a player_metrics_last_event
+// value marks the play's terminal row. Accepts both the new canonical
+// `play_end` (#554) and the legacy `session_end` so the migration is
+// tolerant in both directions and historical rows keep deduping.
+// Mirrors the forwarder's qoe_labels.go isPlayTerminalEvent.
+func isPlayTerminalLastEvent(lastEvent string) bool {
+	return lastEvent == "play_end" || lastEvent == "session_end"
 }
 
 func (s *NftShapeStep) UnmarshalJSON(data []byte) error {
@@ -923,22 +1164,49 @@ func (t *TcTrafficManager) IsActive() bool {
 	return strings.Contains(string(output), "htb")
 }
 
-func (t *TcTrafficManager) EnsureRootQdisc() error {
+// tcAddAlreadyExists reports whether a `tc … add` failure is the benign
+// "the object already exists" outcome of a concurrent apply having created
+// the SAME shared object first. RTNETLINK reports a duplicate class/qdisc as
+// "File exists"; the root-qdisc replace path can also report "Exclusivity
+// flag on, cannot modify". Either way the shared root now exists — that's
+// success, not failure. Matching the kernel's English message is unavoidable
+// here: `tc` shells out and only surfaces RTNETLINK strings on stderr. See #745.
+func tcAddAlreadyExists(out []byte) bool {
+	s := strings.ToLower(string(out))
+	return strings.Contains(s, "file exists") || strings.Contains(s, "exclusivity flag on")
+}
+
+// ensureRootQdiscCore is the lock-free core of the root-qdisc ensure. The
+// caller MUST hold t.tcMu (#746). It NEVER takes the lock itself and is only
+// ever called from tcMu-holding paths (updateRateLimitCore, updateNetemCore,
+// EnsureClass).
+func (t *TcTrafficManager) ensureRootQdiscCore() error {
 	show := exec.Command("tc", "qdisc", "show", "dev", t.interfaceName)
 	if out, err := show.CombinedOutput(); err == nil {
 		if strings.Contains(string(out), "qdisc htb 1:") || strings.Contains(string(out), "root htb") {
 			return nil
 		}
 	}
-	_ = exec.Command("tc", "qdisc", "del", "dev", t.interfaceName, "root").Run()
+	// NOTE: no `tc qdisc del root` here — deleting the root nukes EVERY port's
+	// leaf class + filter at once (the #746 footgun). The "root already exists"
+	// check above plus the idempotent add (tcAddAlreadyExists below) are
+	// sufficient to converge on a single shared root.
 	cmd := exec.Command("tc", "qdisc", "add", "dev", t.interfaceName, "root", "handle", "1:", "htb", "default", "999")
 	if out, err := cmd.CombinedOutput(); err != nil {
+		// A concurrent installer (or an out-of-band one) won the race — the
+		// htb root now exists, which is what we wanted.
+		if tcAddAlreadyExists(out) {
+			return nil
+		}
 		return fmt.Errorf("tc qdisc add failed: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-func (t *TcTrafficManager) EnsureRootClass() error {
+// ensureRootClassCore is the lock-free core of the root-class 1:1 ensure. The
+// caller MUST hold t.tcMu (#746). It NEVER takes the lock itself and is only
+// ever called from tcMu-holding paths.
+func (t *TcTrafficManager) ensureRootClassCore() error {
 	cmd := exec.Command("tc", "class", "show", "dev", t.interfaceName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -953,6 +1221,12 @@ func (t *TcTrafficManager) EnsureRootClass() error {
 		"burst", "16k", "cburst", "16k", "quantum", "1514",
 	)
 	if out, err := addCmd.CombinedOutput(); err != nil {
+		// The root class already exists (a concurrent apply created it) →
+		// success. Previously this returned fatal, so the caller bailed before
+		// installing the per-port leaf class and that port ran uncapped (#745).
+		if tcAddAlreadyExists(out) {
+			return nil
+		}
 		return fmt.Errorf("tc root class add failed: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -1031,11 +1305,25 @@ func (t *TcTrafficManager) GetPortConfig(port int) (map[string]interface{}, erro
 	return config, nil
 }
 
+// UpdateRateLimit is the public, lock-acquiring entrypoint. It holds t.tcMu
+// for the whole leaf-class mutation (#746) so a concurrent config-on-connect
+// can't wipe this port's leaf class mid-apply, then delegates to the lock-free
+// core.
 func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
-	if err := t.EnsureRootQdisc(); err != nil {
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
+	return t.updateRateLimitCore(port, rateMbps)
+}
+
+// updateRateLimitCore is the lock-free core of UpdateRateLimit. The caller MUST
+// hold t.tcMu. It only calls other lock-free helpers (ensureRootQdiscCore,
+// ensureRootClassCore, updateNetemCore, RemoveFilter, RemoveClass,
+// ensurePortFilter, ensurePrioLeafForPort) — never a public locking method.
+func (t *TcTrafficManager) updateRateLimitCore(port int, rateMbps float64) error {
+	if err := t.ensureRootQdiscCore(); err != nil {
 		return err
 	}
-	if err := t.EnsureRootClass(); err != nil {
+	if err := t.ensureRootClassCore(); err != nil {
 		return err
 	}
 	if rateMbps <= 0 {
@@ -1044,7 +1332,7 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 			time.Now().UTC().Format(time.RFC3339Nano),
 			port,
 		)
-		_ = t.UpdateNetem(port, 0, 0)
+		_ = t.updateNetemCore(port, 0, 0)
 		_ = t.RemoveFilter(port)
 		_ = t.RemoveClass(port)
 		t.logTcState("rate_clear", port)
@@ -1136,6 +1424,14 @@ func (t *TcTrafficManager) RemoveClass(port int) error {
 //     about to belong to a fresh playback episode; whatever was
 //     there before is by definition leftover from a prior session.
 func (t *TcTrafficManager) ClearPortShaping(port int) {
+	// Hold tcMu for the whole clear sweep (#746): the class-del here otherwise
+	// races a concurrent leaf-class add/change on another port's apply against
+	// the shared tc tree. The icmpFilterMu acquired below is a DIFFERENT mutex
+	// (guards only the per-port ICMP tracking map) and never overlaps tcMu's
+	// scope, so no deadlock. This method runs raw tc commands only — no *Core
+	// split needed.
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
 	portSuffix := fmt.Sprintf("%03d", port%1000)
 	classid := fmt.Sprintf("1:%s", portSuffix)
 	// First check if there's actually a class to clear — keeps the
@@ -1146,9 +1442,14 @@ func (t *TcTrafficManager) ClearPortShaping(port int) {
 		return
 	}
 	log.Printf("NETSHAPE port_shaping_clear port=%d classid=%s reason=session_start", port, classid)
-	_ = exec.Command("tc", "filter", "del", "dev", t.interfaceName, "protocol", "ip",
-		"parent", "1:0", "prio", "1", "u32",
-		"match", "ip", "sport", fmt.Sprintf("%d", port), "0xffff").Run()
+	// Delete THIS port's u32 filter by its exact handle (#816). This previously
+	// inlined `tc filter del … prio 1 u32 match ip sport <port>`, which at the
+	// shared prio 1 collaterally removed OTHER live sessions' filters — and since
+	// ClearPortShaping is the config-on-start sweep, it was the production
+	// trigger of the cross-session uncap. RemoveFilter resolves the exact handle
+	// (no-op when absent). Safe under the tcMu we already hold — RemoveFilter
+	// takes no lock.
+	_ = t.RemoveFilter(port)
 	// Also clear the per-port ICMP-to-player_ip filter installed for
 	// the path-ping prio routing (issue #404). Per-port pref makes
 	// this a single by-attribute delete; the tracking map is then
@@ -1205,7 +1506,9 @@ func (t *TcTrafficManager) scheduleRateLimitVerification(port int, expectedMbps 
 // (issue #352 layer 3) so any divergence is visible to operators.
 //
 // `tc class show` output for an htb class looks like:
-//   class htb 1:181 parent 1:1 prio 0 rate 15414Kbit ceil 15414Kbit ...
+//
+//	class htb 1:181 parent 1:1 prio 0 rate 15414Kbit ceil 15414Kbit ...
+//
 // We parse the "rate" token. Kbit and Mbit are the only units the
 // proxy ever installs, so the parser handles both.
 func (t *TcTrafficManager) ReadActualRateMbps(port int) float64 {
@@ -1243,13 +1546,62 @@ func (t *TcTrafficManager) ReadActualRateMbps(port int) float64 {
 	return -1
 }
 
+// RemoveFilter deletes ONLY this port's u32 classifier filter, resolved to its
+// exact kernel handle first. The previous implementation deleted by match-spec
+// at the shared `prio 1` (`tc filter del … prio 1 u32 match ip sport <port>`),
+// which the kernel/iproute2 can apply to the WRONG filter at that prio —
+// collaterally removing ANOTHER live session's filter. The victim's traffic
+// then fell through to the 10 Gbps HTB `default 999` class (uncapped) until its
+// next rate-set re-added its filter. This surfaced when a concurrent session's
+// config-on-start clear sweep (ClearPortShaping) ran while peers were streaming
+// (#816). Deleting by the resolved handle touches exactly one filter — or
+// nothing, when this port has no filter (a fresh session's sweep), which must
+// NOT fall back to a match-spec delete (that is the over-deletion being fixed).
 func (t *TcTrafficManager) RemoveFilter(port int) error {
+	show := exec.Command("tc", "filter", "show", "dev", t.interfaceName, "parent", "1:0")
+	out, _ := show.CombinedOutput()
+	handle := u32HandleForPort(string(out), port)
+	if handle == "" {
+		return nil // no filter classifies this port — nothing to remove
+	}
 	cmd := exec.Command(
-		"tc", "filter", "del", "dev", t.interfaceName, "protocol", "ip", "parent", "1:0", "prio", "1", "u32",
-		"match", "ip", "sport", fmt.Sprintf("%d", port), "0xffff",
+		"tc", "filter", "del", "dev", t.interfaceName, "parent", "1:0", "prio", "1",
+		"handle", handle, "u32",
 	)
-	_ = cmd.Run()
+	if outDel, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("NETSHAPE tc filter del failed port=%d handle=%s: %s", port, handle, strings.TrimSpace(string(outDel)))
+	}
 	return nil
+}
+
+// u32HandleForPort scans `tc filter show … parent 1:0` output and returns the
+// handle (e.g. "800::800") of the u32 filter whose selector matches the given
+// port — as a source port (the primary form ensurePortFilter installs) or a
+// destination port (the dport fallback). Returns "" when no filter classifies
+// the port. Pure/string-only so it is unit-testable off-box.
+//
+// iproute2 prints each u32 leaf filter as a header line carrying
+// `fh <handle> … flowid 1:<minor>` followed by one or more
+// `  match <hex>/<mask> at <off>` lines. ensurePortFilter encodes sport at
+// offset 20 as `<port>0000/ffff0000` and the dport fallback as
+// `0000<port>/0000ffff`, so each match is associated with the most recent leaf
+// handle line (the `fh 800:` hashtable line is skipped — only `::` leaf handles
+// classify traffic).
+func u32HandleForPort(filterShow string, port int) string {
+	sportHex := "match " + fmt.Sprintf("%04x0000/ffff0000", port) // sport at offset 20
+	dportHex := "match " + fmt.Sprintf("0000%04x/0000ffff", port) // dport at offset 20
+	handle := ""
+	for _, line := range strings.Split(filterShow, "\n") {
+		if i := strings.Index(line, "fh "); i >= 0 {
+			if tok := strings.Fields(line[i+3:]); len(tok) > 0 && strings.Contains(tok[0], "::") {
+				handle = tok[0]
+			}
+		}
+		if handle != "" && (strings.Contains(line, sportHex) || strings.Contains(line, dportHex)) {
+			return handle
+		}
+	}
+	return ""
 }
 
 func (t *TcTrafficManager) ensurePortFilter(port int, classid string) error {
@@ -1276,11 +1628,23 @@ func (t *TcTrafficManager) ensurePortFilter(port int, classid string) error {
 	return nil
 }
 
+// EnsureClass is a public, lock-acquiring entrypoint (App + updateNetemCore
+// callers). It holds t.tcMu for the whole ensure (#746) and delegates to
+// lock-free cores. NOTE: updateNetemCore calls ensureClassCore directly (it
+// already holds tcMu); only external/App callers go through this wrapper.
 func (t *TcTrafficManager) EnsureClass(port int, rateMbps float64) error {
-	if err := t.EnsureRootQdisc(); err != nil {
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
+	return t.ensureClassCore(port, rateMbps)
+}
+
+// ensureClassCore is the lock-free core of EnsureClass. The caller MUST hold
+// t.tcMu. Only calls other lock-free helpers.
+func (t *TcTrafficManager) ensureClassCore(port int, rateMbps float64) error {
+	if err := t.ensureRootQdiscCore(); err != nil {
 		return err
 	}
-	if err := t.EnsureRootClass(); err != nil {
+	if err := t.ensureRootClassCore(); err != nil {
 		return err
 	}
 	cmd := exec.Command("tc", "class", "show", "dev", t.interfaceName)
@@ -1293,7 +1657,7 @@ func (t *TcTrafficManager) EnsureClass(port int, rateMbps float64) error {
 	if strings.Contains(string(output), classid) {
 		return t.ensurePortFilter(port, classid)
 	}
-	return t.UpdateRateLimit(port, rateMbps)
+	return t.updateRateLimitCore(port, rateMbps)
 }
 
 // ensurePrioLeafForPort installs the prio+netem-per-band leaf inside
@@ -1353,11 +1717,24 @@ func (t *TcTrafficManager) ensurePrioLeafForPort(port int) error {
 // installed (or confirmed present) before the netem replacements so
 // this works even when called on a class created by UpdateRateLimit
 // without netem ever previously being touched.
+// UpdateNetem is the public, lock-acquiring entrypoint. It holds t.tcMu for the
+// whole netem mutation (#746) and delegates to the lock-free core.
 func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) error {
-	if err := t.EnsureRootQdisc(); err != nil {
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
+	return t.updateNetemCore(port, delayMs, lossPct)
+}
+
+// updateNetemCore is the lock-free core of UpdateNetem. The caller MUST hold
+// t.tcMu. Only calls other lock-free helpers (ensureRootQdiscCore,
+// ensureRootClassCore, ensureClassCore, ensurePrioLeafForPort) — never a public
+// locking method. (Also called directly from updateRateLimitCore's clear
+// branch, which already holds tcMu.)
+func (t *TcTrafficManager) updateNetemCore(port int, delayMs int, lossPct float64) error {
+	if err := t.ensureRootQdiscCore(); err != nil {
 		return err
 	}
-	if err := t.EnsureRootClass(); err != nil {
+	if err := t.ensureRootClassCore(); err != nil {
 		return err
 	}
 	portSuffix := fmt.Sprintf("%03d", port%1000)
@@ -1372,7 +1749,7 @@ func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) e
 			return nil
 		}
 	} else {
-		if err := t.EnsureClass(port, 10000); err != nil {
+		if err := t.ensureClassCore(port, 10000); err != nil {
 			return err
 		}
 	}
@@ -1749,37 +2126,38 @@ func main() {
 
 	emptySessions := []SessionData{}
 	app := &App{
-		throughputData: map[int]map[string]interface{}{},
-		sessionEvents: eventStore,
-		traffic:       NewTcTrafficManager(interfaceName, tcDebug),
-		upstreamHost:  upstreamHost,
-		upstreamPort:  upstreamPort,
-		maxSessions:      maxSessions,
-		defaultRateMbps:  defaultRateMbps,
-		portMap:       loadPortMapping(),
+		throughputData:  map[int]map[string]interface{}{},
+		sessionEvents:   eventStore,
+		traffic:         NewTcTrafficManager(interfaceName, tcDebug),
+		upstreamHost:    upstreamHost,
+		upstreamPort:    upstreamPort,
+		maxSessions:     maxSessions,
+		defaultRateMbps: defaultRateMbps,
+		portMap:         loadPortMapping(),
 		client: &http.Client{
 			Transport: &http.Transport{
 				DialContext:           (&net.Dialer{Timeout: 6 * time.Second}).DialContext,
 				ResponseHeaderTimeout: 6 * time.Second,
 			},
 		},
-		shapeLoops:         map[int]context.CancelFunc{},
-		shapeStates:        map[int]NftShapePattern{},
-		shapeApply:         map[int]ShapeApplyState{},
-		faultLoops:         map[int]context.CancelFunc{},
-		sessionsHub:        NewSessionEventHub(),
-		networkHub:         NewNetworkEventHub(),
-		controlHub:         NewControlEventHub(),
-		networkLogs:        map[string]*NetworkLogRingBuffer{},
-		loopStateBySession: map[string]ServerLoopState{},
-		segmentFlight:      map[int]segmentFlightInfo{},
-		segmentRun:         map[int]segmentRunRecord{},
-		drainActive:        map[int]bool{},
-		tcSamples:          map[int][]tcSample{},
-		wireRate:            map[int]wireRateSample{},
-		tcCache:             map[int]*tcStatsCache{},
-		transferCompleteMbps:    map[int]float64{},
-		transferCompleteAt:      map[int]time.Time{},
+		shapeLoops:           map[int]context.CancelFunc{},
+		shapeStates:          map[int]NftShapePattern{},
+		shapeApply:           map[int]ShapeApplyState{},
+		faultLoops:           map[int]context.CancelFunc{},
+		sessionsHub:          NewSessionEventHub(),
+		networkHub:           NewNetworkEventHub(),
+		controlHub:           NewControlEventHub(),
+		avmetricsHub:         NewAVMetricEventHub(),
+		networkLogs:          map[string]*NetworkLogRingBuffer{},
+		loopStateBySession:   map[string]ServerLoopState{},
+		segmentFlight:        map[int]segmentFlightInfo{},
+		segmentRun:           map[int]segmentRunRecord{},
+		drainActive:          map[int]bool{},
+		tcSamples:            map[int][]tcSample{},
+		wireRate:             map[int]wireRateSample{},
+		tcCache:              map[int]*tcStatsCache{},
+		transferCompleteMbps: map[int]float64{},
+		transferCompleteAt:   map[int]time.Time{},
 	}
 
 	app.sessionsSnap.Store(&emptySessions)
@@ -1790,7 +2168,11 @@ func main() {
 	// survived the proxy restart. Without this, pre-existing sessions
 	// keep their session-map values but the kernel forgot — they end
 	// up uncapped. Issue #480.
-	app.restoreShapeApplication()
+	restoredShapes, skippedShapes := app.restoreShapeApplication()
+	// Record the restart as an archivable control_event so a cap-drop spike
+	// landing in the boot restore window is attributable to a redeploy rather
+	// than a shaper bug. Sticky-replayed to the forwarder on reconnect. #671.
+	app.emitServerStart(restoredShapes, skippedShapes)
 	// 100 ms TCP_INFO sampler — folds smoothed RTT / jitter / lifetime
 	// min / RTO into per-session windows that get drained on each
 	// snapshot broadcast (issue #401). Linux-only kernel read; the
@@ -1811,6 +2193,10 @@ func main() {
 	router.HandleFunc("/api/session/{id}", app.handleSession).Methods(http.MethodGet, http.MethodDelete)
 	router.HandleFunc("/api/session/{id}", app.handlePatchSession).Methods(http.MethodPatch)
 	router.HandleFunc("/api/session/{id}/metrics", app.handlePostSessionMetrics).Methods(http.MethodPost)
+	// iOS 18 AVMetrics raw event stream (issue #486 spike). Kept on its
+	// own POST + SSE pair so the comparison against /metrics stays clean.
+	router.HandleFunc("/api/session/{id}/avmetrics", app.handlePostSessionAVMetrics).Methods(http.MethodPost)
+	router.HandleFunc("/api/avmetrics/stream", app.handleAVMetricsStream).Methods(http.MethodGet)
 	router.HandleFunc("/api/session/{id}/network", app.handleGetNetworkLog).Methods(http.MethodGet)
 	router.HandleFunc("/api/network/stream", app.handleNetworkStream).Methods(http.MethodGet)
 	// Control events SSE — issue #474 Milestone B. Mirrors
@@ -2071,6 +2457,26 @@ func (a *App) emitControlEventForSession(sessionID, source, event, info string) 
 	})
 }
 
+// emitServerStart records a global (session-less) boot marker into
+// control_events so a proxy restart is correlatable with the cap-drop spikes
+// it can produce (the restore window before restoreShapeApplication re-installs
+// each port's tc filter — see #671). source=auto: server-driven, not operator
+// or harness. Carries the shape-restoration counts so an operator can see how
+// many sessions were re-capped on boot. Goes through BroadcastServerStart so
+// the forwarder still archives it after its SSE reconnects post-restart.
+func (a *App) emitServerStart(restored, skipped int) {
+	if a == nil || a.controlHub == nil {
+		return
+	}
+	info := fmt.Sprintf("restored=%d;skipped=%d;baseline_mbps=%d", restored, skipped, a.defaultRateMbps)
+	a.controlHub.BroadcastServerStart(ControlEvent{
+		Ts:     time.Now().UTC(),
+		Source: "auto",
+		Event:  "server_start",
+		Info:   info,
+	})
+}
+
 func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	if a.sessionsHub == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -2241,6 +2647,12 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	if v := strings.TrimSpace(r.URL.Query().Get("attempt_id")); v != "" {
 		metricsOnly["attempt_id"] = v
 	}
+	// Play-scoped client start (#587) — picked up here too so it lands
+	// on long-running iOS sessions between manifest fetches, same as
+	// play_id/attempt_id.
+	if v := strings.TrimSpace(r.URL.Query().Get("start_time")); v != "" {
+		metricsOnly["start_time"] = v
+	}
 	merged, ok := a.saveSessionByIDReturning(id, metricsOnly)
 	// Issue #470: emit one SSE frame per metrics POST. Every POST —
 	// heartbeat or otherwise — flows through so the forwarder writes
@@ -2262,6 +2674,144 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
+// avmetricsBatchPayload is the wire shape iOS posts to
+// /api/session/{id}/avmetrics. The player batches AVMetrics events
+// (~50 per POST or every ~500 ms, whichever fires first) so we don't
+// fan a separate request out per LikelyToKeepUp / Stall / Variant
+// switch frame. `Raw` is a passthrough of the SDK event payload so
+// the projection can evolve server-side without an iOS rebuild.
+type avmetricsBatchPayload struct {
+	Events []struct {
+		EventType string          `json:"event_type"`
+		EventTsMs int64           `json:"event_ts_ms"`
+		Raw       json.RawMessage `json:"raw"`
+	} `json:"events"`
+}
+
+// handlePostSessionAVMetrics receives a batch of iOS 18 AVMetrics events
+// for one session and broadcasts each as an SSE frame to
+// /api/avmetrics/stream. Issue #486 spike.
+//
+// Stays out of the SessionData map / control_revision flow on purpose:
+// AVMetrics is a parallel observation stream for comparison against the
+// existing /metrics heartbeat, not a replacement, and we want both
+// streams independently subscribable + independently disablable.
+func (a *App) handlePostSessionAVMetrics(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	if a.avmetricsHub == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]string{"error": "avmetrics hub unavailable"})
+		return
+	}
+	var payload avmetricsBatchPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid json"})
+		return
+	}
+	if len(payload.Events) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "no events"})
+		return
+	}
+	// Resolve sticky identity once per batch — same lookup the
+	// control_events emitter uses so AVMetric rows join to
+	// session_events / network_requests on the same fields.
+	var (
+		playerID  string
+		playID    string
+		attemptID uint32
+	)
+	if id != "" {
+		playerID = a.sessionStickyPlayerID(id)
+		playID = a.sessionStickyPlayID(id)
+		attemptID = a.sessionStickyAttemptID(id)
+	}
+	// Per-request play_id / attempt_id overrides via query string, mirroring
+	// handlePostSessionMetrics (#280) — keeps the row's identity in sync
+	// with the player's current attempt even between manifest fetches.
+	if v := strings.TrimSpace(r.URL.Query().Get("play_id")); v != "" {
+		playID = v
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("attempt_id")); v != "" {
+		if parsed, err := strconv.ParseUint(v, 10, 32); err == nil {
+			attemptID = uint32(parsed)
+		}
+	}
+	now := time.Now().UTC()
+	for _, ev := range payload.Events {
+		if ev.EventType == "" {
+			continue
+		}
+		a.avmetricsHub.Broadcast(AVMetricEvent{
+			Ts:        now,
+			SessionID: id,
+			PlayerID:  playerID,
+			PlayID:    playID,
+			AttemptID: attemptID,
+			EventType: ev.EventType,
+			EventTsMs: ev.EventTsMs,
+			Raw:       ev.Raw,
+		})
+	}
+	w.WriteHeader(http.StatusOK)
+	writeJSON(w, map[string]int{"accepted": len(payload.Events)})
+}
+
+// handleAVMetricsStream emits each AVMetrics event as it lands. Body
+// shape mirrors /api/control/stream: one SSE `data:` line per event,
+// `{"session_id":"...","entry":{...}}`. Issue #486 spike.
+func (a *App) handleAVMetricsStream(w http.ResponseWriter, r *http.Request) {
+	if a.avmetricsHub == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]string{"error": "stream unavailable"})
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "stream unsupported"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	clientID, ch := a.avmetricsHub.AddClient(1024)
+	defer a.avmetricsHub.RemoveClient(clientID)
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			payload := struct {
+				SessionID string        `json:"session_id"`
+				Entry     AVMetricEvent `json:"entry"`
+			}{ev.SessionID, ev}
+			b, err := json.Marshal(payload)
+			if err != nil {
+				continue
+			}
+			if _, err := w.Write([]byte("data: " + string(b) + "\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
 
 func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface{}, baseRevision string) (SessionData, int, string) {
 	if payload == nil {
@@ -2343,17 +2893,17 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			getString(target, "player_metrics_source"),
 			getString(target, "player_metrics_last_event"),
 			getInt(target, "player_metrics_loop_count_player"),
-			getInt(target, "player_metrics_loop_count_increment"),
+			getInt(target, "player_metrics_loop_count_delta"),
 			getInt(target, "loop_count_server"),
 		)
-	} else if _, ok := payload["player_metrics_loop_count_increment"]; ok {
+	} else if _, ok := payload["player_metrics_loop_count_delta"]; ok {
 		log.Printf(
 			"LOOP_COUNTER_PATCH session_id=%s source=%s event=%s player_loop_count=%d loop_increment=%d server_loop_count=%d",
 			id,
 			getString(target, "player_metrics_source"),
 			getString(target, "player_metrics_last_event"),
 			getInt(target, "player_metrics_loop_count_player"),
-			getInt(target, "player_metrics_loop_count_increment"),
+			getInt(target, "player_metrics_loop_count_delta"),
 			getInt(target, "loop_count_server"),
 		)
 	}
@@ -2379,6 +2929,7 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			target[resetKey] = normalizeRequestFailureType(resetType)
 		}
 	}
+	resetFailureWindowState(payload, target)
 	targetPort = getString(target, "x_forwarded_port")
 	if transportUpdated {
 		typeRaw := getString(target, "transport_failure_type")
@@ -2523,6 +3074,7 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 					session[resetKey] = normalizeRequestFailureType(resetType)
 				}
 			}
+			resetFailureWindowState(payload, session)
 			if transportUpdated && transportSnapshot != nil {
 				for key, value := range transportSnapshot {
 					session[key] = value
@@ -2802,21 +3354,30 @@ func parseShapeStepsFromSession(session SessionData) []NftShapeStep {
 func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	if r.Method == http.MethodDelete {
-		sessions := a.getSessionList()
-		filtered := make([]SessionData, 0, len(sessions))
-		removedPorts := map[int]struct{}{}
-		for _, session := range sessions {
-			if getString(session, "session_id") != id {
-				filtered = append(filtered, session)
-				continue
+		// Collect the removed session(s) inside the (re-runnable) CAS
+		// closure; loop-state teardown / recordSessionEnd / kernel teardown
+		// run once on the committed result (mutateSessions side-effect rule).
+		var removed []SessionData
+		a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+			removed = removed[:0]
+			filtered := make([]SessionData, 0, len(sessions))
+			for _, session := range sessions {
+				if getString(session, "session_id") != id {
+					filtered = append(filtered, session)
+					continue
+				}
+				removed = append(removed, session)
 			}
+			return filtered, len(removed) > 0
+		})
+		removedPorts := map[int]struct{}{}
+		for _, session := range removed {
 			a.removeServerLoopState(id)
 			a.recordSessionEnd(session, "deleted")
 			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
 				removedPorts[port] = struct{}{}
 			}
 		}
-		a.saveSessionList(filtered)
 		for port := range removedPorts {
 			a.disablePatternForPort(port)
 			a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
@@ -2827,6 +3388,7 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 			if a.traffic != nil {
 				_ = a.traffic.UpdateNetem(port, 0, 0)
 				a.traffic.ClearPortShaping(port)
+				a.clearShapeApplyState(port)
 			}
 		}
 		writeJSON(w, map[string]string{"message": "Session deleted successfully"})
@@ -2889,7 +3451,7 @@ func (a *App) handleGetNetworkLog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleGetExternalIPs(w http.ResponseWriter, r *http.Request) {
-	sessionList := a.getSessionList()
+	sessionList := a.sessionsView() // #740 read-only: builds ExternalIPEntry view, no mutation
 	if shouldScopeSessionsByRequesterIP(r) {
 		requesterIP := extractClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
 		sessionList = filterSessionsByOriginationIP(sessionList, requesterIP)
@@ -2948,14 +3510,21 @@ func (a *App) handleGetExternalIPs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
-	sessions := a.getSessionList()
+	// Capture the cleared sessions inside the (re-runnable) CAS closure;
+	// loop-state teardown / recordSessionEnd / kernel teardown run once on
+	// the committed result (mutateSessions side-effect rule).
+	var removed []SessionData
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		removed = append(removed[:0], sessions...)
+		return []SessionData{}, true
+	})
 	portSet := map[int]struct{}{}
 	a.shapeMu.Lock()
 	for port := range a.shapeLoops {
 		portSet[port] = struct{}{}
 	}
 	a.shapeMu.Unlock()
-	for _, session := range sessions {
+	for _, session := range removed {
 		a.removeServerLoopState(getString(session, "session_id"))
 		a.recordSessionEnd(session, "cleared")
 		portStr := getString(session, "x_forwarded_port")
@@ -2974,7 +3543,6 @@ func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
 		a.disablePatternForPort(port)
 		a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
 	}
-	a.saveSessionList([]SessionData{})
 	writeJSON(w, map[string]string{"message": "All sessions cleared successfully"})
 }
 
@@ -3191,7 +3759,7 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 		// the session update above so applySessionShaping sees the
 		// freshly cleared pattern_enabled flag and doesn't no-op via
 		// its "pattern owns the rate" guard.
-		for _, sess := range a.getSessionList() {
+		for _, sess := range a.sessionsView() { // #740 read-only: applySessionShaping reads sess, drives kernel
 			if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
 				if p, err := strconv.Atoi(portStr); err == nil && p == port {
 					a.applySessionShaping(sess, port)
@@ -3239,7 +3807,7 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 	// above when the caller included it in the payload, so any session
 	// on this port has the freshest value.
 	mode := ""
-	for _, sess := range a.getSessionList() {
+	for _, sess := range a.sessionsView() { // #740 read-only: reads pattern template mode
 		if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
 			if pn, err := strconv.Atoi(portStr); err == nil && pn == port {
 				mode = getString(sess, "nftables_pattern_template_mode")
@@ -3334,7 +3902,7 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 		// this port (issue #474 Milestone B). Info is a tiny JSON
 		// blob so downstream (graphs, harness archive) can read
 		// step / rate / duration without re-fetching pattern config.
-		for _, sess := range a.getSessionList() {
+		for _, sess := range a.sessionsView() { // #740 read-only: builds control-event info string
 			if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
 				if pn, err := strconv.Atoi(portStr); err == nil && pn == port {
 					info := fmt.Sprintf(`{"step":%d,"rate_mbps":%.3f,"duration_s":%.1f}`,
@@ -3561,7 +4129,7 @@ func (a *App) emitControlEventForPort(port int, source, event, info string) {
 	if a == nil || a.controlHub == nil || event == "" {
 		return
 	}
-	for _, sess := range a.getSessionList() {
+	for _, sess := range a.sessionsView() { // #740 read-only: matches port, emits control event
 		portStr := getString(sess, "x_forwarded_port")
 		if portStr == "" {
 			continue
@@ -3751,64 +4319,69 @@ func transportFaultConfigFromSession(session SessionData) (string, int, string, 
 
 func (a *App) getFirstSessionByPort(port int) SessionData {
 	portStr := strconv.Itoa(port)
-	for _, session := range a.getSessionList() {
+	// #740: scan the no-clone view, but return a clone of the single match —
+	// callers may mutate the result, so it must not alias the live snapshot.
+	for _, session := range a.sessionsView() {
 		if getString(session, "x_forwarded_port") == portStr {
-			return session
+			return cloneSession(session)
 		}
 	}
 	return nil
 }
 
 func (a *App) setTransportFaultSessionState(port int, faultType string, active bool, startedAt string, phaseSeconds float64, cycleSeconds float64) {
-	sessions := a.getSessionList()
-	changed := false
-	controlRevision := ""
 	phaseRounded := math.Round(phaseSeconds*1000) / 1000
 	cycleRounded := math.Round(cycleSeconds*1000) / 1000
-	for _, session := range sessions {
-		portStr := getString(session, "x_forwarded_port")
-		if portStr == "" {
-			continue
-		}
-		if portNum, err := strconv.Atoi(portStr); err == nil && portNum == port {
-			prevType := getString(session, "transport_fault_type")
-			if prevType == "" {
-				prevType = getString(session, "transport_failure_type")
+	controlRevision := newControlRevision()
+	// fault active-edge sessions captured inside the (re-runnable) CAS
+	// closure; the fault_on/fault_off control_events are emitted once on
+	// the committed result (mutateSessions side-effect rule).
+	var edges []string
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		edges = edges[:0]
+		changed := false
+		for _, session := range sessions {
+			portStr := getString(session, "x_forwarded_port")
+			if portStr == "" {
+				continue
 			}
-			prevActive := getBool(session, "transport_fault_active")
-			prevStarted := getString(session, "transport_fault_started_at")
-			session["transport_failure_type"] = faultType
-			session["transport_fault_type"] = faultType
-			session["transport_fault_active"] = active
-			session["transport_fault_started_at"] = startedAt
-			session["transport_fault_phase_seconds"] = phaseRounded
-			session["transport_fault_cycle_seconds"] = cycleRounded
-			controlChanged := prevType != faultType || prevActive != active
-			if !controlChanged && startedAt != "" && prevStarted != startedAt {
-				controlChanged = true
-			}
-			if controlChanged {
-				if controlRevision == "" {
-					controlRevision = newControlRevision()
+			if portNum, err := strconv.Atoi(portStr); err == nil && portNum == port {
+				prevType := getString(session, "transport_fault_type")
+				if prevType == "" {
+					prevType = getString(session, "transport_failure_type")
 				}
-				applyControlRevision(session, controlRevision)
-			}
-			// Emit control_event on the fault active edge — fault_on /
-			// fault_off (issue #474 Milestone B). Replaces the
-			// snapshot_failures classifier's transport_fault edge.
-			if prevActive != active {
-				sessionID := getString(session, "session_id")
-				ev := "fault_off"
-				if active {
-					ev = "fault_on"
+				prevActive := getBool(session, "transport_fault_active")
+				prevStarted := getString(session, "transport_fault_started_at")
+				session["transport_failure_type"] = faultType
+				session["transport_fault_type"] = faultType
+				session["transport_fault_active"] = active
+				session["transport_fault_started_at"] = startedAt
+				session["transport_fault_phase_seconds"] = phaseRounded
+				session["transport_fault_cycle_seconds"] = cycleRounded
+				controlChanged := prevType != faultType || prevActive != active
+				if !controlChanged && startedAt != "" && prevStarted != startedAt {
+					controlChanged = true
 				}
-				a.emitControlEventForSession(sessionID, "proxy", ev, faultType)
+				if controlChanged {
+					applyControlRevision(session, controlRevision)
+				}
+				if prevActive != active {
+					edges = append(edges, getString(session, "session_id"))
+				}
+				changed = true
 			}
-			changed = true
 		}
+		return sessions, changed
+	})
+	// Emit control_event on the fault active edge — fault_on / fault_off
+	// (issue #474 Milestone B). Replaces the snapshot_failures classifier's
+	// transport_fault edge.
+	ev := "fault_off"
+	if active {
+		ev = "fault_on"
 	}
-	if changed {
-		a.saveSessionList(sessions)
+	for _, sessionID := range edges {
+		a.emitControlEventForSession(sessionID, "proxy", ev, faultType)
 	}
 }
 
@@ -3965,7 +4538,7 @@ func (a *App) runTransportFaultLoop(ctx context.Context, port int, faultType str
 
 func (a *App) restoreTransportFaultSchedules() {
 	seenPorts := map[int]struct{}{}
-	for _, session := range a.getSessionList() {
+	for _, session := range a.sessionsView() { // #740 read-only: re-arms transport faults from config
 		portStr := getString(session, "x_forwarded_port")
 		if portStr == "" {
 			continue
@@ -3986,18 +4559,22 @@ func (a *App) restoreTransportFaultSchedules() {
 // restoreShapeApplication re-applies the tc rate/delay/loss state for
 // every session in the loaded session map. Required on boot because
 // the container's network namespace is recreated on restart — tc
-// classes/filters don't survive, but the session map (persisted on
-// disk via saveSessionList) does. Without this, sessions that
-// pre-existed the restart end up running uncapped, which silently
-// breaks both operator-set rate overrides and the deployment baseline
-// cap (issue #480). Matches restoreTransportFaultSchedules' pattern.
-func (a *App) restoreShapeApplication() {
+// classes/filters don't survive.
+//
+// CAVEAT (#686): this is currently a NO-OP across a real restart. The
+// session map is in-memory only (saveSessionList → publishSnapshot;
+// there is no disk persistence), so at boot the list is empty and this
+// restores nothing (the server_start marker reports restored=0). Until
+// #686 adds disk persistence, sessions that pre-existed a restart run
+// uncapped at the deployment baseline until shaping is re-applied —
+// which is the restore-window rate spike #686 tracks. Matches
+// restoreTransportFaultSchedules' pattern (and shares its limitation).
+func (a *App) restoreShapeApplication() (restored, skipped int) {
 	if a.traffic == nil {
-		return
+		return 0, 0
 	}
 	seenPorts := map[int]struct{}{}
-	restored, skipped := 0, 0
-	for _, session := range a.getSessionList() {
+	for _, session := range a.sessionsView() { // #740 read-only: re-applies shape from config
 		portStr := getString(session, "x_forwarded_port")
 		if portStr == "" {
 			skipped++
@@ -4022,6 +4599,7 @@ func (a *App) restoreShapeApplication() {
 		restored++
 	}
 	log.Printf("shape restoration on boot: restored=%d skipped=%d baseline_mbps=%d", restored, skipped, a.defaultRateMbps)
+	return restored, skipped
 }
 
 func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
@@ -4055,7 +4633,7 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch payload.TemplateMode {
-	case "sliders", "square_wave", "ramp_up", "ramp_down", "pyramid":
+	case "sliders", "square_wave", "ramp_up", "ramp_down", "pyramid", "transient_shock":
 	default:
 		payload.TemplateMode = "sliders"
 	}
@@ -4100,7 +4678,7 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 	}, "")
 
 	// Propagate to group members
-	snap := a.getSessionList()
+	snap := a.sessionsView() // #740 read-only: group/port lookups only
 	groupID := a.getGroupIdByPort(port, snap)
 	if groupID != "" {
 		groupPorts := a.getPortsForGroup(groupID, snap)
@@ -4315,7 +4893,7 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 	}, "")
 
 	// Propagate to group members
-	snap2 := a.getSessionList()
+	snap2 := a.sessionsView() // #740 read-only: group/port lookups only
 	groupID := a.getGroupIdByPort(port, snap2)
 	if groupID != "" {
 		groupPorts := a.getPortsForGroup(groupID, snap2)
@@ -4542,7 +5120,7 @@ func isSocketFaultType(faultType string) bool {
 // The canonical reference for every fault type's wire shape AND the
 // real-world failure mode it models is:
 //
-//   .claude/standards/fault-injection-wire-contract.md
+//	.claude/standards/fault-injection-wire-contract.md
 //
 // Read it before editing this function or any of the case branches
 // below. The doc lists: TCP-level shape, what the client OS surfaces,
@@ -4839,6 +5417,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// below.
 	playID := strings.TrimSpace(r.URL.Query().Get("play_id"))
 	attemptIDStr := strings.TrimSpace(r.URL.Query().Get("attempt_id"))
+	// Client-supplied, play-scoped start (#587). Rotates with play_id;
+	// the proxy just carries it through to the session map so it reaches
+	// PlayRecord.start_time (live) and the session_events CH column.
+	startTime := strings.TrimSpace(r.URL.Query().Get("start_time"))
 	var attemptID uint32
 	if attemptIDStr != "" {
 		if n, err := strconv.ParseUint(attemptIDStr, 10, 32); err == nil {
@@ -4852,6 +5434,14 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if entry.AttemptID == 0 {
 			entry.AttemptID = attemptID
 		}
+		// #613: TotalMs is provisionally set at upstream-headers-complete
+		// (~TTFB) by the fetch helper, before the body transfer happens.
+		// Lift it to TTFB+Transfer here — the single chokepoint every
+		// logged row passes through — so no response-serving path can ship
+		// a row with the pre-transfer value. Idempotent (max), so paths
+		// that already set TotalMs ≥ TTFB+Transfer (e.g. fault rows) are
+		// untouched.
+		mergeTotalTiming(&entry)
 		a.addNetworkLogEntry(sessionID, entry)
 	}
 	filename := strings.TrimPrefix(r.URL.Path, "/")
@@ -4903,13 +5493,28 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				// content. Plain HTTP requests redirect to http://.
 				scheme := requestScheme(r)
 				newURL := fmt.Sprintf("%s://%s:%s/%s", scheme, host, newPort, escapedPath)
-				if r.URL.RawQuery != "" {
-					newURL = newURL + "?" + r.URL.RawQuery
+				// #712: drop any proxy.* config args on reattach — config is
+				// materialized once on first bind; a loop/auto-recovery restart
+				// re-hitting the base port must never re-apply or leak proxy.*
+				// onto the session port.
+				if stripped := stripProxyArgs(r.URL.RawQuery); stripped != "" {
+					newURL = newURL + "?" + stripped
 				}
 				log.Printf("Redirecting to existing session URL: %s %s -> %s", newURL, externalPort, newPort)
 				http.Redirect(w, r, newURL, http.StatusFound)
 				return
 			}
+		}
+		// #712 config-on-connect: parse proxy.* args before allocating a
+		// session so a malformed config is a 400 that consumes no session
+		// slot. Reattach (existing-session) requests already redirected above
+		// and never reach here, so config is materialized exactly once — on
+		// the player's first bind.
+		configPatch, hasConfig, cfgErr := parseProxyArgs(r.URL.Query())
+		if cfgErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]interface{}{"error": "invalid proxy config args", "detail": cfgErr.Error()})
+			return
 		}
 		if isExternalIP(requesterIP) {
 			activeForRequester := countActiveSessionsForIP(sessionList, requesterIP)
@@ -4924,12 +5529,65 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if len(sessionList) >= a.maxSessions {
+		// #740 reserve-then-fill: atomically claim a session slot via CAS
+		// instead of serialising the whole bootstrap under createMu. The
+		// closure re-reads the committed list and re-picks `allocated` on every
+		// retry, so two concurrent config-on-connect bootstraps (a fleet) can
+		// never claim the same slot — superseding #739's createMu and the
+		// snapshot→allocate→reserve lost-update that let one session's rate
+		// config land on the other's port (the loser created config-less →
+		// nftk=100 baseline leak). The reservation is a minimal placeholder
+		// carrying a stable session_id (so a concurrent allocateSessionNumber
+		// sees the slot used) plus player_id/group_id (so a concurrent
+		// same-player reattach still de-dupes) and a fresh last_request (so
+		// removeInactiveSessions won't evict it mid-bootstrap). The full
+		// session is CAS-filled below once the port-derived work and config
+		// materialization succeed; a rejected config triggers a cleanup CAS so
+		// no slot leaks.
+		createdAt := nowISO()
+		groupID := extractGroupId(playerID)
+		// #fleet-group: an explicit group_id connect param wins over the legacy
+		// `_G<num>` player_id suffix. Lets the harness born-group a fleet while
+		// keeping player_id a clean UUID — so the analytics layer doesn't derive
+		// a divergent v5 id from a non-UUID player_id (the suffix's fatal flaw).
+		if g := r.URL.Query().Get("group_id"); g != "" {
+			groupID = g
+		}
+		// #fleet-group display-only: group_broadcast=false makes the group a
+		// pure DISPLAY link — members share group_id (so the dashboard charts
+		// them together and the archive groups them) but a member PATCH is NOT
+		// mirrored to the other members. Used by the startup fleet, where every
+		// device runs its own cold-start plan and a broadcast would corrupt the
+		// per-device measurements. Default (absent / any non-false value) keeps
+		// the pyramid-style auto-broadcast group.
+		groupBroadcast := true
+		if gb := r.URL.Query().Get("group_broadcast"); gb == "false" || gb == "0" {
+			groupBroadcast = false
+		}
+		var allocated int
+		_, reserved := a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+			if len(sessions) >= a.maxSessions {
+				return sessions, false
+			}
+			allocated = allocateSessionNumber(sessions, a.maxSessions)
+			idStr := fmt.Sprintf("%d", allocated)
+			return append(sessions, SessionData{
+				"session_id":         idStr,
+				"session_number":     idStr,
+				"sid":                idStr,
+				"player_id":          playerID,
+				"group_id":           groupID,
+				"last_request":       createdAt,
+				"session_start_time": createdAt,
+				"_reserved":          true,
+			}), true
+		})
+		if !reserved {
+			// Only false path is at-capacity (closure always changes otherwise).
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		createdAt := nowISO()
-		allocated := allocateSessionNumber(sessionList, a.maxSessions)
+		idStr := fmt.Sprintf("%d", allocated)
 		assignedExternalPort := replaceThirdFromLastDigit(externalPort, allocated)
 		assignedInternalPort := assignedExternalPort
 		// Sweep any leftover tc rate-limit / filter on the assigned
@@ -4950,7 +5608,25 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			assignedInternalPort = replaceThirdFromLastDigit("30081", allocated)
 			log.Printf("PORT_MAP_DERIVE external=%s internal=%s allocated=%d", assignedExternalPort, assignedInternalPort, allocated)
 		}
-		groupID := extractGroupId(playerID)
+		// Sweep any leftover nftables transport fault (drop/reject) on the
+		// assigned internal port — the symmetric counterpart to the tc
+		// ClearPortShaping above (issue #716). Config-on-connect (#712)
+		// mints a fresh player_id per run, so tc state is well-isolated by
+		// the sweep above, but a transport fault left armed by a prior
+		// session whose teardown was skipped (crash / Ctrl-C / timeout
+		// before Session.Release fired) is the one kernel surface that can
+		// still carry over via port reuse inside the 5-min idle-reap window.
+		// armTransportFaultLoop(…, "none", …) is the same teardown used on
+		// session DELETE (above): it cancels any still-running fault-loop
+		// goroutine (which would otherwise re-arm the rule after a bare
+		// clear) AND deletes the leftover rule. Idempotent and quiet on a
+		// clean port. Unlike the tc sweep (which keys on port%1000), this
+		// must run *after* the external→internal mapping, because faults
+		// are armed on x_forwarded_port (the internal port) — see the arm
+		// calls keyed on x_forwarded_port elsewhere in this file.
+		if internalPortInt, err := strconv.Atoi(assignedInternalPort); err == nil {
+			a.armTransportFaultLoop(internalPortInt, "none", 1, transportUnitsSeconds, 0)
+		}
 		// Optional play_id from the client. iOS/tvOS/Roku don't mint one
 		// (the v2 read path derives a stable fallback), but the v3 web
 		// player (VideoPlayerFrame) does — surfacing it here lets the
@@ -4958,23 +5634,24 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// instead of the server-side derivation.
 		playID := r.URL.Query().Get("play_id")
 		sessionData := SessionData{
-			"session_number":                           fmt.Sprintf("%d", allocated),
-			"sid":                                      fmt.Sprintf("%d", allocated),
-			"session_id":                               fmt.Sprintf("%d", allocated),
-			"player_id":                                playerID,
-			"play_id":                                  playID,
-			"group_id":                                 groupID,
-			"control_revision":                         newControlRevision(),
-			"headers_player_id":                        playerHeader,
-			"headers_player-ID":                        playerHeaderAlt,
-			"headers_x_playback_session_id":            playbackSessionHeader,
-			"manifest_requests_count":                  0,
-			"master_manifest_requests_count":           0,
-			"segments_count":                           0,
-			"all_requests_count":                       0,
-			"last_request":                             createdAt,
-			"first_request_time":                       createdAt,
-			"session_start_time":                       createdAt,
+			"session_number":                 fmt.Sprintf("%d", allocated),
+			"sid":                            fmt.Sprintf("%d", allocated),
+			"session_id":                     fmt.Sprintf("%d", allocated),
+			"player_id":                      playerID,
+			"play_id":                        playID,
+			"group_id":                       groupID,
+			"group_broadcast":                groupBroadcast,
+			"control_revision":               newControlRevision(),
+			"headers_player_id":              playerHeader,
+			"headers_player-ID":              playerHeaderAlt,
+			"headers_x_playback_session_id":  playbackSessionHeader,
+			"manifest_requests_count":        0,
+			"master_manifest_requests_count": 0,
+			"segments_count":                 0,
+			"all_requests_count":             0,
+			"last_request":                   createdAt,
+			"first_request_time":             createdAt,
+			"session_start_time":             createdAt,
 			// Segment / manifest / master_manifest fault config —
 			// initialise mode + units explicitly so both server
 			// (NewFailureHandler) and dashboard (Mode dropdown) read
@@ -4983,47 +5660,47 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// "failures_per_seconds" mode → consecutive=requests,
 			// frequency=seconds, matching the dashboard's visible
 			// default Mode for a fresh session.
-			"segment_failure_type":                     "none",
-			"segment_failure_frequency":                0,
-			"segment_consecutive_failures":             0,
-			"segment_failure_units":                    "requests",
-			"segment_consecutive_units":                "requests",
-			"segment_frequency_units":                  "seconds",
-			"segment_failure_mode":                     "failures_per_seconds",
-			"manifest_failure_type":                    "none",
-			"manifest_failure_frequency":               0,
-			"manifest_failure_units":                   "requests",
-			"manifest_consecutive_units":               "requests",
-			"manifest_frequency_units":                 "seconds",
-			"manifest_failure_mode":                    "failures_per_seconds",
-			"manifest_consecutive_failures":            0,
-			"master_manifest_failure_type":             "none",
-			"master_manifest_failure_frequency":        0,
-			"master_manifest_failure_units":            "requests",
-			"master_manifest_consecutive_units":        "requests",
-			"master_manifest_frequency_units":          "seconds",
-			"master_manifest_failure_mode":             "failures_per_seconds",
-			"master_manifest_consecutive_failures":     0,
+			"segment_failure_type":                 "none",
+			"segment_failure_frequency":            0,
+			"segment_consecutive_failures":         0,
+			"segment_failure_units":                "requests",
+			"segment_consecutive_units":            "requests",
+			"segment_frequency_units":              "seconds",
+			"segment_failure_mode":                 "failures_per_seconds",
+			"manifest_failure_type":                "none",
+			"manifest_failure_frequency":           0,
+			"manifest_failure_units":               "requests",
+			"manifest_consecutive_units":           "requests",
+			"manifest_frequency_units":             "seconds",
+			"manifest_failure_mode":                "failures_per_seconds",
+			"manifest_consecutive_failures":        0,
+			"master_manifest_failure_type":         "none",
+			"master_manifest_failure_frequency":    0,
+			"master_manifest_failure_units":        "requests",
+			"master_manifest_consecutive_units":    "requests",
+			"master_manifest_frequency_units":      "seconds",
+			"master_manifest_failure_mode":         "failures_per_seconds",
+			"master_manifest_consecutive_failures": 0,
 			// "All" fault override — when all_failure_type != "none",
 			// HandleRequest uses this rule for every HTTP request and
 			// ignores the per-kind tabs above. Same control shape as
 			// segment, plus all_failure_urls for variant scoping.
-			"all_failure_type":                         "none",
-			"all_failure_frequency":                    0,
-			"all_consecutive_failures":                 0,
-			"all_failure_units":                        "requests",
-			"all_consecutive_units":                    "requests",
-			"all_frequency_units":                      "seconds",
-			"all_failure_mode":                         "failures_per_seconds",
-			"current_failures":                         0,
-			"consecutive_failures_count":               0,
-			"player_ip":                                requesterIP,
-			"user_agent":                               "",
-			"origination_ip":                           requesterIP,
-			"origination_time":                         createdAt,
-			"is_external_ip":                           isExternalIP(requesterIP),
-			"manifest_failure_at":                      nil,
-			"manifest_failure_recover_at":              nil,
+			"all_failure_type":            "none",
+			"all_failure_frequency":       0,
+			"all_consecutive_failures":    0,
+			"all_failure_units":           "requests",
+			"all_consecutive_units":       "requests",
+			"all_frequency_units":         "seconds",
+			"all_failure_mode":            "failures_per_seconds",
+			"current_failures":            0,
+			"consecutive_failures_count":  0,
+			"player_ip":                   requesterIP,
+			"user_agent":                  "",
+			"origination_ip":              requesterIP,
+			"origination_time":            createdAt,
+			"is_external_ip":              isExternalIP(requesterIP),
+			"manifest_failure_at":         nil,
+			"manifest_failure_recover_at": nil,
 			// nil (not []string{}) so the dashboard can tell "fresh
 			// session, default to all-URLs filter" from "user
 			// explicitly cleared the list" — both serialize to JSON
@@ -5093,18 +5770,79 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// haven't touched this." The derived effective_rate_mbps
 			// field surfaces what the kernel is actually enforcing.
 			// Issue #480.
-			"nftables_bandwidth_mbps":                  float64(0),
+			"nftables_bandwidth_mbps": float64(0),
 		}
-		a.resetServerLoopState(fmt.Sprintf("%d", allocated))
-		sessionList = append(sessionList, sessionData)
-		a.saveSessionList(sessionList)
+		// #712: materialize proxy.* config onto the fresh SessionData before
+		// it's published. ApplyConfigPatch runs the SAME translator the PATCH
+		// API uses, so the URL-arg vocabulary can't drift from the API model.
+		// Translation only — the kernel is driven below, after the save.
+		if hasConfig {
+			if aerr := v2server.ApplyConfigPatch(sessionData, configPatch); aerr != nil {
+				// #740: a rejected config must not leak the reserved slot —
+				// CAS the placeholder back out before returning the 400.
+				a.removeReservedSession(idStr)
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]interface{}{"error": "proxy config rejected", "detail": aerr.Error()})
+				return
+			}
+		}
+		a.resetServerLoopState(idStr)
+		// #740 fill: CAS the placeholder reservation up to the full session.
+		a.fillReservedSession(idStr, sessionData)
 		// Apply the deployment baseline to the kernel BEFORE the
 		// redirect fires — the client reconnects on the new port
 		// immediately and the first segment burst would otherwise run
 		// uncapped. effectiveRate(0) returns the baseline (or 0 on
 		// prod-style deployments). No-op when traffic is nil
 		// (non-Linux dev). Issue #480.
-		if a.defaultRateMbps > 0 && a.traffic != nil {
+		if hasConfig {
+			// #712: drive the kernel from the just-materialized config before
+			// the redirect fires — the client reconnects on the new port
+			// immediately and the first segment burst would otherwise run
+			// unshaped. applySessionShaping resolves the deployment baseline
+			// via effectiveRate, so the no-rate-override case (e.g. labels- or
+			// fault_rules-only config) still gets the baseline cap — this
+			// supersedes the plain baseline apply in the else branch.
+			if port, err := strconv.Atoi(assignedInternalPort); err == nil {
+				// The session-start sweep (ClearPortShaping, above) wiped any
+				// leftover kernel tc rule on this reused port, but the
+				// apply-state cache still holds the prior session's rate.
+				// Invalidate it so the apply below actually fires tc instead of
+				// being skipped as "unchanged" — otherwise the player cold-starts
+				// unshaped (config present, no kernel rule). Regression from #712
+				// re-applying at session-start after #352's ClearPortShaping.
+				a.clearShapeApplyState(port)
+				if steps := v2server.PatternStepsFromSession(sessionData); len(steps) > 0 {
+					v1steps := make([]NftShapeStep, 0, len(steps))
+					for _, s := range steps {
+						v1steps = append(v1steps, NftShapeStep{
+							RateMbps:        s.RateMbps,
+							DurationSeconds: s.DurationSeconds,
+							Enabled:         s.Enabled,
+						})
+					}
+					delayMs := getInt(sessionData, "nftables_delay_ms")
+					lossPct := getFloat(sessionData, "nftables_packet_loss")
+					if perr := a.applyShapePattern(port, v1steps, delayMs, lossPct); perr != nil {
+						log.Printf("config-on-connect pattern apply failed port=%d: %v", port, perr)
+					}
+				} else {
+					a.applySessionShaping(sessionData, port)
+				}
+				if ft := getString(sessionData, "transport_failure_type"); ft != "" && ft != "none" {
+					consec := getInt(sessionData, "transport_consecutive_failures")
+					if consec < 1 {
+						consec = 1
+					}
+					units := getString(sessionData, "transport_consecutive_units")
+					if units == "" {
+						units = "seconds"
+					}
+					freq := getInt(sessionData, "transport_failure_frequency")
+					a.armTransportFaultLoop(port, ft, consec, units, freq)
+				}
+			}
+		} else if a.defaultRateMbps > 0 && a.traffic != nil {
 			if internalPortInt, err := strconv.Atoi(assignedInternalPort); err == nil {
 				effective := a.effectiveRate(0)
 				if err := a.traffic.UpdateRateLimit(internalPortInt, effective); err != nil {
@@ -5122,8 +5860,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		host := hostWithoutPort(r.Host)
 		scheme := requestScheme(r)
 		newURL := fmt.Sprintf("%s://%s:%s/%s", scheme, host, assignedExternalPort, escapedPath)
-		if r.URL.RawQuery != "" {
-			newURL = newURL + "?" + r.URL.RawQuery
+		// #712: strip proxy.* config args from the redirect — config is already
+		// materialized on the session; the player follows this clean URL and
+		// resolves all child requests against it, so proxy.* never reach the
+		// session port or the child-request space.
+		if stripped := stripProxyArgs(r.URL.RawQuery); stripped != "" {
+			newURL = newURL + "?" + stripped
 		}
 		log.Printf("Redirecting to new URL with port: %s %s -> %s", newURL, externalPort, assignedExternalPort)
 		http.Redirect(w, r, newURL, http.StatusFound)
@@ -5151,6 +5893,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sessionData["last_request"] = nowISO()
 	sessionData["last_request_url"] = filename
 	sessionData["user_agent"] = r.UserAgent()
+	// #550 Phase 4: best-effort device taxonomy from UA for
+	// non-instrumented clients (VLC, ffplay, hls.js, Roku channels,
+	// etc.). Idempotent + non-overwriting — iOS-emitted DeviceInfo
+	// values from the metrics POST channel take precedence by virtue
+	// of stampDeviceFromUserAgent's setIfEmpty check.
+	stampDeviceFromUserAgent(sessionData)
 	// Stamp the player's current play_id + attempt_id on the session
 	// so the SSE stream (and downstream analytics) can partition by
 	// playback episode (play_id) and recovery attempt (attempt_id).
@@ -5160,6 +5908,13 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// the proxy guessing.
 	if playID != "" {
 		sessionData["play_id"] = playID
+	}
+	// Play-scoped client start (#587). Carried on the session map so
+	// v2translate can project PlayRecord.start_time and the SSE
+	// session_events frame can carry it to ClickHouse. The client
+	// rotates it with play_id, so it always reflects THIS play.
+	if startTime != "" {
+		sessionData["start_time"] = startTime
 	}
 	// Store the raw string so sessionStickyField (a generic
 	// type-asserts-as-string helper) can read it back uniformly
@@ -5317,9 +6072,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				sessionID := getString(sessionData, "session_id")
 				netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, http.StatusBadGateway, requestBytes, requestReceivedAt)
 				stampNetMeta(&netEntry, requestHeaders, queryString, nil)
-				logEntry(sessionID,netEntry)
-				sessionList[index] = sessionData
-				a.saveSessionList(sessionList)
+				logEntry(sessionID, netEntry)
+				// #740: persist the fault-path mutations as a single-session
+				// atomic merge instead of re-publishing the stale full list
+				// captured at handler top (which clobbered concurrent sessions).
+				a.saveSessionByID(sessionNumber, sessionData)
 				return
 			}
 			resp, netEntry, err := a.doRequestWithTracing(r.Context(), proxyReq)
@@ -5351,9 +6108,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				netEntry.FaultAction = actionTaken
 				netEntry.FaultCategory = categorizeFaultType(failureType)
 				stampNetMeta(netEntry, requestHeaders, queryString, nil)
-				logEntry(sessionID,*netEntry)
-				sessionList[index] = sessionData
-				a.saveSessionList(sessionList)
+				logEntry(sessionID, *netEntry)
+				// #740: persist the fault-path mutations as a single-session
+				// atomic merge instead of re-publishing the stale full list
+				// captured at handler top (which clobbered concurrent sessions).
+				a.saveSessionByID(sessionNumber, sessionData)
 				return
 			}
 			defer resp.Body.Close()
@@ -5373,9 +6132,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				netEntry.FaultAction = actionTaken
 				netEntry.FaultCategory = categorizeFaultType(failureType)
 				stampNetMeta(netEntry, requestHeaders, queryString, resp)
-				logEntry(sessionID,*netEntry)
-				sessionList[index] = sessionData
-				a.saveSessionList(sessionList)
+				logEntry(sessionID, *netEntry)
+				// #740: persist the fault-path mutations as a single-session
+				// atomic merge instead of re-publishing the stale full list
+				// captured at handler top (which clobbered concurrent sessions).
+				a.saveSessionByID(sessionNumber, sessionData)
 				return
 			}
 			if contentType != "" {
@@ -5389,7 +6150,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				log.Printf("segment_corrupted write error session_id=%s err=%v", getString(sessionData, "session_id"), copyErr)
 			}
 			netEntry.TransferMs = transferMs
-			mergeTotalTiming(netEntry)
+			// TotalMs lift now happens uniformly in the logEntry closure (#613).
 			actionTaken = "segment_corrupted_zero_fill"
 			bumpFaultCounter(sessionData, failureType)
 			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
@@ -5407,9 +6168,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			netEntry.FaultAction = actionTaken
 			netEntry.FaultCategory = categorizeFaultType(failureType)
 			stampNetMeta(netEntry, requestHeaders, queryString, resp)
-			logEntry(sessionID,*netEntry)
-			sessionList[index] = sessionData
-			a.saveSessionList(sessionList)
+			logEntry(sessionID, *netEntry)
+			// #740: single-session atomic merge (see note above) — was a
+			// stale full-list re-publish.
+			a.saveSessionByID(sessionNumber, sessionData)
 			return
 		}
 		if isSocketFaultType(failureType) {
@@ -5447,14 +6209,16 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, status, requestBytes, requestReceivedAt)
 			stampNetMeta(&netEntry, requestHeaders, queryString, nil)
-			logEntry(sessionID,netEntry)
-			sessionList[index] = sessionData
-			a.saveSessionList(sessionList)
+			logEntry(sessionID, netEntry)
+			// #740: single-session atomic merge (see note above) — was a
+			// stale full-list re-publish.
+			a.saveSessionByID(sessionNumber, sessionData)
 			return
 		}
 		updateSessionTraffic(sessionData, requestBytes, 0)
-		sessionList[index] = sessionData
-		a.saveSessionList(sessionList)
+		// #740: single-session atomic merge (see note above) — was a
+		// stale full-list re-publish.
+		a.saveSessionByID(sessionNumber, sessionData)
 		status := http.StatusInternalServerError
 		switch failureType {
 		case "404":
@@ -5499,7 +6263,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionID := getString(sessionData, "session_id")
 		netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, status, requestBytes, requestReceivedAt)
 		stampNetMeta(&netEntry, requestHeaders, queryString, nil)
-		logEntry(sessionID,netEntry)
+		logEntry(sessionID, netEntry)
 		return
 	}
 
@@ -5522,7 +6286,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionID := getString(sessionData, "session_id")
 		netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, "none", "http_502_request_failed", http.StatusBadGateway, requestBytes, requestReceivedAt)
 		stampNetMeta(&netEntry, requestHeaders, queryString, nil)
-		logEntry(sessionID,netEntry)
+		logEntry(sessionID, netEntry)
 		return
 	}
 	clientRange := r.Header.Get("Range")
@@ -5573,7 +6337,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		netEntry.RequestKind = requestKind
 		netEntry.BytesIn = requestBytes
 		stampNetMeta(netEntry, requestHeaders, queryString, nil)
-		logEntry(sessionID,*netEntry)
+		logEntry(sessionID, *netEntry)
 		return
 	}
 	defer resp.Body.Close()
@@ -5599,7 +6363,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		netEntry.RequestKind = requestKind
 		netEntry.BytesIn = requestBytes
 		stampNetMeta(netEntry, requestHeaders, queryString, resp)
-		logEntry(sessionID,*netEntry)
+		logEntry(sessionID, *netEntry)
 		return
 	}
 	copyUpstreamHeaders(w, resp)
@@ -5610,11 +6374,16 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	var bytesOut int64
 
-	// Apply content manipulation for master playlists
-	if isMasterManifest && shouldApplyContentManipulation(sessionData) {
+	// Apply content manipulation. Master playlists get the full set (strip /
+	// overstate / live-offset EXT-X-START). Media (VARIANT) playlists get the
+	// live-offset rewrite too — HOLD-BACK + EXT-X-START live in the variant and
+	// are what players actually key off, so a master-only rewrite has no effect
+	// (#793, regression caught by server_content_test master_live_offset).
+	liveOffsetOnVariant := isManifest && !isMasterManifest && getInt(sessionData, "content_live_offset") > 0
+	if (isMasterManifest && shouldApplyContentManipulation(sessionData)) || liveOffsetOnVariant {
 		bodyBytes, err := io.ReadAll(resp.Body)
 		if err != nil {
-			log.Printf("ERROR: Failed to read master playlist body: %v", err)
+			log.Printf("ERROR: Failed to read playlist body for manipulation: %v", err)
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(proxyCtx.Err(), context.DeadlineExceeded) {
 				bumpFaultCounter(sessionData, "transfer_active_timeout")
 				logFaultEvent(sessionData, externalPort, "transfer_active_timeout", requestKind, "transfer_active_timeout_mid_body")
@@ -5623,11 +6392,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		modifiedBody, err := a.applyContentManipulation(bodyBytes, sessionData, contentType)
-		if err != nil {
-			log.Printf("ERROR: Failed to manipulate master playlist: %v", err)
-			// Fall back to original content
-			modifiedBody = bodyBytes
+		var modifiedBody []byte
+		if isMasterManifest {
+			modifiedBody, err = a.applyContentManipulation(bodyBytes, sessionData, contentType)
+			if err != nil {
+				log.Printf("ERROR: Failed to manipulate master playlist: %v", err)
+				modifiedBody = bodyBytes // fall back to original
+			}
+		} else {
+			// Media (variant) playlist: live-offset only — rewrite HOLD-BACK +
+			// EXT-X-START to the requested value.
+			modifiedBody = rewriteVariantLiveOffsetTags(bodyBytes, getInt(sessionData, "content_live_offset"))
 		}
 
 		w.Header().Set("Content-Length", strconv.Itoa(len(modifiedBody)))
@@ -5755,7 +6530,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	netEntry.BytesIn = requestBytes
 	netEntry.BytesOut = bytesOut
 	stampNetMeta(netEntry, requestHeaders, queryString, resp)
-	logEntry(sessionID,*netEntry)
+	logEntry(sessionID, *netEntry)
 	a.saveSessionByID(sessionNumber, sessionData)
 }
 
@@ -5765,6 +6540,9 @@ func shouldApplyContentManipulation(session SessionData) bool {
 		return true
 	}
 	if getBool(session, "content_strip_average_bandwidth") {
+		return true
+	}
+	if getBool(session, "content_strip_resolution") {
 		return true
 	}
 	if getBool(session, "content_overstate_bandwidth") {
@@ -5777,20 +6555,50 @@ func shouldApplyContentManipulation(session SessionData) bool {
 	if len(allowedVariants) > 0 {
 		return true
 	}
+	if vo := getString(session, "content_variant_order"); vo != "" && vo != "default" {
+		return true
+	}
 	return false
+}
+
+// ContentManipulation bundles the per-session master-playlist / manifest
+// manipulation knobs into one value so adding a future option is a struct
+// field rather than another positional parameter rippling through every
+// manipulate* signature and its callers. Built once from the session's
+// content_* fields via newContentManipulation.
+//
+// VariantOrder is HLS-only — manipulateDASHManifest ignores it.
+type ContentManipulation struct {
+	StripCodecs        bool
+	StripAvgBandwidth  bool
+	StripResolution    bool
+	OverstateBandwidth bool
+	LiveOffset         int
+	AllowedVariants    []string
+	VariantOrder       string
+}
+
+// newContentManipulation reads the session's content_* fields into a
+// ContentManipulation struct.
+func newContentManipulation(session SessionData) ContentManipulation {
+	return ContentManipulation{
+		StripCodecs:        getBool(session, "content_strip_codecs"),
+		StripAvgBandwidth:  getBool(session, "content_strip_average_bandwidth"),
+		StripResolution:    getBool(session, "content_strip_resolution"),
+		OverstateBandwidth: getBool(session, "content_overstate_bandwidth"),
+		LiveOffset:         getInt(session, "content_live_offset"),
+		AllowedVariants:    getStringSlice(session, "content_allowed_variants"),
+		VariantOrder:       getString(session, "content_variant_order"),
+	}
 }
 
 // applyContentManipulation modifies master playlist/manifest content based on session settings
 func (a *App) applyContentManipulation(body []byte, session SessionData, contentType string) ([]byte, error) {
-	stripCodecs := getBool(session, "content_strip_codecs")
-	stripAvgBandwidth := getBool(session, "content_strip_average_bandwidth")
-	overstateBandwidth := getBool(session, "content_overstate_bandwidth")
-	liveOffset := getInt(session, "content_live_offset")
-	allowedVariants := getStringSlice(session, "content_allowed_variants")
+	cm := newContentManipulation(session)
 
 	// Handle HLS master playlists
 	if strings.Contains(strings.ToLower(contentType), "mpegurl") || strings.Contains(strings.ToLower(contentType), "m3u8") {
-		result, err := manipulateHLSMaster(body, stripCodecs, stripAvgBandwidth, overstateBandwidth, liveOffset, allowedVariants)
+		result, err := manipulateHLSMaster(body, cm)
 		if err != nil {
 			return nil, err
 		}
@@ -5799,22 +6607,50 @@ func (a *App) applyContentManipulation(body []byte, session SessionData, content
 		// notably hls.js, which would otherwise park at the oldest segment).
 		// Master EXT-X-START is rewritten inside manipulateHLSMaster; this
 		// pass handles the variant side. No-op on master playlists.
-		if liveOffset > 0 {
-			result = rewriteVariantLiveOffsetTags(result, liveOffset)
+		if cm.LiveOffset > 0 {
+			result = rewriteVariantLiveOffsetTags(result, cm.LiveOffset)
 		}
 		return result, nil
 	}
 
 	// Handle DASH manifests
 	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
-		return manipulateDASHManifest(body, stripCodecs, stripAvgBandwidth, overstateBandwidth, liveOffset, allowedVariants)
+		return manipulateDASHManifest(body, cm)
 	}
 
 	return body, nil
 }
 
 // manipulateHLSMaster modifies an HLS master playlist
-func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, overstateBandwidth bool, liveOffset int, allowedVariants []string) ([]byte, error) {
+// variantAllowed reports whether a master variant is whitelisted by
+// allowed_variants. It matches either the exact served URI (e.g.
+// "playlist_6s_360p.m3u8" — back-compat) OR the variant's resolution: the full
+// "640x360", the bare height "360", or "360p". Resolution matching lets a
+// keep-set expressed in resolution terms (e.g. derived from the content
+// catalogue's variants[], which is resolution-keyed) survive across segment
+// durations whose served URIs differ — the harness/dashboard need not know the
+// per-segment URI scheme.
+func variantAllowed(v *m3u8.Variant, allowed map[string]bool) bool {
+	if allowed[v.URI] {
+		return true
+	}
+	res := v.Resolution // "640x360"
+	if res == "" {
+		return false
+	}
+	if allowed[res] {
+		return true
+	}
+	if i := strings.LastIndex(res, "x"); i >= 0 {
+		h := res[i+1:] // "360"
+		if allowed[h] || allowed[h+"p"] {
+			return true
+		}
+	}
+	return false
+}
+
+func manipulateHLSMaster(body []byte, cm ContentManipulation) ([]byte, error) {
 	playlist, listType, err := m3u8.DecodeFrom(bufio.NewReader(bytes.NewReader(body)), true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode HLS playlist: %w", err)
@@ -5828,16 +6664,16 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	master := playlist.(*m3u8.MasterPlaylist)
 	modified := false
 
-	// Filter variants if allowedVariants is specified
-	if len(allowedVariants) > 0 {
+	// Filter variants if allowed_variants is specified
+	if len(cm.AllowedVariants) > 0 {
 		allowedMap := make(map[string]bool)
-		for _, v := range allowedVariants {
+		for _, v := range cm.AllowedVariants {
 			allowedMap[v] = true
 		}
 
 		filteredVariants := make([]*m3u8.Variant, 0)
 		for _, variant := range master.Variants {
-			if variant != nil && allowedMap[variant.URI] {
+			if variant != nil && variantAllowed(variant, allowedMap) {
 				filteredVariants = append(filteredVariants, variant)
 			}
 		}
@@ -5849,7 +6685,7 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	}
 
 	// Strip codecs if requested
-	if stripCodecs {
+	if cm.StripCodecs {
 		hasCodecs := false
 		for _, variant := range master.Variants {
 			if variant != nil && variant.Codecs != "" {
@@ -5863,7 +6699,7 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	}
 
 	// Strip AVERAGE-BANDWIDTH if requested
-	if stripAvgBandwidth {
+	if cm.StripAvgBandwidth {
 		for _, variant := range master.Variants {
 			if variant != nil && variant.AverageBandwidth > 0 {
 				variant.AverageBandwidth = 0
@@ -5872,8 +6708,24 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 		}
 	}
 
+	// Strip RESOLUTION if requested (issue #486). Drops the
+	// EXT-X-STREAM-INF RESOLUTION=WxH attribute, leaving the variant
+	// playable but with empty `AVAssetVariant.video.size`. Useful for
+	// testing how players (and the AVMetrics VariantSwitchEvent
+	// payload) handle missing resolution metadata. Apple's HLS
+	// validator (mediastreamvalidator) rejects this; AVPlayer
+	// continues but loses resolution-aware ABR and UI badges.
+	if cm.StripResolution {
+		for _, variant := range master.Variants {
+			if variant != nil && variant.Resolution != "" {
+				variant.Resolution = ""
+				modified = true
+			}
+		}
+	}
+
 	// Overstate BANDWIDTH and AVERAGE-BANDWIDTH by 10% if requested
-	if overstateBandwidth {
+	if cm.OverstateBandwidth {
 		for _, variant := range master.Variants {
 			if variant == nil {
 				continue
@@ -5889,8 +6741,29 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 		}
 	}
 
+	// Reorder video variants by BANDWIDTH (issue #682). Probes whether
+	// the master-playlist order biases AVPlayer's initial-variant pick —
+	// the pre-iOS-13 / startsOnFirstEligibleVariant path keys off
+	// first-listed. Re-sorts master.Variants in place; the m3u8 encoder
+	// emits EXT-X-STREAM-INF lines in slice order. EXT-X-MEDIA audio/
+	// subtitle renditions travel on each variant's Alternatives and stay
+	// glued to their owning variant, so they are unaffected.
+	switch cm.VariantOrder {
+	case "ascending":
+		sortVariantsByBandwidth(master.Variants, true)
+		modified = true
+	case "descending":
+		sortVariantsByBandwidth(master.Variants, false)
+		modified = true
+	case "first_4mbps":
+		// Promote the variant nearest 4 Mbps to first-listed (rest ascending)
+		// to force a mid-tier initial pick on the first-eligible-variant path.
+		promoteVariantNearestBandwidth(master.Variants, 4_000_000)
+		modified = true
+	}
+
 	// Inject #EXT-X-START with negative offset for live edge positioning
-	if liveOffset > 0 {
+	if cm.LiveOffset > 0 {
 		modified = true
 	}
 
@@ -5915,9 +6788,9 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	// #EXT-X-VERSION so AVPlayer sees the version before any higher-version
 	// tags — inserting between #EXTM3U and #EXT-X-VERSION triggers -12646
 	// "playlist parse error".
-	if liveOffset > 0 {
+	if cm.LiveOffset > 0 {
 		encoded := buf.String()
-		startTag := fmt.Sprintf("#EXT-X-START:TIME-OFFSET=-%d,PRECISE=YES\n", liveOffset)
+		startTag := fmt.Sprintf("#EXT-X-START:TIME-OFFSET=-%d,PRECISE=YES\n", cm.LiveOffset)
 		if idx := strings.Index(encoded, "#EXT-X-START:"); idx >= 0 {
 			end := strings.Index(encoded[idx:], "\n")
 			if end < 0 {
@@ -5939,6 +6812,57 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	}
 
 	return buf.Bytes(), nil
+}
+
+// variantBandwidth returns a variant's BANDWIDTH (peak) as the sort key,
+// 0 for a nil variant.
+func variantBandwidth(v *m3u8.Variant) uint32 {
+	if v == nil {
+		return 0
+	}
+	return v.Bandwidth
+}
+
+// sortVariantsByBandwidth re-sorts the variants in place by BANDWIDTH,
+// ascending (lowest first) or descending. Stable so equal-bandwidth
+// variants keep their authored relative order.
+func sortVariantsByBandwidth(vs []*m3u8.Variant, ascending bool) {
+	sort.SliceStable(vs, func(i, j int) bool {
+		if ascending {
+			return variantBandwidth(vs[i]) < variantBandwidth(vs[j])
+		}
+		return variantBandwidth(vs[i]) > variantBandwidth(vs[j])
+	})
+}
+
+// promoteVariantNearestBandwidth orders the variants ascending, then moves
+// the one whose BANDWIDTH is closest to target to the front — leaving a
+// master playlist whose first-listed variant is the ~target-bitrate rendition.
+// Used by the "first_4mbps" probe (#682).
+func promoteVariantNearestBandwidth(vs []*m3u8.Variant, target uint32) {
+	if len(vs) < 2 {
+		return
+	}
+	sortVariantsByBandwidth(vs, true)
+	best, bestDelta := 0, absDiffUint32(variantBandwidth(vs[0]), target)
+	for i := 1; i < len(vs); i++ {
+		if d := absDiffUint32(variantBandwidth(vs[i]), target); d < bestDelta {
+			best, bestDelta = i, d
+		}
+	}
+	if best == 0 {
+		return
+	}
+	chosen := vs[best]
+	copy(vs[1:best+1], vs[0:best])
+	vs[0] = chosen
+}
+
+func absDiffUint32(a, b uint32) uint32 {
+	if a > b {
+		return a - b
+	}
+	return b - a
 }
 
 // rewriteVariantLiveOffsetTags updates HOLD-BACK inside EXT-X-SERVER-CONTROL
@@ -5989,17 +6913,14 @@ func rewriteVariantLiveOffsetTags(body []byte, liveOffsetSecs int) []byte {
 	return body
 }
 
-// manipulateDASHManifest modifies a DASH manifest
-// Note: stripCodecs and allowedVariants parameters are reserved for future DASH implementation
-func manipulateDASHManifest(body []byte, stripCodecs bool, stripAvgBandwidth bool, overstateBandwidth bool, liveOffset int, allowedVariants []string) ([]byte, error) {
+// manipulateDASHManifest modifies a DASH manifest.
+// Note: the ContentManipulation knobs are reserved for a future DASH
+// implementation. cm.VariantOrder is HLS-only and intentionally ignored here.
+func manipulateDASHManifest(body []byte, cm ContentManipulation) ([]byte, error) {
 	// DASH manifest manipulation would require XML parsing and manipulation
 	// using libraries like encoding/xml or third-party XML processors.
 	// This is deferred to keep the initial implementation focused on HLS.
-	_ = stripCodecs        // Silence unused parameter warning
-	_ = stripAvgBandwidth  // Silence unused parameter warning
-	_ = overstateBandwidth // Silence unused parameter warning
-	_ = liveOffset         // Silence unused parameter warning
-	_ = allowedVariants    // Silence unused parameter warning
+	_ = cm // Silence unused parameter warning
 	log.Printf("[GO-PROXY][CONTENT] DASH manifest manipulation not yet implemented")
 	return body, nil
 }
@@ -6184,16 +7105,16 @@ func (a *App) trackPortThroughput() {
 		mbps float64
 	}
 	type throughputState struct {
-		bytes                int64
-		timestamp            time.Time
-		samples              []throughputSample
-		a1sHistory           []a1sSample // rolling buffer of a1s values for a6s averaging
+		bytes      int64
+		timestamp  time.Time
+		samples    []throughputSample
+		a1sHistory []a1sSample // rolling buffer of a1s values for a6s averaging
 	}
 	const (
 		sampleInterval      = 100 * time.Millisecond
 		shortWindow         = 1 * time.Second
 		mediumWindow        = 6 * time.Second
-		transferRateWindow   = 400 * time.Millisecond
+		transferRateWindow  = 400 * time.Millisecond
 		activeByteThreshold = int64(8192)
 	)
 	cache := map[int]throughputState{}
@@ -6207,10 +7128,10 @@ func (a *App) trackPortThroughput() {
 		state, ok := cache[port]
 		if !ok || state.timestamp.IsZero() {
 			cache[port] = throughputState{
-				bytes:                bytesValue,
-				timestamp:            now,
-				samples:              state.samples,
-				a1sHistory:           state.a1sHistory,
+				bytes:      bytesValue,
+				timestamp:  now,
+				samples:    state.samples,
+				a1sHistory: state.a1sHistory,
 			}
 			return
 		}
@@ -6337,19 +7258,16 @@ func (a *App) trackPortThroughput() {
 			}
 		}
 
-
-
-
 		cache[port] = state
 		payload := map[string]interface{}{
-			"bytes":                       deltaBytes,
-			"wire_tc_bytes_now":           bytesValue,
-			"timestamp":                   now.Unix(),
-			"timestamp_ms":                now.UnixMilli(),
-			"mbps_shaper_rate":               mbpsShaperRate,
-			"mbps_shaper_avg":               mbpsShaperAvg,
-			"mbps_transfer_rate":           mbpsTransferRate,
-			"mbps_transfer_complete":          mbpsTransferComplete,
+			"bytes":                  deltaBytes,
+			"wire_tc_bytes_now":      bytesValue,
+			"timestamp":              now.Unix(),
+			"timestamp_ms":           now.UnixMilli(),
+			"mbps_shaper_rate":       mbpsShaperRate,
+			"mbps_shaper_avg":        mbpsShaperAvg,
+			"mbps_transfer_rate":     mbpsTransferRate,
+			"mbps_transfer_complete": mbpsTransferComplete,
 		}
 		a.throughputMu.Lock()
 		a.throughputData[port] = payload
@@ -6366,7 +7284,7 @@ func (a *App) trackPortThroughput() {
 	for {
 		tickNow := time.Now()
 		if lastPortsRefresh.IsZero() || tickNow.Sub(lastPortsRefresh) >= time.Second {
-			sessions := a.getSessionList()
+			sessions := a.sessionsView() // #740 read-only: collects ports for throughput refresh
 			refreshed := map[int]struct{}{}
 			addPort := func(portStr string) {
 				if portStr == "" {
@@ -6443,10 +7361,12 @@ func (a *App) getSessionData(identifier string) SessionData {
 	if identifier == "" {
 		return nil
 	}
-	sessions := a.getSessionList()
-	for _, session := range sessions {
+	// #740: scan the no-clone view, return a clone of the single match —
+	// callers mutate this (and feed it to normalizeSessionsForResponse, which
+	// writes in place), so it must not alias the live snapshot.
+	for _, session := range a.sessionsView() {
 		if getString(session, "session_id") == identifier {
-			return session
+			return cloneSession(session)
 		}
 	}
 	return nil
@@ -6555,9 +7475,9 @@ func (a *App) getOrCreateNetworkLog(sessionID string) *NetworkLogRingBuffer {
 // and segments — iOS HLS doesn't preserve the master manifest's
 // `?play_id=…` query string on derived URLs), fall back to the session's
 // last-known sticky play_id from the live session map. session_snapshots
-// already does this implicitly via the "if playID != ''" guard at the
+// already does this implicitly via the "if playID != ”" guard at the
 // session level; without this fallback the network_requests table ends
-// up with most rows attributed to play_id='' and the session-viewer's
+// up with most rows attributed to play_id=” and the session-viewer's
 // play_id filter only catches the master manifest hits.
 func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 	if sessionID == "" {
@@ -6852,28 +7772,47 @@ func (a *App) normalizeSessionForResponse(session SessionData) SessionData {
 }
 
 func (a *App) updateSessionsByPortWithControl(port int, updates map[string]interface{}, controlRevision string) {
-	sessions := a.getSessionList()
-	changed := false
 	rev := controlRevision
 	if rev == "" {
 		rev = newControlRevision()
 	}
-	for _, session := range sessions {
-		if a.sessionMatchesPort(session, port) {
-			log.Printf("NETSHAPE session_match port=%d session_id=%s before: x_forwarded_port=%s x_forwarded_port_external=%s nftables_bandwidth_mbps=%v",
-				port, getString(session, "session_id"), getString(session, "x_forwarded_port"),
-				getString(session, "x_forwarded_port_external"), session["nftables_bandwidth_mbps"])
-			for key, value := range updates {
-				session[key] = value
-			}
-			applyControlRevision(session, rev)
-			log.Printf("NETSHAPE session_updated port=%d session_id=%s after: nftables_bandwidth_mbps=%v",
-				port, getString(session, "session_id"), session["nftables_bandwidth_mbps"])
-			changed = true
-		}
+	// Diagnostics captured inside the (re-runnable) CAS closure and logged
+	// once on the committed result — see mutateSessions' side-effect rule.
+	type netshapeLog struct {
+		sessionID  string
+		fwdPort    string
+		fwdPortExt string
+		beforeBW   interface{}
+		afterBW    interface{}
 	}
-	if changed {
-		a.saveSessionList(sessions)
+	var captured []netshapeLog
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		captured = captured[:0]
+		changed := false
+		for _, session := range sessions {
+			if a.sessionMatchesPort(session, port) {
+				entry := netshapeLog{
+					sessionID:  getString(session, "session_id"),
+					fwdPort:    getString(session, "x_forwarded_port"),
+					fwdPortExt: getString(session, "x_forwarded_port_external"),
+					beforeBW:   session["nftables_bandwidth_mbps"],
+				}
+				for key, value := range updates {
+					session[key] = value
+				}
+				applyControlRevision(session, rev)
+				entry.afterBW = session["nftables_bandwidth_mbps"]
+				captured = append(captured, entry)
+				changed = true
+			}
+		}
+		return sessions, changed
+	})
+	for _, e := range captured {
+		log.Printf("NETSHAPE session_match port=%d session_id=%s before: x_forwarded_port=%s x_forwarded_port_external=%s nftables_bandwidth_mbps=%v",
+			port, e.sessionID, e.fwdPort, e.fwdPortExt, e.beforeBW)
+		log.Printf("NETSHAPE session_updated port=%d session_id=%s after: nftables_bandwidth_mbps=%v",
+			port, e.sessionID, e.afterBW)
 	}
 }
 
@@ -6922,19 +7861,18 @@ func (a *App) sessionMatchesPort(session SessionData, port int) bool {
 }
 
 func (a *App) updateSessionsByPort(port int, updates map[string]interface{}) {
-	sessions := a.getSessionList()
-	changed := false
-	for _, session := range sessions {
-		if a.sessionMatchesPort(session, port) {
-			for key, value := range updates {
-				session[key] = value
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		changed := false
+		for _, session := range sessions {
+			if a.sessionMatchesPort(session, port) {
+				for key, value := range updates {
+					session[key] = value
+				}
+				changed = true
 			}
-			changed = true
 		}
-	}
-	if changed {
-		a.saveSessionList(sessions)
-	}
+		return sessions, changed
+	})
 }
 
 func (a *App) getSessionList() []SessionData {
@@ -6945,28 +7883,91 @@ func (a *App) getSessionList() []SessionData {
 	return cloneSessionList(*snap)
 }
 
-func (a *App) publishSnapshot(sessions []SessionData) {
-	uiVersion := atomic.AddUint64(&a.uiStateVersionSeq, 1)
-	uiRevision := newControlRevision()
-	for _, session := range sessions {
-		session["ui_state_version"] = uiVersion
-		session["ui_state_revision"] = uiRevision
+// sessionsView returns the current session snapshot WITHOUT cloning — a
+// read-only borrow of the immutable published slice (issue #740 Commit B).
+// The dominant per-read cost was cloneSession (a deep copy of ~110 fields × N
+// sessions) on every getSessionList, and ~half the call sites only read.
+//
+// CONTRACT — callers MUST treat the result, and every map inside it, as
+// read-only. This is sound only because writers never mutate in place:
+// mutateSessions always copy-on-writes and CAS-publishes a fresh slice, so the
+// snapshot a caller borrows is frozen for its lifetime (a concurrent writer
+// publishes a new slice; it never touches this one). A caller that needs to
+// mutate a session — or hands maps to normalizeSessionsForResponse, which
+// writes in place — must use getSessionList (which clones) or cloneSession the
+// specific map it retains.
+func (a *App) sessionsView() []SessionData {
+	snap := a.sessionsSnap.Load()
+	if snap == nil {
+		return nil
 	}
-	a.sessionsSnap.Store(&sessions)
-	// Issue #470: stopped broadcasting the full session list on every
-	// snapshot publish. /api/sessions/stream is now a per-event channel
-	// driven by emitSessionEvent; the debounced full-state path served
-	// only the forwarder and produced duplicates in session_events as
-	// stale `player_metrics_last_event` markers leaked across emissions.
-	// The in-memory snapshot (sessionsSnap) is still maintained because
-	// GET /api/sessions reads from it.
+	return *snap
 }
 
-func (a *App) saveSessionList(sessions []SessionData) {
-	a.sessionsMu.Lock()
-	a.publishSnapshot(cloneSessionList(sessions))
-	a.sessionsMu.Unlock()
+// mutateSessions is the lock-free read-modify-write primitive for the
+// in-memory session list (issue #740). It loads the current immutable
+// snapshot, hands `fn` a PRIVATE deep clone it may freely mutate, and
+// publishes the result via atomic CompareAndSwap — retrying from a fresh
+// clone on every conflict so no concurrent writer's update is lost. This
+// replaces the old `getSessionList → mutate → saveSessionList` pattern,
+// which held no lock across the read and the write and was therefore a
+// last-writer-wins lost-update race against every other writer.
+//
+// CONTRACT — `fn` MUST be pure / re-runnable:
+//   - It receives a private clone (never the live snapshot) and returns the
+//     new list plus a `changed` flag. Returning changed=false aborts with no
+//     store (and no ui-version bump).
+//   - It MUST NOT perform side effects (kernel/tc calls, control-event emits,
+//     recordSessionEnd, resetServerLoopState, logging of committed state):
+//     fn can run multiple times under contention. Hoist side effects OUT and
+//     run them once on the committed result this returns — the idiomatic shape
+//     is to reset a captured slice at the TOP of fn and append to it as fn
+//     walks the list, so only the committed run's captures survive.
+//
+// Returns the published slice (the committed clone) and true on a successful
+// store, or (nil, false) when fn reported no change.
+func (a *App) mutateSessions(fn func([]SessionData) ([]SessionData, bool)) ([]SessionData, bool) {
+	for {
+		oldPtr := a.sessionsSnap.Load()
+		var current []SessionData
+		if oldPtr != nil {
+			current = *oldPtr
+		}
+		// Hand fn a private deep clone: a retry starts clean and the
+		// committed snapshot is never aliased by the caller.
+		next, changed := fn(cloneSessionList(current))
+		if !changed {
+			return nil, false
+		}
+		// Stamp the ui-version on the to-be-published slice — same shape
+		// the retired publishSnapshot used. A burned version on a lost CAS
+		// is harmless (the field is monotonic, never read for an exact value).
+		uiVersion := atomic.AddUint64(&a.uiStateVersionSeq, 1)
+		uiRevision := newControlRevision()
+		for _, session := range next {
+			session["ui_state_version"] = uiVersion
+			session["ui_state_revision"] = uiRevision
+		}
+		if a.sessionsSnap.CompareAndSwap(oldPtr, &next) {
+			return next, true
+		}
+		// Lost the race — another writer published between our Load and
+		// CompareAndSwap. Re-clone from the new snapshot and re-run fn.
+	}
 }
+
+// Issue #470: the proxy stopped broadcasting the full session list on every
+// snapshot publish. /api/sessions/stream is now a per-event channel driven by
+// emitSessionEvent; the debounced full-state path served only the forwarder
+// and produced duplicates in session_events as stale `player_metrics_last_event`
+// markers leaked across emissions. The in-memory snapshot (sessionsSnap) is
+// still maintained because GET /api/sessions reads from it.
+//
+// Issue #740: publishSnapshot and saveSessionList were retired in favour of
+// mutateSessions (lock-free CAS) — every full-list write now composes the
+// read, mutate, ui-version stamp, and store into one atomic step, so a
+// concurrent writer can no longer clobber another's update. sessionsMu and
+// createMu went with them.
 
 func (a *App) saveSessionByID(sessionID string, session SessionData) {
 	a.saveSessionByIDReturning(sessionID, session)
@@ -6985,15 +7986,22 @@ func (a *App) saveSessionByID(sessionID string, session SessionData) {
 // in-memory snapshot for GET /api/sessions, but no longer queues a
 // hub broadcast.
 func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (SessionData, bool) {
-	a.sessionsMu.Lock()
-	defer a.sessionsMu.Unlock()
-	snap := a.getSessionList()
-	updated := make([]SessionData, len(snap))
-	copy(updated, snap)
+	// #740: the merge is now a mutateSessions CAS closure rather than an
+	// RMW under sessionsMu. metricsPostMu (held by the caller) still
+	// serialises same-session POSTs for arrival ordering; the CAS guards
+	// cross-session writers. resetServerLoopState is the one side effect and
+	// is hoisted out to run once on the committed result.
 	var merged SessionData
 	var found bool
-	for i, s := range updated {
-		if getString(s, "session_id") == sessionID {
+	var playRotated bool
+	a.mutateSessions(func(updated []SessionData) ([]SessionData, bool) {
+		merged = nil
+		found = false
+		playRotated = false
+		for i, s := range updated {
+			if getString(s, "session_id") != sessionID {
+				continue
+			}
 			// Drop the merge if it's a player_metrics POST whose
 			// `player_metrics_event_time` predates what we already have.
 			// One goroutine per request means two near-simultaneous
@@ -7003,7 +8011,7 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 			// event_time jumps in session_snapshots and zigzag charts
 			// at step boundaries (issue #403 follow-up).
 			if isStalePlayerMetricsUpdate(s, session) {
-				return nil, false
+				return updated, false
 			}
 			merged = cloneSession(s)
 			for k, v := range session {
@@ -7047,16 +8055,146 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 					merged["player_metrics_event_time"] = nowStr
 				}
 			}
+			// #587 — play_id rotation resets the proxy-accumulated per-play
+			// counters so the new play measures from zero, mirroring the
+			// clients' own per-play reset. Detected at this single merge
+			// chokepoint (every GET/POST that stamps play_id flows through
+			// here). retry()/auto-recovery bumps attempt_id but keeps play_id
+			// stable, so this does NOT fire on recovery. Fault/shaping config,
+			// session identity/timing, and control state are preserved.
+			prevPlay := getString(s, "play_id")
+			newPlay := getString(session, "play_id")
+			if prevPlay != "" && newPlay != "" && prevPlay != newPlay {
+				resetPlayScopedServerCounters(merged)
+				playRotated = true
+			}
 			updated[i] = merged
 			found = true
 			break
 		}
+		return updated, found
+	})
+	// Hoisted out of the CAS closure (non-idempotent in-memory reset).
+	if playRotated {
+		a.resetServerLoopState(sessionID)
 	}
-	a.publishSnapshot(updated)
 	if !found {
 		return nil, false
 	}
 	return cloneSession(merged), true
+}
+
+// fillReservedSession replaces the bootstrap placeholder (see the reserve CAS
+// in handleProxy, #740) with the fully-built session, matched by session_id.
+// A clone of `full` is published — the caller keeps mutating its own
+// sessionData for the kernel apply / recordSessionStart that follow, exactly
+// as the pre-#740 saveSessionList (which cloned at publish) allowed. If the
+// reservation is somehow gone (e.g. reaped mid-bootstrap), the full session is
+// appended so the bootstrap still completes.
+func (a *App) fillReservedSession(sessionID string, full SessionData) {
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		clone := cloneSession(full)
+		for i, s := range sessions {
+			if getString(s, "session_id") == sessionID {
+				sessions[i] = clone
+				return sessions, true
+			}
+		}
+		return append(sessions, clone), true
+	})
+}
+
+// removeReservedSession CAS-removes the bootstrap placeholder when config
+// materialization fails, so a rejected config leaks no session slot (#740).
+func (a *App) removeReservedSession(sessionID string) {
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		filtered := make([]SessionData, 0, len(sessions))
+		removed := false
+		for _, s := range sessions {
+			if getString(s, "session_id") == sessionID {
+				removed = true
+				continue
+			}
+			filtered = append(filtered, s)
+		}
+		return filtered, removed
+	})
+}
+
+// resetFailureWindowState clears the persisted per-surface failure
+// window cursor (`<prefix>_failure_at` / `<prefix>_failure_recover_at`)
+// for every surface whose fault CONFIG the incoming settings payload
+// touches (#643). The cursor is the engine's "where in the
+// fault/recover cycle am I" state, written back by the per-request
+// handlers; without this reset a re-arm RESUMES the previous arm's
+// half-consumed window — e.g. arm `--consecutive 10`, consume 4, re-arm
+// ×10 → only 6 more faults fire before the OLD recover point is hit and
+// the rule silently goes quiet. The next matching request after a
+// config change must always open a fresh window.
+//
+// Covers the `all` surface too — the normalization loops above it
+// historically listed only segment/manifest/master_manifest.
+func resetFailureWindowState(payload map[string]interface{}, target SessionData) {
+	for _, prefix := range []string{"segment", "manifest", "master_manifest", "all"} {
+		touched := false
+		for _, suffix := range []string{"_failure_type", "_failure_frequency", "_consecutive_failures", "_failure_mode"} {
+			if _, ok := payload[prefix+suffix]; ok {
+				touched = true
+				break
+			}
+		}
+		if !touched {
+			continue
+		}
+		delete(target, prefix+"_failure_at")
+		delete(target, prefix+"_failure_recover_at")
+	}
+}
+
+// resetPlayScopedServerCounters zeroes the proxy-ACCUMULATED counters that
+// should restart at a fresh play (#587). Called from saveSessionByIDReturning
+// when the player rotates play_id. Deliberately preserves fault/shaping
+// CONFIG, session identity/timing (session_start_time, origination_*), and
+// control state. The server-side loop-detection in-memory state is reset by
+// the caller via resetServerLoopState.
+//
+// IMPORTANT — what is NOT reset, and why:
+//   - The *_requests_count counters (manifest/master/segments/all) are the
+//     fault-pattern CLOCK: FailureHandler.handleFailureCount compares the
+//     running request count against the count-based *_failure_at /
+//     *_failure_recover_at thresholds to decide when to fire. Zeroing the
+//     count without rewinding those thresholds would suppress faults until
+//     the count climbed back, desyncing operator fault patterns. Left
+//     running so injection behaviour is unchanged across a play rotation.
+//   - transport_fault_*_packets can be the "packets"-units cycle counter for
+//     transport faults (and self-reset each on/off cycle), so they're left
+//     alone too.
+//
+// The fault_count_* family below is purely a write-only reporting tally
+// (bumpFaultCounter only writes; every read is reporting/init/projection),
+// so resetting it does NOT affect fault firing.
+func resetPlayScopedServerCounters(m SessionData) {
+	// Server-side loop counter (in-memory seq state reset separately).
+	m["loop_count_server"] = 0
+	delete(m, "loop_count_server_last_at")
+	// Cumulative byte totals + the rolling-window state behind the Mbps
+	// derivations, so the new play measures throughput from zero. These feed
+	// dashboard display only — no control decision reads them.
+	m["bytes_in_total"] = int64(0)
+	m["bytes_out_total"] = int64(0)
+	m["bytes_in_last"] = int64(0)
+	m["bytes_out_last"] = int64(0)
+	delete(m, "bytes_last_ts")
+	delete(m, "io_samples")
+	delete(m, "active_io_samples")
+	// Fault-injection REPORTING tally — one key per category
+	// (fault_count_total, fault_count_socket_*, fault_count_request_*,
+	// fault_count_transfer_*). Write-only; resetting does not change firing.
+	for k := range m {
+		if strings.HasPrefix(k, "fault_count_") {
+			m[k] = 0
+		}
+	}
 }
 
 // hasDeviceFamilyToken reports whether the given User-Agent string
@@ -7653,15 +8791,16 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		// below makes the actual cap visible to charts and the dashboard
 		// throttle line. Issue #480.
 		setDefault("nftables_bandwidth_mbps", float64(0))
-		// effective_rate_limit_mbps — what the kernel is actually
-		// enforcing right now (max of operator override and deployment
-		// baseline). Stamped on every snapshot so dashboards have a
-		// stable, always-present field to draw the throttle line from.
-		// 0 means truly uncapped (prod-style with operator slider at
-		// 0). Positive means a cap is in effect, regardless of origin.
-		// Issue #480.
-		operatorRate := getFloat(session, "nftables_bandwidth_mbps")
-		session["effective_rate_limit_mbps"] = a.effectiveRate(operatorRate)
+		// effective_rate_limit_mbps — kernel-enforced cap at this
+		// instant. Resolves in priority order:
+		//   1. Pattern step runtime (nftables_pattern_rate_runtime_mbps)
+		//      when a pattern is enabled and running.
+		//   2. Operator slider (nftables_bandwidth_mbps) when set (>0).
+		//   3. Deployment baseline (INFINITE_STREAM_DEFAULT_RATE_MBPS).
+		// 0 means truly uncapped (all three sources at 0). Stamped on
+		// every snapshot so dashboards have a stable, always-present
+		// field to draw the throttle line from. Issue #480.
+		session["effective_rate_limit_mbps"] = a.effectiveRateForSession(session)
 		setDefault("nftables_delay_ms", 0)
 		setDefault("nftables_packet_loss", 0)
 		setDefault("nftables_pattern_enabled", false)
@@ -7677,7 +8816,7 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		setDefault("player_metrics_profile_shift_count", 0)
 		setDefault("loop_count_server", 0)
 		setDefault("player_metrics_loop_count_player", 0)
-		setDefault("player_metrics_loop_count_increment", 0)
+		setDefault("player_metrics_loop_count_delta", 0)
 		bestMbps := bestVariantMbps(session)
 		videoMbps := getFloat(session, "player_metrics_video_bitrate_mbps")
 		if bestMbps > 0 && videoMbps > 0 {
@@ -7830,49 +8969,99 @@ func (a *App) emitSessionEvent(session SessionData) {
 }
 
 func (a *App) removeInactiveSessions() {
-	sessions := a.getSessionList()
-	if len(sessions) == 0 {
-		return
-	}
-	active := make([]SessionData, 0, len(sessions))
+	// A player that makes no request for this long is treated as gone and
+	// its session synthesized to a terminal inactive_timeout. Kept generous
+	// (5m) so a *legitimately rebuffering* play isn't evicted mid-stream: a
+	// characterization sweep that slams the cap from a 4K rung back to the
+	// ~2 Mbps floor between cycles can stall ~50s+ while AVPlayer drains a
+	// stranded 4K segment — well under any real abandonment but over the old
+	// 60s window, which killed the play (and orphaned later cycles).
+	const inactiveWindow = 5 * time.Minute
+	// Pin the cut point once so a CAS retry can't flip a borderline session
+	// active/inactive on micro-timing.
 	now := time.Now()
-	removedPorts := map[int]struct{}{}
-	for _, session := range sessions {
-		lastRequest := getString(session, "last_request")
-		if lastRequest == "" {
-			continue
-		}
-		lastTime, err := time.Parse("2006-01-02T15:04:05.000", lastRequest)
-		if err != nil {
-			continue
-		}
-		if now.Sub(lastTime) < 60*time.Second {
-			active = append(active, session)
-		} else {
-			a.recordSessionEnd(session, "inactive_timeout")
-			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
-				removedPorts[port] = struct{}{}
+	// removed/active captured inside the (re-runnable) CAS closure;
+	// recordSessionEnd + kernel teardown run once on the committed result
+	// (mutateSessions side-effect rule). active is reused for auto-ungroup.
+	var removed []SessionData
+	var active []SessionData
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		removed = removed[:0]
+		active = make([]SessionData, 0, len(sessions))
+		for _, session := range sessions {
+			lastRequest := getString(session, "last_request")
+			if lastRequest == "" {
+				continue
 			}
-			// session removed from active list — no separate cleanup needed
+			lastTime, err := time.Parse("2006-01-02T15:04:05.000", lastRequest)
+			if err != nil {
+				continue
+			}
+			if now.Sub(lastTime) < inactiveWindow {
+				active = append(active, session)
+			} else {
+				removed = append(removed, session)
+				// session removed from active list — no separate cleanup needed
+			}
+		}
+		// Republish whenever the list is non-empty, matching the pre-#740
+		// unconditional saveSessionList(active) (which also dropped sessions
+		// with empty/unparseable last_request). Empty input → no-op.
+		return active, len(sessions) > 0
+	})
+	removedPorts := map[int]struct{}{}
+	for _, session := range removed {
+		a.recordSessionEnd(session, "inactive_timeout")
+		if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
+			removedPorts[port] = struct{}{}
 		}
 	}
-	a.saveSessionList(active)
 	for port := range removedPorts {
 		a.disablePatternForPort(port)
 		a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
 	}
-	// Auto-ungroup single-member groups
-	groupMembers := map[string][]string{}
+	// Auto-ungroup groups that have DECAYED to a single member — but never a
+	// group that is still ASSEMBLING. A fleet (token `_G<num>` suffix or
+	// CreateGroup) can pass through a transient 1-member state as its sims
+	// connect sequentially; clearing the group then would PERMANENTLY break it,
+	// because group_id is only derived at session creation and never re-derived.
+	// So we collapse a singleton ONLY if we've previously seen its group with ≥2
+	// concurrent members — tracked per-session via group_ever_multi. This is
+	// mechanism-agnostic: it protects suffix groups and operator/API groups
+	// alike while still cleaning up a real group that lost all but one member.
+	type groupMember struct {
+		sessionID string
+		everMulti bool
+	}
+	groupMembers := map[string][]groupMember{}
 	for _, session := range active {
 		gid := getString(session, "group_id")
 		if gid != "" {
-			groupMembers[gid] = append(groupMembers[gid], getString(session, "session_id"))
+			groupMembers[gid] = append(groupMembers[gid], groupMember{
+				sessionID: getString(session, "session_id"),
+				everMulti: getString(session, "group_ever_multi") == "1",
+			})
 		}
 	}
 	for _, members := range groupMembers {
-		if len(members) == 1 {
-			a.saveSessionByID(members[0], SessionData{
-				"session_id": members[0],
+		if len(members) >= 2 {
+			// A real multi-member group right now — stamp every member so a
+			// later decay-to-1 is distinguishable from a still-assembling group.
+			for _, m := range members {
+				if !m.everMulti {
+					a.saveSessionByID(m.sessionID, SessionData{
+						"session_id":       m.sessionID,
+						"group_ever_multi": "1",
+					})
+				}
+			}
+			continue
+		}
+		// Exactly one member: ungroup only if this group was previously ≥2
+		// (decayed). A never-multi singleton is still assembling — keep it.
+		if members[0].everMulti {
+			a.saveSessionByID(members[0].sessionID, SessionData{
+				"session_id": members[0].sessionID,
 				"group_id":   "",
 			})
 		}
@@ -8471,6 +9660,25 @@ func (a *App) effectiveRate(requested float64) float64 {
 	return 0
 }
 
+// effectiveRateForSession reports the cap the kernel is actually
+// enforcing at this instant — pattern step rate first, then the
+// operator slider, then the deployment baseline. Used for the
+// snapshot-stamped `effective_rate_limit_mbps` so the dashboard's
+// "Effective Limit" line tracks both slider AND pattern overrides
+// without ambiguity. Issue #480 follow-up.
+//
+// Kernel-apply call sites do NOT use this — they already skip the
+// pattern branch via the `nftables_pattern_enabled` guard upstream
+// and call `effectiveRate(operatorRate)` directly.
+func (a *App) effectiveRateForSession(session SessionData) float64 {
+	if getBool(session, "nftables_pattern_enabled") {
+		if pr := getFloat(session, "nftables_pattern_rate_runtime_mbps"); pr > 0 {
+			return pr
+		}
+	}
+	return a.effectiveRate(getFloat(session, "nftables_bandwidth_mbps"))
+}
+
 func getenv(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -8550,7 +9758,7 @@ func refreshFailureStateFromLatest(a *App, dst SessionData, sessionID string) {
 	if a == nil || dst == nil || sessionID == "" {
 		return
 	}
-	latest := a.getSessionList()
+	latest := a.sessionsView() // #740 read-only: reads matched session into dst, never writes the snapshot
 	for _, s := range latest {
 		if getString(s, "session_id") != sessionID {
 			continue
@@ -8877,7 +10085,7 @@ func (a *App) resolveSessionList(sessions [][]SessionData) []SessionData {
 	if len(sessions) > 0 && sessions[0] != nil {
 		return sessions[0]
 	}
-	return a.getSessionList()
+	return a.sessionsView() // #740 read-only: callers (getGroupIdByPort/getPortsForGroup) only read
 }
 
 // updateSessionGroup updates all sessions in a group with the given updates
@@ -8885,20 +10093,18 @@ func (a *App) updateSessionGroup(groupID string, updates map[string]interface{})
 	if groupID == "" {
 		return
 	}
-	sessions := a.getSessionList()
-	changed := false
-	for _, session := range sessions {
-		sessionGroupID := getString(session, "group_id")
-		if sessionGroupID == groupID {
-			for key, value := range updates {
-				session[key] = value
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		changed := false
+		for _, session := range sessions {
+			if getString(session, "group_id") == groupID {
+				for key, value := range updates {
+					session[key] = value
+				}
+				changed = true
 			}
-			changed = true
 		}
-	}
-	if changed {
-		a.saveSessionList(sessions)
-	}
+		return sessions, changed
+	})
 }
 
 type RequestHandler struct {

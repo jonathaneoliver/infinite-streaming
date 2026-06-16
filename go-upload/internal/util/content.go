@@ -12,6 +12,19 @@ import (
 	"time"
 )
 
+// Variant is one rung of a content item's ABR ladder, parsed from the on-disk
+// HLS master playlist. Resolution-keyed (no URI): the *served* master's
+// per-segment-duration URIs (`playlist_6s_360p.m3u8`) differ from the source
+// master's (`360p/playlist.m3u8`) and from each other across 2s/6s/LL, so the
+// stable cross-segment identity is resolution + bitrate. Field names mirror the
+// proxy v2 `ManifestVariant` so dashboard code can consume either source.
+type Variant struct {
+	Resolution       string `json:"resolution"`        // "640x360"
+	Height           int    `json:"height"`            // 360
+	Bandwidth        int    `json:"bandwidth"`         // EXT-X-STREAM-INF BANDWIDTH (peak)
+	AverageBandwidth int    `json:"average_bandwidth"` // AVERAGE-BANDWIDTH, 0 if the playlist omits it
+}
+
 type ContentInfo struct {
 	Name string `json:"name"`
 	// Logical clip identifier — the lowercased name with the
@@ -33,9 +46,32 @@ type ContentInfo struct {
 	ThumbnailURLSmall string  `json:"thumbnail_url_small,omitempty"`
 	// 1280 px wide — Continue Watching hero / large surfaces.
 	ThumbnailURLLarge string  `json:"thumbnail_url_large,omitempty"`
-	SegmentDuration   *int    `json:"segment_duration"`
-	MaxResolution     *string `json:"max_resolution"`
-	MaxHeight         *int    `json:"max_height"`
+	// Native segment length (seconds) the source was encoded at, as
+	// detected from the on-disk playlists. Kept for display / upload
+	// config / forwarder Chromecast discovery. NOT the set of lengths the
+	// clip is *playable* at — see SegmentDurations.
+	SegmentDuration *int `json:"segment_duration"`
+	// All segment lengths (seconds) go-live can actually serve this clip
+	// at. go-live synthesizes both a 2s and a 6s master playlist on the
+	// fly from ANY HLS source master (RangeHLSGenerator composes virtual
+	// segment windows from the stored segments), so segment length is a
+	// presentation choice — every HLS clip is browsable at 2s AND 6s
+	// regardless of its native SegmentDuration. LL is reported separately
+	// via HasLL because it additionally needs on-disk partial info.
+	SegmentDurations []int `json:"segment_durations,omitempty"`
+	// True when the source carries the partial-segment info LL-HLS needs
+	// (#EXT-X-PART tags, or a .byteranges sidecar fallback) — the
+	// prerequisite for go-live to generate the low-latency master. 2s/6s
+	// never need partials; LL always does.
+	HasLL         bool    `json:"has_ll"`
+	MaxResolution *string `json:"max_resolution"`
+	MaxHeight     *int    `json:"max_height"`
+	// Full ABR ladder (one entry per video rung), ascending by bandwidth,
+	// parsed from the on-disk master.m3u8. Resolution-keyed — see Variant.
+	// Empty/omitted for content with no HLS master. Lets clients (the
+	// characterization harness, the dashboard) read the rung list without
+	// fetching + parsing a playlist or priming a proxy session.
+	Variants []Variant `json:"variants,omitempty"`
 
 	// Internal — used for newest-wins dedup. Lowercase so encoding/json
 	// skips it. Set during ListContent from the encode-timestamp suffix
@@ -119,7 +155,10 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 			thumbnailURLLarge = base + "/thumbnail-large.jpg"
 		}
 		segmentDuration := detectSegmentDuration(itemPath)
+		segmentDurations := availableSegmentDurations(itemPath, hasHls, segmentDuration)
+		hasLL := hasHls && contentHasPartials(itemPath)
 		maxResolution, maxHeight := detectMaxResolution(itemPath)
+		variants := parseMasterVariants(itemPath)
 		clipID, codec, ts := splitClipIDAndCodec(name)
 		// If the name didn't carry an encode timestamp (older content),
 		// fall back to the directory's mtime for tiebreaks. Avoids
@@ -141,8 +180,11 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 			ThumbnailURLSmall: thumbnailURLSmall,
 			ThumbnailURLLarge: thumbnailURLLarge,
 			SegmentDuration:   segmentDuration,
+			SegmentDurations:  segmentDurations,
+			HasLL:             hasLL,
 			MaxResolution:     maxResolution,
 			MaxHeight:         maxHeight,
+			Variants:          variants,
 			encodeTS:          ts,
 		})
 	}
@@ -195,6 +237,80 @@ func detectSegmentDuration(contentPath string) *int {
 	}
 
 	return nil
+}
+
+// availableSegmentDurations reports the integer segment lengths go-live can
+// serve this clip at. go-live composes both a 2s and a 6s virtual master from
+// any HLS source master, so any HLS clip is available at both regardless of
+// its native encode. The natively-detected duration is folded in too so a
+// DASH-only clip (no HLS synthesis) still advertises something. LL is not an
+// integer length — it's reported separately via HasLL.
+func availableSegmentDurations(contentPath string, hasHls bool, native *int) []int {
+	set := map[int]bool{}
+	if hasHls {
+		set[2] = true
+		set[6] = true
+	}
+	if native != nil {
+		set[*native] = true
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(set))
+	for d := range set {
+		out = append(out, d)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// contentHasPartials reports whether the source carries the partial-segment
+// info LL-HLS needs. Mirrors go-live's LoadPlaylistInfoWithByteranges fallback
+// chain (parser/playlist.go, parser/byterange.go) so the catalogue's LL flag
+// matches what go-live can actually generate: prefer #EXT-X-PART tags in a
+// variant playlist, fall back to a sibling .byteranges file next to the media
+// segments. 2s/6s never need this; LL always does.
+func contentHasPartials(contentPath string) bool {
+	resDirs := []string{"1080p", "720p", "540p", "360p"}
+	for _, dir := range resDirs {
+		resPath := filepath.Join(contentPath, dir)
+		if playlistHasPartTags(filepath.Join(resPath, "playlist.m3u8")) {
+			return true
+		}
+		if dirHasByteranges(resPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func playlistHasPartTags(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if strings.HasPrefix(strings.TrimSpace(scanner.Text()), "#EXT-X-PART") {
+			return true
+		}
+	}
+	return false
+}
+
+func dirHasByteranges(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".byteranges") {
+			return true
+		}
+	}
+	return false
 }
 
 func parseHlsPlaylistDuration(path string) *int {
@@ -282,6 +398,52 @@ func parseDashSegmentDuration(path string) *int {
 			}
 		}
 	}
+}
+
+// parseMasterVariants reads the content's source master.m3u8 and returns its
+// full video-variant ladder (resolution + peak/average bandwidth per rung),
+// sorted ascending by bandwidth. Returns nil when there is no master or it
+// carries no EXT-X-STREAM-INF entries. The source master is segment-duration
+// independent (go-live synthesizes the 2s/6s/LL masters on the fly), so this is
+// the content's intrinsic ladder — every existing clip gets it for free, no
+// re-encode. The BANDWIDTH match is anchored on `[,:]` so it does NOT capture
+// the digits of `AVERAGE-BANDWIDTH=` (which contains the substring "BANDWIDTH").
+func parseMasterVariants(contentPath string) []Variant {
+	file, err := os.Open(filepath.Join(contentPath, "master.m3u8"))
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+
+	bwRe := regexp.MustCompile(`[,:]BANDWIDTH=(\d+)`)
+	avgRe := regexp.MustCompile(`AVERAGE-BANDWIDTH=(\d+)`)
+	resRe := regexp.MustCompile(`RESOLUTION=(\d+)x(\d+)`)
+
+	var variants []Variant
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "#EXT-X-STREAM-INF") {
+			continue
+		}
+		var v Variant
+		if m := bwRe.FindStringSubmatch(line); m != nil {
+			v.Bandwidth, _ = strconv.Atoi(m[1])
+		}
+		if m := avgRe.FindStringSubmatch(line); m != nil {
+			v.AverageBandwidth, _ = strconv.Atoi(m[1])
+		}
+		if m := resRe.FindStringSubmatch(line); m != nil {
+			v.Resolution = m[1] + "x" + m[2]
+			v.Height, _ = strconv.Atoi(m[2])
+		}
+		variants = append(variants, v)
+	}
+	if len(variants) == 0 {
+		return nil
+	}
+	sort.Slice(variants, func(i, j int) bool { return variants[i].Bandwidth < variants[j].Bandwidth })
+	return variants
 }
 
 func detectMaxResolution(contentPath string) (*string, *int) {

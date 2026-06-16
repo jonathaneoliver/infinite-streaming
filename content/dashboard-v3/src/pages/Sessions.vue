@@ -10,9 +10,10 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
+import LabelFrequencyTable from '@/components/LabelFrequencyTable.vue';
 import ChatPanel from '@/components/chat/ChatPanel.vue';
-import { sessionViewerURL } from '@/composables/urlTimeFormat';
-import { listPlays, patchPlayClassification, type PlaySummary } from '@/repo/v2-repo';
+import { sessionViewerURL, type CompareMember } from '@/composables/urlTimeFormat';
+import { listPlays, patchPlayClassification, type PlaySummary, type Scenario } from '@/repo/v2-repo';
 
 interface SessionRow {
   session_id: string;
@@ -20,15 +21,34 @@ interface SessionRow {
   player_id?: string;
   group_id?: string;
   content_id?: string;
+  // #673 — Scenario (run-identity) source fields. These typed columns are
+  // already on the play summary (find.go final SELECT, #550 Phase 4) and
+  // reach us via PlaySummary's index signature; the Scenario column surfaces
+  // them. test / platform / run_id have no column and come from the testing=
+  // label tier instead (see scenario()).
+  device_class?: string;
+  device_model?: string;
+  player_tech?: string;
+  app_version?: string;
+  os_version_major?: number | string;
+  os_version_minor?: number | string;
+  // #678 — typed run-identity object from /api/v2/plays (built server-side
+  // from the columns above + testing= label tails). Preferred by scenario();
+  // the loose columns remain for the rollout fallback.
+  scenario?: Scenario;
   started?: string;
   last_seen?: string;
   classification?: string;
   last_state?: string;
   last_player_error?: string;
+  // #550 Phase 2 outcome (argMax'd onto the play summary) — how the play
+  // ended. Rendered as the "Outcome" column via endOutcome().
+  playback_status?: string;
+  playback_reason?: string;
   metric_events?: number | string;
   net_events?: number | string;
   stalls?: number;
-  dropped_frames?: number;
+  frames_dropped?: number;
   downshifts?: number;
   upshifts?: number;
   resolution_changes?: number;
@@ -65,6 +85,17 @@ interface SessionRow {
   is_critical?: boolean;
   issues_breakdown?: Record<string, any>;
   health_breakdown?: Record<string, any>;
+  // #563 — derived QoE rate metrics (read-time, from the #550 residency
+  // accumulators). undefined when there's no playing time to normalise
+  // against, so the cell renders "—" rather than a misleading 0.
+  rebuffer_ratio?: number;   // stalling / (stalling + playing)
+  buffering_ratio?: number;  // buffering / (buffering + playing)
+  drop_ratio?: number;       // dropped / (dropped + displayed)
+  stalls_per_hr?: number;
+  mean_stall_ms?: number;    // stalling_time_ms / stalls
+  shifts_per_min?: number;   // bitrate shifts / playing minute
+  downshifts_per_min?: number;
+  errors_per_hr?: number;
 }
 
 const RANGES = [
@@ -111,11 +142,17 @@ const filters = ref<{
   play_id: string;
   classification: 'all' | 'starred' | 'interesting' | 'other';
   // Test-harness origin filter. 'all' = no constraint, 'only' = keep
-  // plays stamped by the characterization framework (have an
-  // info=run_id_… label), 'hide' = exclude them so manual sessions
+  // plays stamped by the characterization framework (have a
+  // testing=run_id_… label, or legacy info=run_id_… pre-#571), 'hide' = exclude them so manual sessions
   // surface without test-noise. See Characterization.vue for how
   // the framework stamps these labels at the start of each run.
   harness: 'all' | 'only' | 'hide';
+  // #673 — Scenario facets. platform/test are read from the testing= label
+  // tier (harnessPlatform / harnessTest); '' = no constraint. They sit
+  // alongside the harness tristate: Harness scopes "is this a test run at
+  // all", these narrow to a specific platform or test mode within that.
+  platform: string;
+  test: string;
   // Tristate label filter:
   //   - labels:        AND-required INCLUDES (row.labels must contain every entry)
   //   - labelsExclude: AND-required EXCLUDES (row.labels must contain NONE of these)
@@ -123,34 +160,49 @@ const filters = ref<{
   // like "has http_404 AND has-not fault_rule_enabled".
   labels: string[];
   labelsExclude: string[];
+  // 4-category facet (docs/EVENT_TAXONOMY.md). Empty = no constraint; else
+  // OR-semantics: keep plays that contain ≥1 label in any selected category.
+  categories: Category[];
 }>({
   player_id: '', group_id: '', content_id: '', play_id: '',
   classification: 'all',
   harness: 'all',
+  platform: '', test: '',
   labels: [], labelsExclude: [],
+  categories: [],
 });
 
 // Test-harness label extraction. The characterization framework
-// stamps each play it runs with:
-//   info=run_id_<utc-compact>   e.g. info=run_id_20260524T070148Z
-//   info=platform_<name>        e.g. info=platform_ipad-sim
-//   info=test_<name>            e.g. info=test_rampup
-// These three label PREFIXES (with their value tail) are how
-// Characterization.vue groups plays into runs; this page lifts the
-// same convention to surface "this play came from the harness" on
-// the picker.
-function findLabelTail(r: SessionRow, prefix: string): string | null {
+// stamps each play it runs with these keys (#571 moved them from the
+// info= prefix to the testing= tier):
+//   testing=run_id_<utc-compact>   e.g. testing=run_id_20260524T070148Z
+//   testing=platform_<name>        e.g. testing=platform_ipad-sim
+//   testing=test_<name>            e.g. testing=test_rampup
+// These keys (with their value tail) are how Characterization.vue groups
+// plays into runs; this page lifts the same convention to surface "this
+// play came from the harness" on the picker. We match the testing= tier
+// first, then fall back to the legacy info= prefix for plays written
+// before #571 (still present within the ≤30-day 'other' TTL).
+function findLabelTail(r: SessionRow, key: string): string | null {
   const pairs = Array.isArray(r.labels) ? r.labels : [];
-  for (const [label] of pairs) {
-    const s = String(label);
-    if (s.startsWith(prefix)) return s.slice(prefix.length);
+  for (const prefix of [`testing=${key}`, `info=${key}`]) {
+    for (const [label] of pairs) {
+      const s = String(label);
+      if (s.startsWith(prefix)) return s.slice(prefix.length);
+    }
   }
   return null;
 }
-function harnessRunId(r: SessionRow): string | null { return findLabelTail(r, 'info=run_id_'); }
-function harnessPlatform(r: SessionRow): string | null { return findLabelTail(r, 'info=platform_'); }
-function harnessTest(r: SessionRow): string | null { return findLabelTail(r, 'info=test_'); }
-function isHarnessRow(r: SessionRow): boolean { return harnessRunId(r) !== null; }
+function harnessRunId(r: SessionRow): string | null { return findLabelTail(r, 'run_id_'); }
+function harnessPlatform(r: SessionRow): string | null { return findLabelTail(r, 'platform_'); }
+function harnessTest(r: SessionRow): string | null { return findLabelTail(r, 'test_'); }
+function isHarnessRow(r: SessionRow): boolean { return rowRunId(r) !== ''; }
+// #678 — scenario-aware accessors: prefer the server `scenario` object, fall
+// back to the testing= label tails. Used by the Platform/Test facets so they
+// agree with the Scenario cell regardless of which source populated it.
+function rowTest(r: SessionRow): string { return r.scenario?.test ?? harnessTest(r) ?? ''; }
+function rowPlatform(r: SessionRow): string { return r.scenario?.platform ?? harnessPlatform(r) ?? ''; }
+function rowRunId(r: SessionRow): string { return r.scenario?.run_id ?? harnessRunId(r) ?? ''; }
 
 // Pretty-print the UTC compact run_id (20260524T070148Z) as local
 // hh:mm. Falls back to the raw string if it doesn't match the
@@ -168,20 +220,68 @@ function shortRunId(runID: string | null): string {
   return utc.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-// Compact "harness pill" payload — what's shown on the row when the
-// play was stamped by the test framework. Null when the play isn't a
-// harness run.
-function harnessPill(r: SessionRow): { runId: string; platform: string; test: string; tooltip: string } | null {
-  const runID = harnessRunId(r);
-  if (!runID) return null;
-  const platform = harnessPlatform(r) ?? 'unknown';
-  const test = harnessTest(r) ?? '—';
-  return {
-    runId: shortRunId(runID),
-    platform,
-    test,
-    tooltip: `Test harness run\nrun_id: ${runID}\nplatform: ${platform}\ntest: ${test}`,
+// #673/#678 — Scenario (run-identity) cell. A play's *dimensions* — what it
+// IS (test, platform, device, content versions) — as opposed to the event
+// labels, which are what HAPPENED during it (stalls, faults, breaches, with
+// counts). They were intermingled in the testing= label tier; this surfaces
+// the identity fields as their own structured cell.
+//
+// #678 moved the assembly server-side (forwarder /api/v2/plays now returns a
+// typed `scenario` object). We prefer that; scenarioFromRow() is the rollout
+// fallback for when the frontend ships ahead of the forwarder (separate
+// deploys) or for cached rows predating the field. Both paths feed the same
+// renderer, scenarioView(). Content has its own column, so content_id from
+// the object is intentionally not shown here.
+interface ScenarioField { key: string; label: string; value: string }
+// Render order + display labels, keyed by the typed Scenario field name.
+const SCENARIO_FIELDS: { src: keyof Scenario; key: string; label: string }[] = [
+  { src: 'test',         key: 'test',     label: 'test' },
+  { src: 'platform',     key: 'platform', label: 'platform' },
+  { src: 'device_model', key: 'device',   label: 'device' },
+  { src: 'player_tech',  key: 'player',   label: 'player' },
+  { src: 'app_version',  key: 'app',      label: 'app' },
+  { src: 'os_version',   key: 'os',       label: 'os' },
+  { src: 'manifest_variant', key: 'variant', label: 'variant' }, // #679
+  { src: 'server_build', key: 'build',    label: 'build' },      // #679
+  { src: 'run_id',       key: 'run',      label: 'run' },
+];
+// Build the render model from a typed Scenario object (server-supplied, #678).
+function scenarioView(sc: Scenario): { fields: ScenarioField[]; tooltip: string } | null {
+  const fields: ScenarioField[] = [];
+  for (const f of SCENARIO_FIELDS) {
+    let value = String(sc[f.src] ?? '');
+    if (!value && f.src === 'device_model') value = String(sc.device_class ?? '');
+    if (f.src === 'run_id' && value) value = shortRunId(value);
+    if (value) fields.push({ key: f.key, label: f.label, value });
+  }
+  if (fields.length === 0) return null;
+  const tooltip = fields.map((f) => `${f.label}: ${f.value}`).join('\n')
+    + (sc.run_id ? `\nrun_id: ${sc.run_id}` : '');
+  return { fields, tooltip };
+}
+// Rollout fallback: assemble a Scenario from the raw row (typed columns +
+// testing= label tails) the way #673 did client-side, for rows the forwarder
+// hasn't enriched yet.
+function scenarioFromRow(r: SessionRow): Scenario {
+  const col = (k: string) => {
+    const v = (r as any)[k];
+    return v === undefined || v === null || v === '' ? '' : String(v);
   };
+  const osMaj = col('os_version_major');
+  const osMin = col('os_version_minor');
+  return {
+    test: harnessTest(r) ?? '',
+    platform: harnessPlatform(r) ?? '',
+    run_id: harnessRunId(r) ?? '',
+    device_class: col('device_class'),
+    device_model: col('device_model'),
+    player_tech: col('player_tech'),
+    app_version: col('app_version'),
+    os_version: osMaj ? (osMin ? `${osMaj}.${osMin}` : osMaj) : '',
+  };
+}
+function scenario(r: SessionRow): { fields: ScenarioField[]; tooltip: string } | null {
+  return scenarioView(r.scenario ?? scenarioFromRow(r));
 }
 
 // rows / loading / error are computeds backed by playsQuery; declared
@@ -205,9 +305,12 @@ function computeRange(): { since: string; until: string } {
 }
 
 function deriveHealth(r: SessionRow): void {
-  const n = (k: keyof SessionRow) => Number((r as any)[k]) || 0;
+  // Reads any field off the raw PlaySummary (normalisePlay spreads the
+  // whole summary onto the row), so this also reaches the #550
+  // accumulators that aren't in the SessionRow interface.
+  const n = (k: string) => Number((r as any)[k]) || 0;
   const stalls = n('stalls');
-  const drops = n('dropped_frames');
+  const drops = n('frames_dropped');
   const downshifts = n('downshifts');
   const upshifts = n('upshifts');
   const resChanges = n('resolution_changes');
@@ -241,16 +344,85 @@ function deriveHealth(r: SessionRow): void {
     upshifts, player_error: r.last_player_error || '',
   };
 
-  const deductStalls = stalls * 2;
-  const deductErrors = errors * 25;
-  const deductFaults = Math.min(faults * 1, 10);
-  const deductDrops = Math.min(dropBlocks, 20);
-  const deductShifts = downshifts * 1;
-  r.health_score = Math.max(0, 100 - (deductStalls + deductErrors + deductFaults + deductDrops + deductShifts));
-  r.health_breakdown = {
-    stalls: deductStalls, errors: deductErrors,
-    faults: deductFaults, drops: deductDrops, downshifts: deductShifts,
-  };
+  // #659: health_score is computed below, AFTER the normalized rates — it's
+  // re-based on those (length-unbiased) + a breach penalty, not raw counts.
+
+  // #563 — derived QoE rate metrics, normalised against playing time
+  // (Conviva-style). undefined when the denominator is zero so cells
+  // show "—". All inputs are cumulative #550 columns on the summary.
+  // Minimum sample before a rate is trustworthy. A couple of events over
+  // a few seconds otherwise normalises to an absurd per-hour/per-minute
+  // value (1 stall over 2s ≈ 1800/hr). Below the floor the cell renders
+  // "—" (insufficient sample) rather than noise. Per-time rates gate on
+  // playing time; the time-ratios gate on their own (engaged-time)
+  // denominator so a stall-heavy SHORT play still reports a real
+  // rebuffer %; the drop ratio gates on a minimum frame count.
+  const RATE_MIN_PLAYING_MS = 30_000; // ≥30s of playback for per-time rates
+  const RATIO_MIN_MS = 30_000;        // ≥30s engaged time for the time ratios
+  const RATIO_MIN_FRAMES = 300;       // ≥~5–10s of frames for the drop ratio
+  const playingMs = n('playing_time_ms');
+  const stallingMs = n('stalling_time_ms');
+  const bufferingMs = n('buffering_time_ms');
+  const displayed = n('frames_displayed');
+  const playingHrs = playingMs / 3_600_000;
+  const playingMin = playingMs / 60_000;
+  const rebufDenom = stallingMs + playingMs;
+  const bufDenom = bufferingMs + playingMs;
+  const frameDenom = drops + displayed;
+  const rateOk = playingMs >= RATE_MIN_PLAYING_MS;
+  r.rebuffer_ratio = rebufDenom >= RATIO_MIN_MS ? stallingMs / rebufDenom : undefined;
+  r.buffering_ratio = bufDenom >= RATIO_MIN_MS ? bufferingMs / bufDenom : undefined;
+  r.drop_ratio = frameDenom >= RATIO_MIN_FRAMES ? drops / frameDenom : undefined;
+  r.stalls_per_hr = rateOk ? stalls / playingHrs : undefined;
+  r.mean_stall_ms = stalls > 0 ? stallingMs / stalls : undefined;
+  r.shifts_per_min = rateOk ? n('bitrate_shifts') / playingMin : undefined;
+  r.downshifts_per_min = rateOk ? downshifts / playingMin : undefined;
+  r.errors_per_hr = rateOk ? n('error_count') / playingHrs : undefined;
+
+  // #659: health from normalized QoE rates (length-unbiased) + a hard
+  // penalty for critical/error QoE labels, replacing the raw-count formula.
+  // Below the rate sample floor a play has no trustworthy rates, so it's
+  // scored on hard-failure presence instead of rate noise.
+  const breach = breachHealthPenalty(r);
+  if (rateOk) {
+    const rebufPct = (r.rebuffer_ratio ?? 0) * 100;
+    const dropPct = (r.drop_ratio ?? 0) * 100;
+    const dRebuf = Math.min(rebufPct * 4, 50);
+    const dStalls = Math.min((r.stalls_per_hr ?? 0) * 3, 20);
+    const dDown = Math.min((r.downshifts_per_min ?? 0) * 5, 15);
+    const dDrop = Math.min(dropPct * 2, 15);
+    const dErr = Math.min((r.errors_per_hr ?? 0) * 5, 20);
+    r.health_score = Math.max(0, 100 - (dRebuf + dStalls + dDown + dDrop + dErr + breach));
+    const r3 = (x: number) => Math.round(x * 1000) / 1000;
+    r.health_breakdown = {
+      rebuffer_pct: r3(rebufPct),
+      stalls_per_hr: r3(r.stalls_per_hr ?? 0),
+      downshifts_per_min: r3(r.downshifts_per_min ?? 0),
+      drop_pct: r3(dropPct),
+      errors_per_hr: r3(r.errors_per_hr ?? 0),
+      breach,
+    };
+  } else {
+    const hardFail = errors > 0 || faults > 0 || n('frozen_count') > 0;
+    r.health_score = Math.max(0, 100 - (hardFail ? 40 : 0) - breach);
+    r.health_breakdown = { short_play: true, hard_failure: hardFail, breach };
+  }
+}
+
+// #659: health penalty for the worst QoE labels — critical (×20) and error
+// (×10) tiers (the *_breach family etc.), capped at 40. Makes a real breach
+// dent the score that the raw-count formula ignored.
+function breachHealthPenalty(r: SessionRow): number {
+  const pairs = Array.isArray(r.labels) ? r.labels : [];
+  let p = 0;
+  for (const pr of pairs) {
+    const label = String((pr as any)[0] ?? '');
+    const eq = label.indexOf('=');
+    const sev = eq > 0 ? label.slice(0, eq) : '';
+    if (sev === 'critical') p += 20;
+    else if (sev === 'error') p += 10;
+  }
+  return Math.min(p, 40);
 }
 
 // Normalise one PlaySummary into a SessionRow: aliases v2 field
@@ -354,27 +526,44 @@ function matchesHarness(r: SessionRow): boolean {
   }
 }
 
+// Category facet — OR-semantics: with any category selected, keep plays
+// that contain ≥1 label in any of them. Empty selection = no constraint.
+function matchesCategories(r: SessionRow): boolean {
+  const cats = filters.value.categories;
+  if (!cats.length) return true;
+  const byCat = chipsByCategory(r);
+  return cats.some((c) => byCat[c].length > 0);
+}
+function toggleCategoryFilter(c: Category) {
+  const cur = filters.value.categories;
+  filters.value.categories = cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c];
+}
+
 function matches(r: SessionRow): boolean {
   const f = filters.value;
   return (!f.player_id || r.player_id === f.player_id)
     && (!f.group_id || r.group_id === f.group_id)
     && (!f.content_id || r.content_id === f.content_id)
     && (!f.play_id || r.play_id === f.play_id)
+    && (!f.platform || rowPlatform(r) === f.platform)
+    && (!f.test || rowTest(r) === f.test)
     && matchesClassification(r)
     && matchesHarness(r)
+    && matchesCategories(r)
     && matchesLabels(r);
 }
 
 // Hierarchical label filter — mirrors the SessionDisplay event-filter
 // accordion. One tier per severity (error → critical → warning →
-// info), each containing the distinct labels seen at that tier with
-// occurrence counts. Click a label chip to toggle inclusion;
+// info → testing), each containing the distinct labels seen at that
+// tier with occurrence counts. Click a label chip to toggle inclusion;
 // click the tier header to toggle ALL labels in that tier. Issue
 // #474 follow-up.
-type Severity = 'error' | 'critical' | 'warning' | 'info';
+type Severity = 'error' | 'critical' | 'warning' | 'info' | 'testing';
 // User-facing ordering: Critical leads (the "🚨 something's actually
-// wrong" tier), then Error (player-error transitions), Warning, Info.
-const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info'];
+// wrong" tier), then Error (player-error transitions), Warning, Info,
+// and finally Testing (test-harness KV metadata, #571 — recessive).
+const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info', 'testing'];
 const SEVERITY_META: Record<Severity, { label: string; bg: string; border: string; color: string }> = {
   // Critical wears red (worst-looking — user-visible playback
   // breakage); Error wears orange. Whole palette pair moves
@@ -384,6 +573,9 @@ const SEVERITY_META: Record<Severity, { label: string; bg: string; border: strin
   critical: { label: 'Critical', bg: '#fee2e2', border: '#fca5a5', color: '#7f1d1d' },
   warning:  { label: 'Warning',  bg: '#fef3c7', border: '#fcd34d', color: '#854d0e' },
   info:     { label: 'Info',     bg: '#f0fdf4', border: '#a7f3d0', color: '#1f2937' },
+  // Testing wears muted slate — recessive test-harness metadata, not
+  // playback signal (#571). Mirrors SessionDisplay.vue.
+  testing:  { label: 'Testing',  bg: '#f1f5f9', border: '#cbd5e1', color: '#475569' },
 };
 
 interface LabelEntry {
@@ -399,7 +591,7 @@ interface LabelTier {
 
 const labelTiers = computed<LabelTier[]>(() => {
   const acc: Record<Severity, Map<string, number>> = {
-    error: new Map(), critical: new Map(), warning: new Map(), info: new Map(),
+    error: new Map(), critical: new Map(), warning: new Map(), info: new Map(), testing: new Map(),
   };
   for (const r of rows.value) {
     const pairs = Array.isArray(r.labels) ? r.labels : [];
@@ -434,7 +626,7 @@ const labelTiers = computed<LabelTier[]>(() => {
 // info collapsed (matches SessionDisplay's expandedTiers initial
 // state — the user usually wants to scan the worst tiers first).
 const expandedLabelTiers = ref<Record<Severity, boolean>>({
-  error: true, critical: true, warning: false, info: false,
+  error: true, critical: true, warning: false, info: false, testing: false,
 });
 function toggleLabelTier(sev: Severity) {
   expandedLabelTiers.value[sev] = !expandedLabelTiers.value[sev];
@@ -568,6 +760,13 @@ const playerOptions = computed(() => distinctFor('player_id'));
 const groupOptions = computed(() => distinctFor('group_id'));
 const contentOptions = computed(() => distinctFor('content_id'));
 const playOptions = computed(() => distinctFor('play_id'));
+// #673 — Scenario facet option sets. Derived (not row keys), so distinctFor
+// can't build them; map each row through the harness label-tail readers and
+// dedupe. Independent of the four id selects — a platform spans many plays.
+const platformOptions = computed(() =>
+  Array.from(new Set(rows.value.map((r) => rowPlatform(r)).filter(Boolean))).sort());
+const testOptions = computed(() =>
+  Array.from(new Set(rows.value.map((r) => rowTest(r)).filter(Boolean))).sort());
 
 // When a parent filter narrows enough that the current value is no
 // longer in the visible set, clear it. Mirrors `fillSelect` in the
@@ -576,6 +775,8 @@ watch(playerOptions, (opts) => { if (filters.value.player_id && !opts.includes(f
 watch(groupOptions, (opts) => { if (filters.value.group_id && !opts.includes(filters.value.group_id)) filters.value.group_id = ''; });
 watch(contentOptions, (opts) => { if (filters.value.content_id && !opts.includes(filters.value.content_id)) filters.value.content_id = ''; });
 watch(playOptions, (opts) => { if (filters.value.play_id && !opts.includes(filters.value.play_id)) filters.value.play_id = ''; });
+watch(platformOptions, (opts) => { if (filters.value.platform && !opts.includes(filters.value.platform)) filters.value.platform = ''; });
+watch(testOptions, (opts) => { if (filters.value.test && !opts.includes(filters.value.test)) filters.value.test = ''; });
 
 function clearFilters() {
   filters.value.player_id = '';
@@ -584,6 +785,8 @@ function clearFilters() {
   filters.value.play_id = '';
   filters.value.classification = 'all';
   filters.value.harness = 'all';
+  filters.value.platform = '';
+  filters.value.test = '';
   filters.value.labels = [];
   filters.value.labelsExclude = [];
 }
@@ -640,10 +843,28 @@ function parseChIsoMs(v: string | null | undefined): number {
  *  Threshold is generous (60 s) so a heartbeat that's a few seconds
  *  late doesn't kick us into archive mode. */
 const LIVE_TAIL_MS = 60_000;
+
+/** A play is "still live" — viewer follows the live edge instead of
+ *  pinning to a fixed end_time — only if its last_seen is within
+ *  LIVE_TAIL_MS of now AND it has not reached a terminal outcome.
+ *  A play_end (any non-in_progress playback_status) means the play is
+ *  OVER: clamp to [from,to] no matter how recently it ended, otherwise
+ *  a just-finished archive opens following live (the 60 s tail alone
+ *  misclassifies it for its first minute). Mirrors endOutcome's
+ *  in_progress test. */
+function isTerminal(r: SessionRow): boolean {
+  const status = String(r.playback_status ?? '').trim();
+  return status !== '' && status !== 'in_progress';
+}
+function isStillLive(r: SessionRow): boolean {
+  if (isTerminal(r)) return false;
+  const lastSeen = parseChIsoMs(r.last_seen);
+  return Number.isFinite(lastSeen) && (Date.now() - lastSeen) < LIVE_TAIL_MS;
+}
 function endTimeFor(r: SessionRow): string {
   const lastSeen = parseChIsoMs(r.last_seen);
   if (!Number.isFinite(lastSeen)) return 'live';
-  if (Date.now() - lastSeen < LIVE_TAIL_MS) return 'live';
+  if (isStillLive(r)) return 'live';
   return new Date(lastSeen).toISOString();
 }
 
@@ -655,12 +876,59 @@ function viewerHref(r: SessionRow): string {
   // the upper bound and follows the live edge.
   const startMs = r.started ? parseChIsoMs(r.started) : NaN;
   const lastSeen = r.last_seen ? parseChIsoMs(r.last_seen) : NaN;
-  const stillLive = Number.isFinite(lastSeen) && (Date.now() - lastSeen) < LIVE_TAIL_MS;
+  const stillLive = isStillLive(r);
   return sessionViewerURL({
     playerId: r.player_id,
     playId: r.play_id && r.play_id !== '—' ? r.play_id : undefined,
     fromMs: Number.isFinite(startMs) ? startMs : undefined,
     toMs: stillLive ? undefined : (Number.isFinite(lastSeen) ? lastSeen : undefined),
+  });
+}
+// #736 — grouped plays by group_id (born-grouped runs carry a unique
+// G<num> from row 1). One play per player_id; tag = the session number so
+// the viewer's overlay legend reads S1/S2/S3. Computed once per render so
+// the per-row "Compare group" check stays O(rows), not O(rows²).
+const groupsById = computed(() => {
+  const byGroup = new Map<string, CompareMember[]>();
+  const seen = new Map<string, Set<string>>();
+  for (const r of rows.value) {
+    const gid = r.group_id;
+    if (!gid || !r.player_id || !r.play_id || r.play_id === '—') continue;
+    if (!byGroup.has(gid)) { byGroup.set(gid, []); seen.set(gid, new Set()); }
+    const players = seen.get(gid)!;
+    if (players.has(r.player_id)) continue;
+    players.add(r.player_id);
+    byGroup.get(gid)!.push({ playerId: r.player_id, playId: r.play_id, tag: r.session_id });
+  }
+  return byGroup;
+});
+function groupMembers(r: SessionRow): CompareMember[] {
+  return (r.group_id ? groupsById.value.get(r.group_id) : undefined) ?? [];
+}
+function canCompareGroup(r: SessionRow): boolean {
+  return groupMembers(r).length >= 2;
+}
+// Open the session-viewer in compare mode over every play in this row's
+// group, windowed to the union of all members' bounds so no sibling's data
+// is clipped.
+function compareGroupHref(r: SessionRow): string {
+  const members = groupMembers(r);
+  if (members.length < 2 || !r.player_id) return '#';
+  let minStart = Infinity, maxEnd = -Infinity, anyLive = false;
+  for (const m of rows.value) {
+    if (m.group_id !== r.group_id) continue;
+    const s = m.started ? parseChIsoMs(m.started) : NaN;
+    const e = m.last_seen ? parseChIsoMs(m.last_seen) : NaN;
+    if (Number.isFinite(s)) minStart = Math.min(minStart, s);
+    if (Number.isFinite(e)) maxEnd = Math.max(maxEnd, e);
+    if (isStillLive(m)) anyLive = true;
+  }
+  return sessionViewerURL({
+    playerId: r.player_id,
+    playId: r.play_id && r.play_id !== '—' ? r.play_id : undefined,
+    fromMs: Number.isFinite(minStart) ? minStart : undefined,
+    toMs: anyLive ? undefined : (Number.isFinite(maxEnd) ? maxEnd : undefined),
+    compare: members,
   });
 }
 function bundleHref(r: SessionRow): string {
@@ -720,10 +988,13 @@ function fmtIssuesBadge(r: SessionRow): IssueBadge {
 }
 interface HealthBadge { score: number; cls: 'ok' | 'warn' | 'bad'; tip: string }
 function fmtHealthBadge(r: SessionRow): HealthBadge {
-  const s = Number(r.health_score) || 0;
-  const cls: HealthBadge['cls'] = s >= 90 ? 'ok' : s >= 70 ? 'warn' : 'bad';
+  const raw = Number(r.health_score) || 0;
+  const s = Math.round(raw * 100) / 100; // #659: 2dp display
+  const cls: HealthBadge['cls'] = raw >= 90 ? 'ok' : raw >= 70 ? 'warn' : 'bad';
   const b = r.health_breakdown || {};
-  const tip = `100 − stalls:${b.stalls || 0} − errors:${b.errors || 0} − faults:${b.faults || 0} − drops:${b.drops || 0} − downshifts:${b.downshifts || 0}`;
+  const tip = b.short_play
+    ? `short play — ${b.hard_failure ? 'hard failure' : 'no failures'}${b.breach ? `, breach −${b.breach}` : ''}`
+    : `rebuffer ${b.rebuffer_pct ?? 0}% · stalls ${b.stalls_per_hr ?? 0}/hr · downshift ${b.downshifts_per_min ?? 0}/min · drop ${b.drop_pct ?? 0}% · err ${b.errors_per_hr ?? 0}/hr${b.breach ? ` · breach −${b.breach}` : ''}`;
   return { score: s, cls, tip };
 }
 interface CountCell { n: number; color: string; bold: boolean }
@@ -745,6 +1016,33 @@ function fmtPct(v?: number): PctCell {
   return { label: `${n.toFixed(1)}%`, color };
 }
 
+// #563 rate-cell formatters. Unlike fmtPct (quality: higher = better),
+// these are "bad-high" — green when low, amber/red as they rise — and
+// render "—" when the value is undefined (no playing time to normalise).
+function fmtRatioPct(v: number | undefined, warn: number, bad: number): PctCell {
+  if (v === undefined || !Number.isFinite(v)) return { label: '—', color: '#9ca3af' };
+  const pct = v * 100;
+  let color = '#065f46';
+  if (v >= bad) color = '#991b1b';
+  else if (v >= warn) color = '#92400e';
+  return { label: `${pct.toFixed(3)}%`, color };
+}
+function fmtRate(v: number | undefined, warn: number, bad: number): PctCell {
+  if (v === undefined || !Number.isFinite(v)) return { label: '—', color: '#9ca3af' };
+  let color = '#065f46';
+  if (v >= bad) color = '#991b1b';
+  else if (v >= warn) color = '#92400e';
+  return { label: v.toFixed(3), color };
+}
+function fmtMsDur(v: number | undefined): PctCell {
+  if (v === undefined || !Number.isFinite(v) || v <= 0) return { label: '—', color: '#9ca3af' };
+  const label = v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${Math.round(v)}ms`;
+  let color = '#065f46';
+  if (v >= 2000) color = '#991b1b';
+  else if (v >= 1000) color = '#92400e';
+  return { label, color };
+}
+
 const FLAG_DEFS = [
   { key: 'user_marked_count' as const,   icon: '🚨', label: '911 / user flag',  color: '#dc2626' },
   { key: 'frozen_count' as const,        icon: '❄️',  label: 'frozen',           color: '#7c3aed' },
@@ -759,9 +1057,12 @@ interface LabelChip {
   label: string;     // raw `<severity>=<event>` string
   name: string;      // event portion (with the `*` synthMark intact)
   count: number;
-  cls: 'info' | 'warning' | 'critical' | 'error';
+  cls: 'info' | 'warning' | 'critical' | 'error' | 'testing';
 }
-function labelChips(r: SessionRow): LabelChip[] {
+// All chips for a row, incl. the testing tier — severity-ranked. Internal;
+// the column uses labelChips() (testing filtered out) and the Test-meta pill
+// uses testingMeta().
+function allLabelChips(r: SessionRow): LabelChip[] {
   const pairs = Array.isArray(r.labels) ? r.labels : [];
   const out: LabelChip[] = [];
   for (const p of pairs) {
@@ -775,14 +1076,122 @@ function labelChips(r: SessionRow): LabelChip[] {
       sev === 'error' ? 'error'
       : sev === 'critical' ? 'critical'
       : sev === 'warning' ? 'warning'
+      : sev === 'testing' ? 'testing'
       : 'info';
     out.push({ label, name, count, cls });
   }
+  // #653: rank by severity tier first (so real errors lead, not the
+  // high-frequency info churn), then count-desc within a tier.
+  const sevRank: Record<LabelChip['cls'], number> = {
+    critical: 0, error: 1, warning: 2, info: 3, testing: 4,
+  };
   out.sort((a, b) =>
-    b.count - a.count
+    sevRank[a.cls] - sevRank[b.cls]
+    || b.count - a.count
     || a.label.localeCompare(b.label),
   );
   return out;
+}
+
+// Playback-signal chips for the Labels column. #658/#673: the testing= KV
+// tier is structured run metadata, not events — it's pulled out of the chip
+// flow (here) and rendered in the dedicated Scenario column (scenario()) so
+// it stops competing with the error/warning chips.
+function labelChips(r: SessionRow): LabelChip[] {
+  return allLabelChips(r).filter((c) => c.cls !== 'testing');
+}
+
+// 4-category classification — mirrors the viewer's axis (see
+// docs/EVENT_TAXONOMY.md): Actions / Injected / Conditions / Reactions.
+// The list only has label strings (no per-row `fault_category`), so the
+// synthesized failure rollups (segment/manifest) are ambiguous; they're
+// disambiguated by a co-occurring unambiguous sibling on the same play
+// (every `*segment_failure` row also carries an http_*/timeout label,
+// and both land in the histogram). The `*` synthMark prefix is stripped.
+type Category = 'action' | 'injected' | 'condition' | 'reaction';
+const CAT_ACTION_RE    = /^(fault_on|fault_off|fault_rule|pattern_|shaper_|timeouts_changed|loop_server|session_start|session_end|server_start|content_changed|label_changed|control_change)/;
+const CAT_CONDITION_RE = /^(fault_timeout|transfer_active_timeout|transfer_idle_timeout|slow_request|slow_segment|qoe_ttfb_breach|qoe_transfer_stall)/;
+const CAT_INJECTED_RE  = /^(http_4xx|http_5xx|fault_other|fault_incomplete|corrupted|transport_socket)/;
+const CAT_AMBIGUOUS_RE = /^(segment_failure|manifest_failure|master_manifest_failure)/;
+function baseLabelName(name: string): string { return name.startsWith('*') ? name.slice(1) : name; }
+function labelCategory(name: string, playTypes: Set<string>): Category {
+  const n = baseLabelName(name);
+  if (CAT_ACTION_RE.test(n)) return 'action';
+  if (CAT_CONDITION_RE.test(n)) return 'condition';
+  if (CAT_INJECTED_RE.test(n)) return 'injected';
+  if (CAT_AMBIGUOUS_RE.test(n)) {
+    for (const t of playTypes) if (CAT_INJECTED_RE.test(t)) return 'injected';
+    for (const t of playTypes) if (CAT_CONDITION_RE.test(t)) return 'condition';
+    return 'injected'; // a failure with no disambiguating sibling
+  }
+  return 'reaction';
+}
+const CATEGORY_ORDER: Category[] = ['action', 'injected', 'condition', 'reaction'];
+const CATEGORY_TAG: Record<Category, { tag: string; title: string }> = {
+  action:    { tag: 'act',  title: 'Actions — operator/proxy/harness config (faults, patterns, shaper, lifecycle)' },
+  injected:  { tag: 'inj',  title: 'Injected faults — fabricated/destroyed responses (4xx/5xx, corrupted, socket)' },
+  condition: { tag: 'cond', title: 'Conditions & results — transfer timeouts, slow segments, QoE network breaches' },
+  reaction:  { tag: 'rxn',  title: 'Reactions — player behaviour (QoE, stalls, shifts)' },
+};
+function playTypeSet(r: SessionRow): Set<string> {
+  const s = new Set<string>();
+  for (const c of labelChips(r)) s.add(baseLabelName(c.name));
+  return s;
+}
+function chipsByCategory(r: SessionRow): Record<Category, LabelChip[]> {
+  const types = playTypeSet(r);
+  const out: Record<Category, LabelChip[]> = { action: [], injected: [], condition: [], reaction: [] };
+  for (const c of labelChips(r)) out[labelCategory(c.name, types)].push(c);
+  return out;
+}
+
+// #653/#656: per-group cap before the "+N more" toggle collapses the tail.
+const LABEL_CHIP_CAP = 6;
+
+// Per-row "show all labels" state, keyed by play_id. Collapsed by default.
+const expandedLabelRows = ref<Set<string>>(new Set());
+function toggleLabelRow(playId: string) {
+  const s = new Set(expandedLabelRows.value);
+  if (s.has(playId)) s.delete(playId); else s.add(playId);
+  expandedLabelRows.value = s;
+}
+// Visible head of one category group: all when expanded, else capped.
+function visibleCategoryChips(r: SessionRow, cat: Category): LabelChip[] {
+  const all = chipsByCategory(r)[cat];
+  return expandedLabelRows.value.has(String(r.play_id)) ? all : all.slice(0, LABEL_CHIP_CAP);
+}
+// Combined hidden count across all category groups (drives "+N more").
+function hiddenLabelCount(r: SessionRow): number {
+  const byCat = chipsByCategory(r);
+  return CATEGORY_ORDER.reduce((sum, c) => sum + Math.max(0, byCat[c].length - LABEL_CHIP_CAP), 0);
+}
+
+// #563 — human-readable "how did this play end?" from the Phase 2
+// outcome fields. playback_status is the verb; playback_reason refines
+// a user_stopped into the state it was in at exit (the iOS client's
+// refineTerminalReason + the #556 proxy inactive_timeout). Returns a
+// short label, a colour, and a tooltip carrying the raw status·reason.
+function endOutcome(r: SessionRow): { label: string; color: string; tip: string } {
+  const status = String(r.playback_status ?? '').trim();
+  const reason = String(r.playback_reason ?? '').trim();
+  const grey = '#9ca3af', green = '#065f46', amber = '#92400e', red = '#991b1b', neutral = '#374151';
+  const tip = status ? `${status}${reason ? ' · ' + reason : ''}` : 'in progress';
+  if (!status || status === 'in_progress') return { label: 'Playing', color: grey, tip };
+  if (status === 'completed') return { label: 'Completed', color: green, tip };
+  if (status === 'start_failure') return { label: 'Startup failed', color: red, tip };
+  if (status === 'mid_stream_failure') return { label: 'Mid-stream fail', color: red, tip };
+  if (status === 'abandoned_start') return { label: 'Abandoned start', color: amber, tip };
+  if (status === 'user_stopped') {
+    if (reason.startsWith('ended_stalling')) return { label: 'Quit (stalled)', color: amber, tip };
+    if (reason.startsWith('ended_buffering')) return { label: 'Quit (buffering)', color: amber, tip };
+    if (reason === 'app_backgrounded') return { label: 'Backgrounded', color: neutral, tip };
+    if (reason === 'app_terminated') return { label: 'App killed', color: neutral, tip };
+    if (reason === 'inactive_timeout') return { label: 'Timed out', color: amber, tip };
+    if (reason === 'next_content_selected') return { label: 'Switched', color: neutral, tip };
+    return { label: 'User quit', color: neutral, tip };
+  }
+  if (reason === 'inactive_timeout') return { label: 'Timed out', color: amber, tip };
+  return { label: status.replace(/_/g, ' '), color: neutral, tip };
 }
 
 function flagChips(r: SessionRow): { icon: string; label: string; tip: string; color: string; count: number }[] {
@@ -803,22 +1212,53 @@ const COLUMNS = [
   { key: 'duration_ms',      label: 'Duration',   type: 'number' as const,  sortable: true },
   { key: 'player_id',        label: 'Player',     type: 'string' as const,  sortable: true },
   { key: 'content_id',       label: 'Content',    type: 'string' as const,  sortable: true },
+  { key: 'scenario',         label: 'Scenario',   type: 'string' as const,  sortable: false },
   { key: 'play_id',          label: 'Play ID',    type: 'string' as const,  sortable: true },
+  { key: 'group_id',         label: 'Group',      type: 'string' as const,  sortable: true },
   { key: 'last_state',       label: 'State',      type: 'string' as const,  sortable: true },
+  { key: 'playback_status',  label: 'Outcome',    type: 'string' as const,  sortable: true },
   { key: 'issues_count',     label: 'Issues',     type: 'number' as const,  sortable: true },
   { key: '__flags',          label: 'Flags',      type: 'string' as const,  sortable: false },
   { key: 'labels_total',     label: 'Labels',     type: 'number' as const,  sortable: true },
   { key: 'health_score',     label: 'Health',     type: 'number' as const,  sortable: true },
-  { key: 'stalls',           label: 'Stalls',     type: 'number' as const,  sortable: true },
-  { key: 'errors_count',     label: 'Errors',     type: 'number' as const,  sortable: true },
+  // Raw counts — superseded for cross-play comparison by the rate/ratio
+  // twins below, so they're demoted to the Detail toggle. Faults has no
+  // rate twin (operator-driven), so it stays a default column.
+  { key: 'stalls',           label: 'Stalls',     type: 'number' as const,  sortable: true, detail: true },
+  { key: 'errors_count',     label: 'Errors',     type: 'number' as const,  sortable: true, detail: true },
   { key: 'faults_count',     label: 'Faults',     type: 'number' as const,  sortable: true },
-  { key: 'downshifts_count', label: 'Downshifts', type: 'number' as const,  sortable: true },
-  { key: 'dropped_frames',   label: 'Drops',      type: 'number' as const,  sortable: true },
+  { key: 'downshifts_count', label: 'Downshifts', type: 'number' as const,  sortable: true, detail: true },
+  { key: 'frames_dropped',   label: 'Drops',      type: 'number' as const,  sortable: true, detail: true },
   { key: 'avg_quality_pct',  label: 'Avg Q%',     type: 'number' as const,  sortable: true },
   { key: 'metric_events',    label: 'Metrics',    type: 'number' as const,  sortable: true },
   { key: 'net_events',       label: 'HAR',        type: 'number' as const,  sortable: true },
+  // #563 — derived QoE rates. The high-signal ones are shown by default
+  // (a ratio = time-impact, a frequency, + the reliability/quality
+  // essentials); the niche rates (avg stall duration, total shift churn)
+  // ride the Detail toggle alongside the raw counts they normalise.
+  { key: 'rebuffer_ratio',     label: 'Rebuf %',   type: 'number' as const, sortable: true },
+  { key: 'stalls_per_hr',      label: 'Stalls/hr', type: 'number' as const, sortable: true },
+  { key: 'downshifts_per_min', label: 'Downsh/min', type: 'number' as const, sortable: true },
+  { key: 'drop_ratio',         label: 'Drop %',    type: 'number' as const, sortable: true },
+  { key: 'errors_per_hr',      label: 'Err/hr',    type: 'number' as const, sortable: true },
+  { key: 'mean_stall_ms',      label: 'Stall avg', type: 'number' as const, sortable: true, detail: true },
+  { key: 'shifts_per_min',     label: 'Shifts/min', type: 'number' as const, sortable: true, detail: true },
   { key: '__bundle',         label: '',           type: 'string' as const,  sortable: false },
 ];
+
+// #563 — the high-signal rates are on by default; the "Detail" toggle
+// reveals the raw counts they supersede + the niche rates. Persisted so
+// an operator's choice sticks.
+const DETAIL_KEY = 'ismSessionsShowDetail';
+const showDetail = ref<boolean>((() => {
+  try { return localStorage.getItem(DETAIL_KEY) === '1'; } catch { return false; }
+})());
+watch(showDetail, (v) => {
+  try { localStorage.setItem(DETAIL_KEY, v ? '1' : '0'); } catch { /* ignore */ }
+});
+// Header loop iterates this so detail columns appear/disappear with the
+// toggle; the body cells gate on showDetail in the same position.
+const visibleColumns = computed(() => COLUMNS.filter((c) => showDetail.value || !(c as any).detail));
 
 function onHeaderClick(col: typeof COLUMNS[number]) {
   if (!col.sortable) return;
@@ -937,6 +1377,8 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
         <div class="page-subtitle">Browse archived streaming sessions. Click one to open it in the Session Viewer.</div>
       </div>
 
+      <LabelFrequencyTable style="margin-bottom: 1rem;" />
+
       <div class="panel">
         <div class="panel-header">
           <div class="panel-title">Active Sessions <span v-if="loading" class="status-message">loading…</span></div>
@@ -1009,7 +1451,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
               >{{ c.label }}</button>
             </div>
 
-            <div class="class-chip-wrap" title="Filter by test-harness origin (plays stamped with info=run_id_… by the characterization framework)">
+            <div class="class-chip-wrap" title="Filter by test-harness origin (plays stamped with testing=run_id_… by the characterization framework)">
               <span class="ctrl-label-text">Harness:</span>
               <button
                 v-for="c in ([
@@ -1025,8 +1467,46 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
               >{{ c.label }}</button>
             </div>
 
+            <div class="class-chip-wrap" title="Filter by event category (docs/EVENT_TAXONOMY.md). Multi-select; keeps plays containing ≥1 label in any selected category.">
+              <span class="ctrl-label-text">Category:</span>
+              <button
+                v-for="cat in CATEGORY_ORDER"
+                :key="cat"
+                type="button"
+                class="class-chip"
+                :class="['cat-chip-' + cat, { active: filters.categories.includes(cat) }]"
+                :title="CATEGORY_TAG[cat].title"
+                @click="toggleCategoryFilter(cat)"
+              >{{ CATEGORY_TAG[cat].tag }}</button>
+            </div>
+
+            <!-- #673 — Scenario facets. Only rendered when the current rows
+                 carry harness-stamped platform/test metadata, so manual-only
+                 views aren't cluttered with empty selects. -->
+            <label v-if="platformOptions.length" class="ctrl-label">
+              <span>Platform:</span>
+              <select v-model="filters.platform" class="ctrl-input">
+                <option value="">all ({{ platformOptions.length }})</option>
+                <option v-for="v in platformOptions" :key="v" :value="v">{{ v }}</option>
+              </select>
+            </label>
+            <label v-if="testOptions.length" class="ctrl-label">
+              <span>Test:</span>
+              <select v-model="filters.test" class="ctrl-input">
+                <option value="">all ({{ testOptions.length }})</option>
+                <option v-for="v in testOptions" :key="v" :value="v">{{ v }}</option>
+              </select>
+            </label>
+
             <button type="button" class="btn btn-secondary" @click="clearFilters">Clear filters</button>
             <span class="match-count">{{ matchCount }}</span>
+            <!-- #563 — high-signal rates show by default; this reveals the
+                 raw counts they supersede + the niche rates (stall avg,
+                 total shift churn). -->
+            <label class="ctrl-label rates-toggle" title="Show raw counts (stalls, errors, downshifts, drops) and the niche rates (stall avg, shifts/min)">
+              <input type="checkbox" v-model="showDetail" />
+              <span class="ctrl-label-text">Detail</span>
+            </label>
           </div>
 
           <!-- Hierarchical labels filter (issue #474 follow-up).
@@ -1137,7 +1617,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
               <thead>
                 <tr>
                   <th
-                    v-for="col in COLUMNS"
+                    v-for="col in visibleColumns"
                     :key="col.key"
                     :class="{ sortable: col.sortable }"
                     :title="col.sortable ? `Sort by ${col.label}` : ''"
@@ -1157,7 +1637,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                 <tr
                   v-for="r in sorted"
                   :key="r.session_id + ':' + (r.play_id ?? '')"
-                  :class="{ 'row-critical': r.is_critical }"
+                  :class="[{ 'row-critical': r.is_critical }, 'row-health-' + fmtHealthBadge(r).cls]"
                   @click="onRowClick(r, $event)"
                 >
                   <td class="cell-star">
@@ -1185,20 +1665,36 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                   <td>{{ r.player_id || '' }}</td>
                   <td>
                     <div>{{ r.content_id || '' }}</div>
-                    <div v-if="harnessPill(r)" class="harness-pill" :title="harnessPill(r)!.tooltip">
-                      🧪
-                      <span class="harness-test">{{ harnessPill(r)!.test }}</span>
-                      <span class="harness-sep">·</span>
-                      <span class="harness-platform">{{ harnessPill(r)!.platform }}</span>
-                      <span class="harness-sep">·</span>
-                      <span class="harness-run">{{ harnessPill(r)!.runId }}</span>
-                    </div>
+                  </td>
+                  <td class="cell-scenario">
+                    <template v-if="scenario(r)">
+                      <span
+                        v-for="f in scenario(r)!.fields"
+                        :key="f.key"
+                        class="scenario-chip"
+                        :class="'scenario-' + f.key"
+                        :title="scenario(r)!.tooltip"
+                      ><span class="scenario-key">{{ f.label }}</span>{{ f.value }}</span>
+                    </template>
+                    <span v-else class="dash">—</span>
                   </td>
                   <td class="cell-play-id">
                     <a v-if="r.play_id && r.player_id" :href="viewerHref(r)" class="play-id-link">{{ r.play_id }}</a>
                     <template v-else>{{ r.play_id || '' }}</template>
                   </td>
+                  <td class="cell-group-id">
+                    <a
+                      v-if="canCompareGroup(r)"
+                      :href="compareGroupHref(r)"
+                      class="group-compare-link"
+                      :title="`Open all ${groupMembers(r).length} grouped plays in compare mode`"
+                      @click.stop
+                    >{{ r.group_id }}</a>
+                    <span v-else-if="r.group_id" class="group-id-plain" :title="r.group_id">{{ r.group_id }}</span>
+                    <span v-else class="dash">—</span>
+                  </td>
                   <td>{{ r.last_state || '' }}</td>
+                  <td><span :style="{ color: endOutcome(r).color, fontWeight: 600 }" :title="endOutcome(r).tip">{{ endOutcome(r).label }}</span></td>
                   <td>
                     <span class="issue-badge" :class="'issue-' + fmtIssuesBadge(r).cls" :title="fmtIssuesBadge(r).tip">{{ fmtIssuesBadge(r).count }}</span>
                   </td>
@@ -1207,26 +1703,52 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                     <span v-if="flagChips(r).length === 0" class="dash">—</span>
                   </td>
                   <td class="cell-labels">
-                    <span
-                      v-for="chip in labelChips(r)"
-                      :key="chip.label"
-                      class="label-chip"
-                      :class="'label-' + chip.cls"
-                      :title="chip.label"
-                    >{{ chip.count }}× {{ chip.name }}</span>
+                    <template v-for="cat in CATEGORY_ORDER" :key="cat">
+                      <template v-if="visibleCategoryChips(r, cat).length">
+                        <span class="label-group-tag" :class="'cat-tag-' + cat" :title="CATEGORY_TAG[cat].title">{{ CATEGORY_TAG[cat].tag }}</span>
+                        <span
+                          v-for="chip in visibleCategoryChips(r, cat)"
+                          :key="cat + '-' + chip.label"
+                          class="label-chip"
+                          :class="['label-' + chip.cls, 'cat-' + cat]"
+                          :title="chip.label"
+                        >{{ chip.count }}× {{ chip.name }}</span>
+                      </template>
+                    </template>
+                    <button
+                      v-if="hiddenLabelCount(r) > 0 && !expandedLabelRows.has(String(r.play_id))"
+                      type="button"
+                      class="label-more"
+                      title="Show all labels"
+                      @click.stop="toggleLabelRow(String(r.play_id))"
+                    >+{{ hiddenLabelCount(r) }} more</button>
+                    <button
+                      v-else-if="expandedLabelRows.has(String(r.play_id))"
+                      type="button"
+                      class="label-more"
+                      title="Show fewer"
+                      @click.stop="toggleLabelRow(String(r.play_id))"
+                    >show less</button>
                     <span v-if="labelChips(r).length === 0" class="dash">—</span>
                   </td>
                   <td>
                     <span class="health-badge" :class="'issue-' + fmtHealthBadge(r).cls" :title="fmtHealthBadge(r).tip">{{ fmtHealthBadge(r).score }}</span>
                   </td>
-                  <td><span :style="{ color: fmtCount(r.stalls, 1, 5).color, fontWeight: fmtCount(r.stalls, 1, 5).bold ? 600 : 400 }">{{ fmtCount(r.stalls, 1, 5).n }}</span></td>
-                  <td><span :style="{ color: fmtCount(r.errors_count, 1, 1).color, fontWeight: fmtCount(r.errors_count, 1, 1).bold ? 600 : 400 }">{{ fmtCount(r.errors_count, 1, 1).n }}</span></td>
+                  <td v-if="showDetail"><span :style="{ color: fmtCount(r.stalls, 1, 5).color, fontWeight: fmtCount(r.stalls, 1, 5).bold ? 600 : 400 }">{{ fmtCount(r.stalls, 1, 5).n }}</span></td>
+                  <td v-if="showDetail"><span :style="{ color: fmtCount(r.errors_count, 1, 1).color, fontWeight: fmtCount(r.errors_count, 1, 1).bold ? 600 : 400 }">{{ fmtCount(r.errors_count, 1, 1).n }}</span></td>
                   <td><span :style="{ color: fmtCount(r.faults_count, 1, 10).color, fontWeight: fmtCount(r.faults_count, 1, 10).bold ? 600 : 400 }">{{ fmtCount(r.faults_count, 1, 10).n }}</span></td>
-                  <td><span :style="{ color: fmtCount(r.downshifts_count, 1, 5).color, fontWeight: fmtCount(r.downshifts_count, 1, 5).bold ? 600 : 400 }">{{ fmtCount(r.downshifts_count, 1, 5).n }}</span></td>
-                  <td><span :style="{ color: fmtCount(r.dropped_frames, 100, 1000).color, fontWeight: fmtCount(r.dropped_frames, 100, 1000).bold ? 600 : 400 }">{{ fmtCount(r.dropped_frames, 100, 1000).n }}</span></td>
+                  <td v-if="showDetail"><span :style="{ color: fmtCount(r.downshifts_count, 1, 5).color, fontWeight: fmtCount(r.downshifts_count, 1, 5).bold ? 600 : 400 }">{{ fmtCount(r.downshifts_count, 1, 5).n }}</span></td>
+                  <td v-if="showDetail"><span :style="{ color: fmtCount(r.frames_dropped, 100, 1000).color, fontWeight: fmtCount(r.frames_dropped, 100, 1000).bold ? 600 : 400 }">{{ fmtCount(r.frames_dropped, 100, 1000).n }}</span></td>
                   <td><span :style="{ color: fmtPct(r.avg_quality_pct).color }">{{ fmtPct(r.avg_quality_pct).label }}</span></td>
                   <td>{{ r.metric_events || 0 }}</td>
                   <td>{{ r.net_events || 0 }}</td>
+                  <td><span :style="{ color: fmtRatioPct(r.rebuffer_ratio, 0.002, 0.004).color }" :title="'Rebuffering ratio — fraction of engaged time spent stalling'">{{ fmtRatioPct(r.rebuffer_ratio, 0.002, 0.004).label }}</span></td>
+                  <td><span :style="{ color: fmtRate(r.stalls_per_hr, 1, 5).color }" :title="'Stalls per playing-hour'">{{ fmtRate(r.stalls_per_hr, 1, 5).label }}</span></td>
+                  <td><span :style="{ color: fmtRate(r.downshifts_per_min, 1, 3).color }" :title="'ABR downshifts per playing-minute'">{{ fmtRate(r.downshifts_per_min, 1, 3).label }}</span></td>
+                  <td><span :style="{ color: fmtRatioPct(r.drop_ratio, 0.05, 0.2).color }" :title="'Dropped-frame ratio'">{{ fmtRatioPct(r.drop_ratio, 0.05, 0.2).label }}</span></td>
+                  <td><span :style="{ color: fmtRate(r.errors_per_hr, 0.5, 2).color }" :title="'Errors per playing-hour'">{{ fmtRate(r.errors_per_hr, 0.5, 2).label }}</span></td>
+                  <td v-if="showDetail"><span :style="{ color: fmtMsDur(r.mean_stall_ms).color }" :title="'Mean stall duration'">{{ fmtMsDur(r.mean_stall_ms).label }}</span></td>
+                  <td v-if="showDetail"><span :style="{ color: fmtRate(r.shifts_per_min, 2, 6).color }" :title="'Total bitrate shifts per playing-minute'">{{ fmtRate(r.shifts_per_min, 2, 6).label }}</span></td>
                   <td>
                     <a
                       v-if="r.player_id"
@@ -1354,15 +1876,15 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   border-color: #1d4ed8;
 }
 
-/* Harness origin pill — sub-line under the content cell when a
-   play was stamped by the characterization framework. Compact;
-   reuses the colour palette of the test-runner page so the visual
-   tie between Sessions ↔ Characterization is obvious. */
-.harness-pill {
+/* #673 Scenario column — one small "key value" chip per run-identity
+   field. Reuses the green test-runner palette so the visual tie between
+   Sessions ↔ Characterization carries over from the old harness pill. */
+.cell-scenario { min-width: 180px; max-width: 280px; line-height: 1.7; }
+.scenario-chip {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   gap: 4px;
-  margin-top: 2px;
+  margin: 0 4px 2px 0;
   padding: 1px 6px;
   border-radius: 10px;
   background: #ecfdf5;
@@ -1371,10 +1893,18 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   font: 500 10px ui-monospace, SFMono-Regular, monospace;
   white-space: nowrap;
 }
-.harness-test { font-weight: 700; }
-.harness-platform { color: #047857; }
-.harness-run { color: #065f46; opacity: 0.85; }
-.harness-sep { color: #34d399; }
+.scenario-key {
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  color: #047857;
+  opacity: 0.85;
+}
+/* The two harness-stamped identity fields lead — tint them so test/platform
+   read as the primary "which run is this" signal vs. the device/version tail. */
+.scenario-test  { background: #d1fae5; border-color: #34d399; }
+.scenario-run   { opacity: 0.85; }
 
 .btn {
   display: inline-block;
@@ -1391,7 +1921,10 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 .btn-secondary { background: var(--bg-secondary, #f9fafb); }
 
 .table-wrap {
-  max-height: 60vh;
+  /* Fill the viewport below the page chrome (header + filter bar) instead of
+     the old fixed 60vh, so far more rows are visible before scrolling. */
+  max-height: calc(100vh - 180px);
+  min-height: 320px;
   overflow: auto;
   background: var(--bg-primary);
   border: 1px solid var(--border-color, #e5e7eb);
@@ -1409,7 +1942,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   z-index: 3;
 }
 .picker-table th {
-  padding: 8px 10px;
+  padding: 5px 10px;
   text-align: left;
   border-bottom: 1px solid var(--border-color, #e5e7eb);
   font-weight: 600;
@@ -1419,8 +1952,11 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 }
 .picker-table th.sortable { cursor: pointer; }
 .sort-idle { color: #9ca3af; }
+/* #659: compact rows — tighter vertical padding + line-height so more rows
+   are visible (the #654 label cap already shrank cell height). */
 .picker-table td {
-  padding: 5px 8px;
+  padding: 2px 8px;
+  line-height: 1.25;
   border-bottom: 1px solid var(--border-color, #f3f4f6);
   position: relative;
 }
@@ -1429,8 +1965,16 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   border-left: 4px solid transparent;
 }
 .picker-table tbody tr:hover { background: var(--bg-hover, #f9fafb); }
+/* #659: full-row wash + left bar by re-based health band (rate + breach).
+   ok is kept very faint so healthy rows stay calm and warn/bad pop. */
+.picker-table tbody tr.row-health-ok   { border-left-color: #16a34a; background: #f3faf5; }
+.picker-table tbody tr.row-health-warn { border-left-color: #d97706; background: #fef6e7; }
+.picker-table tbody tr.row-health-bad  { border-left-color: #dc2626; background: #fdeeee; }
+.picker-table tbody tr.row-health-ok:hover   { background: #e8f5ec; }
+.picker-table tbody tr.row-health-warn:hover { background: #fdeed2; }
+.picker-table tbody tr.row-health-bad:hover  { background: #fbe2e2; }
 .picker-table tbody tr.row-critical { border-left: 4px solid #dc2626; }
-.picker-table tbody tr.row-critical:hover { background: #fef2f2; }
+.picker-table tbody tr.row-critical:hover { background: #fbe2e2; }
 .empty {
   padding: 16px;
   text-align: center;
@@ -1452,6 +1996,15 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 .cell-play-id { font-weight: 600; color: #1d4ed8; }
 .play-id-link { color: #1d4ed8; text-decoration: none; font-weight: 600; }
 .play-id-link:hover { text-decoration: underline; }
+.cell-group-id { max-width: 170px; }
+.group-compare-link {
+  display: inline-block; max-width: 100%; padding: 1px 6px; border-radius: 4px;
+  font-family: ui-monospace, monospace; font-size: 0.72rem; font-weight: 600;
+  color: #6d28d9; background: #ede9fe; text-decoration: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+}
+.group-compare-link:hover { background: #ddd6fe; text-decoration: underline; }
+.group-id-plain { font-family: ui-monospace, monospace; font-size: 0.72rem; color: #6b7280; }
 
 .issue-badge, .health-badge {
   display: inline-block;
@@ -1496,7 +2049,50 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 .label-warning  { background: #fef3c7; color: #854d0e; border-color: #fcd34d; }
 .label-critical { background: #fee2e2; color: #7f1d1d; border-color: #fca5a5; }
 .label-error    { background: #ffedd5; color: #7c2d12; border-color: #fdba74; }
-
+.label-testing  { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
+/* Category accent (docs/EVENT_TAXONOMY.md) — a left border tints each chip
+   by causal role while the background keeps the severity tint. The group
+   tags + filter facet chips share the same four accents. */
+.label-chip.cat-action    { border-left: 3px solid #8b5cf6; }
+.label-chip.cat-injected  { border-left: 3px solid #ef4444; }
+.label-chip.cat-condition { border-left: 3px solid #f59e0b; }
+.label-chip.cat-reaction  { border-left: 3px solid #3b82f6; }
+.cat-tag-action    { color: #7c3aed; }
+.cat-tag-injected  { color: #dc2626; }
+.cat-tag-condition { color: #d97706; }
+.cat-tag-reaction  { color: #2563eb; }
+.class-chip.cat-chip-action    { border-left: 3px solid #8b5cf6; }
+.class-chip.cat-chip-injected  { border-left: 3px solid #ef4444; }
+.class-chip.cat-chip-condition { border-left: 3px solid #f59e0b; }
+.class-chip.cat-chip-reaction  { border-left: 3px solid #3b82f6; }
+/* #653: "+N more" / "show less" toggle for the capped label list. */
+.label-more {
+  display: inline-block;
+  padding: 1px 6px;
+  margin: 0 3px 2px 0;
+  border-radius: 10px;
+  font: 600 11px system-ui;
+  line-height: 1.4;
+  white-space: nowrap;
+  background: #eef2ff;
+  color: #4338ca;
+  border: 1px solid #c7d2fe;
+  cursor: pointer;
+}
+.label-more:hover { background: #e0e7ff; }
+/* #656: tiny uppercase divider tag preceding the injected / player chip
+   groups, so cause vs effect read as distinct clusters. */
+.label-group-tag {
+  display: inline-block;
+  margin: 0 4px 2px 0;
+  font: 700 9px system-ui;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  vertical-align: middle;
+}
+/* #658: compact pill for the testing= run metadata (test · platform), full
+   set on hover — keeps the structured KV facts out of the playback chips. */
 /* Hierarchical labels filter — mirrors SessionDisplay's Focus Window
  * event-filter accordion. One row per severity tier with a clickable
  * header (toggle ALL labels in that tier), a chevron (collapse), and
@@ -1634,8 +2230,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   padding: 4px 4px 2px 26px;     /* indent under the chevron */
 }
 .lf-label-row {
-  display: grid;
-  grid-template-columns: 18px 1fr auto;
+  display: flex;
   gap: 6px;
   align-items: center;
   padding: 2px 8px;
@@ -1666,16 +2261,22 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   text-decoration-thickness: 1.5px;
   text-decoration-color: var(--tier-color);
 }
-.lf-label-check { font-weight: 700; }
+.lf-label-check { font-weight: 700; flex: none; }
 /* Tighten the ⊘ glyph — many fonts render it overly wide. */
 .lf-label-row.state-exclude .lf-label-check { letter-spacing: -1px; }
 .lf-label-name {
+  /* flex item that shrinks (min-width:0 + ellipsis) so the count sits right
+     after the name rather than being pushed to the far edge. */
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font: 500 12px ui-monospace, Menlo, monospace;
 }
 .lf-label-count {
+  flex: none;
   font: 600 11px ui-monospace, Menlo, monospace;
-  opacity: 0.85;
+  opacity: 0.7;
+  white-space: nowrap;
 }
 
 .rel-recent { color: #16a34a; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }

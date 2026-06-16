@@ -400,6 +400,13 @@ private fun PickerList(
                         )
                     }
                     item {
+                        LiveOffsetRow(
+                            seconds = state.liveOffsetSeconds,
+                            enabled = !state.goLive,
+                            onChange = { vm.setLiveOffsetSeconds(it) },
+                        )
+                    }
+                    item {
                         PickerItem(
                             label = "Skip Home on launch (auto-resume last stream)",
                             selected = state.skipHomeOnLaunch,
@@ -417,6 +424,19 @@ private fun PickerList(
                         PlayIdRotationRow(
                             seconds = state.playIdRotationSeconds,
                             onChange = { vm.setPlayIdRotationSeconds(it) },
+                        )
+                    }
+                    item {
+                        PeakBitrateRow(
+                            mbps = state.peakBitrateMbps,
+                            onChange = { vm.setPeakBitrateMbps(it) },
+                        )
+                    }
+                    item {
+                        PickerItem(
+                            label = "Start on lowest rung (ABR adapts up)",
+                            selected = state.startsFirstVariant,
+                            onClick = { vm.setStartsFirstVariant(!state.startsFirstVariant) },
                         )
                     }
                     item {
@@ -657,6 +677,59 @@ private fun PreviewVideoSlotsRow(
     }
 }
 
+/**
+ * Numeric stepper for the user-configurable live-edge offset (seconds).
+ * 0 = use the manifest's HOLD-BACK / Go Live default; otherwise the player
+ * is pinned that many seconds behind the live edge. Capped at 60 s in 1 s
+ * steps. When Go Live is on it takes precedence, so the row renders disabled
+ * with an explanatory subtitle. Mirrors the Apple `LiveOffsetRow` and the
+ * `live_offset_s` query param on `testing-session.html` (issues #266 / #793).
+ */
+@Composable
+private fun LiveOffsetRow(
+    seconds: Int,
+    enabled: Boolean,
+    onChange: (Int) -> Unit,
+) {
+    val maxOffset = 60
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(60.dp)
+            .clip(RoundedCornerShape(Radius.row))
+            .background(Tokens.bgSoft)
+            .padding(horizontal = Space.s4),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "Live offset (seconds behind live)",
+                style = AppType.body.copy(color = if (enabled) Tokens.fg else Tokens.fgFaint),
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                when {
+                    !enabled -> "Overridden by Go Live (snaps to edge)"
+                    seconds <= 0 -> "Off — use manifest HOLD-BACK"
+                    else -> "${seconds}s behind live edge"
+                },
+                style = AppType.monoSm.copy(color = Tokens.fgFaint),
+            )
+        }
+        StepperButton(
+            symbol = "−",
+            enabled = enabled && seconds > 0,
+            onClick = { onChange(seconds - 1) },
+        )
+        Spacer(Modifier.width(Space.s2))
+        StepperButton(
+            symbol = "+",
+            enabled = enabled && seconds < maxOffset,
+            onClick = { onChange(seconds + 1) },
+        )
+    }
+}
+
 @Composable
 private fun PlayIdRotationRow(seconds: Int, onChange: (Int) -> Unit) {
     val presets = listOf(
@@ -690,6 +763,62 @@ private fun PlayIdRotationRow(seconds: Int, onChange: (Int) -> Unit) {
             presets.forEachIndexed { index, (label, value) ->
                 if (index > 0) Spacer(Modifier.width(Space.s2))
                 val active = seconds == value
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (active) Tokens.accent else Tokens.bgCard)
+                        .tvFocus(cornerRadius = 8.dp)
+                        .clickable(onClick = { onChange(value) })
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        label,
+                        style = AppType.monoSm.copy(
+                            color = if (active) Tokens.bg else Tokens.fg,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Preset selector for the ABR peak-bitrate ceiling (Mbps). 0 = no cap; any
+ * other value pins the ExoPlayer track selector so it won't pick a video rung
+ * above that bitrate. The analog of the Apple peak-bitrate clamp and the
+ * `is.flag.peak_bitrate_mbps` launch lever (issue #797).
+ */
+@Composable
+private fun PeakBitrateRow(mbps: Int, onChange: (Int) -> Unit) {
+    val presets = listOf(
+        "Off" to 0,
+        "2" to 2,
+        "4" to 4,
+        "8" to 8,
+        "16" to 16,
+    )
+    val subtitle = if (mbps <= 0) "Off — ABR may pick any rung"
+                   else "Cap ABR at ${mbps} Mbps"
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Radius.row))
+            .background(Tokens.bgSoft)
+            .padding(horizontal = Space.s4, vertical = Space.s3),
+    ) {
+        Text(
+            "Peak bitrate cap (ABR ceiling)",
+            style = AppType.body.copy(color = Tokens.fg),
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(subtitle, style = AppType.monoSm.copy(color = Tokens.fgFaint))
+        Spacer(Modifier.height(Space.s2))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            presets.forEachIndexed { index, (label, value) ->
+                if (index > 0) Spacer(Modifier.width(Space.s2))
+                val active = mbps == value
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))

@@ -13,6 +13,8 @@ IOS_APP_BUNDLE_ID ?= com.jeoliver.InfiniteStreamPlayer
 IOS_API_BASE ?= http://$(K3S_HOST):40000
 IOS_METRICS_DURATION ?= 900
 IOS_SCORE_MIN ?= 60
+REPORT_DAYS ?= 7
+REPORT_OUT ?= /tmp/report-conditions.md
 
 run:
 	docker compose up -d
@@ -105,6 +107,12 @@ harness-cli:
 	@case ":$$PATH:" in *":$(patsubst %/,%,$(dir $(HARNESS_CLI_BIN))):"*) ;; \
 	  *) echo "warn: $(dir $(HARNESS_CLI_BIN)) is not on \$$PATH — add it or set HARNESS_CLI_BIN" ;; \
 	esac
+
+# #508 streaming report — what the player does around faults / stalls / play-ends.
+# Read-only; needs the harness CLI on $PATH (make harness-cli), pointed at test-dev.
+# Override: make report REPORT_DAYS=14 REPORT_OUT=/tmp/r.md
+report:
+	python3 analytics/tools/report.py --kind conditions --days $(REPORT_DAYS) --out $(REPORT_OUT)
 
 # Regenerate the typed Go clients under tools/harness-cli/internal/v2gen/
 # from api/openapi/v2/{proxy,forwarder}.yaml. Idempotent; safe to run
@@ -412,6 +420,21 @@ test-go:
 	@echo "=== go-upload ==="
 	cd go-upload && go vet ./... && go test -race ./...
 
+# Install the repo's git hooks into the active hooks dir. The post-checkout
+# hook seeds content/dashboard-v3/node_modules (gitignored) on every
+# `git worktree add` so the Vue dashboard always builds — see #740. Honours
+# core.hooksPath when set, else the shared common hooks dir (which all
+# worktrees share). Re-run after pulling a hook change.
+.PHONY: install-hooks
+install-hooks:
+	@dest="$$(git config --get core.hooksPath || echo "$$(git rev-parse --git-common-dir)/hooks")"; \
+	mkdir -p "$$dest"; \
+	for h in .githooks/*; do \
+		[ -f "$$h" ] || continue; \
+		cp "$$h" "$$dest/$$(basename "$$h")" && chmod +x "$$dest/$$(basename "$$h")"; \
+	done; \
+	echo "Installed hooks from .githooks/ → $$dest"
+
 test-deploy-all: test-deploy-compose test-deploy-ghcr test-deploy-registry
 
 # Frontend-only hot deploy — rebuild the Vue dashboard locally, push
@@ -428,10 +451,52 @@ test-deploy-all: test-deploy-compose test-deploy-ghcr test-deploy-registry
 # appears INSTANTLY inside the container — nginx serves the new
 # bundle on the next request, no docker cp / docker exec / reload
 # needed.
-test-deploy-frontend:
+# _ff-guard: before any deploy that ships the LOCAL working tree to the shared
+# test-dev box, ensure (1) we're on the deploy branch and (2) it's at its
+# origin HEAD. Clean + behind → fast-forward and proceed; dirty/diverged →
+# abort, so a stale tree never ships (the way #652's chart swap shipped
+# pre-merge on 2026-06-07). No upstream → no-op.
+#
+# (1) is the branch check: the old guard only verified the CURRENT branch was
+# current with ITS OWN upstream, so a feature branch that's up to date with
+# its own origin sailed through and shipped code stale-vs-dev. That reverted
+# the forwarder + dashboard + harness on test-dev on 2026-06-08 (a deploy from
+# the feat/scenario-typed-api-678 branch served pre-#697/#699 code). Now a
+# non-DEPLOY_BRANCH deploy aborts unless you opt in with ALLOW_BRANCH_DEPLOY=1.
+#
+# DEPLOY_BRANCH — the branch a shared-box deploy is expected to ship (dev).
+DEPLOY_BRANCH ?= dev
+.PHONY: _ff-guard
+_ff-guard:
+	@cur=$$(git symbolic-ref --short -q HEAD || echo DETACHED); \
+	if [ "$$cur" != "$(DEPLOY_BRANCH)" ] && [ -z "$(ALLOW_BRANCH_DEPLOY)" ]; then \
+		echo "✗ deploy expects branch '$(DEPLOY_BRANCH)' but HEAD is '$$cur'."; \
+		echo "  A deploy from a stale feature branch silently reverted test-dev on 2026-06-08"; \
+		echo "  (forwarder + dashboard + harness all served pre-merge code)."; \
+		echo "  → 'git switch $(DEPLOY_BRANCH)' to ship $(DEPLOY_BRANCH), or set ALLOW_BRANCH_DEPLOY=1 to deploy '$$cur' on purpose."; \
+		exit 1; \
+	fi
+	@git fetch origin --quiet
+	@behind=$$(git rev-list --count HEAD..@{u} 2>/dev/null || echo 0); \
+	if [ "$$behind" -gt 0 ]; then \
+		if git diff --quiet && git diff --cached --quiet && git merge --ff-only @{u}; then \
+			echo "↑ fast-forwarded $$behind commit(s) from origin before deploy"; \
+		else \
+			echo "✗ branch is $$behind behind origin and can't auto fast-forward (uncommitted changes or diverged) — resolve, then re-run"; \
+			exit 1; \
+		fi; \
+	else \
+		echo "✓ up to date with origin"; \
+	fi
+
+test-deploy-frontend: _ff-guard
 	@echo "=== Frontend-only hot deploy (no container recreate) ==="
 	@if [ ! -f content/dashboard-v3/package.json ]; then \
 		echo "dashboard-v3 not present — nothing to deploy"; exit 1; \
+	fi
+	@if [ ! -d content/dashboard-v3/node_modules/.bin ]; then \
+		echo "dashboard-v3/node_modules missing — npm ci..."; \
+		(cd content/dashboard-v3 && npm ci); \
 	fi
 	@echo "Building dashboard-v3 (Vue)..."
 	@cd content/dashboard-v3 && npm run --silent build
@@ -440,8 +505,26 @@ test-deploy-frontend:
 	rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev/content/dashboard/v3/
 	@echo "✓ test-dev frontend updated; sessions untouched."
 
-test-deploy-dev:
+test-deploy-dev: _ff-guard
 	@echo "=== Dev: local working tree (port 21000) ==="
+	@# Build the Vue dashboard FIRST, before any rsync --delete touches the
+	@# remote. A missing node_modules (the usual fresh-worktree state — it's
+	@# gitignored) or a failed build now aborts with test-dev UNTOUCHED.
+	@# Previously the working-tree rsync --delete ran first, so a build
+	@# failure half-wiped the box (lost the :21000 override + v3 bundle, no
+	@# container rebuild) — #740, 2026-06-11. `make install-hooks` adds a
+	@# post-checkout hook that seeds node_modules on worktree add; this
+	@# npm-ci fallback covers the case where the hook isn't installed.
+	@if [ -f content/dashboard-v3/package.json ]; then \
+		if [ ! -d content/dashboard-v3/node_modules/.bin ]; then \
+			echo "dashboard-v3/node_modules missing — npm ci..."; \
+			(cd content/dashboard-v3 && npm ci); \
+		fi; \
+		echo "Building dashboard-v3 (Vue)..."; \
+		(cd content/dashboard-v3 && npm run --silent build); \
+	else \
+		echo "dashboard-v3 not present, skipping Vue build"; \
+	fi
 	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev'
 	@echo "Syncing local working tree (excluding .git and .gitignore matches)..."
 	rsync -az --delete \
@@ -454,16 +537,13 @@ test-deploy-dev:
 	@# which is gitignored, so the --filter ':- .gitignore' rule above
 	@# hides it from rsync's source view and --delete then wipes it on
 	@# the remote (this bit you for the testing.html-→-dashboard.html
-	@# redirect on 2026-05-12). Build + push it as an extra rsync
-	@# whose source it can actually see. Skipped silently if
-	@# dashboard-v3 isn't set up yet.
+	@# redirect on 2026-05-12). Push the already-built bundle now (after the
+	@# tree sync, so --delete can't wipe it). Skipped when dashboard-v3 isn't
+	@# set up yet.
 	@if [ -f content/dashboard-v3/package.json ]; then \
-		echo "Building & pushing dashboard-v3 (Vue)..."; \
-		(cd content/dashboard-v3 && npm run --silent build) && \
+		echo "Pushing dashboard-v3 bundle..."; \
 		ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev/content/dashboard/v3' && \
 		rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev/content/dashboard/v3/; \
-	else \
-		echo "dashboard-v3 not present, skipping Vue build"; \
 	fi
 	ssh -n $(TEST_SSH) 'printf "CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=%s\nINFINITE_STREAM_ANNOUNCE_LABEL=%s\nINFINITE_STREAM_TLS=%s\nINFINITE_STREAM_TLS_SAN=%s\n" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(INFINITE_STREAM_ANNOUNCE_URL)" "$(INFINITE_STREAM_ANNOUNCE_LABEL)" "$(INFINITE_STREAM_TLS)" "$(INFINITE_STREAM_TLS_SAN)" > ~/test-dev/.env'
 	scp tests/deploy/override-dev.yml $(TEST_SSH):~/test-dev/docker-compose.override.yml
@@ -516,7 +596,7 @@ analytics-update:
 # keep flowing live (go-server is untouched); archival pauses for ~1s
 # while the forwarder restarts. --no-deps prevents docker compose from
 # pulling go-server into the recreate.
-analytics-rebuild-forwarder:
+analytics-rebuild-forwarder: _ff-guard
 	@echo "=== Rebuilding forwarder on test-dev (no go-server restart) ==="
 	ssh $(TEST_SSH) 'mkdir -p ~/test-dev/analytics/go-forwarder ~/test-dev/go-proxy'
 	rsync -az --delete \
@@ -767,6 +847,11 @@ deploy-androidtv:
 
 uninstall-androidtv:
 	$(ANDROID_SDK_HOME)/platform-tools/adb uninstall com.infinitestream.player 2>/dev/null || true
+
+# Google TV runs Android TV OS — same APK, same gradle install path.
+# Alias so muscle memory works either way.
+deploy-googletv: deploy-androidtv
+uninstall-googletv: uninstall-androidtv
 
 # ── Synthetic test pattern ─────────────────────────────────────────────
 # Generate a 4K mezzanine file from FFmpeg's `testsrc` source (colour

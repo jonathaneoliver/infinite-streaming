@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -38,13 +39,7 @@ func NewCLILauncher() *CLILauncher {
 	return &CLILauncher{
 		Out:              os.Stderr,
 		HeartbeatTimeout: 60 * time.Second,
-		BundleIDs: map[Platform]string{
-			PlatformIPhone:    "com.jeoliver.InfiniteStreamPlayer",
-			PlatformIPad:      "com.jeoliver.InfiniteStreamPlayer",
-			PlatformIPadSim:   "com.jeoliver.InfiniteStreamPlayer",
-			PlatformAppleTV:   "com.jeoliver.InfiniteStreamPlayerTV",
-			PlatformAndroidTV: "com.infinitestream.player",
-		},
+		BundleIDs:        cloneBundleIDs(),
 	}
 }
 
@@ -195,7 +190,7 @@ func launchApp(ctx context.Context, d Device, bundleID string) error {
 type devicectlListResult struct {
 	Result struct {
 		Devices []struct {
-			Identifier         string `json:"identifier"`
+			Identifier       string `json:"identifier"`
 			DeviceProperties struct {
 				Name string `json:"name"`
 			} `json:"deviceProperties"`
@@ -325,6 +320,57 @@ func devicectlPID(ctx context.Context, identifier, leaf string) (int, error) {
 	return 0, nil
 }
 
+// devicectlTerminateMatching terminates the first running process whose
+// executable URL contains substr (case-insensitive). Used to stop the
+// WebDriverAgent runner, whose on-device executable name
+// ("WebDriverAgentRunner-Runner") doesn't match its bundle-id leaf
+// ("xctrunner"), so the /<leaf>.app/ path in devicectlTerminate can't find
+// it. Returns nil when nothing matches (already stopped = OK).
+func devicectlTerminateMatching(ctx context.Context, identifier, substr string) error {
+	pid, err := devicectlPIDMatching(ctx, identifier, substr)
+	if err != nil {
+		return err
+	}
+	if pid == 0 {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "xcrun", "devicectl", "device", "process", "terminate",
+		"--device", identifier, "--pid", fmt.Sprintf("%d", pid))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("devicectl terminate pid=%d: %w: %s", pid, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// devicectlPIDMatching returns the PID of the first running process whose
+// executable URL contains substr (case-insensitive). (0, nil) when none.
+func devicectlPIDMatching(ctx context.Context, identifier, substr string) (int, error) {
+	cmd := exec.CommandContext(ctx, "xcrun", "devicectl", "device", "info", "processes",
+		"--device", identifier, "--json-output", "-")
+	raw, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("devicectl info processes: %w", err)
+	}
+	var resp struct {
+		Result struct {
+			RunningProcesses []struct {
+				Executable        string `json:"executable"`
+				ProcessIdentifier int    `json:"processIdentifier"`
+			} `json:"runningProcesses"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return 0, fmt.Errorf("decode processes: %w", err)
+	}
+	low := strings.ToLower(substr)
+	for _, p := range resp.Result.RunningProcesses {
+		if strings.Contains(strings.ToLower(p.Executable), low) {
+			return p.ProcessIdentifier, nil
+		}
+	}
+	return 0, nil
+}
+
 // bundleLeaf extracts "InfiniteStreamPlayer" from "com.jeoliver.InfiniteStreamPlayer".
 func bundleLeaf(bundleID string) string {
 	if i := strings.LastIndex(bundleID, "."); i >= 0 {
@@ -345,10 +391,53 @@ type simctlListResult struct {
 }
 
 func discoverSimctl(ctx context.Context) ([]Device, error) {
+	// Default discovery surfaces only Booted sims — a non-booted entry
+	// would force a slow `simctl boot` (and steal UI focus) before
+	// launch. Fleet enumeration that wants the not-yet-booted ones uses
+	// AvailableSims with bootedOnly=false.
+	return listSimctlDevices(ctx, true)
+}
+
+// DiscoverRealDevices enumerates real (physical) Apple devices via
+// devicectl — iPhone / iPad / Apple TV. Used by the fleet roster to assign
+// the correct platform to a CHAR_FLEET_UDIDS entry that is a real device
+// rather than a simulator. Returns nil (not an error) when devicectl finds
+// nothing.
+func DiscoverRealDevices(ctx context.Context) ([]Device, error) {
+	return discoverDevicectl(ctx)
+}
+
+// AvailableSims enumerates every available simulator of the given
+// platform regardless of boot state — the fleet roster path
+// (CHAR_FLEET_COUNT) needs not-yet-booted sims so it can boot them on
+// demand. Pass an empty platform to return all simulator platforms.
+func AvailableSims(ctx context.Context, platform Platform) ([]Device, error) {
+	all, err := listSimctlDevices(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	if platform == "" {
+		return all, nil
+	}
+	var out []Device
+	for _, d := range all {
+		if d.Platform == platform {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// listSimctlDevices runs `simctl list devices available --json` and maps
+// the result to Devices. When bootedOnly is true, only State=="Booted"
+// entries are returned (the default-discovery contract).
+func listSimctlDevices(ctx context.Context, bootedOnly bool) ([]Device, error) {
 	if _, err := exec.LookPath("xcrun"); err != nil {
 		return nil, errors.New("xcrun not on $PATH")
 	}
-	cmd := exec.CommandContext(ctx, "xcrun", "simctl", "list", "devices", "--json")
+	// `available` drops unusable runtimes/devices (missing runtime, etc.)
+	// — the same set the operator can actually boot.
+	cmd := exec.CommandContext(ctx, "xcrun", "simctl", "list", "devices", "available", "--json")
 	raw, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("xcrun simctl: %w", err)
@@ -364,11 +453,7 @@ func discoverSimctl(ctx context.Context) ([]Device, error) {
 			continue
 		}
 		for _, d := range devs {
-			// Only surface booted sims by default. Non-booted entries
-			// would force a `simctl boot` before launch, which is slow
-			// and changes the operator's UI focus — keep that as an
-			// explicit opt-in (Phase 1+).
-			if d.State != "Booted" {
+			if bootedOnly && d.State != "Booted" {
 				continue
 			}
 			out = append(out, Device{
@@ -381,6 +466,27 @@ func discoverSimctl(ctx context.Context) ([]Device, error) {
 	return out, nil
 }
 
+// BootSim boots the given simulator UDID and waits until it reports
+// Booted (simctl bootstatus blocks until the system is up). Booting an
+// already-booted sim is a no-op error from simctl ("Unable to boot … in
+// current state: Booted") which we swallow.
+func BootSim(ctx context.Context, udid string) error {
+	cmd := exec.CommandContext(ctx, "xcrun", "simctl", "boot", udid)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if strings.Contains(msg, "current state: Booted") {
+			return nil // already booted
+		}
+		return fmt.Errorf("simctl boot %s: %w: %s", udid, err, msg)
+	}
+	// bootstatus blocks until the sim finishes booting (or ctx fires).
+	wait := exec.CommandContext(ctx, "xcrun", "simctl", "bootstatus", udid)
+	if out, err := wait.CombinedOutput(); err != nil {
+		return fmt.Errorf("simctl bootstatus %s: %w: %s", udid, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func mapSimRuntime(rt string) Platform {
 	switch {
 	case strings.Contains(rt, "iOS"):
@@ -389,6 +495,68 @@ func mapSimRuntime(rt string) Platform {
 		return PlatformAppleTV
 	}
 	return ""
+}
+
+// LatestSimRuntimeVersion returns the highest installed, available simulator
+// runtime version for the given OS family ("iOS" / "tvOS"), e.g. "26.4". The
+// Device Farm launch path pins this as appium:platformVersion so DF never
+// allocates an old-OS sim. Returns an error if xcrun is unavailable or no
+// matching runtime is installed.
+func LatestSimRuntimeVersion(ctx context.Context, osName string) (string, error) {
+	if _, err := exec.LookPath("xcrun"); err != nil {
+		return "", errors.New("xcrun not on $PATH")
+	}
+	cmd := exec.CommandContext(ctx, "xcrun", "simctl", "list", "runtimes", "--json")
+	raw, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("xcrun simctl list runtimes: %w", err)
+	}
+	var resp struct {
+		Runtimes []struct {
+			Version     string `json:"version"`
+			Platform    string `json:"platform"`
+			IsAvailable bool   `json:"isAvailable"`
+		} `json:"runtimes"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return "", fmt.Errorf("decode runtimes: %w", err)
+	}
+	var best string
+	for _, rt := range resp.Runtimes {
+		if !rt.IsAvailable || !strings.EqualFold(rt.Platform, osName) {
+			continue
+		}
+		if best == "" || compareSemverish(rt.Version, best) > 0 {
+			best = rt.Version
+		}
+	}
+	if best == "" {
+		return "", fmt.Errorf("no available %s simulator runtime installed", osName)
+	}
+	return best, nil
+}
+
+// compareSemverish compares dotted numeric version strings ("26.4" vs "26.10")
+// segment-by-segment numerically, so 26.10 > 26.4 (lexical compare would get it
+// wrong). Non-numeric or missing segments sort as 0. Returns -1/0/1.
+func compareSemverish(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		var ai, bi int
+		if i < len(as) {
+			ai, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			bi, _ = strconv.Atoi(bs[i])
+		}
+		if ai != bi {
+			if ai < bi {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 func simctlTerminate(ctx context.Context, udid, bundleID string) error {

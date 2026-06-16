@@ -50,6 +50,24 @@ export function ensureChartJs(): Promise<any> {
   return chartJsPromise;
 }
 
+let visNetworkPromise: Promise<any> | null = null;
+
+// vis-network (the graph sibling of vis-timeline) — loaded from CDN, exposes
+// window.vis.Network + window.vis.DataSet. Used by the Fault Sweep lineage graph.
+export function ensureVisNetwork(): Promise<any> {
+  if ((window as any).vis?.Network) return Promise.resolve((window as any).vis);
+  if (visNetworkPromise) return visNetworkPromise;
+  visNetworkPromise = (async () => {
+    const css = document.createElement('link');
+    css.rel = 'stylesheet';
+    css.href = 'https://cdn.jsdelivr.net/npm/vis-network@9.1.9/styles/vis-network.min.css';
+    document.head.appendChild(css);
+    await loadScript('https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js');
+    return (window as any).vis;
+  })();
+  return visNetworkPromise;
+}
+
 let visTimelinePromise: Promise<any> | null = null;
 
 export function ensureVisTimeline(): Promise<any> {

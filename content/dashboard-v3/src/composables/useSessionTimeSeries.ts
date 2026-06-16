@@ -35,8 +35,10 @@ import {
 } from './sessionTimeSeriesUtils';
 // SSE event names this stream produces. Issue #474 Milestone C
 // dropped 'marker' (the session_markers stream retired) and added
-// 'control' (control_events — proxy/harness action log).
-const V3_EVENT_TYPES = ['meta', 'event', 'network', 'control', 'heartbeat', 'complete', 'stream_error'];
+// 'control' (control_events — proxy/harness action log). Issue #486
+// added 'avmetrics' for the iOS 18 AVMetrics raw-event comparison
+// stream.
+const V3_EVENT_TYPES = ['meta', 'event', 'network', 'control', 'avmetrics', 'heartbeat', 'complete', 'stream_error'];
 
 /**
  * Stream<T> — the per-stream surface every renderer consumes. Read
@@ -55,11 +57,18 @@ export interface Stream<T> {
   rangeBounds: Ref<{ min: number; max: number } | null>;
   loading: Ref<boolean>;
   error: Ref<string | null>;
+  /** Bumped whenever the cache is RESET (a re-subscribe to a new
+   *  player/play/time window cleared all rows). Forward-only consumers
+   *  (chart/timeline watermark drains) watch this to reset their
+   *  watermark + clear their datasets and re-drain from scratch — needed
+   *  for refetch-on-pan (#587), where re-subscribing to an OLDER window
+   *  would otherwise be missed by a watermark sitting at the live edge. */
+  epoch: Ref<number>;
 }
 
 export interface UseSessionTimeSeriesOpts {
   /** Comma list of streams to subscribe to. Default: all three. */
-  streams?: ('events' | 'network' | 'control')[];
+  streams?: ('events' | 'network' | 'control' | 'avmetrics')[];
   /** Bundle names. Default: charts_minimal,lanes_v1,network for samples+network. */
   bundles?: string[];
   /** Ad-hoc field list — applied to every enabled stream as a
@@ -87,6 +96,9 @@ export interface UseSessionTimeSeriesReturn {
   events: Stream<Record<string, unknown>>;
   network: Stream<Record<string, unknown>>;
   control: Stream<Record<string, unknown>>;
+  /** iOS 18 AVMetrics raw event stream (issue #486 spike). Empty
+   *  unless the caller opted in via `streams: [..., 'avmetrics']`. */
+  avmetrics: Stream<Record<string, unknown>>;
   /** True if the server is actively tailing this stream. False once
    *  it sends `event:complete` (archive replay or play ended). */
   live: Ref<boolean>;
@@ -147,22 +159,33 @@ export function useSessionTimeSeries(
   const eventsArr = shallowRef<Record<string, unknown>[]>([]);
   const networkArr = shallowRef<Record<string, unknown>[]>([]);
   const controlArr = shallowRef<Record<string, unknown>[]>([]);
+  const avmetricsArr = shallowRef<Record<string, unknown>[]>([]);
 
   const eventsVersion = ref(0);
   const networkVersion = ref(0);
   const controlVersion = ref(0);
+  const avmetricsVersion = ref(0);
+
+  // Bumped on every cache RESET (re-subscribe). Shared across all four
+  // streams so forward-only consumers can detect "the cache was wiped
+  // and reloaded with a different window" and re-drain from scratch
+  // (#587 refetch-on-pan).
+  const cacheEpoch = ref(0);
 
   const eventsBounds = ref<{ min: number; max: number } | null>(null);
   const networkBounds = ref<{ min: number; max: number } | null>(null);
   const controlBounds = ref<{ min: number; max: number } | null>(null);
+  const avmetricsBounds = ref<{ min: number; max: number } | null>(null);
 
   const eventsLoading = ref(false);
   const networkLoading = ref(false);
   const controlLoading = ref(false);
+  const avmetricsLoading = ref(false);
 
   const eventsError = ref<string | null>(null);
   const networkError = ref<string | null>(null);
   const controlError = ref<string | null>(null);
+  const avmetricsError = ref<string | null>(null);
 
   const live = ref(true);
   const connectionState = ref<'connecting' | 'open' | 'closed'>('closed');
@@ -180,6 +203,7 @@ export function useSessionTimeSeries(
   const eventsPending: Record<string, unknown>[] = [];
   const networkPending: Record<string, unknown>[] = [];
   const controlPending: Record<string, unknown>[] = [];
+  const avmetricsPending: Record<string, unknown>[] = [];
   let flushTimer: ReturnType<typeof setInterval> | null = null;
 
   function teardown() {
@@ -198,22 +222,31 @@ export function useSessionTimeSeries(
     eventsArr.value = [];
     networkArr.value = [];
     controlArr.value = [];
+    avmetricsArr.value = [];
     eventsPending.length = 0;
     networkPending.length = 0;
     controlPending.length = 0;
+    avmetricsPending.length = 0;
     eventsVersion.value++;
     networkVersion.value++;
     controlVersion.value++;
+    avmetricsVersion.value++;
     eventsBounds.value = null;
     networkBounds.value = null;
     controlBounds.value = null;
+    avmetricsBounds.value = null;
     eventsLoading.value = false;
     networkLoading.value = false;
     controlLoading.value = false;
+    avmetricsLoading.value = false;
     eventsError.value = null;
     networkError.value = null;
     controlError.value = null;
+    avmetricsError.value = null;
     lastEventId = '';
+    // Signal consumers that the cache was wiped (#587) so watermark
+    // drains reset rather than missing the freshly-loaded window.
+    cacheEpoch.value++;
   }
 
   /** Build the SSE URL from current opts + identity refs. */
@@ -233,6 +266,7 @@ export function useSessionTimeSeries(
       if (streams.includes('events')) defaults.push('charts_minimal', 'lanes_v1');
       if (streams.includes('network')) defaults.push('network');
       if (streams.includes('control')) defaults.push('control');
+      if (streams.includes('avmetrics')) defaults.push('avmetrics');
       if (defaults.length) params.set('bundles', defaults.join(','));
     }
     if (opts.fields && opts.fields.length) {
@@ -310,6 +344,9 @@ export function useSessionTimeSeries(
       case 'control':
         enqueueRow(data, controlPending);
         return;
+      case 'avmetrics':
+        enqueueRow(data, avmetricsPending);
+        return;
       case 'heartbeat':
         return;
       case 'complete':
@@ -320,6 +357,7 @@ export function useSessionTimeSeries(
         eventsLoading.value = false;
         networkLoading.value = false;
         controlLoading.value = false;
+        avmetricsLoading.value = false;
         teardown();
         return;
       case 'stream_error':
@@ -329,6 +367,7 @@ export function useSessionTimeSeries(
           eventsError.value = msg;
           networkError.value = msg;
           controlError.value = msg;
+          avmetricsError.value = msg;
         } catch {
           eventsError.value = 'stream error';
         }
@@ -351,6 +390,7 @@ export function useSessionTimeSeries(
     drainQueue(eventsPending, eventsArr, eventsVersion, eventsBounds, eventsLoading);
     drainQueue(networkPending, networkArr, networkVersion, networkBounds, networkLoading);
     drainQueue(controlPending, controlArr, controlVersion, controlBounds, controlLoading);
+    drainQueue(avmetricsPending, avmetricsArr, avmetricsVersion, avmetricsBounds, avmetricsLoading);
   }
 
   function drainQueue(
@@ -482,35 +522,58 @@ export function useSessionTimeSeries(
       rangeBounds: boundsRef,
       loading: loadingRef,
       error: errorRef,
+      epoch: cacheEpoch,
     };
   }
 
-  // Periodic eviction guard: if any stream balloons past its soft
-  // cap, drop entries outside the current viewport guardband. The
-  // viewport hint is (samples ∪ network ∪ events) bounds so we
-  // never throw away data the brush is actively showing. Renderers
-  // that pan past the cache trigger a fresh fetch — handled at
-  // the upper layer (TS6).
-  const SOFT_CAP_SAMPLES = 50000;
-  const SOFT_CAP_NETWORK = 5000;
-  const SOFT_CAP_EVENTS = 50000;
+  // Recency cap (issue #582). The previous eviction called
+  // evictOutsideViewport with the streams' OWN merged data bounds —
+  // which keeps `[min − 2·span, max + 2·span]` of the entire cached
+  // range, i.e. it never actually drops anything as the range grows.
+  // So the caches grew unbounded for the life of the tab (a primary
+  // contributor to the 12 GB renderer). Replace with a hard recency
+  // cap: keep only the most recent N rows per stream. Arrays are sorted
+  // ascending by ts (insertSortedDedup), so the oldest are at the front.
+  // Panning past the retained window triggers a fresh range fetch at the
+  // upper layer.
+  // Doubled from the original #582 values to retain a longer focus-window
+  // history (~5.4h at 1 Hz) for 3h+ sessions while #587 (on-demand
+  // refetch of evicted windows) is blocked on server support. Still a
+  // hard memory bound — ~2× the footprint, far below the old unbounded leak.
+  const SOFT_CAP_SAMPLES = 20000;
+  const SOFT_CAP_NETWORK = 4000;
+  const SOFT_CAP_EVENTS = 20000;
+  // Trim the oldest rows past `cap` AND advance the stream's
+  // rangeBounds.min to the new oldest ts. The bounds update is
+  // essential for refetch-on-pan (#587): the brush rail's left edge and
+  // the "is this window already cached?" check both read rangeBounds.min,
+  // so leaving it at the pre-trim value made the UI think evicted rows
+  // were still in the cache (panning there showed blank, no refetch).
+  function trimToCap(
+    arr: Record<string, unknown>[],
+    cap: number,
+    boundsRef: Ref<{ min: number; max: number } | null>,
+  ): boolean {
+    if (arr.length > cap) {
+      arr.splice(0, arr.length - cap);
+      const cur = boundsRef.value;
+      if (cur) {
+        const newMin = tsOf(arr[0]);
+        if (Number.isFinite(newMin) && newMin !== cur.min) {
+          boundsRef.value = { min: newMin, max: cur.max };
+        }
+      }
+      return true;
+    }
+    return false;
+  }
   watch(
-    [eventsVersion, networkVersion, controlVersion],
+    [eventsVersion, networkVersion, controlVersion, avmetricsVersion],
     () => {
-      const bounds = mergedBounds(eventsBounds.value, networkBounds.value, controlBounds.value);
-      if (!bounds) return;
-      if (eventsArr.value.length > SOFT_CAP_SAMPLES) {
-        evictOutsideViewport(eventsArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(eventsArr);
-      }
-      if (networkArr.value.length > SOFT_CAP_NETWORK) {
-        evictOutsideViewport(networkArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(networkArr);
-      }
-      if (controlArr.value.length > SOFT_CAP_EVENTS) {
-        evictOutsideViewport(controlArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(controlArr);
-      }
+      if (trimToCap(eventsArr.value, SOFT_CAP_SAMPLES, eventsBounds)) triggerRef(eventsArr);
+      if (trimToCap(networkArr.value, SOFT_CAP_NETWORK, networkBounds)) triggerRef(networkArr);
+      if (trimToCap(controlArr.value, SOFT_CAP_EVENTS, controlBounds)) triggerRef(controlArr);
+      if (trimToCap(avmetricsArr.value, SOFT_CAP_EVENTS, avmetricsBounds)) triggerRef(avmetricsArr);
     },
   );
 
@@ -518,6 +581,7 @@ export function useSessionTimeSeries(
     events: makeStream(eventsArr, eventsVersion, eventsBounds, eventsLoading, eventsError),
     network: makeStream(networkArr, networkVersion, networkBounds, networkLoading, networkError),
     control: makeStream(controlArr, controlVersion, controlBounds, controlLoading, controlError),
+    avmetrics: makeStream(avmetricsArr, avmetricsVersion, avmetricsBounds, avmetricsLoading, avmetricsError),
     live,
     connectionState,
     reconnect: connect,
@@ -526,14 +590,12 @@ export function useSessionTimeSeries(
 }
 
 function mergedBounds(
-  a: { min: number; max: number } | null,
-  b: { min: number; max: number } | null,
-  c: { min: number; max: number } | null,
+  ...sources: ({ min: number; max: number } | null)[]
 ): { min: number; max: number } | null {
   let min = Infinity;
   let max = -Infinity;
   let any = false;
-  for (const x of [a, b, c]) {
+  for (const x of sources) {
     if (!x) continue;
     if (x.min < min) min = x.min;
     if (x.max > max) max = x.max;

@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -53,36 +51,35 @@ const (
 	startupSamplerPeriod      = 500 * time.Millisecond
 )
 
-// startupCapMarginFraction is the headroom multiplied onto each
-// variant's AVERAGE-BANDWIDTH to derive its "just-pick-this-variant"
-// cap. avg × (1 + headroom) × (1 + TCPOverhead) sits below the next
-// variant's avg, so the player's variant-selection algorithm should
-// land on this rung. Tuned to match what AVPlayer settles on in
-// practice — too low and the player won't pick the intended variant;
-// too high and it overshoots.
-const startupCapMarginFraction = 0.20
-
 // computeStartupCaps derives one cap per video variant from the
-// manifest. Each cap is variant.avg × 1.20 × 1.07 (TCP overhead) —
-// enough headroom that the player picks that variant comfortably,
-// but below the next variant's avg.
+// manifest, anchored on the variant's PEAK (BANDWIDTH) rate (#551 — the
+// audited OSS players all key startup selection on peak). Each cap is
+// variant.peak × (1 + LadderBumpPct) so it sits just above THIS variant's
+// peak and below the next variant's peak (the ladder's ≥1.5× spacing
+// guards that), which is what makes a peak-keyed player land on this rung
+// at cold start.
+//
+// NOTE (#551): re-anchored from AVERAGE-BANDWIDTH × 1.20 × 1.07-TCP to
+// peak × 1.05. The exact bump may need empirical re-tuning on the sim —
+// if a player overshoots/undershoots the intended variant, adjust via
+// CHAR_LADDER_BUMP_PCT.
 //
 // Returns the caps in DESCENDING order (top variant first) so the
 // most interesting case (no-constraint) runs first.
 //
 // Override CHAR_STARTUP_CAPS=30,8,3 to bypass and use a literal list.
 func computeStartupCaps(bws map[string]runner.VariantBandwidth) []float64 {
-	avgs := make([]float64, 0, len(bws))
+	peaks := make([]float64, 0, len(bws))
 	for _, bw := range bws {
-		if bw.AvgMbps > 0 {
-			avgs = append(avgs, bw.AvgMbps)
+		if bw.PeakMbps > 0 {
+			peaks = append(peaks, bw.PeakMbps)
 		}
 	}
-	sort.Sort(sort.Reverse(sort.Float64Slice(avgs)))
-	out := make([]float64, 0, len(avgs))
-	for _, avg := range avgs {
-		cap := avg * (1 + startupCapMarginFraction) * (1 + float64(runner.TCPOverheadPct)/100)
-		out = append(out, math.Round(cap*1000)/1000)
+	sort.Sort(sort.Reverse(sort.Float64Slice(peaks)))
+	f := 1 + runner.LadderBumpPct()/100
+	out := make([]float64, 0, len(peaks))
+	for _, pk := range peaks {
+		out = append(out, math.Round(pk*f*1000)/1000)
 	}
 	return out
 }
@@ -94,7 +91,49 @@ func TestStartupAndroidTV(t *testing.T) { runStartup(t, runner.PlatformAndroidTV
 func TestStartupWeb(t *testing.T)       { runStartup(t, runner.PlatformWeb) }
 
 func runStartup(t *testing.T, p runner.Platform) {
-	sess := OpenSession(t, p)
+	// Fleet dispatch (1 device by default, N under CHAR_FLEET_*). runFleet
+	// resolves the roster and either runs the single-device path unchanged or
+	// fans out one parallel subtest per device with the home + sweep barriers
+	// wired (see runStartupOnDevice).
+	//
+	// Group mode (CHAR_FLEET_GROUP=1): unlike pyramid's broadcast group (one
+	// leader drives, the proxy mirrors to all), startup forms a DISPLAY-ONLY
+	// group — every device runs its OWN cold-start plan independently and the
+	// shared group_id only groups the plays for the dashboard's side-by-side
+	// compare. A broadcast group would corrupt the per-device measurements, so
+	// each session is born with group_broadcast=false (see runStartupCycle).
+	runFleet(t, p, runStartupOnDevice)
+}
+
+// runStartupOnDevice runs the startup cap matrix against ONE explicit device.
+// startup KEEPS its existing per-cycle prime (each app_cold cycle mints a fresh
+// player_id and caps the session at capMbps before launch, inside
+// runStartupCycle) — fleet-awareness only changes WHICH device it targets and
+// adds the home/sweep sync barriers. The initial OpenSessionOnDevice warms a
+// player so we can read the manifest's variant bandwidths up front; the HOME
+// barrier is wired inside it, the SWEEP barrier (below) gates the cap matrix.
+func runStartupOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars *fleetBarriers) {
+	// The home barrier is owned by OpenSessionOnDevice. We own the sweep
+	// barrier — drop ourselves from it if we die before reaching it.
+	sweepArrived := false
+	if bars != nil {
+		defer func() {
+			if !sweepArrived {
+				bars.sweep.giveUp()
+			}
+		}()
+	}
+
+	// Spread parallel fleet launches so N sims don't cold-build WDA at once
+	// (no-op for index 0 / single-device runs).
+	staggerFleetLaunch(t, dev.FleetIndex)
+
+	// Device-explicit launch (HOME barrier wired inside when bars != nil).
+	var devPtr *runner.Device
+	if bars != nil {
+		devPtr = &dev
+	}
+	sess := OpenSessionOnDevice(t, p, devPtr, bars)
 
 	target := envOr("CHAR_STARTUP_CLIP_TARGET", defaultStartupClipTarget)
 	setupClip := envOr("CHAR_STARTUP_CLIP_SETUP", defaultStartupClipSetup)
@@ -208,6 +247,27 @@ func runStartup(t *testing.T, p runner.Platform) {
 		}
 	}
 
+	// Fleet sync #2 (sweep): this sim is warmed up with its manifest read. Hold
+	// until every sim is here, then all begin the cap matrix at once. Bounded
+	// so a sim that failed bring-up can't hang the rest. No-op single.
+	if bars != nil {
+		sweepArrived = true
+		t.Logf("ready — waiting at fleet SWEEP barrier (cap matrix starts together across the fleet)")
+		bctx, bcancel := context.WithTimeout(ctx, 5*time.Minute)
+		bars.sweep.arriveAndWait(bctx)
+		bcancel()
+		t.Logf("SWEEP barrier released — beginning synchronized cap matrix")
+	}
+
+	// Display-only group id (empty for single-device / non-group runs). Each
+	// app_cold cycle's config-on-connect carries it so every fresh session is
+	// born into the group at connect (survives the per-cycle player_id churn),
+	// with group_broadcast=false so per-device shaping/labels don't mirror.
+	groupID := bars.fleetGroupID()
+	if groupID != "" {
+		t.Logf("display-only group %s — this device runs its own plan; grouped only for dashboard compare", groupID)
+	}
+
 	var allCycles []runner.StartupCycleResult
 	cycleIdx := 0
 
@@ -216,7 +276,7 @@ func runStartup(t *testing.T, p runner.Platform) {
 		for rep := 0; rep < reps; rep++ {
 			for _, boundary := range startupBoundaries {
 				cycleIdx++
-				result := runStartupCycle(ctx, t, sess, appium, *picked, boundary, target, setupClip, capMbps, cycleIdx, rep, bws)
+				result := runStartupCycle(ctx, t, sess, appium, *picked, boundary, target, setupClip, capMbps, cycleIdx, rep, bws, groupID)
 				allCycles = append(allCycles, result)
 				firstAnnot := runner.AnnotateVariant(bws, result.FirstVariantPicked, capMbps)
 				settledAnnot := runner.AnnotateVariant(bws, result.SettledVariant, capMbps)
@@ -305,7 +365,7 @@ func runStartupCycle(
 	ctx context.Context, t *testing.T,
 	sess *runner.Session, appium *runner.AppiumLauncher, dev runner.Device,
 	boundary startupBoundary, targetClip, setupClip string, capMbps float64, idx, rep int,
-	bws map[string]runner.VariantBandwidth,
+	bws map[string]runner.VariantBandwidth, groupID string,
 ) runner.StartupCycleResult {
 	result := runner.StartupCycleResult{
 		CycleIdx:      idx,
@@ -353,23 +413,29 @@ func runStartupCycle(
 			t.Logf("[%d] Kill: %v (continuing — app may already be killed)", idx, err)
 		}
 		time.Sleep(1 * time.Second)
+		// #714: release the prior cycle's session before allocating a fresh
+		// one, so reps × caps cold launches don't exhaust the 4-slot pool.
+		if sess.PlayerID != "" {
+			if rerr := sess.Release(ctx); rerr != nil {
+				t.Logf("[%d] release prior session: %v", idx, rerr)
+			}
+		}
+		// #714 config-on-connect (default = harness pre-configures via a curl;
+		// CHAR_PROXY_CONFIG=app → player emits proxy.* on its own bootstrap
+		// URL): mint a fresh id and cap the session at capMbps before the
+		// first byte — replaces ReadPlayerID + post-launch ApplyRate + tc-settle.
+		pid := runner.NewPlayerID()
+		// groupID born-groups this fresh session at connect (display-only:
+		// group_broadcast=false ⇒ no cross-device mirroring). Empty for
+		// single-device / non-group runs, so no group_id param is sent.
+		wireConfigOnConnect(ctx, t, appium, nil, pid, capMbps, 0, 0, groupID, false, nil)
 		s, err := appium.LaunchToHome(ctx, dev)
 		if err != nil {
 			t.Fatalf("[%d] LaunchToHome: %v", idx, err)
 		}
-		pid, err := appium.ReadPlayerID(ctx, s)
-		if err != nil {
-			t.Fatalf("[%d] ReadPlayerID: %v (rebuild iOS app — needs home-player-id AX node)", idx, err)
-		}
 		s.PlayerID = pid
 		result.PlayerID = pid
 		sess.PlayerID = pid
-		if err := s.ApplyRate(ctx, capMbps); err != nil {
-			t.Fatalf("[%d] ApplyRate %.2f: %v", idx, capMbps, err)
-		}
-		// tc-settle gap — the proxy needs ~1-2s for kernel rules to
-		// actually engage after the HTTP PATCH returns.
-		time.Sleep(2 * time.Second)
 		result.StartedAt = time.Now()
 		// Land on the SAME target_clip every time (not Continue
 		// Watching, which would be path-dependent on the last play).
@@ -695,13 +761,13 @@ func populateStartupCycleResult(r runner.StartupCycleResult, samples []runner.Sa
 		last := samples[len(samples)-1]
 		shiftDelta := max0(last.ProfileShiftCount - baselineSample.ProfileShiftCount)
 		stallDelta := max0(last.Stalls - baselineSample.Stalls)
-		droppedDelta := max0(last.DroppedFrames - baselineSample.DroppedFrames)
+		droppedDelta := max0(last.FramesDropped - baselineSample.FramesDropped)
 		// ProfileShiftCount is a combined counter (up + down). We don't
 		// have per-direction info; lump into UpshiftsIn30S and leave
 		// DownshiftsIn30S=0. Standards doc notes this.
 		r.UpshiftsIn30S = shiftDelta
 		r.StallsIn30S = stallDelta
-		r.DroppedFramesIn30S = droppedDelta
+		r.FramesDroppedIn30S = droppedDelta
 	}
 
 	r.NetworkBitrateAtStartMbps = firstNB
@@ -800,55 +866,8 @@ func pickedDevice(s *runner.Session) *runner.Device {
 	return &d
 }
 
-func envOr(key, dflt string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return dflt
-}
-
-// envFloatList parses a comma-separated list of floats from env.
-// Empty / unset / malformed → returns dflt unchanged.
-func envFloatList(key string, dflt []float64) []float64 {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return dflt
-	}
-	out := []float64{}
-	for _, p := range strings.Split(v, ",") {
-		t := strings.TrimSpace(p)
-		if t == "" {
-			continue
-		}
-		f, err := strconv.ParseFloat(t, 64)
-		if err != nil {
-			return dflt
-		}
-		out = append(out, f)
-	}
-	if len(out) == 0 {
-		return dflt
-	}
-	return out
-}
-
-func envFloat(key string, dflt float64) float64 {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return f
-		}
-	}
-	return dflt
-}
-
-func envInt(key string, dflt int) int {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return dflt
-}
+// env helpers (envOr / envFloatList / envFloat / envInt) live in sweep.go so
+// the non-test fleet.go can reference envInt for CHAR_FLEET_COUNT etc.
 
 func countSettleMisses(cs []runner.StartupCycleResult) int {
 	n := 0

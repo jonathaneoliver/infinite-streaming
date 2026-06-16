@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 )
-
 
 // Session is the open-handle the runner hands to characterization tests.
 // One Session = one (device, player_id, harness connection) triple. Tests
@@ -42,6 +42,84 @@ func (s *Session) PlayerState(ctx context.Context) (*PlayerRecord, error) {
 		return nil, errors.New("session: no player bound")
 	}
 	return ShowPlayer(ctx, s.PlayerID)
+}
+
+// CloseViaUI closes the playback screen the way a user would — driving
+// the app's own back navigation through the launcher — so the app emits
+// its real client play_end and the play shows up cleanly ended in the
+// sessions view (#627) rather than dangling in_progress after a hard
+// terminate. Re-entering playback (the next test's launch) rotates the
+// play_id, so back-to-back tests get distinct, bounded plays; multiple
+// play_ids within one test are fine.
+//
+// No-op for launchers that can't drive the UI (CLI / Manual). Call this
+// in a test's cleanup BEFORE Launcher.Close() tears the session down.
+func (s *Session) CloseViaUI(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	c, ok := s.Launcher.(UICloser)
+	if !ok {
+		return nil
+	}
+	return c.ClosePlaybackViaUI(ctx, s.Device)
+}
+
+// Release deletes the proxy session for this player so its slot frees
+// immediately instead of lingering until the 5-min idle reaper.
+//
+// CRITICAL under config-on-connect: every run mints a fresh player_id, so
+// without an explicit release a handful of back-to-back runs exhausts the
+// small session pool (4 slots) and the next run 503s "session limit reached".
+// The delete also clears the port's transport-fault loop and records the
+// session end (the ClickHouse archive is unaffected — it streams independently).
+// Best-effort; call in a test's cleanup after CloseViaUI, before Launcher.Close().
+func (s *Session) Release(ctx context.Context) error {
+	if s == nil || s.PlayerID == "" {
+		return nil
+	}
+	_, err := runHarness(ctx, "players", "rm", "--yes", s.PlayerID)
+	return err
+}
+
+// ReleaseDevice fully releases the device after a run — e.g. terminating
+// WebDriverAgent so iOS's "Automation Running" overlay clears. Opt-in:
+// runs only when CHAR_RELEASE_DEVICE=1, because Appium keeps WDA resident
+// between sessions by design for fast reuse across back-to-back tests, so
+// killing it costs a WDA (re)launch on the next run. No-op for launchers
+// that can't release the device (CLI / Manual). Call in a test's cleanup
+// AFTER Launcher.Close().
+func (s *Session) ReleaseDevice(ctx context.Context) error {
+	if s == nil || os.Getenv("CHAR_RELEASE_DEVICE") != "1" {
+		return nil
+	}
+	r, ok := s.Launcher.(DeviceReleaser)
+	if !ok {
+		return nil
+	}
+	return r.ReleaseDevice(ctx, s.Device)
+}
+
+// WaitForManifest polls the harness until the bound player's current play has
+// fetched its master playlist (variants present), or until the timeout/ctx
+// fires. The pattern builder needs the variant ladder, so the sweep probe waits
+// on this before ApplyPattern.
+func (s *Session) WaitForManifest(ctx context.Context, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		rec, err := s.PlayerState(ctx)
+		if err == nil && rec.CurrentPlay != nil && len(rec.CurrentPlay.Manifest.Variants) > 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("manifest not ready after %s", timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 // WaitForHeartbeat polls the harness until the bound player reports

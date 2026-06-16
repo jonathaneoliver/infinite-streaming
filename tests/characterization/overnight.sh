@@ -45,12 +45,38 @@ mkdir -p "$RUN_DIR"
 
 LAUNCH_MODE=${LAUNCH_MODE:-appium}
 PER_TEST_TIMEOUT=${PER_TEST_TIMEOUT:-120m}
+# Resolve Device Farm on/off the SAME way the Go harness does (runner.DeviceFarmEnabled):
+# DEFAULT ON — off only when explicitly 0/false/off. The shell env wins, else the
+# nearest .env. Without this, a DIRECT `./overnight.sh` run would allocate via DF
+# (the harness defaults on / reads .env) yet skip booting the pool here. `make
+# characterize-*` already `-include`s + exports .env.
+DEVICE_FARM="${CHAR_DEVICE_FARM:-}"
+if [[ -z "$DEVICE_FARM" && -f "$REPO_ROOT/.env" ]]; then
+    df_line="$(grep -E '^[[:space:]]*CHAR_DEVICE_FARM[[:space:]]*=' "$REPO_ROOT/.env" | tail -1)"
+    DEVICE_FARM="${df_line#*=}"
+    DEVICE_FARM="${DEVICE_FARM//[[:space:]]/}"
+    DEVICE_FARM="${DEVICE_FARM//\"/}"
+    DEVICE_FARM="${DEVICE_FARM//\'/}"
+fi
+DF_ON=1
+case "$(printf '%s' "$DEVICE_FARM" | tr '[:upper:]' '[:lower:]')" in
+    0|false|off) DF_ON=0 ;;
+esac
+
+# Under Device Farm the sim pool must be booted (+ WDA warm) before the run so DF
+# can allocate. boot-pool.sh is iOS-sim specific; real hardware / web don't need
+# it. Best-effort — a warning there shouldn't abort the run.
+if [[ "$DF_ON" == "1" && "$PLATFORM" == "ipad-sim" ]]; then
+    echo "Device Farm on — booting the sim pool (boot-pool.sh)…"
+    "$REPO_ROOT/tools/appium-device-farm/boot-pool.sh" || echo "  boot-pool reported an issue (continuing)"
+fi
 
 SUMMARY=$RUN_DIR/summary.txt
 {
     echo "platform:   $PLATFORM"
     echo "run_id:     $RUN_ID"
     echo "launch:     $LAUNCH_MODE"
+    echo "device_farm: $([[ "$DF_ON" == "1" ]] && echo on || echo off)"
     echo "timeout:    $PER_TEST_TIMEOUT (per test)"
     echo "run_dir:    $RUN_DIR"
     echo "started:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"

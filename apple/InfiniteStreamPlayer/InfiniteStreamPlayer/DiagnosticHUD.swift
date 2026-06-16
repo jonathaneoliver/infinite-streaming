@@ -79,9 +79,9 @@ struct DiagnosticHUD: View {
     }
 
     private var stallText: String {
-        let n = diagnostics.stallCount
+        let n = diagnostics.stallingCount
         if n == 0 { return "0" }
-        return String(format: "%d (last %.1fs)", n, diagnostics.lastStallDurationSeconds)
+        return String(format: "%d (last %.1fs)", n, diagnostics.stallDurationS)
     }
 
     private func mbpsText(_ bps: Double?) -> String {

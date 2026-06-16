@@ -23,11 +23,56 @@ const (
 	BasicAuthScopes basicAuthContextKey = "basicAuth.Scopes"
 )
 
+// Defines values for AppConfigProtocol.
+const (
+	Dash AppConfigProtocol = "dash"
+	Hls  AppConfigProtocol = "hls"
+)
+
+// Valid indicates whether the value is a known member of the AppConfigProtocol enum.
+func (e AppConfigProtocol) Valid() bool {
+	switch e {
+	case Dash:
+		return true
+	case Hls:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AppConfigSegment.
+const (
+	Ll AppConfigSegment = "ll"
+	S2 AppConfigSegment = "s2"
+	S6 AppConfigSegment = "s6"
+)
+
+// Valid indicates whether the value is a known member of the AppConfigSegment enum.
+func (e AppConfigSegment) Valid() bool {
+	switch e {
+	case Ll:
+		return true
+	case S2:
+		return true
+	case S6:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ContentManipulationLiveOffset.
 const (
 	ContentManipulationLiveOffsetN0  ContentManipulationLiveOffset = 0
+	ContentManipulationLiveOffsetN12 ContentManipulationLiveOffset = 12
 	ContentManipulationLiveOffsetN18 ContentManipulationLiveOffset = 18
+	ContentManipulationLiveOffsetN2  ContentManipulationLiveOffset = 2
 	ContentManipulationLiveOffsetN24 ContentManipulationLiveOffset = 24
+	ContentManipulationLiveOffsetN30 ContentManipulationLiveOffset = 30
+	ContentManipulationLiveOffsetN36 ContentManipulationLiveOffset = 36
+	ContentManipulationLiveOffsetN4  ContentManipulationLiveOffset = 4
+	ContentManipulationLiveOffsetN42 ContentManipulationLiveOffset = 42
 	ContentManipulationLiveOffsetN6  ContentManipulationLiveOffset = 6
 )
 
@@ -36,11 +81,47 @@ func (e ContentManipulationLiveOffset) Valid() bool {
 	switch e {
 	case ContentManipulationLiveOffsetN0:
 		return true
+	case ContentManipulationLiveOffsetN12:
+		return true
 	case ContentManipulationLiveOffsetN18:
+		return true
+	case ContentManipulationLiveOffsetN2:
 		return true
 	case ContentManipulationLiveOffsetN24:
 		return true
+	case ContentManipulationLiveOffsetN30:
+		return true
+	case ContentManipulationLiveOffsetN36:
+		return true
+	case ContentManipulationLiveOffsetN4:
+		return true
+	case ContentManipulationLiveOffsetN42:
+		return true
 	case ContentManipulationLiveOffsetN6:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ContentManipulationVariantOrder.
+const (
+	Ascending  ContentManipulationVariantOrder = "ascending"
+	Default    ContentManipulationVariantOrder = "default"
+	Descending ContentManipulationVariantOrder = "descending"
+	First4mbps ContentManipulationVariantOrder = "first_4mbps"
+)
+
+// Valid indicates whether the value is a known member of the ContentManipulationVariantOrder enum.
+func (e ContentManipulationVariantOrder) Valid() bool {
+	switch e {
+	case Ascending:
+		return true
+	case Default:
+		return true
+	case Descending:
+		return true
+	case First4mbps:
 		return true
 	default:
 		return false
@@ -187,10 +268,12 @@ func (e HeartbeatEventType) Valid() bool {
 
 // Defines values for PatternDefaultStepSeconds.
 const (
-	PatternDefaultStepSecondsN12 PatternDefaultStepSeconds = 12
-	PatternDefaultStepSecondsN18 PatternDefaultStepSeconds = 18
-	PatternDefaultStepSecondsN24 PatternDefaultStepSeconds = 24
-	PatternDefaultStepSecondsN6  PatternDefaultStepSeconds = 6
+	PatternDefaultStepSecondsN12  PatternDefaultStepSeconds = 12
+	PatternDefaultStepSecondsN120 PatternDefaultStepSeconds = 120
+	PatternDefaultStepSecondsN18  PatternDefaultStepSeconds = 18
+	PatternDefaultStepSecondsN24  PatternDefaultStepSeconds = 24
+	PatternDefaultStepSecondsN6   PatternDefaultStepSeconds = 6
+	PatternDefaultStepSecondsN60  PatternDefaultStepSeconds = 60
 )
 
 // Valid indicates whether the value is a known member of the PatternDefaultStepSeconds enum.
@@ -198,11 +281,15 @@ func (e PatternDefaultStepSeconds) Valid() bool {
 	switch e {
 	case PatternDefaultStepSecondsN12:
 		return true
+	case PatternDefaultStepSecondsN120:
+		return true
 	case PatternDefaultStepSecondsN18:
 		return true
 	case PatternDefaultStepSecondsN24:
 		return true
 	case PatternDefaultStepSecondsN6:
+		return true
+	case PatternDefaultStepSecondsN60:
 		return true
 	default:
 		return false
@@ -238,12 +325,13 @@ func (e PatternMarginPct) Valid() bool {
 
 // Defines values for PatternTemplate.
 const (
-	Pyramid    PatternTemplate = "pyramid"
-	RampDown   PatternTemplate = "ramp_down"
-	RampUp     PatternTemplate = "ramp_up"
-	Sliders    PatternTemplate = "sliders"
-	Square     PatternTemplate = "square"
-	SquareWave PatternTemplate = "square_wave"
+	Pyramid        PatternTemplate = "pyramid"
+	RampDown       PatternTemplate = "ramp_down"
+	RampUp         PatternTemplate = "ramp_up"
+	Sliders        PatternTemplate = "sliders"
+	Square         PatternTemplate = "square"
+	SquareWave     PatternTemplate = "square_wave"
+	TransientShock PatternTemplate = "transient_shock"
 )
 
 // Valid indicates whether the value is a known member of the PatternTemplate enum.
@@ -260,6 +348,8 @@ func (e PatternTemplate) Valid() bool {
 	case Square:
 		return true
 	case SquareWave:
+		return true
+	case TransientShock:
 		return true
 	default:
 		return false
@@ -626,6 +716,39 @@ func (e GetApiV2PlayersParamsState) Valid() bool {
 	}
 }
 
+// AppConfig Client-side ("app behaviour") config the player applies at its next
+// play boundary — the per-play, no-restart counterpart to the cold-start
+// launch args (`is.segment` etc., #797). The proxy stores these per
+// session and surfaces them on `GET /api/sessions`; the player overlays
+// any non-null field onto its own state when it opens the next play
+// (segment/protocol drive the manifest URL; live_offset_s and
+// peak_bitrate_mbps drive the ExoPlayer/AVPlayer track selector). A
+// null/omitted field leaves the player's own value untouched.
+//
+// Server-side (`proxy.*` / ContentManipulation) config already
+// reconfigures per-play with no restart; this brings the client-side
+// half in line. Settable via `PATCH /api/session/{id}` or the
+// `app.<field>` config-on-connect URL args. Issue #800.
+type AppConfig struct {
+	// LiveOffsetS Live-edge offset in seconds for the next play (maps to `is.flag.live_offset_s`). 0 = let the manifest HOLD-BACK / Go Live decide.
+	LiveOffsetS *float32 `json:"live_offset_s,omitempty"`
+
+	// PeakBitrateMbps ABR peak-bitrate ceiling in Mbps for the next play (maps to `is.flag.peak_bitrate_mbps`). 0 = no cap.
+	PeakBitrateMbps *int `json:"peak_bitrate_mbps,omitempty"`
+
+	// Protocol Streaming protocol for the next play (maps to `is.protocol`).
+	Protocol *AppConfigProtocol `json:"protocol,omitempty"`
+
+	// Segment Segment ladder for the next play (maps to the client `is.segment` lever). ll / s2 / s6.
+	Segment *AppConfigSegment `json:"segment,omitempty"`
+}
+
+// AppConfigProtocol Streaming protocol for the next play (maps to `is.protocol`).
+type AppConfigProtocol string
+
+// AppConfigSegment Segment ladder for the next play (maps to the client `is.segment` lever). ll / s2 / s6.
+type AppConfigSegment string
+
 // ContentManipulation Master playlist mutations applied at manifest serve time. Takes
 // effect on the next master manifest fetch. Used to test player
 // robustness against malformed / restricted / shifted manifests.
@@ -633,7 +756,7 @@ type ContentManipulation struct {
 	// AllowedVariants When non-empty, only the listed variant URIs are kept in the master playlist.
 	AllowedVariants *[]string `json:"allowed_variants,omitempty"`
 
-	// LiveOffset Live edge offset window in seconds. 0 = no offset.
+	// LiveOffset Live edge offset window in seconds. 0 = no offset. Values 2/4/12/30/36/42 added (#793) for the segment×live-offset matrix.
 	LiveOffset *ContentManipulationLiveOffset `json:"live_offset,omitempty"`
 
 	// OverstateBandwidth Inflate BANDWIDTH attribute by 10%.
@@ -644,10 +767,19 @@ type ContentManipulation struct {
 
 	// StripCodecs Remove CODECS attribute from EXT-X-STREAM-INF lines.
 	StripCodecs *bool `json:"strip_codecs,omitempty"`
+
+	// StripResolution Remove RESOLUTION attribute from EXT-X-STREAM-INF lines. Apple HLS validator rejects this; AVPlayer plays but variant.video.size becomes empty (issue #486).
+	StripResolution *bool `json:"strip_resolution,omitempty"`
+
+	// VariantOrder Re-sort the video EXT-X-STREAM-INF entries by BANDWIDTH to probe whether master-playlist order biases AVPlayer's initial-variant pick (#682). ascending = lowest first (our authoring); descending = highest first; first_4mbps = promote the variant nearest 4 Mbps to first-listed, rest ascending (initial-variant probe); default = passthrough. EXT-X-MEDIA audio/subtitle renditions are left untouched.
+	VariantOrder *ContentManipulationVariantOrder `json:"variant_order,omitempty"`
 }
 
-// ContentManipulationLiveOffset Live edge offset window in seconds. 0 = no offset.
+// ContentManipulationLiveOffset Live edge offset window in seconds. 0 = no offset. Values 2/4/12/30/36/42 added (#793) for the segment×live-offset matrix.
 type ContentManipulationLiveOffset int
+
+// ContentManipulationVariantOrder Re-sort the video EXT-X-STREAM-INF entries by BANDWIDTH to probe whether master-playlist order biases AVPlayer's initial-variant pick (#682). ascending = lowest first (our authoring); descending = highest first; first_4mbps = promote the variant nearest 4 Mbps to first-listed, rest ascending (initial-variant probe); default = passthrough. EXT-X-MEDIA audio/subtitle renditions are left untouched.
+type ContentManipulationVariantOrder string
 
 // FaultCounters Read-only. Server-maintained; never appears in PATCH bodies.
 type FaultCounters map[string]int
@@ -862,7 +994,7 @@ type NetworkLogEntry struct {
 
 // Pattern defines model for Pattern.
 type Pattern struct {
-	// DefaultStepSeconds Default per-step duration the dashboard chose when generating the step list.
+	// DefaultStepSeconds Default per-step duration the dashboard chose when generating the step list. 60 / 120 give buffer-draining holds for transient_shock-style probes.
 	DefaultStepSeconds *PatternDefaultStepSeconds `json:"default_step_seconds,omitempty"`
 
 	// MarginPct Headroom percent above the variant rate used when sizing template steps. 0 = exact (deliberate-stall footgun). 5 = default — covers TCP/IP + TLS 1.3 + HTTP/2 framing overhead on a LAN. 10 = real WiFi with retransmits. 25 / 50 = stress-test over-headroom.
@@ -872,11 +1004,14 @@ type Pattern struct {
 	// Template Template that drove step-list generation. Stored verbatim
 	// so the dashboard can repaint the template radios. The kernel
 	// cycles through `steps` regardless of template; this field is
-	// metadata, not a recompute trigger.
+	// metadata, not a recompute trigger. `transient_shock` is the
+	// deepening-drop staircase (hold top, dip to each lower rung in
+	// turn, recover to top between dips) mirroring the transient_shock
+	// characterization mode.
 	Template *PatternTemplate `json:"template,omitempty"`
 }
 
-// PatternDefaultStepSeconds Default per-step duration the dashboard chose when generating the step list.
+// PatternDefaultStepSeconds Default per-step duration the dashboard chose when generating the step list. 60 / 120 give buffer-draining holds for transient_shock-style probes.
 type PatternDefaultStepSeconds int
 
 // PatternMarginPct Headroom percent above the variant rate used when sizing template steps. 0 = exact (deliberate-stall footgun). 5 = default — covers TCP/IP + TLS 1.3 + HTTP/2 framing overhead on a LAN. 10 = real WiFi with retransmits. 25 / 50 = stress-test over-headroom.
@@ -885,7 +1020,10 @@ type PatternMarginPct int
 // PatternTemplate Template that drove step-list generation. Stored verbatim
 // so the dashboard can repaint the template radios. The kernel
 // cycles through `steps` regardless of template; this field is
-// metadata, not a recompute trigger.
+// metadata, not a recompute trigger. `transient_shock` is the
+// deepening-drop staircase (hold top, dip to each lower rung in
+// turn, recover to top between dips) mirroring the transient_shock
+// characterization mode.
 type PatternTemplate string
 
 // PatternStep defines model for PatternStep.
@@ -1045,8 +1183,19 @@ type PlayRecord struct {
 
 	// Shape Play-scoped shape override. Replaces `player.shape` for this
 	// play if set. Auto-cleared on play end.
-	Shape     *Shape    `json:"shape,omitempty"`
-	StartedAt time.Time `json:"started_at"`
+	Shape *Shape `json:"shape,omitempty"`
+
+	// StartTime **Client-supplied** play start (ISO-8601 UTC), minted by the
+	// player at the same boundary as `id` (play_id) and re-sent as a
+	// `?start_time=` query param on every request. Unlike
+	// `started_at` — which the proxy derives from the SESSION's first
+	// request and therefore does NOT move when the play_id rotates —
+	// this is play-scoped: a content switch yields a new play_id AND
+	// a new start_time. Prefer this for "when did THIS play begin";
+	// `started_at` is the connection/session start. Null for
+	// non-instrumented clients (web, Roku) that don't send it.
+	StartTime *time.Time `json:"start_time,omitempty"`
+	StartedAt time.Time  `json:"started_at"`
 }
 
 // PlayStartedEvent defines model for PlayStartedEvent.
@@ -1196,6 +1345,9 @@ type PlayerGroupPatch struct {
 // a typed projection). All fields nullable — the player may not
 // report every field on every tick.
 type PlayerMetrics struct {
+	// AppVersion #550 Phase 4: app marketing version from Bundle CFBundleShortVersionString.
+	AppVersion *string `json:"app_version,omitempty"`
+
 	// AvgNetworkBitrateMbps Player-computed avgNetworkBitrate.
 	AvgNetworkBitrateMbps *float32 `json:"avg_network_bitrate_mbps,omitempty"`
 
@@ -1206,17 +1358,53 @@ type PlayerMetrics struct {
 	// BufferEndS Player-reported end of buffered range (seconds).
 	BufferEndS *float32 `json:"buffer_end_s,omitempty"`
 
+	// BufferingCount #550 Phase 1: entries into `buffering` state.
+	BufferingCount *int `json:"buffering_count,omitempty"`
+
+	// BufferingDurationMs #550 Phase 1: duration of the MOST RECENT buffer event (sticky).
+	BufferingDurationMs *int `json:"buffering_duration_ms,omitempty"`
+
+	// BufferingTimeMs #550 Phase 1: cumulative buffering time (ms).
+	BufferingTimeMs *int `json:"buffering_time_ms,omitempty"`
+
+	// ConfiguredOffsetS Configured target offset from live (iOS configuredTimeOffsetFromLive; on Android equals recommended_offset_s).
+	ConfiguredOffsetS *float32 `json:"configured_offset_s,omitempty"`
+
+	// ContentName Content title bound at metrics-start. Stamped on every payload so dashboards see "which content was playing" without joining against the upload catalogue.
+	ContentName *string `json:"content_name,omitempty"`
+
+	// DeviceClass #550 Phase 4: form-factor enum: `phone` / `tablet` / `tv` / `desktop` / `unknown`.
+	DeviceClass *string `json:"device_class,omitempty"`
+
+	// DeviceModel #550 Phase 4: hardware model identifier (e.g. iPhone15,3) via sysctl hw.machine.
+	DeviceModel *string `json:"device_model,omitempty"`
+
+	// DeviceResolution Physical-pixel resolution of the device's current orientation, formatted `"WxH"` to match video_resolution / display_resolution. Swaps integers on iPad rotation; static on Apple TV / orientation-locked clients. Supersedes screen_width_px / screen_height_px / screen_density (dropped 2026-05-30).
+	DeviceResolution *string `json:"device_resolution,omitempty"`
+
 	// DisplayResolution Player-reported window/display resolution (separate from the active video resolution).
 	DisplayResolution *string `json:"display_resolution,omitempty"`
-
-	// DroppedFrames Player-reported dropped frames count.
-	DroppedFrames *int `json:"dropped_frames,omitempty"`
 
 	// Error Most recent player-reported error string.
 	Error *string `json:"error,omitempty"`
 
+	// ErrorCode #550 Phase 2: NSError.code / HTTP status / system errno. Populated on `error` events AND terminal failure rows. 0 = no error.
+	ErrorCode *int `json:"error_code,omitempty"`
+
+	// ErrorCount #550 Phase 2: cumulative observation counter. Ticks on every `error` event (transient or terminal). Forwarder computes per-row delta server-side.
+	ErrorCount *int `json:"error_count,omitempty"`
+
+	// ErrorDetails #550 Phase 2: JSON blob with URL, underlying error chain, native message.
+	ErrorDetails *string `json:"error_details,omitempty"`
+
+	// ErrorDomain #550 Phase 2: NSError.domain — `CoreMediaErrorDomain` / `NSURLErrorDomain` / `AVFoundationErrorDomain` / `http` etc.
+	ErrorDomain *string `json:"error_domain,omitempty"`
+
 	// EventTime Player-supplied wallclock for the most recent metrics tick.
 	EventTime *time.Time `json:"event_time,omitempty"`
+
+	// FetchingResolution WxH of the variant the player is about to fetch — derived iOS-side from indicatedBitrate vs the variant ladder. Empty before the first access-log event.
+	FetchingResolution *string `json:"fetching_resolution,omitempty"`
 
 	// FirstFrameTimeS Time-to-first-frame (seconds since play started).
 	FirstFrameTimeS *float32 `json:"first_frame_time_s,omitempty"`
@@ -1224,11 +1412,20 @@ type PlayerMetrics struct {
 	// FramesDisplayed Player-reported displayed frames count.
 	FramesDisplayed *int `json:"frames_displayed,omitempty"`
 
+	// FramesDropped Player-reported dropped frames count.
+	FramesDropped *int `json:"frames_dropped,omitempty"`
+
+	// FramesRate Active variant's nominal frame rate (Hz). Sticky after first observation in the format-change event.
+	FramesRate *float32 `json:"frames_rate,omitempty"`
+
+	// IdlingCount #550 Phase 1: entries into `idle` state.
+	IdlingCount *int `json:"idling_count,omitempty"`
+
+	// IdlingTimeMs #550 Phase 1: cumulative idle time (ms).
+	IdlingTimeMs *int `json:"idling_time_ms,omitempty"`
+
 	// LastEvent Most recent player-reported lifecycle event (playing, buffering_start, stall_start, etc.).
 	LastEvent *string `json:"last_event,omitempty"`
-
-	// LastStallTimeS Duration of the most recent stall (seconds).
-	LastStallTimeS *float32 `json:"last_stall_time_s,omitempty"`
 
 	// LiveEdgeS Player-reported live edge timestamp (seconds).
 	LiveEdgeS *float32 `json:"live_edge_s,omitempty"`
@@ -1236,8 +1433,8 @@ type PlayerMetrics struct {
 	// LiveOffsetS Player-reported offset behind live edge (seconds).
 	LiveOffsetS *float32 `json:"live_offset_s,omitempty"`
 
-	// LoopCountIncrement Server-derived increment from the previous report.
-	LoopCountIncrement *int `json:"loop_count_increment,omitempty"`
+	// LoopCountDelta Server-derived increment from the previous report.
+	LoopCountDelta *int `json:"loop_count_delta,omitempty"`
 
 	// LoopCountPlayer How many times the player has reported looping the content. Player-reported, may be 0 on platforms that do not count.
 	LoopCountPlayer *int `json:"loop_count_player,omitempty"`
@@ -1245,17 +1442,47 @@ type PlayerMetrics struct {
 	// NetworkBitrateMbps Player-computed instantaneous networkBitrate.
 	NetworkBitrateMbps *float32 `json:"network_bitrate_mbps,omitempty"`
 
+	// OsVersionMajor #550 Phase 4: OS major version (e.g. 26 for iOS 26.0.1).
+	OsVersionMajor *int `json:"os_version_major,omitempty"`
+
+	// OsVersionMinor #550 Phase 4: OS minor version.
+	OsVersionMinor *int `json:"os_version_minor,omitempty"`
+
+	// PausingCount #550 Phase 1: entries into `paused` state.
+	PausingCount *int `json:"pausing_count,omitempty"`
+
+	// PausingTimeMs #550 Phase 1: cumulative time in `paused` state (ms).
+	PausingTimeMs *int `json:"pausing_time_ms,omitempty"`
+
 	// PlaybackEngine Web-player engine (`native` for AVPlayer, `mse` for Media Source Extensions). Pairs with `browser_family` for the rendition inference.
 	PlaybackEngine *string `json:"playback_engine,omitempty"`
 
 	// PlaybackRate Player playback rate (1.0 = normal).
 	PlaybackRate *float32 `json:"playback_rate,omitempty"`
 
+	// PlaybackReason #550 Phase 2: controlled vocab per status. During in_progress, mirrors `player_state`; on terminal rows, forwarder classifier derives from error_code+domain+kind.
+	PlaybackReason *string `json:"playback_reason,omitempty"`
+
+	// PlaybackStatus #550 Phase 2: terminal outcome enum: `in_progress` / `completed` / `user_stopped` / `start_failure` (VSF) / `abandoned_start` (EBVS) / `mid_stream_failure` (MSF). Mid-session rows = `in_progress`.
+	PlaybackStatus *string `json:"playback_status,omitempty"`
+
 	// PlayerRestarts Number of player restarts (auto-recovery + manual).
 	PlayerRestarts *int `json:"player_restarts,omitempty"`
 
+	// PlayerTech #550 Phase 4: playback engine: `AVPlayer` / `hls.js` / `shaka` / `native-roku` / `vlc` / `ffmpeg`.
+	PlayerTech *string `json:"player_tech,omitempty"`
+
+	// PlayerTechVersion Playback engine version, paired with player_tech. Android: Media3/ExoPlayer library version (app-bundled, independent of the OS). iOS: OS version (AVPlayer is part of the OS).
+	PlayerTechVersion *string `json:"player_tech_version,omitempty"`
+
 	// PlayheadWallclockMs Player-encoded PDT (milliseconds since Unix epoch) for the current playhead. Used by the chart engine to compute live offset against the server clock.
 	PlayheadWallclockMs *int `json:"playhead_wallclock_ms,omitempty"`
+
+	// PlayingCount #550 Phase 1: entries into `playing` state since play start.
+	PlayingCount *int `json:"playing_count,omitempty"`
+
+	// PlayingTimeMs #550 Phase 1: cumulative time in `playing` state (ms), since play start.
+	PlayingTimeMs *int `json:"playing_time_ms,omitempty"`
 
 	// PositionS Player current position (seconds).
 	PositionS *float32 `json:"position_s,omitempty"`
@@ -1263,29 +1490,89 @@ type PlayerMetrics struct {
 	// ProfileShiftCount Number of ABR rendition shifts the player has reported.
 	ProfileShiftCount *int `json:"profile_shift_count,omitempty"`
 
+	// RecommendedOffsetS Manifest-recommended target offset from live (iOS recommendedTimeOffsetFromLive / ExoPlayer liveConfiguration.targetOffsetMs). Gates the qoe_live_offset_* labels.
+	RecommendedOffsetS *float32 `json:"recommended_offset_s,omitempty"`
+
 	// SeekableEndS Player-reported end of seekable range (seconds).
 	SeekableEndS *float32 `json:"seekable_end_s,omitempty"`
+
+	// SeekingCount #550 Phase 1: AVPlayerItemTimeJumped events since play start.
+	SeekingCount *int `json:"seeking_count,omitempty"`
+
+	// SeekingTimeMs #550 Phase 1: cumulative time spent in seek-induced refill (TimeJumped → next .playing). Conviva CIRR/CIRT pattern: `connection_buffering = buffering_time_ms - seeking_time_ms`.
+	SeekingTimeMs *int `json:"seeking_time_ms,omitempty"`
 
 	// Source Identifier for the metrics source (e.g. avplayer-ios, exoplayer-android).
 	Source *string `json:"source,omitempty"`
 
+	// StallDurationMs #550 Phase 1: duration of the MOST RECENT stall event (sticky on subsequent heartbeats).
+	StallDurationMs *int `json:"stall_duration_ms,omitempty"`
+
+	// StallStuck #550 Phase 1 ext: orthogonal "this stall won't auto-recover" flag. True from the moment AVPlayer transitions stalled → .paused (give-up) until next .playing transition. State stays "stalled" for residency continuity; dashboards key on this flag to surface operator-actionable stalls.
+	StallStuck *bool `json:"stall_stuck,omitempty"`
+
 	// StallTimeS Cumulative stall time (seconds).
 	StallTimeS *float32 `json:"stall_time_s,omitempty"`
-	Stalls     *int     `json:"stalls,omitempty"`
+
+	// StallingCount #550 Phase 1: entries into `stalled` state.
+	StallingCount *int `json:"stalling_count,omitempty"`
+
+	// StallingTimeMs #550 Phase 1: cumulative stalling time (ms). Single canonical pair replacing legacy stall_count/stall_time_s during soft cutover.
+	StallingTimeMs *int `json:"stalling_time_ms,omitempty"`
+	Stalls         *int `json:"stalls,omitempty"`
 
 	// State Player state machine label (idle, playing, paused, buffering, ended, error).
 	State *string `json:"state,omitempty"`
+
+	// StateFrom On state_change events: the player_state before the transition. Empty / null on heartbeat rows.
+	StateFrom *string `json:"state_from,omitempty"`
+
+	// StateTo On state_change events: the player_state after the transition. Empty / null on heartbeat rows.
+	StateTo *string `json:"state_to,omitempty"`
+
+	// TerminalErrorCode #550 Phase 2: error code populated ONLY on terminal failure rows. Querying `WHERE terminal_error_code != 0` is SQL-safe — never returns transient codes.
+	TerminalErrorCode *int `json:"terminal_error_code,omitempty"`
+
+	// TerminalErrorDetails #550 Phase 2: error details JSON on terminal failure rows.
+	TerminalErrorDetails *string `json:"terminal_error_details,omitempty"`
+
+	// TerminalErrorDomain #550 Phase 2: error domain on terminal failure rows.
+	TerminalErrorDomain *string `json:"terminal_error_domain,omitempty"`
+
+	// TimePerVariantS JSON-string-encoded map of variant-label → cumulative seconds spent at that variant (e.g. `{"2160p@29857kbps":65.28}`). Preserved across retry()-style restarts.
+	TimePerVariantS *string `json:"time_per_variant_s,omitempty"`
+
+	// TrickplayingCount #550 Phase 1: entries into trickplay (rate ∉ {0, ~1}).
+	TrickplayingCount *int `json:"trickplaying_count,omitempty"`
+
+	// TrickplayingTimeMs #550 Phase 1: cumulative time at non-1× playback rate (FF / RW).
+	TrickplayingTimeMs *int `json:"trickplaying_time_ms,omitempty"`
 
 	// TriggerType What triggered the most recent metrics tick (timer, event, etc.).
 	TriggerType *string `json:"trigger_type,omitempty"`
 
 	// TrueOffsetS Wall-clock offset between player position and real time (seconds).
-	TrueOffsetS      *float32 `json:"true_offset_s,omitempty"`
+	TrueOffsetS *float32 `json:"true_offset_s,omitempty"`
+
+	// UserMarkedAt On user_marked (911) events: wall-clock ISO-8601 instant the operator pressed the button. Empty on other rows.
+	UserMarkedAt     *string  `json:"user_marked_at,omitempty"`
 	VideoBitrateMbps *float32 `json:"video_bitrate_mbps,omitempty"`
 
-	// VideoQualityPct video_bitrate_mbps as a percentage of the top variant in the active manifest
+	// VideoFirstFrameTimeMs #550 Phase 1: TTFF in ms. Conviva/Mux/Bitmovin canonical units. Replaces legacy video_first_frame_time_s.
+	VideoFirstFrameTimeMs *int `json:"video_first_frame_time_ms,omitempty"`
+
+	// VideoQuality60sPct Log-bitrate (Weber-Fechner) quality over the last 60s of watched playback. Formula: log(kbps/min) / log(max/min) per event, clamped to a 0.20 floor, time-weighted by durationWatched. Matches dashboard PlayLog computeQualityPct.
+	VideoQuality60sPct *float32 `json:"video_quality_60s_pct,omitempty"`
+
+	// VideoQualityAvgPct Same log-bitrate formula as video_quality_60s_pct but over the lifetime of the play. Computed by iOS from AVPlayerItem.accessLog().
+	VideoQualityAvgPct *float32 `json:"video_quality_avg_pct,omitempty"`
+
+	// VideoQualityPct video_bitrate_mbps as a percentage of the top variant in the active manifest (snapshot)
 	VideoQualityPct *float32 `json:"video_quality_pct,omitempty"`
 	VideoResolution *string  `json:"video_resolution,omitempty"`
+
+	// VideoStartTimeMs #550 Phase 1: alternate startup-time measurement in ms.
+	VideoStartTimeMs *int `json:"video_start_time_ms,omitempty"`
 
 	// VideoStartTimeS Time-to-playing (seconds since play started).
 	VideoStartTimeS *float32 `json:"video_start_time_s,omitempty"`
@@ -1304,6 +1591,21 @@ type PlayerMetrics struct {
 // (`POST/PATCH/DELETE /api/v2/players/{id}/fault-rules/{rule_id}`)
 // are a planned addition; not in this initial spec.
 type PlayerPatch struct {
+	// AppConfig Client-side ("app behaviour") config the player applies at its next
+	// play boundary — the per-play, no-restart counterpart to the cold-start
+	// launch args (`is.segment` etc., #797). The proxy stores these per
+	// session and surfaces them on `GET /api/sessions`; the player overlays
+	// any non-null field onto its own state when it opens the next play
+	// (segment/protocol drive the manifest URL; live_offset_s and
+	// peak_bitrate_mbps drive the ExoPlayer/AVPlayer track selector). A
+	// null/omitted field leaves the player's own value untouched.
+	//
+	// Server-side (`proxy.*` / ContentManipulation) config already
+	// reconfigures per-play with no restart; this brings the client-side
+	// half in line. Settable via `PATCH /api/session/{id}` or the
+	// `app.<field>` config-on-connect URL args. Issue #800.
+	AppConfig *AppConfig `json:"app_config,omitempty"`
+
 	// Content Master playlist mutations applied at manifest serve time. Takes
 	// effect on the next master manifest fetch. Used to test player
 	// robustness against malformed / restricted / shifted manifests.
@@ -1355,6 +1657,12 @@ type PlayerPatch struct {
 // per-device and do not broadcast. Each property's description
 // notes which side it falls on.
 type PlayerRecord struct {
+	// AppConfig Client-side config the player applies at its next play boundary
+	// (#800). Stored server-side; the player reads it from
+	// `GET /api/sessions` and overlays it on the next play.
+	// *Broadcasts to group on PATCH.*
+	AppConfig *AppConfig `json:"app_config,omitempty"`
+
 	// Content Master playlist mutations applied at manifest serve time:
 	// strip CODECS, strip AVERAGE-BANDWIDTH, overstate bandwidth,
 	// allowed-variants whitelist, live-offset window. Takes effect
@@ -1574,6 +1882,9 @@ type ServerMetrics struct {
 
 	// RtoMs Current TCP retransmit timeout.
 	RtoMs *float32 `json:"rto_ms,omitempty"`
+
+	// RttAvmetricsMs Median TTFB (responseStart - requestEnd) from iOS 18 AVMetrics MediaResourceRequest events. Stream-level latency from URLSession pipeline; not a wire RTT on HTTP/2 keep-alive. Issue #486.
+	RttAvmetricsMs *float32 `json:"rtt_avmetrics_ms,omitempty"`
 
 	// RttMaxMs Maximum RTT in the last sample window.
 	RttMaxMs *float32 `json:"rtt_max_ms,omitempty"`

@@ -211,7 +211,8 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 	// is empty when the player isn't in any group — broadcast becomes
 	// a no-op.
 	var groupID string
-	srv := s // capture the Server receiver before the closure shadows it
+	groupBroadcast := true // default; a display-only group sets group_broadcast=false at connect
+	srv := s               // capture the Server receiver before the closure shadows it
 	post, found, mErr := s.v1.MutatePlayer(pidStr, func(s map[string]any) error {
 		// Re-check under sessionsMu. Another v2 PATCH that won the
 		// outer race would have updated FieldRevisions before
@@ -228,6 +229,9 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		s["control_revision"] = rev
 		fr.TouchWith(paths, rev)
 		groupID = getString(s, "group_id")
+		if v, ok := s["group_broadcast"].(bool); ok {
+			groupBroadcast = v
+		}
 		return nil
 	})
 	if mErr != nil {
@@ -256,14 +260,27 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Per-mutation broadcast override (?broadcast=true|false). Wins over the
+	// group's default (resolved above from the session's group_broadcast) for
+	// THIS PATCH only, so an A/B can drive shared shaping (broadcast=true) and
+	// per-member treatment such as a per-member fault (broadcast=false) in any
+	// order, independent of the group-mode flag set at connect. Absent ⇒ group
+	// default. content/labels are not broadcast-eligible regardless, so this
+	// only changes behaviour for shape / fault_rules — exactly where it's needed.
+	if ov := r.URL.Query().Get("broadcast"); ov != "" {
+		groupBroadcast = ov == "true" || ov == "1"
+	}
+
 	// Auto-broadcast to other group members (DESIGN.md § Player groups
 	// — auto-broadcast preserved from v1). Each member gets the same
 	// new control_revision and the same patch applied; their per-
 	// player FieldRevisions tracker is bumped to the same `rev` so a
 	// concurrent PATCHer reading from any member sees the latest
-	// revision uniformly.
+	// revision uniformly. Skipped when the group is display-only
+	// (group_broadcast=false at connect) — members share group_id for
+	// charting but are shaped/labelled independently (startup fleet).
 	var broadcastTouched []string
-	if groupID != "" {
+	if groupID != "" && groupBroadcast {
 		touched, bErr := s.v1.BroadcastPatch(groupID, pidStr, rev, func(member map[string]any) error {
 			return applyPatchToSession(srv, member, patch)
 		})
@@ -344,8 +361,13 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 // Phase D: labels.* only.
 // Phase H: + shape.{rate_mbps,delay_ms,loss_pct,transport_fault.*}
 // Phase I: + fault_rules (whole-array PATCH; the per-rule sub-resource
-//          endpoints have their own paths and don't run through here).
+//
+//	endpoints have their own paths and don't run through here).
+//
 // Phase K: + shape.pattern (drives v1's pattern step-engine).
+// #800: + app_config (client-side per-play config; applyAppConfigPatch stores
+//
+//	it nested on the session for the player to read back — no kernel side).
 func unsupportedPaths(paths []string) []string {
 	var bad []string
 	for _, p := range paths {
@@ -360,6 +382,7 @@ func unsupportedPaths(paths []string) []string {
 		case p == "fault_rules":
 		case p == "transfer_timeouts", strings.HasPrefix(p, "transfer_timeouts."):
 		case p == "content", strings.HasPrefix(p, "content."):
+		case p == "app_config", strings.HasPrefix(p, "app_config."):
 		default:
 			bad = append(bad, p)
 		}
@@ -445,6 +468,9 @@ func applyPatchToSession(srv *Server, s map[string]any, patch map[string]any) er
 	if c, hasC := patch["content"]; hasC {
 		applyContentPatch(s, c)
 	}
+	if ac, hasAC := patch["app_config"]; hasAC {
+		applyAppConfigPatch(s, ac)
+	}
 	return nil
 }
 
@@ -489,9 +515,11 @@ func applyContentPatch(s map[string]any, c any) {
 	if c == nil {
 		s["content_strip_codecs"] = false
 		s["content_strip_average_bandwidth"] = false
+		s["content_strip_resolution"] = false
 		s["content_overstate_bandwidth"] = false
 		s["content_live_offset"] = 0
 		s["content_allowed_variants"] = []any{}
+		s["content_variant_order"] = "default"
 		return
 	}
 	m, ok := c.(map[string]any)
@@ -503,6 +531,9 @@ func applyContentPatch(s map[string]any, c any) {
 	}
 	if v, present := m["strip_average_bandwidth"]; present {
 		s["content_strip_average_bandwidth"] = toBool(v)
+	}
+	if v, present := m["strip_resolution"]; present {
+		s["content_strip_resolution"] = toBool(v)
 	}
 	if v, present := m["overstate_bandwidth"]; present {
 		s["content_overstate_bandwidth"] = toBool(v)
@@ -517,6 +548,95 @@ func applyContentPatch(s map[string]any, c any) {
 			s["content_allowed_variants"] = arr
 		}
 	}
+	if v, present := m["variant_order"]; present {
+		if v == nil {
+			s["content_variant_order"] = "default"
+		} else if str, ok := v.(string); ok {
+			s["content_variant_order"] = str
+		}
+	}
+}
+
+// applyAppConfigPatch — projects the v2 app_config patch (#800: client-side
+// behaviour the player applies at its NEXT play boundary) onto the session map
+// as a nested "app_config" object. Unlike the flat content_*/shape_* fields,
+// app_config is stored nested because it is read back verbatim by the player
+// off GET /api/sessions (the proxy never acts on it server-side — it's a
+// pass-through the client overlays onto its own segment/protocol/offset/peak
+// state). JSON Merge Patch semantics: app_config:null clears the whole object;
+// a field set to null drops just that field; an omitted field is untouched, so
+// a partial patch (e.g. only segment) preserves the rest. Enum fields keep only
+// valid values so a malformed arg can't poison the object the client trusts.
+func applyAppConfigPatch(s map[string]any, c any) {
+	if c == nil {
+		delete(s, "app_config")
+		return
+	}
+	m, ok := c.(map[string]any)
+	if !ok {
+		return
+	}
+	out, _ := s["app_config"].(map[string]any)
+	if out == nil {
+		out = map[string]any{}
+	}
+	setEnum := func(key string, v any, allowed ...string) {
+		if v == nil {
+			delete(out, key)
+			return
+		}
+		str, ok := v.(string)
+		if !ok {
+			return
+		}
+		for _, a := range allowed {
+			if str == a {
+				out[key] = str
+				return
+			}
+		}
+	}
+	if v, present := m["segment"]; present {
+		setEnum("segment", v, "ll", "s2", "s6")
+	}
+	if v, present := m["protocol"]; present {
+		setEnum("protocol", v, "hls", "dash")
+	}
+	if v, present := m["live_offset_s"]; present {
+		if v == nil {
+			delete(out, "live_offset_s")
+		} else {
+			out["live_offset_s"] = toFloatZero(v)
+		}
+	}
+	if v, present := m["peak_bitrate_mbps"]; present {
+		if v == nil {
+			delete(out, "peak_bitrate_mbps")
+		} else {
+			out["peak_bitrate_mbps"] = toIntZero(v)
+		}
+	}
+	if len(out) == 0 {
+		delete(s, "app_config")
+		return
+	}
+	s["app_config"] = out
+}
+
+// toFloatZero coerces a JSON-decoded numeric (float64 from encoding/json, or an
+// int form) to float64, defaulting to 0 for anything else.
+func toFloatZero(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	}
+	return 0
 }
 
 func toIntZero(v any) int {
@@ -813,4 +933,3 @@ func writePreconditionFailed(w http.ResponseWriter, currentRevision string, conf
 		},
 	)
 }
-

@@ -3,10 +3,10 @@
 // At ingest, every snapshot / network row gets a small set of label
 // strings stamped onto its `labels` column. Label format:
 //
-//   <severity>=<event>      direct from one column / last_event value
-//   <severity>=*<event>     synthesized — needs cross-row state or
-//                           multi-column logic. The `*` prefix is the
-//                           "introduced by the labeler" signal.
+//	<severity>=<event>      direct from one column / last_event value
+//	<severity>=*<event>     synthesized — needs cross-row state or
+//	                        multi-column logic. The `*` prefix is the
+//	                        "introduced by the labeler" signal.
 //
 // Severities (worst → least): error, critical, warning, info.
 //
@@ -37,6 +37,11 @@ const (
 	SevCritical = "critical"
 	SevWarning  = "warning"
 	SevInfo     = "info"
+	// SevTesting tags operator/test-harness KV metadata (run_id, test,
+	// platform, …) so it groups separately from genuine playback signal.
+	// Intentionally NOT ranked by worstSeverity — testing labels must not
+	// tint rows or bump the auto-classification tier. See kvLabelsFromInfo.
+	SevTesting = "testing"
 )
 
 // Synthesized labels carry a `*` prefix on the event portion so the
@@ -52,6 +57,32 @@ type labelState struct {
 	plays    map[string]*playLabelState // key: player_id|play_id
 	urls     map[string]urlEntry        // key: url; for request_retry
 	lastGCAt time.Time
+	// #553 — QoE label thresholds. Installed once at startup via
+	// SetThresholds; nil falls back to compiled-in defaults so tests
+	// and the no-config boot path stay safe.
+	cfg *QoEThresholds
+}
+
+// fallbackThresholds is the compiled-in default used when no config has
+// been installed (tests, or before SetThresholds runs at startup).
+var fallbackThresholds = qoeDefaults()
+
+// thresholds returns the active QoE thresholds. Caller MUST hold s.mu
+// (the event labeler already does; the network labeler reads under a
+// brief lock).
+func (s *labelState) thresholds() *QoEThresholds {
+	if s.cfg != nil {
+		return s.cfg
+	}
+	return fallbackThresholds
+}
+
+// SetThresholds installs the loaded QoE config. Call once at startup
+// before ingest begins.
+func (s *labelState) SetThresholds(cfg *QoEThresholds) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg = cfg
 }
 
 // urlEntry records the most-recent fetch of one URL so the retry
@@ -65,8 +96,8 @@ type urlEntry struct {
 
 type playLabelState struct {
 	// Pair-derivation: open stall/buffering windows.
-	stallStartTs   string
-	stallStartTime time.Time
+	stallStartTs       string
+	stallStartTime     time.Time
 	bufferingStartTs   string
 	bufferingStartTime time.Time
 	// Context detection: ts of the first observed first-frame /
@@ -74,8 +105,86 @@ type playLabelState struct {
 	// classify a stall/buffering as startup / scrub / midplay.
 	firstFrameTime   time.Time
 	lastTimejumpTime time.Time
+	// #553 windowed/dwell state for threshold-based qoe_* labels.
+	// stallBurstTimes / downshiftTimes accumulate event timestamps;
+	// the qoe labeler trims them to the configured window and counts.
+	// minVariantSince marks when the play first pinned the lowest
+	// rung (zero once it climbs off). peakSamples is the recent
+	// server-throughput trail for qoe_throughput_divergence.
+	stallBurstTimes []time.Time
+	downshiftTimes  []time.Time
+	minVariantSince time.Time
+	peakSamples     []tsVal
+	// #553 — terminal aggregate labels (vsf/msf/ebvs + tier) fire once
+	// per play, on the first terminal row. playback_status is sticky
+	// client pass-through, so without this guard a failed session that
+	// keeps heart-beating re-stamps the label on every subsequent row
+	// ("endless qoe_msf").
+	terminalEmitted bool
+	// #603 — set true once any non-terminal row is seen for this play
+	// (play_start / restart / state_change / …). A play terminal arriving
+	// while this is still false is the PREVIOUS play's play_end mis-bucketed
+	// onto this play_id (no play_start boundary yet) — its accumulators are
+	// the prior play's, so the QoE labeler ignores it.
+	everOpened bool
+	// #595 — edge-triggering for level/sticky qoe_* labels. qoeActive is
+	// the set of qoe labels that were true on the previous evaluated row.
+	// A label is emitted only on its rising edge (off→on): its first
+	// determination, or a new instance after it cleared. While a condition
+	// stays continuously true it is suppressed (no per-heartbeat repeats).
+	// The terminal row force-emits the still-true set so the summary +
+	// qoe_tier_* reflect end state. nil until first use.
+	qoeActive map[string]struct{}
+	// #657 — clear-cooldown re-arm. qoeLastOn records the last row-time each
+	// qoe label was TRUE. A rising edge re-fires only if the label has been
+	// off for ≥ RefireCooldownS since that time, so a condition that flaps
+	// above/below its threshold within the cooldown counts as one episode
+	// (one chip) instead of re-chipping on every re-crossing. nil until use.
+	qoeLastOn map[string]time.Time
 	// LRU touch for GC.
 	seen time.Time
+}
+
+// tsVal is a timestamped scalar — recent server-throughput samples for
+// the windowed-peak computation behind qoe_throughput_divergence.
+type tsVal struct {
+	t time.Time
+	v float64
+}
+
+// trimBefore drops entries older than cutoff, in place. Used to bound
+// the per-play windowed slices on every evaluation so they can't grow
+// unbounded between the 5-minute GC sweeps.
+func trimBefore(times []time.Time, cutoff time.Time) []time.Time {
+	kept := times[:0]
+	for _, t := range times {
+		if !t.Before(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	return kept
+}
+
+// recentPeak appends (now, v), drops samples older than window, and
+// returns the trimmed trail plus the max value within it. A zero or
+// negative v is still recorded as a sample timestamp but never lifts
+// the peak.
+func recentPeak(samples []tsVal, now time.Time, v float64, window time.Duration) ([]tsVal, float64) {
+	cutoff := now.Add(-window)
+	kept := samples[:0]
+	for _, s := range samples {
+		if !s.t.Before(cutoff) {
+			kept = append(kept, s)
+		}
+	}
+	kept = append(kept, tsVal{t: now, v: v})
+	var peak float64
+	for _, s := range kept {
+		if s.v > peak {
+			peak = s.v
+		}
+	}
+	return kept, peak
 }
 
 var defaultLabelState = newLabelState()
@@ -158,82 +267,134 @@ func computeEventLabelsWithState(s *labelState, r *row) []string {
 		ps.lastTimejumpTime = now
 	}
 
+	// #550 Phase 3: the LastEvent switch is additive (was early-return).
+	// Each arm appends to `out`; the QoE labeler then layers its
+	// threshold-based labels on top before we return. Keeping the arms
+	// fall-through is what makes the orthogonal qoe_* labels reachable.
+	var out []string
+
 	switch r.LastEvent {
 
 	// info — normal lifecycle worth surfacing
 	case "rate_shift_up":
-		return []string{SevInfo + "=shift_up"}
+		out = []string{SevInfo + "=shift_up"}
 	case "rate_shift_down":
-		return []string{SevInfo + "=shift_down"}
+		out = []string{SevInfo + "=shift_down"}
+		ps.downshiftTimes = append(ps.downshiftTimes, now) // #553 qoe_downshift_storm window
 	case "video_first_frame":
-		labels := []string{SevInfo + "=first_frame"}
-		if l := videoStartupLabel(r.VideoFirstFrameTimeS); l != "" {
-			labels = append(labels, l)
-		}
-		return labels
-	case "video_start_time":
-		return []string{SevInfo + "=playback_start"}
+		out = []string{SevInfo + "=first_frame"}
+	// #622 — `video_start_time` no longer derives a label. Its old
+	// `playback_start` relabel marked the VST/first-render moment,
+	// which `first_frame` already covers, and the name read like a
+	// play-level boundary — easily confused with the real play-open
+	// `play_start` (#603/#621). The video_start_time METRIC (startup
+	// latency) is untouched; only the derived label is gone.
+	// Forward-only: historical rows keep their playback_start labels.
+	case "play_start":
+		// #603 — explicit play-open boundary (symmetric to play_end).
+		// Distinct from `restart`, which is mid-session recovery only.
+		out = []string{SevInfo + "=play_start"}
 
 	// warning — degraded but functioning
 	case "timejump":
-		return []string{SevWarning + "=timejump"}
+		out = []string{SevWarning + "=timejump"}
 	case "segment_stall":
-		return []string{SevWarning + "=stall_segment"}
+		out = []string{SevWarning + "=stall_segment"}
+	// #703a/#778 — the jump-to-live seek nudge (METHOD 3). A recovery action,
+	// not itself a failure; keeps the item (no restart). Warning so it surfaces.
+	case "live_resync":
+		out = []string{SevWarning + "=live_resync"}
 
-	// critical — user-visible impact
+	// critical / error — user-visible impact
 	case "frozen":
-		return []string{SevCritical + "=stall_frozen"}
+		out = []string{SevCritical + "=stall_frozen"}
 	case "user_marked":
-		return []string{SevCritical + "=user_marked_911"}
+		out = []string{SevCritical + "=user_marked_911"}
+	// #703a — AVPlayer auto-paused mid-stall (rate→0, buffer drained): a hard
+	// stall that needs intervention and does NOT reach .failed. Error severity.
+	case "player_stuck":
+		out = []string{SevError + "=player_stuck"}
+	// #703 — confirmed hard wedge (-12880 + sustained no-progress). Observability
+	// only post-#703a (a real wedge surfaces as .failed and recovers there), but
+	// a confirmed wedge is still a play-ending fault signature → error.
+	case "wedge_detected":
+		out = []string{SevError + "=wedge_detected"}
 
 	// restart splits on reason — operator-initiated reload is
 	// informational; everything else is an involuntary recovery
 	// the operator should see.
 	case "restart":
-		if r.TriggerType == "reload" {
-			return []string{SevInfo + "=restart_reload"}
+		// #603 — `restart` is a mid-play recovery (play boundaries are
+		// play_start/play_end). Split on the client's restart_reason:
+		// auto_recovery (player hit a fatal error and recovered itself) is
+		// critical; a manual user_retry is a warning (user perceived a problem
+		// and re-attempted); a legacy reload restart is info. Falls back to
+		// TriggerType=="reload" for older rows that predate restart_reason.
+		switch {
+		case r.RestartReason == "user_retry":
+			out = []string{SevWarning + "=restart_user_retry"}
+		case r.RestartReason == "reload" || r.TriggerType == "reload":
+			out = []string{SevInfo + "=restart_reload"}
+		// #703a — distinguish the auto-recovery methods so the dashboard/harness
+		// can tell which path drove the restart (failure vs stuck vs live-resync),
+		// instead of collapsing all three into one `restart_auto_recovery` chip.
+		case r.RestartReason == "auto_recovery_failure":
+			out = []string{SevCritical + "=restart_auto_recovery_failure"}
+		case r.RestartReason == "auto_recovery_stuck":
+			out = []string{SevCritical + "=restart_auto_recovery_stuck"}
+		case r.RestartReason == "auto_recovery_live_resync":
+			out = []string{SevCritical + "=restart_auto_recovery_live_resync"}
+		default: // legacy auto_recovery / unknown reason
+			out = []string{SevCritical + "=restart_auto_recovery"}
 		}
-		return []string{SevCritical + "=restart_auto_recovery"}
 
 	// error — system-detected failure
 	case "error":
-		return []string{SevError + "=player_error"}
+		out = []string{SevError + "=player_error"}
 
 	// Pair-derivation: stall_start opens a window; nothing on the
 	// row itself yet (the duration label lands on stall_end).
 	case "stall_start":
 		ps.stallStartTs = r.Ts
 		ps.stallStartTime = now
-		return nil
+		ps.stallBurstTimes = append(ps.stallBurstTimes, now) // #553 qoe_stall_burst window
 	case "stall_end":
-		dur := float64(r.LastStallTimeS)
+		// stall_duration_ms is the canonical sticky per-event duration.
+		// last_stall_time_s fallback removed; if neither value is set
+		// the in-process pair cache below derives from end-start.
+		dur := float64(r.StallDurationMs) / 1000.0
 		if dur <= 0 && !ps.stallStartTime.IsZero() {
 			dur = now.Sub(ps.stallStartTime).Seconds()
 		}
 		ps.stallStartTs = ""
 		ps.stallStartTime = time.Time{}
-		if dur <= 0 {
-			return nil
+		if dur > 0 {
+			out = []string{stallLabel(dur, stallContext(ps, now))}
 		}
-		return []string{stallLabel(dur, stallContext(ps, now))}
 
 	case "buffering_start":
 		ps.bufferingStartTs = r.Ts
 		ps.bufferingStartTime = now
-		return nil
 	case "buffering_end":
-		dur := float64(r.LastBufferingTimeS)
+		// Same precedence as stall_end: buffering_duration_ms canonical,
+		// in-process pair cache fills in for clients that don't send it.
+		dur := float64(r.BufferingDurationMs) / 1000.0
 		if dur <= 0 && !ps.bufferingStartTime.IsZero() {
 			dur = now.Sub(ps.bufferingStartTime).Seconds()
 		}
 		ps.bufferingStartTs = ""
 		ps.bufferingStartTime = time.Time{}
-		if dur <= 0 {
-			return nil
+		if dur > 0 {
+			out = []string{bufferingLabel(dur, bufferingContext(ps, now))}
 		}
-		return []string{bufferingLabel(dur, bufferingContext(ps, now))}
 	}
-	return nil
+
+	// #550 Phase 3 — threshold-based QoE auto-labels. Orthogonal to the
+	// LastEvent switch above; layered on whatever the event arm emitted.
+	// s.thresholds() is read while we still hold s.mu (locked at the top).
+	out = append(out, computeQoEEventLabels(s.thresholds(), ps, r, now)...)
+
+	return out
 }
 
 // bucket categorises a duration in seconds.
@@ -279,22 +440,13 @@ func bufferingContext(ps *playLabelState, now time.Time) string {
 	return "midplay"
 }
 
-// videoStartupLabel classifies player-reported time-to-first-frame.
-// Sits alongside the existing `info=first_frame` direct emission so a
-// slow cold-start surfaces both signals on the same row.
-//
-//   ttff > 4s  → error=*video_startup_severe
-//   ttff > 2s  → warning=*video_startup_long
-//   else       → "" (fast startup; only the info=first_frame chip lands)
-func videoStartupLabel(ttffS float32) string {
-	switch {
-	case ttffS > 4.0:
-		return SevError + "=" + synthMark + "video_startup_severe"
-	case ttffS > 2.0:
-		return SevWarning + "=" + synthMark + "video_startup_long"
-	}
-	return ""
-}
+// Startup latency is now classified solely by qoe_vst_* (qoe_labels.go),
+// keyed on VideoStartTimeMs — the industry-standard Video Start Time
+// (playback actually starting), config-driven thresholds. The legacy
+// video_startup_* labels (keyed on VideoFirstFrameTimeS, hardcoded 2s/4s)
+// were retired in #568; they duplicated qoe_vst_* and disagreed on
+// severity. VideoFirstFrameTimeMs is retained — qoe_vsf/qoe_msf still use
+// it as the "did a frame ever render?" discriminator.
 
 func stallLabel(durS float64, ctx string) string {
 	b := durationBucket(durS)
@@ -302,20 +454,20 @@ func stallLabel(durS float64, ctx string) string {
 	case "startup":
 		switch b {
 		case bucketShort:
-			return SevInfo + "=" + synthMark + "stall_short_startup"
+			return SevInfo + "=" + synthMark + "qoe_stall_short_startup"
 		case bucketLong:
-			return SevWarning + "=" + synthMark + "stall_long_startup"
+			return SevWarning + "=" + synthMark + "qoe_stall_long_startup"
 		default:
-			return SevCritical + "=" + synthMark + "stall_severe_startup"
+			return SevCritical + "=" + synthMark + "qoe_stall_severe_startup"
 		}
 	default: // midplay
 		switch b {
 		case bucketShort:
-			return SevInfo + "=" + synthMark + "stall_short_midplay"
+			return SevInfo + "=" + synthMark + "qoe_stall_short_midplay"
 		case bucketLong:
-			return SevWarning + "=" + synthMark + "stall_long_midplay"
+			return SevWarning + "=" + synthMark + "qoe_stall_long_midplay"
 		default:
-			return SevCritical + "=" + synthMark + "stall_severe_midplay"
+			return SevCritical + "=" + synthMark + "qoe_stall_severe_midplay"
 		}
 	}
 }
@@ -329,20 +481,20 @@ func bufferingLabel(durS float64, ctx string) string {
 	case "scrub":
 		switch b {
 		case bucketShort:
-			return SevInfo + "=" + synthMark + "buffering_short_scrub"
+			return SevInfo + "=" + synthMark + "qoe_buffering_short_scrub"
 		case bucketLong:
-			return SevInfo + "=" + synthMark + "buffering_long_scrub"
+			return SevInfo + "=" + synthMark + "qoe_buffering_long_scrub"
 		default:
-			return SevWarning + "=" + synthMark + "buffering_severe_scrub"
+			return SevWarning + "=" + synthMark + "qoe_buffering_severe_scrub"
 		}
 	default: // startup
 		switch b {
 		case bucketShort:
-			return SevInfo + "=" + synthMark + "buffering_short_startup"
+			return SevInfo + "=" + synthMark + "qoe_buffering_short_startup"
 		case bucketLong:
-			return SevWarning + "=" + synthMark + "buffering_long_startup"
+			return SevWarning + "=" + synthMark + "qoe_buffering_long_startup"
 		default:
-			return SevCritical + "=" + synthMark + "buffering_severe_startup"
+			return SevCritical + "=" + synthMark + "qoe_buffering_severe_startup"
 		}
 	}
 }
@@ -397,6 +549,18 @@ func computeNetworkLabelsWithState(s *labelState, r *netRow) []string {
 		}
 		if r.TransferMs > 6000 && isSegmentPath(r.Path) {
 			out = append(out, SevWarning+"=slow_segment")
+		}
+		// #553 — QoE network-tier breaches on clean rows. Thresholds
+		// from config; read under a brief lock (this path doesn't hold
+		// the labelState mutex outside the retry section below).
+		s.mu.Lock()
+		cfg := s.thresholds()
+		s.mu.Unlock()
+		if r.TTFBMs > float32(cfg.Network.TTFBBreachMs) {
+			out = append(out, qoeLabel(SevWarning, "qoe_ttfb_breach"))
+		}
+		if r.TransferMs > float32(cfg.Network.TransferStallMs) {
+			out = append(out, qoeLabel(SevWarning, "qoe_transfer_stall"))
 		}
 	}
 
@@ -537,6 +701,11 @@ func computeControlLabels(r *ctrlRow) []string {
 		return out
 	case "content_changed":
 		return []string{SevInfo + "=" + synthMark + "content_changed"}
+	case "server_start":
+		// Proxy restart/boot marker (#671). Global (no player_id) — info
+		// carries restored/skipped/baseline_mbps. info-tier so it never
+		// tints a row, but is filterable via `--label-has info=*server_start`.
+		return []string{SevInfo + "=" + synthMark + "server_start"}
 	case "session_start":
 		return []string{SevInfo + "=" + synthMark + "session_start"}
 	case "session_end":
@@ -550,9 +719,12 @@ func computeControlLabels(r *ctrlRow) []string {
 
 // kvLabelsFromInfo parses a label_changed control_event's `info` JSON
 // (the player's labels map at the moment of change) and renders each
-// pair as one `<sev>=<key>_<value>` label entry. Uses SevInfo because
-// KV labels are operator metadata, not failure signals — they should
-// inherit the existing `info=` chip color in the dashboard.
+// pair as one `<sev>=<key>_<value>` label entry. Uses SevTesting: these
+// KV labels are set by the automated test harness (run_id / test /
+// platform / cycle_id via LabelPlay), so they're test metadata, not
+// playback signal — they group under the dashboard's "Testing" tier
+// rather than drowning real events in Info. testing is unranked in
+// worstSeverity, so these never tint a row or bump classification.
 //
 // Sanitises both key and value to [A-Za-z0-9_-] so the label stays in
 // the strict `<sev>=<event>` grammar.
@@ -571,7 +743,7 @@ func kvLabelsFromInfo(info string) []string {
 		if k == "" || v == "" {
 			continue
 		}
-		out = append(out, SevInfo+"="+k+"_"+v)
+		out = append(out, SevTesting+"="+k+"_"+v)
 	}
 	return out
 }

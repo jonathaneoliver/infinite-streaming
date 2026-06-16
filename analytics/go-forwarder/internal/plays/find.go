@@ -41,7 +41,15 @@ func FindPlays(ctx context.Context, b Backend, f PlayFilter) ([]map[string]any, 
 		limit = maxPlaysLimit
 	}
 
-	return runPlaysQuery(ctx, b, clauses, params, post, limit)
+	rows, err := runPlaysQuery(ctx, b, clauses, params, post, limit)
+	if err != nil {
+		return nil, err
+	}
+	// #678 — attach the typed scenario (run-identity) object built from the
+	// summary columns + testing= label tails. Single chokepoint: both the
+	// list and the single-play GetPlaySummary path flow through here.
+	enrichScenario(rows)
+	return rows, nil
 }
 
 // GetPlaySummary returns the single PlaySummary for play_id, or nil
@@ -128,9 +136,9 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		WITH base AS (
 		  SELECT
 		    session_id, play_id, attempt_id, ts,
-		    player_id, group_id, content_id,
+		    player_id, group_id, content_id, master_manifest_url,
 		    player_state, player_error, last_event,
-		    stall_count, dropped_frames, frames_displayed,
+		    stall_count, frames_dropped, frames_displayed,
 		    video_bitrate_mbps, video_resolution, video_quality_pct,
 		    video_first_frame_time_s,
 		    master_manifest_consecutive_failures,
@@ -141,6 +149,20 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		    fault_count_transfer_active_timeout,
 		    fault_count_transfer_idle_timeout,
 		    classification,
+		    -- #550 Phase 1+2+4 fields for the aggregation below.
+		    playing_time_ms, buffering_time_ms, stalling_time_ms,
+		    error_count, error_code, error_domain,
+		    terminal_error_code, terminal_error_domain,
+		    playback_status, playback_reason,
+		    device_class, device_model, player_tech, player_tech_version,
+		    app_version, os_version_major, os_version_minor,
+		    -- #634: tie-break key for the outcome argMaxes below. A
+		    -- play-terminal row that shares its ts with the final
+		    -- heartbeat (e.g. a pre-fix proxy-synthesized play_end,
+		    -- which cloned the dead session's event_time) must still
+		    -- win, or playback_status flaps between in_progress and
+		    -- the terminal value from one read to the next.
+		    last_event IN ('play_end', 'session_end') AS is_terminal_row,
 		    lagInFrame(video_bitrate_mbps, 1, video_bitrate_mbps) OVER w AS prev_bitrate,
 		    lagInFrame(video_resolution,   1, video_resolution)   OVER w AS prev_resolution
 		  FROM %s.%s
@@ -154,6 +176,24 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		         countIf(faulted = 1)  AS net_faults
 		  FROM %s.network_requests
 		  %s
+		  GROUP BY play_id
+		),
+		-- #679: the go-live build that served this play, read from the
+		-- X-Served-By response header the proxy already captures into
+		-- response_headers (a JSON array of {name,value}). go-live emits
+		-- "go-live/<build>" once it's built with -ldflags; the forwarder
+		-- strips the prefix. anyIf(non-empty) since it's constant per play.
+		server_builds AS (
+		  SELECT play_id, anyIf(sb, sb != '') AS served_by
+		  FROM (
+		    SELECT play_id,
+		           JSONExtractString(
+		             arrayFirst(h -> JSONExtractString(h, 'name') = 'X-Served-By',
+		                        JSONExtractArrayRaw(response_headers)),
+		             'value') AS sb
+		    FROM %s.network_requests
+		    %s
+		  )
 		  GROUP BY play_id
 		),
 		-- Per-play label histogram across all three source tables.
@@ -171,6 +211,15 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		  SELECT lowerUTF8(play_id) AS play_id, arrayJoin(labels) AS label
 		  FROM %s.control_events
 		  %s
+		  UNION ALL
+		  -- #506 derived anomaly labels (analytics/tools/derive_labels.py):
+		  -- one row per (play, condition), surfaced as <severity>=<label> so
+		  -- the existing chip renderer + label filter treat them like any
+		  -- other label. DISTINCT collapses ReplacingMergeTree pre-merge
+		  -- dups; the play_id JOIN below bounds this tiny table to the
+		  -- window's plays, so no time WHERE is needed here.
+		  SELECT DISTINCT lowerUTF8(play_id) AS play_id, concat(severity, '=', label) AS label
+		  FROM %s.derived_labels
 		),
 		labels_per_play AS (
 		  SELECT play_id, label, count() AS n
@@ -192,11 +241,15 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		    any(player_id) AS player_id,
 		    any(group_id) AS group_id,
 		    any(content_id) AS content_id,
+		    -- #679: the master manifest the player loaded — non-empty only on
+		    -- master-playlist fetches, so pick any non-empty value (constant
+		    -- per play). The forwarder derives the LL/2s/6s variant from it.
+		    anyIf(master_manifest_url, master_manifest_url != '') AS master_manifest_url,
 		    min(ts) AS started_at,
 		    max(ts) AS last_seen_at,
 		    count() AS metric_events,
 		    max(stall_count) AS stalls,
-		    max(dropped_frames) AS dropped_frames,
+		    max(frames_dropped) AS frames_dropped,
 		    argMax(player_state, ts) AS last_state,
 		    argMax(player_error, ts) AS last_player_error,
 		    max(master_manifest_consecutive_failures) AS master_manifest_failures,
@@ -220,7 +273,38 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		    countIf(last_event = 'restart')       AS restart_count,
 		    countIf(last_event = 'error')         AS error_event_count,
 		    any(classification) AS classification,
-		    maxIf(attempt_id, attempt_id > 0)       AS attempt_id_max
+		    maxIf(attempt_id, attempt_id > 0)       AS attempt_id_max,
+		    -- #550 Phase 1: residency totals. argMax(.., ts) = the value at the
+		    -- play's LAST row (its final cumulative total), NOT max(). A stale
+		    -- leading row — e.g. a mis-bucketed prior-play play_end (#603) — carries
+		    -- a huge value at an EARLY ts; max() would let it win and inflate the
+		    -- per-play total + the derived rate columns. Monotonic within a play, so
+		    -- for a clean play argMax(.., ts) == max() anyway.
+		    argMax(playing_time_ms, ts) AS playing_time_ms,
+		    argMax(buffering_time_ms, ts) AS buffering_time_ms,
+		    argMax(stalling_time_ms, ts) AS stalling_time_ms,
+		    -- #550 Phase 2: outcome (argMax on terminal row; in_progress
+		    -- mid-play rows return last value seen, which is what we
+		    -- want for live sessions). #634: keyed on (ts, is_terminal_row)
+		    -- so a terminal row at the same ts as the final heartbeat
+		    -- still wins deterministically instead of flapping.
+		    argMax(playback_status, (ts, is_terminal_row)) AS playback_status,
+		    argMax(playback_reason, (ts, is_terminal_row)) AS playback_reason,
+		    argMax(terminal_error_code, (ts, is_terminal_row))   AS terminal_error_code,
+		    argMax(terminal_error_domain, (ts, is_terminal_row)) AS terminal_error_domain,
+		    argMax(error_code, ts)   AS last_error_code,
+		    argMax(error_domain, ts) AS last_error_domain,
+		    max(error_count) AS error_count,
+		    -- #550 Phase 4: device taxonomy — stable per session;
+		    -- argMax picks the most recent stamp (which equals every
+		    -- stamp in practice).
+		    argMax(device_class, ts) AS device_class,
+		    argMax(device_model, ts) AS device_model,
+		    argMax(player_tech, ts)  AS player_tech,
+		    argMax(player_tech_version, ts) AS player_tech_version,
+		    argMax(app_version, ts)  AS app_version,
+		    argMax(os_version_major, ts) AS os_version_major,
+		    argMax(os_version_minor, ts) AS os_version_minor
 		  FROM base
 		  GROUP BY play_id
 		)
@@ -232,7 +316,7 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		  agg.session_id, agg.group_id, agg.content_id,
 		  toString(agg.started_at)   AS started_at,
 		  toString(agg.last_seen_at) AS last_seen_at,
-		  agg.metric_events, agg.stalls, agg.dropped_frames,
+		  agg.metric_events, agg.stalls, agg.frames_dropped,
 		  agg.last_state, agg.last_player_error,
 		  agg.master_manifest_failures, agg.manifest_failures, agg.segment_failures,
 		  agg.all_failures, agg.transport_failures, agg.active_timeouts, agg.idle_timeouts,
@@ -241,7 +325,18 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		  agg.frames_displayed, agg.first_frame_s,
 		  agg.user_marked_count, agg.frozen_count, agg.segment_stall_count,
 		  agg.restart_count, agg.error_event_count,
+		  -- #550 Phase 1+2+4 fields propagated to PlaySummary.
+		  agg.playing_time_ms, agg.buffering_time_ms, agg.stalling_time_ms,
+		  agg.playback_status, agg.playback_reason,
+		  agg.terminal_error_code, agg.terminal_error_domain,
+		  agg.last_error_code, agg.last_error_domain, agg.error_count,
+		  agg.device_class, agg.device_model, agg.player_tech, agg.player_tech_version,
+		  agg.app_version, agg.os_version_major, agg.os_version_minor,
 		  agg.classification,
+		  -- #679: scenario sources — master manifest URL (variant derived in
+		  -- the forwarder) + go-live build from the captured X-Served-By header.
+		  agg.master_manifest_url,
+		  ifNull(server_builds.served_by, '') AS served_by,
 		  ifNull(net_counts.net_rows,   0) AS net_events,
 		  ifNull(net_counts.net_errors, 0) AS net_errors,
 		  ifNull(net_counts.net_faults, 0) AS net_faults,
@@ -250,16 +345,19 @@ func runPlaysQuery(ctx context.Context, b Backend, clauses []string, params map[
 		  ifNull(labels_agg.label_pairs,           []) AS label_histogram
 		FROM agg
 		LEFT JOIN net_counts ON agg.play_id = net_counts.play_id
+		LEFT JOIN server_builds ON agg.play_id = server_builds.play_id
 		LEFT JOIN labels_agg ON lowerUTF8(agg.play_id) = labels_agg.play_id
 		%s
 		ORDER BY agg.started_at DESC
 		LIMIT %d
 		FORMAT JSONEachRow`,
 		b.Database, b.EventsTable, where,
-		b.Database, netWhere,
+		b.Database, netWhere, // net_counts
+		b.Database, netWhere, // #679 server_builds
 		b.Database, b.EventsTable, where,
 		b.Database, netWhere,
 		b.Database, netWhere,
+		b.Database, // #506 derived_labels branch in labels_unioned
 		postWhere(postClauses),
 		limit,
 	)

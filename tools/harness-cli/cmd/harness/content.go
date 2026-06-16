@@ -24,6 +24,8 @@ Flags:
   --overstate-bandwidth        inflate BANDWIDTH by 10%
   --live-offset SEC            live-edge offset window
   --allowed-variants url[,url] whitelist variant URIs (others stripped)
+  --variant-order ORDER        reorder master variants by BANDWIDTH:
+                               default | ascending | descending | first_4mbps (#682)
   --show                       print current and exit
   --clear                      send {"content": null}
 `
@@ -38,6 +40,7 @@ func cmdContent(client *api.Client, args []string, asJSON bool) error {
 	overstateBw := fs.Bool("overstate-bandwidth", false, "")
 	liveOffset := fs.Int("live-offset", -1, "")
 	allowedCSV := fs.String("allowed-variants", "", "")
+	variantOrder := fs.String("variant-order", "", "")
 	show := fs.Bool("show", false, "")
 	clear := fs.Bool("clear", false, "")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -89,6 +92,14 @@ func cmdContent(client *api.Client, args []string, asJSON bool) error {
 	if *allowedCSV != "" {
 		variants := strings.Split(*allowedCSV, ",")
 		cm.AllowedVariants = &variants
+		touched = true
+	}
+	if *variantOrder != "" {
+		vo := proxy.ContentManipulationVariantOrder(*variantOrder)
+		if !vo.Valid() {
+			return fmt.Errorf("invalid --variant-order %q (want default|ascending|descending|first_4mbps)", *variantOrder)
+		}
+		cm.VariantOrder = &vo
 		touched = true
 	}
 	if !touched {

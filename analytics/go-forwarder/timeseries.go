@@ -182,6 +182,10 @@ func makeTimeseriesHandler(cfg config, ring *Ring) http.HandlerFunc {
 			cancel := startControlPoller(ctx, w, flusher, writeMu, cfg, params, emittedIDs)
 			defer cancel()
 		}
+		if selectionsHasAVMetrics(selections) {
+			cancel := startAVMPoller(ctx, w, flusher, writeMu, cfg, params, emittedIDs)
+			defer cancel()
+		}
 
 		streamLiveDeltas(ctx, w, flusher, writeMu, subCh, selections, emittedIDs, params.playID)
 	}
@@ -248,7 +252,7 @@ func parseTimeseriesParams(r *http.Request) (timeseriesParams, error) {
 	// (CH will reject unknown columns per-stream — clean 4xx surface).
 	if f := strings.TrimSpace(q.Get("fields")); f != "" {
 		list := splitCSV(f)
-		for _, sk := range []streamKind{streamEvents, streamNetwork, streamControl} {
+		for _, sk := range []streamKind{streamEvents, streamNetwork, streamControl, streamAVMetrics} {
 			p.fieldsByStream[sk] = list
 		}
 	}
@@ -368,6 +372,11 @@ func emitBackfill(
 		// CH query; live continuation is handled by startControlPoller
 		// after backfill returns.
 		return emitBackfillControl(ctx, w, flusher, cfg, params, seen)
+	case streamAVMetrics:
+		// ios_avmetric_events doesn't pass through the ring either —
+		// same shape as control_events. Live continuation handled by
+		// startAVMPoller after backfill returns.
+		return emitBackfillAVM(ctx, w, flusher, cfg, params, seen)
 	}
 	return nil
 }
@@ -539,6 +548,18 @@ func lockedWrite(mu *sync.Mutex, fn func()) {
 	fn()
 }
 
+// selectionsHasAVMetrics reports whether the resolved selections
+// include the ios_avmetric_events stream. Mirrors selectionsHasControl
+// — both streams are CH-only, polled rather than ring-driven.
+func selectionsHasAVMetrics(selections []streamSelection) bool {
+	for _, s := range selections {
+		if s.Stream == streamAVMetrics {
+			return true
+		}
+	}
+	return false
+}
+
 // selectionsHasControl reports whether the resolved selections include
 // the control_events stream. control_events doesn't come off the ring
 // — see startControlPoller.
@@ -571,6 +592,8 @@ func streamToEventName(s streamKind) string {
 		return "network"
 	case streamControl:
 		return "control"
+	case streamAVMetrics:
+		return "avmetrics"
 	}
 	return "data"
 }
@@ -617,10 +640,62 @@ func buildSamplesQuery(cfg config, sel streamSelection, params timeseriesParams)
 	// WHERE clause's `ts >= parseDateTime64BestEffort(...)` is then a
 	// String/DateTime64 comparison that CH rejects with
 	// ILLEGAL_TYPE_OF_ARGUMENT. Same pattern v2_handlers.go uses.
+	// Middle-layer LEFT-JOIN the #506 derived token (event rows are keyed by
+	// event_fingerprint); outer toString projection runs over native `ts`.
 	cols := buildSelectColumns(sel.Columns)
-	q := fmt.Sprintf(`SELECT %s FROM (SELECT * FROM %s.%s WHERE %s ORDER BY ts ASC LIMIT %d) FORMAT JSONEachRow`,
-		cols, cfg.chDatabase, cfg.chTable, strings.Join(clauses, " AND "), limit)
+	dtScope := []string{}
+	if params.playerID != "" {
+		dtScope = append(dtScope, "lowerUTF8(player_id) = lowerUTF8({player:String})")
+	}
+	if params.playID != "" && params.playID != "—" {
+		dtScope = append(dtScope, "lowerUTF8(play_id) = lowerUTF8({play:String})")
+	}
+	if params.from != "" {
+		dtScope = append(dtScope, "ts >= parseDateTime64BestEffort({from:String})")
+	}
+	if params.to != "" {
+		dtScope = append(dtScope, "ts <= parseDateTime64BestEffort({to:String})")
+	}
+	if len(dtScope) == 0 {
+		dtScope = append(dtScope, "ts >= now() - INTERVAL 1 HOUR")
+	}
+	q := fmt.Sprintf(`SELECT %s, token FROM (
+	  SELECT base.*, ifNull(dt.token, '') AS token, ifNull(dt.arr, []) AS dl_arr
+	  FROM (SELECT * FROM %s.%s WHERE %s ORDER BY ts ASC LIMIT %d) base
+	  %s
+	) FORMAT JSONEachRow`,
+		cols, cfg.chDatabase, cfg.chTable, strings.Join(clauses, " AND "), limit,
+		derivedEventTokenJoinSQL(cfg.chDatabase, strings.Join(dtScope, " AND ")))
 	return q, args, nil
+}
+
+// derivedEventTokenJoinSQL is the session_events counterpart to
+// derivedTokenJoinSQL. The live session_events has no per-row fingerprint
+// (sorting key is player_id, ts), so event tokens are keyed by (player_id, ts)
+// — which is also how the SSE layer identities event rows. surface='event'
+// keeps network tokens (which may share a ts) from bleeding in; argMax dedupes
+// the ReplacingMergeTree to the latest score.
+func derivedEventTokenJoinSQL(db, scope string) string {
+	return fmt.Sprintf(`LEFT JOIN (
+	  SELECT tok.player_id AS player_id, tok.ts AS ts, tok.token AS token, ifNull(lab.arr, []) AS arr
+	  FROM (
+	    SELECT player_id, ts, argMax(token, scored_at) AS token
+	    FROM %s.derived_tokens
+	    WHERE surface = 'event' AND %s
+	    GROUP BY player_id, ts
+	  ) tok
+	  LEFT JOIN (
+	    SELECT player_id, ts, groupArray(sl) AS arr
+	    FROM (
+	      SELECT player_id, ts, condition,
+	             argMax(concat(severity, '=', label), scored_at) AS sl
+	      FROM %s.derived_labels WHERE surface = 'event' AND %s
+	      GROUP BY player_id, ts, condition
+	    )
+	    GROUP BY player_id, ts
+	  ) lab ON tok.player_id = lab.player_id AND tok.ts = lab.ts
+	) dt ON base.player_id = dt.player_id AND base.ts = dt.ts`,
+		db, scope, db, scope)
 }
 
 func buildNetworkQuery(cfg config, sel streamSelection, params timeseriesParams) (string, map[string]string, error) {
@@ -658,11 +733,77 @@ func buildNetworkQuery(cfg config, sel streamSelection, params timeseriesParams)
 		limit = backfillCapNetwork
 	}
 	// Subquery wrap — same DateTime64-vs-String aliasing reason as
-	// buildSamplesQuery above.
+	// buildSamplesQuery above. The middle layer LEFT-JOINs the #506
+	// batch-derived per-row token (analytics/tools/derive_tokens.py); the
+	// outer toString projection then operates on the native `ts`.
 	cols := buildSelectColumns(sel.Columns)
-	q := fmt.Sprintf(`SELECT %s FROM (SELECT * FROM %s.network_requests WHERE %s ORDER BY ts ASC LIMIT %d) FORMAT JSONEachRow`,
-		cols, cfg.chDatabase, strings.Join(clauses, " AND "), limit)
+	dtScope := []string{}
+	if params.playerID != "" {
+		dtScope = append(dtScope, "lowerUTF8(player_id) = lowerUTF8({player:String})")
+	}
+	if params.playID != "" && params.playID != "—" {
+		dtScope = append(dtScope, "lowerUTF8(play_id) = lowerUTF8({play:String})")
+	}
+	if params.from != "" {
+		dtScope = append(dtScope, "ts >= parseDateTime64BestEffort({from:String})")
+	}
+	if params.to != "" {
+		dtScope = append(dtScope, "ts <= parseDateTime64BestEffort({to:String})")
+	}
+	if len(dtScope) == 0 {
+		dtScope = append(dtScope, "ts >= now() - INTERVAL 1 HOUR")
+	}
+	q := fmt.Sprintf(`SELECT %s, token FROM (
+	  SELECT base.*, ifNull(dt.token, '') AS token, ifNull(dt.arr, []) AS dl_arr
+	  FROM (SELECT * FROM %s.network_requests WHERE %s ORDER BY ts ASC LIMIT %d) base
+	  %s
+	) FORMAT JSONEachRow`,
+		cols, cfg.chDatabase, strings.Join(clauses, " AND "), limit,
+		derivedTokenJoinSQL(cfg.chDatabase, "entry_fingerprint", strings.Join(dtScope, " AND ")))
 	return q, args, nil
+}
+
+// derivedTokenJoinSQL returns a LEFT JOIN fragment that attaches the #506
+// batch-derived per-row token (analytics/tools/derive_tokens.py, reusing the
+// single tokenizer in analytics/tools/tokenize.py) to a base query aliased
+// `base`, matched by (player_id, ts, entry_fingerprint). derived_tokens is a
+// ReplacingMergeTree, so argMax(token, scored_at) collapses pre-merge
+// duplicates to the latest score. `scope` constrains the build side to the
+// same player/play/time window as the base query (the columns derived_tokens
+// shares) so the join never has to read the whole table.
+// baseFpCol is the fingerprint column on the base table to match against
+// derived_tokens.entry_fingerprint — `entry_fingerprint` for network_requests,
+// `event_fingerprint` for session_events (the batch stores either under
+// entry_fingerprint; surface distinguishes them).
+// A SINGLE join exposing both `token` (derived_tokens) and `arr` (the #506
+// per-row anomaly labels, derived_labels) — kept to one base join on purpose:
+// CH 24.8's analyzer can't resolve `ts` from `base.*` across two base joins,
+// so the label aggregate is folded in as an inner join in its own scope. The
+// label rows for a given (player_id, ts, entry_fingerprint) always have a token
+// row (a label anchors on a tokenised row), so LEFT JOIN labels onto tokens
+// loses nothing.
+func derivedTokenJoinSQL(db, baseFpCol, scope string) string {
+	return fmt.Sprintf(`LEFT JOIN (
+	  SELECT tok.player_id AS player_id, tok.ts AS ts, tok.entry_fingerprint AS entry_fingerprint,
+	         tok.token AS token, ifNull(lab.arr, []) AS arr
+	  FROM (
+	    SELECT player_id, ts, entry_fingerprint, argMax(token, scored_at) AS token
+	    FROM %s.derived_tokens
+	    WHERE %s
+	    GROUP BY player_id, ts, entry_fingerprint
+	  ) tok
+	  LEFT JOIN (
+	    SELECT player_id, ts, entry_fingerprint, groupArray(sl) AS arr
+	    FROM (
+	      SELECT player_id, ts, entry_fingerprint, condition,
+	             argMax(concat(severity, '=', label), scored_at) AS sl
+	      FROM %s.derived_labels WHERE %s
+	      GROUP BY player_id, ts, entry_fingerprint, condition
+	    )
+	    GROUP BY player_id, ts, entry_fingerprint
+	  ) lab ON tok.player_id = lab.player_id AND tok.ts = lab.ts AND tok.entry_fingerprint = lab.entry_fingerprint
+	) dt ON base.player_id = dt.player_id AND base.ts = dt.ts AND base.%s = dt.entry_fingerprint`,
+		db, scope, db, scope, baseFpCol)
 }
 
 // buildSelectColumns produces the SELECT projection list. `ts` is
@@ -675,6 +816,12 @@ func buildSelectColumns(cols []string) string {
 		switch c {
 		case "ts":
 			parts = append(parts, "toString(ts) AS ts")
+		case "labels":
+			// #506 — fold the per-row derived anomaly labels (dl_arr, from
+			// derivedLabelJoinSQL) into the row's labels[] so they render as
+			// chips in NetworkLog / PlayLog with no dashboard change. The
+			// surrounding query always exposes dl_arr (ifNull(...,[])).
+			parts = append(parts, "arrayConcat(labels, dl_arr) AS labels")
 		default:
 			parts = append(parts, c)
 		}

@@ -137,7 +137,7 @@ expected for loss-driven congestion-window collapse.
 **Test:** `tests/server_behavior/server_pattern_test.go::TestServerPattern`
 
 **Methodology:** Install a built-in pattern **template** (square_wave /
-ramp_up / ramp_down / pyramid) via `POST /api/nftables/pattern/{port}`, sweep
+ramp_up / ramp_down / pyramid / transient_shock) via `POST /api/nftables/pattern/{port}`, sweep
 the per-step duration (6s / 12s / 24s), pull segments continuously, and bucket
 each segment by the engine's **live** step (`nftables_pattern_step` /
 `nftables_pattern_rate_runtime_mbps`) — bucketing by the engine's own step
@@ -422,6 +422,32 @@ re-encode applying one manipulation doesn't drop another's edit. overstate
 multiplies both BANDWIDTH and AVERAGE-BANDWIDTH by exactly 1.10. corruption
 preserves Content-Length (honest header) while zeroing every body byte, so the
 failure surfaces as a decode error, not a truncated transfer.
+
+---
+
+## 1.11 Config-on-connect (#712)
+
+`sb_config_on_connect_test.go` — `TestConfigOnConnect_Shape` /
+`TestConfigOnConnect_FaultRule`.
+
+Instead of bootstrap → PATCH, the bootstrap manifest URL itself carries the
+session config as `proxy.*` args. The base-port handler materializes the config
+atomically, then 302s to the session port with the args **stripped**:
+
+```
+GET …:30081/go-live/<content>/master_6s.m3u8
+      ?player_id=<uuid>&proxy.shape.rate_mbps=2.5&proxy.labels.test=cfg712
+  → 302 …:301N1/go-live/<content>/master_6s.m3u8?player_id=<uuid>   # proxy.* gone
+```
+
+The tests assert (a) the redirected URL carries no `proxy.*`, (b) the session
+record on `/api/sessions` already reflects the config (`nftables_bandwidth_mbps`,
+`segment_failure_type`, …) **before any PATCH**. Full vocabulary + tier
+precedence + the "segment length is the filename, not an arg" rule live in
+[`api/openapi/v2/DESIGN.md` § 5b](../../api/openapi/v2/DESIGN.md). Config-on-
+connect rides the **same** v2→v1 translator as PATCH, so it accepts exactly the
+PATCH-supported field set (no `filter.variant`/`.codec` yet) and rejects the
+rest with 400.
 
 ---
 

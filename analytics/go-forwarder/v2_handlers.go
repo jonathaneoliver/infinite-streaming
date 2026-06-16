@@ -73,7 +73,88 @@ func mountV2Handlers(mux *http.ServeMux, cfg config) {
 		v2ControlEventsHandler(w, r, cfg)
 	})
 
+	// /api/v2/avmetric_events — issue #693. Bounded read of the iOS 18
+	// AVMetrics feed (ios_avmetric_events), the highest-resolution
+	// failure-timing telemetry we have. Mirrors control_events' shape +
+	// discriminator guard; `event_type` is the AVMetric subclass filter.
+	mux.HandleFunc("/api/v2/avmetric_events", func(w http.ResponseWriter, r *http.Request) {
+		v2AVMetricEventsHandler(w, r, cfg)
+	})
+
 	mountV2PlaysHandlers(mux, cfg)
+}
+
+// v2AVMetricEventsHandler returns ios_avmetric_events rows as NDJSON
+// keyed by ?player_id=, ?play_id=, ?event_type= (repeatable), ?from=,
+// ?to=, ?limit=, plus label_has/label_not. Bounded (LIMIT) so it closes
+// — unlike the timeseries SSE. Issue #693.
+func v2AVMetricEventsHandler(w http.ResponseWriter, r *http.Request, cfg config) {
+	q := r.URL.Query()
+	playerID := canonicalV2ID(q.Get("player_id"))
+	playID := canonicalV2ID(q.Get("play_id"))
+	// event_type is repeatable (the AVMetric subclass name, e.g.
+	// HLSPlaylistRequestEvent). Filtering by it lets an operator pull just
+	// the error-bearing events without a player_id.
+	var eventTypes []string
+	for _, et := range q["event_type"] {
+		if et = strings.TrimSpace(et); et != "" {
+			eventTypes = append(eventTypes, et)
+		}
+	}
+	from := q.Get("from")
+	to := q.Get("to")
+	limit := q.Get("limit")
+	if limit == "" {
+		limit = "1000"
+	}
+	labelHas, labelNot := readLabelFilters(q)
+	// Require at least one discriminating predicate so we never scan the
+	// whole ios_avmetric_events table.
+	if playerID == "" && playID == "" && len(eventTypes) == 0 && len(labelHas) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"one of player_id, play_id, event_type, or label_has required"}`))
+		return
+	}
+	params := map[string]string{"limit": limit}
+	var where []string
+	if playerID != "" {
+		params["player_id"] = playerID
+		where = append(where, "player_id = {player_id:String}")
+	}
+	if playID != "" {
+		params["play_id"] = playID
+		where = append(where, "play_id = {play_id:String}")
+	}
+	if len(eventTypes) > 0 {
+		names := make([]string, len(eventTypes))
+		for i, et := range eventTypes {
+			key := "event_type_" + itoa(i)
+			params[key] = et
+			names[i] = "{" + key + ":String}"
+		}
+		where = append(where, "event_type IN ("+strings.Join(names, ", ")+")")
+	}
+	if from != "" {
+		params["from"] = from
+		where = append(where, "ts >= parseDateTime64BestEffortOrNull({from:String}, 3)")
+	}
+	if to != "" {
+		params["to"] = to
+		where = append(where, "ts <= parseDateTime64BestEffortOrNull({to:String}, 3)")
+	}
+	where, params = applyLabelFilters(where, params, "labels", labelHas, labelNot)
+	query := "SELECT ts, player_id, play_id, attempt_id, session_id, event_type, event_ts_ms, raw_json, labels, event_fingerprint, classification " +
+		"FROM " + cfg.chDatabase + ".ios_avmetric_events WHERE " +
+		strings.Join(where, " AND ") +
+		" ORDER BY ts ASC LIMIT {limit:UInt32} FORMAT JSONEachRow"
+	body, err := chQueryBytes(r.Context(), cfg, query, params)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"upstream query failed"}`))
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	_, _ = w.Write(body)
 }
 
 // v2ControlEventsHandler returns control_events rows as NDJSON keyed
@@ -84,26 +165,49 @@ func v2ControlEventsHandler(w http.ResponseWriter, r *http.Request, cfg config) 
 	// why this matters. An operator who curls the endpoint with
 	// an uppercase UUID would otherwise get an empty page.
 	playerID := canonicalV2ID(q.Get("player_id"))
-	if playerID == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"player_id required"}`))
-		return
-	}
 	playID := canonicalV2ID(q.Get("play_id"))
+	// `event` is repeatable. An event filter lets a global / session-less
+	// event (e.g. server_start, which has no player_id, #671) be listed
+	// without one — the read path no longer hard-requires player_id.
+	var events []string
+	for _, ev := range q["event"] {
+		if ev = strings.TrimSpace(ev); ev != "" {
+			events = append(events, ev)
+		}
+	}
 	from := q.Get("from")
 	to := q.Get("to")
 	limit := q.Get("limit")
 	if limit == "" {
 		limit = "1000"
 	}
-	params := map[string]string{
-		"player_id": playerID,
-		"limit":     limit,
+	// Tristate label filter — see label_filter.go.
+	labelHas, labelNot := readLabelFilters(q)
+	// Require at least one discriminating predicate so we never scan the
+	// whole control_events table.
+	if playerID == "" && playID == "" && len(events) == 0 && len(labelHas) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"one of player_id, play_id, event, or label_has required"}`))
+		return
 	}
-	where := []string{"player_id = {player_id:String}"}
+	params := map[string]string{"limit": limit}
+	var where []string
+	if playerID != "" {
+		params["player_id"] = playerID
+		where = append(where, "player_id = {player_id:String}")
+	}
 	if playID != "" {
 		params["play_id"] = playID
 		where = append(where, "play_id = {play_id:String}")
+	}
+	if len(events) > 0 {
+		names := make([]string, len(events))
+		for i, ev := range events {
+			key := "event_" + itoa(i)
+			params[key] = ev
+			names[i] = "{" + key + ":String}"
+		}
+		where = append(where, "event IN ("+strings.Join(names, ", ")+")")
 	}
 	if from != "" {
 		params["from"] = from
@@ -113,8 +217,6 @@ func v2ControlEventsHandler(w http.ResponseWriter, r *http.Request, cfg config) 
 		params["to"] = to
 		where = append(where, "ts <= parseDateTime64BestEffortOrNull({to:String}, 3)")
 	}
-	// Tristate label filter — see label_filter.go.
-	labelHas, labelNot := readLabelFilters(q)
 	where, params = applyLabelFilters(where, params, "labels", labelHas, labelNot)
 	query := "SELECT ts, player_id, play_id, attempt_id, session_id, source, event, info, labels, event_fingerprint, classification " +
 		"FROM " + cfg.chDatabase + ".control_events WHERE " +
@@ -366,36 +468,65 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		clauses = append(clauses, "ts >= now() - INTERVAL 1 HOUR")
 	}
 
-	// Wrap in a sub-select so the outer toString aliases don't shadow
-	// the typed `ts` column referenced by WHERE / ORDER BY (same trap
-	// the snapshots handler addresses; see commit 9cfca6f).
+	// derived_tokens join scope — the player/play/time columns
+	// derived_tokens shares, reusing the same params as the base WHERE so
+	// the join's build side is bounded to this query's window (see
+	// derivedTokenJoinSQL in timeseries.go).
+	dtScope := []string{}
+	if playerID != "" {
+		dtScope = append(dtScope, "lowerUTF8(player_id) = lowerUTF8({pid:String})")
+	}
+	if playID != "" && playID != "—" {
+		dtScope = append(dtScope, "lowerUTF8(play_id) = lowerUTF8({play:String})")
+	}
+	if from != "" {
+		dtScope = append(dtScope, "ts >= parseDateTime64BestEffort({from:String})")
+	}
+	if to != "" {
+		dtScope = append(dtScope, "ts < parseDateTime64BestEffort({to:String})")
+	}
+	if len(dtScope) == 0 {
+		dtScope = append(dtScope, "ts >= now() - INTERVAL 1 HOUR")
+	}
+
+	// Three layers: innermost `base` keeps native `ts` for WHERE/ORDER BY
+	// (no toString shadowing — same trap the snapshots handler addresses,
+	// commit 9cfca6f); the middle layer LEFT-JOINs the #506 batch-derived
+	// per-row token AND per-row anomaly labels (arrayConcat'd into labels[]
+	// so they chip like any ingest label); the outer applies toString.
 	query := fmt.Sprintf(`
 		SELECT
-		  toString(ts_raw) AS timestamp,
+		  toString(ts) AS timestamp,
 		  session_id, player_id, play_id, attempt_id,
 		  method, url, upstream_url, request_kind, content_type,
 		  status, bytes_in, bytes_out,
 		  ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,
-		  faulted, fault_type, fault_action, fault_category
+		  faulted, fault_type, fault_action, fault_category,
+		  arrayConcat(labels, dl_arr) AS labels, token
 		FROM (
-		  SELECT
-		    ts AS ts_raw,
-		    session_id, player_id, play_id, attempt_id,
-		    method, url, upstream_url, request_kind, content_type,
-		    status, bytes_in, bytes_out,
-		    ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,
-		    faulted, fault_type, fault_action, fault_category
-		  FROM %s.network_requests
-		  WHERE %s
-		  -- DESC so the LIMIT keeps the most recent N rows. ASC
-		  -- caused rare 4xx / faulted rows to be squeezed out by
-		  -- bulk 200s on long sessions; the NetworkLog table sorts
-		  -- client-side so display order is unaffected.
-		  ORDER BY ts DESC
-		  LIMIT %d
+		  SELECT base.*, ifNull(dt.token, '') AS token, ifNull(dt.arr, []) AS dl_arr
+		  FROM (
+		    SELECT
+		      ts, entry_fingerprint,
+		      session_id, player_id, play_id, attempt_id,
+		      method, url, upstream_url, request_kind, content_type,
+		      status, bytes_in, bytes_out,
+		      ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,
+		      faulted, fault_type, fault_action, fault_category, labels
+		    FROM %s.network_requests
+		    WHERE %s
+		    -- DESC so the LIMIT keeps the most recent N rows. ASC
+		    -- caused rare 4xx / faulted rows to be squeezed out by
+		    -- bulk 200s on long sessions; the NetworkLog table sorts
+		    -- client-side so display order is unaffected.
+		    ORDER BY ts DESC
+		    LIMIT %d
+		  ) base
+		  %s
 		)
 		FORMAT JSONEachRow`,
-		cfg.chDatabase, strings.Join(clauses, " AND "), limit)
+		cfg.chDatabase, strings.Join(clauses, " AND "), limit,
+		derivedTokenJoinSQL(cfg.chDatabase, "entry_fingerprint", strings.Join(dtScope, " AND ")))
 
 	rows, err := queryClickHouseRows(r.Context(), cfg, query, params)
 	if err != nil {
@@ -436,6 +567,20 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		}
 		if pid, _ := row["play_id"].(string); pid != "" {
 			item["play_id"] = pid
+		}
+		// #558 — surface the ingest-time labels[] so the dashboard can
+		// render network-row chips (http_5xx / slow_segment / fault_* and
+		// the #553 qoe_ttfb_breach / qoe_transfer_stall). NetworkLogEntry
+		// has no labels field, so patch it onto the row map directly,
+		// mirroring how ts/session_id/player_id are added above.
+		if labels, ok := row["labels"]; ok && labels != nil {
+			item["labels"] = labels
+		}
+		// #506 — the batch-derived per-row token (V_SEG(ΔP,ΔS), V_PROBE,
+		// STARTUP_RAMP, LOOP_BOUNDARY, …), LEFT-JOINed from derived_tokens.
+		// Empty for rows not yet scored by derive_tokens.py.
+		if tok, ok := row["token"].(string); ok && tok != "" {
+			item["token"] = tok
 		}
 		out = append(out, item)
 	}

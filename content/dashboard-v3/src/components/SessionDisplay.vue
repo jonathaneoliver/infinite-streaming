@@ -26,7 +26,7 @@
  * Composables run unconditionally; if sessionId is empty (live mode
  * before historical resolution), they short-circuit and return empty.
  */
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
+import { ref, shallowRef, computed, watch, onMounted, onBeforeUnmount, provide } from 'vue';
 import { useQueryClient } from '@tanstack/vue-query';
 import CollapsibleSection from '@/components/CollapsibleSection.vue';
 import SessionDetails from '@/components/SessionDetails.vue';
@@ -45,18 +45,28 @@ import { useChartCoordination } from '@/composables/useChartCoordination';
 // derives its event list from `labels[]` on rows across all three
 // streams (events / network / control_events) instead of a dedicated
 // markers table. See `sessionEvents` computed below.
+// Event category — replaces the old binary effect/cause axis. Four
+// causal roles keyed on stream + the proxy's fault_category. See
+// docs/EVENT_TAXONOMY.md for the model and the full mapping.
+type Category = 'action' | 'injected' | 'condition' | 'reaction';
+
 interface SessionEvent {
   ts?: string;
   event_time?: string;
   type?: string;
   info?: string;
-  kind?: 'effect' | 'cause';
+  category?: Category;
   priority?: 1 | 2 | 3 | 4;
   severity?: string;
   [k: string]: unknown;
 }
 import { usePlayer } from '@/composables/usePlayer';
-import { useSessionTimeSeries } from '@/composables/useSessionTimeSeries';
+import { useSessionTimeSeries, type Stream } from '@/composables/useSessionTimeSeries';
+import { useCompareMode } from '@/composables/useCompareMode';
+import { useGroupSiblings } from '@/composables/useGroupSiblings';
+import { CompareContextKey, sessionDash, type CompareSibling, type CompareSeriesIdentity } from '@/composables/useCompareContext';
+import CompareSeriesSource from '@/components/CompareSeriesSource.vue';
+import CompareSessionLegend from '@/components/CompareSessionLegend.vue';
 import { chRowToPlayerRecord, tsOfRow } from '@/composables/chRowAdapter';
 import {
   setArchivePlayer,
@@ -89,6 +99,18 @@ const props = defineProps<{
    *  (auto-pin brush to samples.rangeBounds when they land). */
   startMs?: number | null;
   endMs?: number | null;
+  /** Live-page hint: caller is mounting on a perpetually-live page
+   *  (TestingSession) with no URL time bounds. Skip the
+   *  pin-to-sample-bounds fallback so the brush leaves coord.range
+   *  null and panels follow the live edge on every refresh. Treat
+   *  identically to startMs!=null && endMs==null but without forcing
+   *  a startMs anchor. Default: false (legacy archive behaviour). */
+  followLive?: boolean;
+  /** #736 archive compare: the grouped set (incl. the active play) to
+   *  overlay, each member pinned to a specific historical play_id. When
+   *  present (≥2 members) compare mode is forced on and siblings resolve
+   *  from here instead of the live useGroupSiblings path. */
+  comparePlays?: Array<{ playerId: string; playId: string; tag?: string }>;
 }>();
 
 const playIdRef = computed(() => props.playId);
@@ -102,6 +124,153 @@ const playIdRef = computed(() => props.playId);
 // this subscription only matters for mutation-side consumers.
 const livePlayerIdRef = computed(() => props.playerId);
 const { player: livePlayer } = usePlayer(livePlayerIdRef);
+
+/* ─── Compare-charts overlay (issue #579) ───────────────────────────
+ * When the active session is in a group (≥2 members) and the operator
+ * flips "Compare Charts" (the GroupBanner toggle), overlay each grouped
+ * sibling's tagged rate/buffer series onto the shared charts. The toggle
+ * + sibling resolution are keyed on the RAW player id (props.playerId)
+ * so GroupBanner's button and this consumer share state via the
+ * module-level useCompareMode / useGroupSiblings maps. Each sibling's
+ * SSE is owned by one renderless CompareSeriesSource (rendered in the
+ * template); we register its events stream here and publish the assembled
+ * CompareContext so BandwidthChart / BufferChart can pull their overlays
+ * via useCompareOverlays(). */
+// Compare-toggle key. Live: per-player, so it shares state with GroupBanner's
+// checkbox. Archive (#736): a STABLE group key — switching the active-member
+// tab rail changes props.playerId, and we don't want that to land on a fresh
+// (off) toggle and silently drop compare mode.
+const compareKey = computed<string>(() => {
+  const cps = props.comparePlays ?? [];
+  if (cps.length >= 2) return 'archive-group:' + cps.map((m) => m.playerId).slice().sort().join(',');
+  return props.playerId;
+});
+const compareMode = useCompareMode(compareKey);
+const { siblings: groupSiblings } = useGroupSiblings(livePlayerIdRef);
+// #736 archive compare: when the viewer is opened with a grouped set
+// (comparePlays from the URL), siblings come from there — each pinned to a
+// specific historical play_id — instead of the live group resolution, and
+// compare mode is forced on. Tag from the carried session number so the
+// legend reads S1/S2/S3 without a live player lookup.
+type EffSibling = { playerId: string; label: string; tag: string; index: number; playId?: string };
+const archiveCompare = computed(() => (props.comparePlays?.length ?? 0) >= 2);
+const archiveSiblings = computed<EffSibling[]>(() =>
+  (props.comparePlays ?? [])
+    .filter((m) => m.playerId !== props.playerId)
+    .map((m, index) => ({
+      playerId: m.playerId,
+      playId: m.playId,
+      tag: m.tag ? `S${m.tag}` : `S${m.playerId.slice(0, 4)}`,
+      label: m.tag ? `#${m.tag}` : m.playerId.slice(0, 8),
+      index,
+    })),
+);
+const effectiveSiblings = computed<EffSibling[]>(() =>
+  archiveCompare.value ? archiveSiblings.value : groupSiblings.value,
+);
+const compareEnabled = computed(
+  () => effectiveSiblings.value.length >= 1 && compareMode.state.enabled,
+);
+// #736: arriving via the sessions "Compare group" link defaults the Compare
+// Charts toggle ON — the archive view has no live GroupBanner to flip it, so
+// SessionDisplay renders its own toggle (below) and seeds it here. The user
+// can still uncheck it; driving everything through compareMode (not a forced
+// flag) keeps the panel collapse + overlay consistent with the live page.
+if (archiveCompare.value) compareMode.setEnabled(true);
+// Registered sibling streams keyed by player_id. shallowRef + whole-Map
+// replace so add/remove triggers the computed WITHOUT deep-reactive
+// wrapping the Stream (which holds refs + functions).
+const siblingStreams = shallowRef(new Map<string, Stream<Record<string, unknown>>>());
+// Parallel map of each sibling's AVMetrics stream, registered alongside its
+// events stream so the bandwidth chart can merge every device's per-segment
+// dots (issue #486 compare-mode). Kept separate (not folded onto a tuple) so
+// the existing events-keyed lookups stay unchanged.
+const siblingAvmetrics = shallowRef(new Map<string, Stream<Record<string, unknown>>>());
+function registerSibling(
+  pid: string,
+  stream: Stream<Record<string, unknown>>,
+  avmetricsStream: Stream<Record<string, unknown>>,
+) {
+  const m = new Map(siblingStreams.value);
+  m.set(pid, stream);
+  siblingStreams.value = m;
+  const a = new Map(siblingAvmetrics.value);
+  a.set(pid, avmetricsStream);
+  siblingAvmetrics.value = a;
+}
+function unregisterSibling(pid: string) {
+  if (!siblingStreams.value.has(pid) && !siblingAvmetrics.value.has(pid)) return;
+  const m = new Map(siblingStreams.value);
+  m.delete(pid);
+  siblingStreams.value = m;
+  const a = new Map(siblingAvmetrics.value);
+  a.delete(pid);
+  siblingAvmetrics.value = a;
+}
+// Renderless subscribers to mount — only while compare is on, so a fresh
+// SSE per sibling isn't opened until the operator asks for the overlay.
+const compareSources = computed(() => (compareEnabled.value ? effectiveSiblings.value : []));
+const compareSiblings = computed<CompareSibling[]>(() => {
+  if (!compareEnabled.value) return [];
+  return effectiveSiblings.value
+    .filter((s) => siblingStreams.value.has(s.playerId))
+    .map((s) => ({
+      playerId: s.playerId,
+      tag: s.tag,
+      label: s.label,
+      index: s.index,
+      // Each sibling gets a stable dash by index; the active session is
+      // solid (below). Colour is per-metric, assigned in compareSeries.
+      dash: sessionDash(s.index),
+      stream: siblingStreams.value.get(s.playerId)!,
+      avmetricsStream: siblingAvmetrics.value.get(s.playerId),
+    }));
+});
+// The active session's own compare identity — tag `S<display_id>` (so it
+// reads as one of the grouped sessions) and a SOLID line (empty dash) to
+// stand out from the dashed siblings. Charts build their primary `series`
+// from this in compare mode so the active session's lines are tagged +
+// slimmed to the same canonical set the siblings show.
+const compareSelf = computed<CompareSeriesIdentity | null>(() => {
+  if (!compareEnabled.value) return null;
+  if (archiveCompare.value) {
+    // Archive: tag from the active member's carried session number (no live
+    // player record to read display_id from).
+    const self = (props.comparePlays ?? []).find((m) => m.playerId === props.playerId);
+    const tag = self?.tag ? `S${self.tag}` : `S${props.playerId.slice(0, 4)}`;
+    return { tag, dash: [] };
+  }
+  const did = livePlayer.value?.display_id;
+  const tag = did != null ? `S${did}` : `S${props.playerId.slice(0, 4)}`;
+  return { tag, dash: [] };
+});
+// Shared session-legend view (S1/S2 chips → hover-highlight + show/hide
+// per session across all charts). Cleared when compare mode turns off so
+// a stale hidden set doesn't blank a session on re-entry.
+const compareHovered = ref<string | null>(null);
+const compareHidden = ref<Set<string>>(new Set());
+const compareView = { hovered: compareHovered, hidden: compareHidden };
+watch(compareEnabled, (on) => {
+  if (!on) { compareHovered.value = null; compareHidden.value = new Set(); }
+});
+// The chip list: the active session first (solid, "This session"), then
+// each grouped sibling with its dash + label.
+const compareSessions = computed(() => {
+  if (!compareEnabled.value) return [];
+  const out: Array<{ tag: string; label: string; dash: number[]; isSelf: boolean }> = [];
+  const selfTag = compareSelf.value?.tag;
+  if (selfTag) out.push({ tag: selfTag, label: 'This session', dash: [], isSelf: true });
+  for (const s of compareSiblings.value) {
+    out.push({ tag: s.tag, label: s.label, dash: s.dash, isSelf: false });
+  }
+  return out;
+});
+provide(CompareContextKey, {
+  enabled: compareEnabled,
+  self: compareSelf,
+  siblings: compareSiblings,
+  view: compareView,
+});
 
 // Defensive: only adopt usePlayer's canonical-case id when it
 // matches props.playerId case-insensitively. The shared TanStack
@@ -140,13 +309,40 @@ const archivePlayerId = computed(() =>
 // useArchivedSessionMarkers fetch against the retired session_markers
 // table. One synthetic event per label; ts/severity/type come straight
 // from the row + label string.
+// Network-row → category, keyed on the proxy's fault_category (the same
+// signal that drives the waterfall's clock-vs-scissors glyph). A transfer
+// timeout is a guard firing on a real slow transfer, NOT an injected
+// fault — see docs/EVENT_TAXONOMY.md.
+function categoryForNetworkRow(r: Record<string, unknown>): Category {
+  const cat = String((r as { fault_category?: unknown }).fault_category ?? '').toLowerCase();
+  switch (cat) {
+    case 'http':
+    case 'corruption':
+    case 'socket':
+    case 'transport':
+      return 'injected';
+    case 'transfer_timeout':
+      return 'condition';
+    case 'client_disconnect':
+      return 'reaction';
+    default:
+      return hasDegradationLabel(r) ? 'condition' : 'reaction';
+  }
+}
+function hasDegradationLabel(r: Record<string, unknown>): boolean {
+  const labels = Array.isArray((r as { labels?: unknown }).labels)
+    ? ((r as { labels: unknown[] }).labels as string[])
+    : [];
+  return labels.some((l) => /=\*?(slow_|qoe_ttfb_breach|qoe_transfer_stall)/.test(l));
+}
+
 const sessionEvents = computed<SessionEvent[]>(() => {
   // Trigger reactivity on each stream's version ref.
   void timeseries.events.version.value;
   void timeseries.network.version.value;
   void timeseries.control.version.value;
   const out: SessionEvent[] = [];
-  function emit(row: Record<string, unknown>, kind: 'effect' | 'cause') {
+  function emit(row: Record<string, unknown>, category: Category) {
     const labels = Array.isArray((row as { labels?: unknown }).labels)
       ? ((row as { labels: unknown[] }).labels as string[])
       : null;
@@ -161,29 +357,86 @@ const sessionEvents = computed<SessionEvent[]>(() => {
       // filter UI treats `*manifest_failure` and `manifest_failure`
       // as the same bucket type.
       if (type.startsWith('*')) type = type.slice(1);
+      // Off-axis: the `testing` tier is harness run metadata (run_id,
+      // total_stalls, …). It lives on the Characterization page + the
+      // session "Test run" chip, never in the event filter.
+      if (sev === 'testing') continue;
       if (sev !== 'error' && sev !== 'critical' && sev !== 'warning' && sev !== 'info') continue;
-      out.push({ ts, type, severity: sev, kind });
+      out.push({ ts, type, severity: sev, category });
     }
   }
-  // Cause / effect axis (post-#474 redefinition):
-  //   - cause  = something the operator / proxy deliberately introduced
-  //              to provoke a reaction. Every control_events row counts
-  //              (fault enables, pattern toggles, shaper edits, the
-  //              pattern_step ticks themselves). On network rows, only
-  //              the proxy-flagged `faulted=1` responses count — those
-  //              are the 1-in-10 HTTP 4xx/5xx returned by the fault
-  //              rules. An organic upstream 5xx the proxy didn't fault
-  //              stays an effect.
-  //   - effect = the player's / network's reaction. All session_events
-  //              rows (stalls, restarts, ABR shifts, errors) and the
-  //              clean network rows.
-  for (const r of timeseries.events.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, 'effect');
-  for (const r of timeseries.network.inRange(0, Number.MAX_SAFE_INTEGER)) {
-    const faulted = Number((r as { faulted?: unknown }).faulted) || 0;
-    emit(r, faulted ? 'cause' : 'effect');
-  }
-  for (const r of timeseries.control.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, 'cause');
+  // Four-category axis — see docs/EVENT_TAXONOMY.md:
+  //   action    — operator/proxy/harness config + lifecycle (control_events)
+  //   injected  — proxy fabricated/destroyed a response (http / corruption /
+  //               socket / transport fault categories)
+  //   condition — a guard/threshold fired on a real degraded transfer
+  //               (transfer_timeout) or a clean-row slow_*/qoe_* breach
+  //   reaction  — player behaviour (session_events) + client_disconnect
+  for (const r of timeseries.events.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, 'reaction');
+  for (const r of timeseries.network.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, categoryForNetworkRow(r));
+  for (const r of timeseries.control.inRange(0, Number.MAX_SAFE_INTEGER)) emit(r, 'action');
   return out;
+});
+
+// "Test run" chip — harness run metadata is off the event axis (it isn't a
+// cause/effect), so it surfaces in the session header instead. Derived from
+// the same `testing=<key>_<value>` labels Characterization.vue reads. Null
+// when the play isn't part of a harness run. See docs/EVENT_TAXONOMY.md.
+const TEST_RUN_KEYS = ['run_id', 'test', 'platform', 'total_stalls', 'profile_shifts', 'shocks', 'completed'];
+const testRun = computed<Record<string, string> | null>(() => {
+  void timeseries.events.version.value;
+  void timeseries.network.version.value;
+  void timeseries.control.version.value;
+  const found: Record<string, string> = {};
+  const scan = (rows: Record<string, unknown>[]) => {
+    for (const r of rows) {
+      const labels = Array.isArray((r as { labels?: unknown }).labels)
+        ? ((r as { labels: unknown[] }).labels as string[])
+        : [];
+      for (const l of labels) {
+        if (!l.startsWith('testing=')) continue;
+        const body = l.slice('testing='.length);
+        for (const k of TEST_RUN_KEYS) {
+          if (found[k] === undefined && body.startsWith(k + '_')) {
+            found[k] = body.slice(k.length + 1);
+          }
+        }
+      }
+    }
+  };
+  scan(timeseries.events.inRange(0, Number.MAX_SAFE_INTEGER));
+  scan(timeseries.control.inRange(0, Number.MAX_SAFE_INTEGER));
+  scan(timeseries.network.inRange(0, Number.MAX_SAFE_INTEGER));
+  return found.run_id !== undefined ? found : null;
+});
+
+// Numeric run summaries, in display order, skipping any that are absent
+// (mid-run only run_id exists; summaries are stamped at run end).
+const testRunMetrics = computed<Array<{ label: string; value: string }>>(() => {
+  const tr = testRun.value;
+  if (!tr) return [];
+  const defs: Array<[string, string]> = [
+    ['total_stalls', 'stalls'],
+    ['profile_shifts', 'shifts'],
+    ['shocks', 'shocks'],
+  ];
+  return defs
+    .filter(([k]) => tr[k] !== undefined)
+    .map(([k, label]) => ({ label, value: tr[k] }));
+});
+
+// `completed` arrives as a compact basic-ISO stamp (20260608T175144Z);
+// render it in local time like every other timestamp on the page.
+function compactTsToMs(s: string): number {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(s);
+  if (!m) return NaN;
+  return Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`);
+}
+const testRunCompletedLabel = computed<string>(() => {
+  const c = testRun.value?.completed;
+  if (!c) return '';
+  const ms = compactTsToMs(c);
+  return Number.isFinite(ms) ? fmtTime(ms) : c;
 });
 
 // v3 unified time-series model. Single subscription per
@@ -256,6 +509,31 @@ const toMsRef = computed<number | null>(() => {
   return props.showContext ? props.endMs + CONTEXT_PAD_MS : props.endMs;
 });
 
+/* ─── Refetch-on-pan (#587) ─────────────────────────────────────────
+ * When the operator pins the focus bar to a window OLDER than what's in
+ * the rolling cache (evicted by the #582 recency cap), re-point the SSE
+ * at that window so the panels can show the early part of a long session.
+ * Returning to live (range null) drops the override and re-subscribes to
+ * the live tail. Reuses the existing fromMs/toMs Ref re-subscribe path —
+ * the same mechanism SessionViewer's "show context" uses — so reviewing
+ * history pauses live until the operator clicks Live (or drags back to
+ * the right edge). The cache-reset epoch makes the charts/timeline
+ * re-drain the fetched window instead of missing it behind a stale
+ * watermark. The server treats a `to` >5s in the past as a bounded
+ * archive read (no live tail), so the window loads cleanly. */
+const histFromRef = ref<number | null>(null);
+const histToRef = ref<number | null>(null);
+const HISTORY_PAD_MS = 60 * 1000;
+// Live mode backfills only the recent window (cheap), NOT the whole play
+// — a multi-hour play is 10k+ rows and re-streaming it on every
+// return-to-live left the live edge blank for seconds. Deep history is
+// loaded on demand via the pan-back override below. Refreshed whenever
+// we (re)enter live so "return to live" pulls a fresh recent window.
+const LIVE_BACKFILL_MS = 10 * 60 * 1000;
+const liveFromRef = ref<number | null>(props.followLive ? Date.now() - LIVE_BACKFILL_MS : null);
+const tsFromMs = computed<number | null>(() => histFromRef.value ?? liveFromRef.value ?? fromMsRef.value);
+const tsToMs = computed<number | null>(() => histToRef.value ?? toMsRef.value);
+
 /** Resolved [fromMs, toMs] for the CycleBandsRail. When toMsRef is
  *  null (follow-live), use Date.now() as the upper bound so bands
  *  still render. Rail renders nothing when either bound is missing
@@ -276,10 +554,11 @@ const timeseries = useSessionTimeSeries(
     // proxy/harness action rows alongside player events + network
     // rows. The control bundle is auto-added when 'control' is in
     // streams (useSessionTimeSeries). Issue #474 Milestone C.
-    streams: ['events', 'network', 'control'],
+    streams: ['events', 'network', 'control', 'avmetrics'],
     bundles: ['charts_minimal', 'lanes_v1', 'panel_v1', 'session_details', 'network'],
-    fromMs: fromMsRef,
-    toMs: toMsRef,
+    // History override (#587) takes precedence over the live window.
+    fromMs: tsFromMs,
+    toMs: tsToMs,
   },
 );
 
@@ -293,6 +572,7 @@ watch(
     if (!b) return;
     if (props.startMs != null) return;   // URL gave us the truth
     if (props.showContext) return;        // wider window, don't anchor on it
+    if (props.followLive) return;         // live mode uses liveFromRef (#587)
     if (!playIdRef.value) return;         // live mode
     if (windowBoundsRef.value !== null) return;
     windowBoundsRef.value = b;
@@ -305,6 +585,37 @@ watch(
 // — and so any earlier reactive code (window watcher, brush clamps)
 // sees a coord instance even though it gets consumed mostly later.
 const coord = useChartCoordination(archivePlayerId);
+
+/* Refetch-on-pan driver (#587). Watches the committed focus range (the
+ * #590 brush debounce means this fires once per gesture, not per
+ * mousemove). Pinning before the cached data fetches that window;
+ * returning to live drops the override. Declared after `coord` to avoid
+ * a TDZ on the watch getter. Live mode only — URL-driven archive views
+ * (props.startMs set) already load their bounded window. */
+watch(
+  () => coord.state.range,
+  (range) => {
+    if (props.startMs != null) return; // URL-driven archive; not live
+    if (!range) {
+      // Back to live — re-subscribe to a FRESH recent window (not the
+      // stale one from when the page first loaded).
+      histFromRef.value = null;
+      histToRef.value = null;
+      if (props.followLive) liveFromRef.value = Date.now() - LIVE_BACKFILL_MS;
+      return;
+    }
+    const bounds = timeseries.events.rangeBounds.value;
+    // Only refetch when the pinned window starts MEANINGFULLY before
+    // what's cached; a window already in the cache needs no server
+    // round-trip. The slop keeps the auto-pin fallback (bounds.min − 5s)
+    // and small drag jitter from triggering a needless re-subscribe.
+    const REFETCH_SLOP_MS = 15 * 1000;
+    if (bounds && range.min < bounds.min - REFETCH_SLOP_MS) {
+      histFromRef.value = range.min - HISTORY_PAD_MS;
+      histToRef.value = range.max + HISTORY_PAD_MS;
+    }
+  },
+);
 
 // Pin the focus-window brush as soon as we know the time bounds.
 //   - URL gave us startMs + endMs (sessions.html click): pin
@@ -327,9 +638,10 @@ function tryPinBrush(min: number | null, max: number | null) {
 if (props.startMs != null && props.endMs != null) {
   // URL-driven archive range: pin immediately.
   tryPinBrush(props.startMs, props.endMs);
-} else if (props.startMs != null && props.endMs == null) {
-  // end_time=live: leave coord.range null so brush follows live
-  // edge. Treat as "pinned" for the fallback watcher's purposes.
+} else if ((props.startMs != null && props.endMs == null) || props.followLive) {
+  // end_time=live OR explicit live-page hint: leave coord.range null
+  // so brush follows live edge. Treat as "pinned" for the fallback
+  // watcher's purposes so it doesn't auto-pin on first samples.
   hasPinnedBrush = true;
 }
 watch(
@@ -344,6 +656,55 @@ watch(
   { immediate: true },
 );
 
+// Live-edge anchor. `coord.lastSampleMs` is the brush's live-follow
+// target (effectiveRange.max) AND the rail's right edge. It used to be
+// advanced ONLY from inside the charts' drain (pushSample → noteSample),
+// so while the charts backfilled asynchronously the brush sat behind the
+// true live edge — "not locked at live" until the drain caught up. The
+// cache's `rangeBounds.max` is the authoritative newest ts the instant
+// the cache has it, so feed the live edge from there directly. The
+// charts' recent-first drain keeps the visible window populated up to
+// this edge, so the chart's right edge stays in sync without a blank.
+watch(
+  () => timeseries.events.rangeBounds.value?.max,
+  (m) => { if (m != null) coord.noteSample(m); },
+  { immediate: true },
+);
+
+/* True start of the CURRENT play (#587). The rail's left edge must
+ * anchor to where THIS play_id began, not `current_play.started_at` —
+ * that's a player-level field that goes stale when the play rotates
+ * (a content switch gives a new play_id but leaves started_at pointing
+ * at the prior play, so the rail stretched back hours to a play that
+ * isn't loaded). Query the earliest archived event for the live play_id
+ * instead; re-query whenever the play_id changes. */
+const playStartMs = ref<number | null>(null);
+watch(
+  () => (livePlayer.value?.current_play as { play_id?: string } | null | undefined)?.play_id
+    ?? playIdRef.value ?? null,
+  async (pid) => {
+    playStartMs.value = null;
+    const player = apiPlayerIdRef.value;
+    if (!pid || !player) return;
+    try {
+      const url = `/analytics/api/v2/events?player_id=${encodeURIComponent(player)}`
+        + `&play_id=${encodeURIComponent(pid)}&order=asc&limit=1`;
+      const r = await fetch(url);
+      if (!r.ok) return;
+      const j = await r.json();
+      const ts = j?.items?.[0]?.ts as string | undefined;
+      if (ts) {
+        const ms = Date.parse(ts);
+        // Guard against a race where the play_id changed mid-fetch.
+        const curPid = (livePlayer.value?.current_play as { play_id?: string } | null | undefined)?.play_id
+          ?? playIdRef.value ?? null;
+        if (Number.isFinite(ms) && curPid === pid) playStartMs.value = ms;
+      }
+    } catch { /* network/parse failure → fall back to cache min */ }
+  },
+  { immediate: true },
+);
+
 /** Effective time range for the brush rail. Reads the cached
  *  rangeBounds of the samples stream as the historical span; always
  *  extends `max` with `coord.lastSampleMs` so the rail's right edge
@@ -354,10 +715,32 @@ watch(
 const timeRange = computed<{ min: number; max: number } | null>(() => {
   const ar = timeseries.events.rangeBounds.value;
   const live = coord.state.lastSampleMs || 0;
-  if (!ar && !live) return null;
-  if (!ar) return { min: live, max: live };
-  if (!live) return ar;
-  return { min: ar.min, max: Math.max(ar.max, live) };
+  // Extend the rail's LEFT edge to THIS play's true start (#587) so the
+  // operator can drag the focus bar into windows the recency cap has
+  // evicted from the cache — panning there fires the refetch watcher
+  // above. Prefer the CLIENT-supplied, play-scoped current_play.start_time
+  // (rotates with play_id); fall back to the play_id's earliest archived
+  // event (playStartMs) for non-instrumented clients; then the cache min.
+  // NEVER the stale player-level current_play.started_at.
+  const clientStartStr = (livePlayer.value?.current_play as { start_time?: string | null } | null | undefined)?.start_time;
+  const clientStart = clientStartStr ? Date.parse(clientStartStr) : NaN;
+  const playStart = (Number.isFinite(clientStart) && clientStart > 0) ? clientStart : playStartMs.value;
+  const haveStart = playStart != null && Number.isFinite(playStart) && playStart > 0;
+  if (!ar && !live && !haveStart) return null;
+  let min = ar?.min ?? 0;
+  if (haveStart && (min === 0 || (playStart as number) < min)) min = playStart as number;
+  let max = Math.max(ar?.max ?? 0, live);
+  // Archived view (explicit upper bound, not following live): clamp the
+  // rail's right edge to `to` — draw it from→to, not all the way to now.
+  // Without this, `live` (coord.lastSampleMs) can be a stale ~now value
+  // left in the per-player coord by a PRIOR live session on this same
+  // player_id, stretching an empty gap from `to` to now.
+  const upper = tsToMs.value;
+  if (!props.followLive && upper != null && upper > 0) max = upper;
+  if (!min) min = max;
+  if (!max) max = min;
+  if (!min && !max) return null;
+  return { min, max };
 });
 
 const loading = computed(() => timeseries.events.loading.value);
@@ -383,19 +766,34 @@ function eventMs(ev: SessionEvent): number {
   return Number.isFinite(v) ? v : NaN;
 }
 
-// L0 — Kind toggle (orthogonal: effect vs cause)
-const enabledKind = ref<Record<'effect' | 'cause', boolean>>({
-  effect: true,
-  cause: false,
+// L0 — Category toggle (replaces the old effect/cause binary; see
+// docs/EVENT_TAXONOMY.md). The fault signal (injected / condition) and
+// player reactions default on; operator actions default off to keep the
+// config / pattern churn out of the way until asked for.
+const enabledKind = ref<Record<Category, boolean>>({
+  action: false,
+  injected: true,
+  condition: true,
+  reaction: true,
 });
+
+const CATEGORY_META: Record<Category, { label: string; title: string }> = {
+  action: { label: 'Actions', title: 'Actions — operator/proxy/harness configured something (faults, patterns, shaper, lifecycle)' },
+  injected: { label: 'Injected', title: 'Injected faults — the proxy fabricated or destroyed a response (404/5xx, corrupted, socket, transport)' },
+  condition: { label: 'Conditions', title: 'Conditions & results — a guard/threshold fired on a real degraded transfer (transfer timeout, slow segment)' },
+  reaction: { label: 'Reactions', title: 'Reactions — what the player did (stalls, ABR shifts, QoE breaches)' },
+};
+const CATEGORY_ORDER: Category[] = ['action', 'injected', 'condition', 'reaction'];
 
 // L1 — Severity tier (issue #473, replaces numeric Priority 1..4).
 // String tiers, worst-first. Same vocabulary the forwarder writes to
 // session_events.labels[] and network_requests.labels[] so a single
 // filter UI sweeps both. Critical leads (user-visible playback
-// breakage like stall_severe / frozen / restart_auto_recovery); Error
+// breakage like qoe_stall_severe_midplay / frozen / restart_auto_recovery); Error
 // sits next for system-detected error states (player_error).
-type Severity = 'error' | 'critical' | 'warning' | 'info';
+type Severity = 'error' | 'critical' | 'warning' | 'info' | 'testing';
+// `testing` is intentionally omitted — harness run metadata is off-axis
+// (Characterization page + session "Test run" chip), not an event tier.
 const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info'];
 const SEVERITY_META: Record<Severity, { label: string; color: string; bg: string; border: string }> = {
   // Critical wears the red palette (worst-looking — user-visible
@@ -407,17 +805,21 @@ const SEVERITY_META: Record<Severity, { label: string; color: string; bg: string
   critical: { label: 'Critical', color: '#7f1d1d', bg: '#fee2e2', border: '#fca5a5' },
   warning:  { label: 'Warning',  color: '#854d0e', bg: '#fef3c7', border: '#fcd34d' },
   info:     { label: 'Info',     color: '#1f2937', bg: '#f0fdf4', border: '#a7f3d0' },
+  // Testing wears a muted slate palette (visually recessive — it's
+  // test-harness metadata, not playback signal). Lowest in the order
+  // and hidden by default. See the forwarder's SevTesting (#571).
+  testing:  { label: 'Testing',  color: '#475569', bg: '#f1f5f9', border: '#cbd5e1' },
 };
 
 const expandedTiers = ref<Record<Severity, boolean>>({
-  error: true, critical: true, warning: false, info: false,
+  error: true, critical: true, warning: false, info: false, testing: false,
 });
 function toggleTier(p: Severity) {
   expandedTiers.value[p] = !expandedTiers.value[p];
 }
 
 const visiblePriority = ref<Record<Severity, boolean>>({
-  error: true, critical: true, warning: true, info: false,
+  error: true, critical: true, warning: true, info: false, testing: false,
 });
 function togglePriorityVisibility(p: Severity, e: MouseEvent) {
   e.stopPropagation();
@@ -484,7 +886,7 @@ function eventSeverity(ev: SessionEvent): Severity {
   // Fall back to the legacy numeric `priority` for one release while
   // older forwarder builds + historical rows roll out.
   const sev = (ev as { severity?: string }).severity;
-  if (sev === 'error' || sev === 'critical' || sev === 'warning' || sev === 'info') return sev;
+  if (sev === 'error' || sev === 'critical' || sev === 'warning' || sev === 'info' || sev === 'testing') return sev;
   switch (ev.priority) {
     case 1: return 'error';
     case 2: return 'critical';
@@ -493,8 +895,8 @@ function eventSeverity(ev: SessionEvent): Severity {
   }
   return 'warning';
 }
-function eventKindCE(ev: SessionEvent): 'effect' | 'cause' {
-  return ev.kind === 'cause' ? 'cause' : 'effect';
+function eventCategory(ev: SessionEvent): Category {
+  return ev.category ?? 'reaction';
 }
 
 interface AnnotatedEvent extends SessionEvent {
@@ -504,7 +906,7 @@ interface AnnotatedEvent extends SessionEvent {
 
 const kindFilteredEvents = computed<AnnotatedEvent[]>(() =>
   sessionEvents.value
-    .filter((ev) => enabledKind.value[eventKindCE(ev)])
+    .filter((ev) => enabledKind.value[eventCategory(ev)])
     .map((ev) => ({ ...ev, _ts: eventMs(ev), _p: eventSeverity(ev) }))
     .filter((ev) => Number.isFinite(ev._ts))
     .sort((a, b) => a._ts - b._ts),
@@ -520,20 +922,20 @@ const filteredEvents = computed<AnnotatedEvent[]>(
 );
 
 const tierCounts = computed<Record<Severity, number>>(() => {
-  const c: Record<Severity, number> = { error: 0, critical: 0, warning: 0, info: 0 };
+  const c: Record<Severity, number> = { error: 0, critical: 0, warning: 0, info: 0, testing: 0 };
   for (const ev of kindFilteredEvents.value) c[ev._p]++;
   return c;
 });
 
-function kindCount(k: 'effect' | 'cause'): number {
+function kindCount(k: Category): number {
   let n = 0;
-  for (const ev of sessionEvents.value) if (eventKindCE(ev) === k) n++;
+  for (const ev of sessionEvents.value) if (eventCategory(ev) === k) n++;
   return n;
 }
 
 const tierTypes = computed<Record<Severity, Array<{ type: string; count: number }>>>(() => {
   const buckets: Record<Severity, Map<string, number>> = {
-    error: new Map(), critical: new Map(), warning: new Map(), info: new Map(),
+    error: new Map(), critical: new Map(), warning: new Map(), info: new Map(), testing: new Map(),
   };
   for (const ev of kindFilteredEvents.value) {
     const t = String(ev.type ?? 'event');
@@ -629,7 +1031,18 @@ function recenterOnNav() {
 }
 
 watch(navCurrent, (ev) => {
-  coord.setCursorMs(ev ? ev._ts : null);
+  if (!ev) { coord.setCursor(null, null); return; }
+  // Compose a short label for the cursor hover tooltip. `type` is the
+  // event class (e.g. `restart`, `stall_start`, `fault_on`); `info`
+  // is the per-event detail string when available. Severity is
+  // appended in parens so the hover surface tells the operator
+  // everything they need without reopening the navigator. Issue #486.
+  const parts: string[] = [];
+  if (ev.type) parts.push(String(ev.type));
+  if (ev.info) parts.push(String(ev.info));
+  const sev = (ev.severity ?? '').toString();
+  const label = parts.join(' · ') + (sev ? ` (${sev})` : '');
+  coord.setCursor(ev._ts, label || 'event');
 });
 
 function onKey(e: KeyboardEvent) {
@@ -654,7 +1067,7 @@ const railMarkers = computed(() => {
     return {
       leftPct: pct,
       color: SEVERITY_META[ev._p].color,
-      opacity: eventKindCE(ev) === 'effect' ? 1 : 0.4,
+      opacity: eventCategory(ev) === 'reaction' ? 1 : 0.55,
       isCurrent,
       ts: ev._ts,
       ev,
@@ -677,7 +1090,24 @@ const railMarkers = computed(() => {
  *  (default 10 min) without any auto-feedback watcher that could get
  *  stuck. */
 const brushRange = computed(() => coord.effectiveRange.value);
-const windowSpanMs = computed(() => Math.max(1, brushRange.value.max - brushRange.value.min));
+
+/** Draft focus window during an active brush gesture (issue #590). While
+ *  the operator drags/resizes the rail (or wheel-zooms it), the rail
+ *  renders from this draft so it tracks the cursor live — but the
+ *  coordinated range the heavy panels read is NOT updated until the
+ *  gesture settles (mouse-release for drag/resize, ~160 ms quiet for
+ *  wheel). So charts/logs/timeline re-render once on commit instead of
+ *  on every mousemove/wheel tick. */
+const draftRange = ref<{ min: number; max: number } | null>(null);
+/** What the rail visual + focus pill render: the in-flight draft while
+ *  gesturing, else the committed coordinated range. */
+const railRange = computed(() => draftRange.value ?? coord.effectiveRange.value);
+const windowSpanMs = computed(() => Math.max(1, railRange.value.max - railRange.value.min));
+/** Is the focus window parked at the live edge? Drives the rail pill —
+ *  it used to be hardcoded "· at end", which lied once the operator
+ *  pinned to (or panned into) a historical window. Reads railRange so it
+ *  tracks the in-flight draft during a drag too. */
+const atLiveEdge = computed(() => coord.isAtLiveEdge(railRange.value.max));
 
 /** Live toggle checked rule — same across every surface. */
 const brushLiveChecked = computed(() => coord.state.range === null);
@@ -719,7 +1149,11 @@ function onBrushMouseDown(e: MouseEvent, mode: 'pan' | 'resize-left' | 'resize-r
     startStart: start.min,
     startEnd: start.max,
   };
+  // Pin coord once so live-follow stops during the drag, and seed the
+  // draft so the rail tracks the cursor live. onDragMove updates only
+  // the draft; coord (and thus the panels) commits on release (#590).
   coord.setRange({ min: start.min, max: start.max });
+  draftRange.value = { min: start.min, max: start.max };
   window.addEventListener('mousemove', onDragMove);
   window.addEventListener('mouseup', onDragEnd, { once: true });
 }
@@ -747,10 +1181,14 @@ function onDragMove(e: MouseEvent) {
     if (f < d.startStart + MIN_WINDOW_MS) f = d.startStart + MIN_WINDOW_MS;
     s = d.startStart;
   }
-  coord.setRange({ min: s, max: f });
+  // Update only the draft during the drag (#590) — the rail moves live,
+  // the panels stay parked at the pinned start until release.
+  draftRange.value = { min: s, max: f };
 }
 function onDragEnd() {
-  const ended = brushRange.value;
+  // Commit the draft (the final dragged window) to coord on release.
+  const ended = draftRange.value ?? brushRange.value;
+  draftRange.value = null;
   dragState.value = null;
   window.removeEventListener('mousemove', onDragMove);
   // BRUSH WIDTH on release becomes the new liveSpan — operator's
@@ -760,10 +1198,12 @@ function onDragEnd() {
   // every other chart's live-tracker uses the same width.
   const dropSpan = ended.max - ended.min;
   if (dropSpan > 0) coord.setLiveSpan(dropSpan);
-  // RIGHT EDGE within 2 s of the latest sample → snap to live
-  // (charts AND brush follow the right edge as new samples arrive).
-  // Otherwise leave the range pinned to whatever onDragMove last set.
+  // RIGHT EDGE within 2 s of the latest sample → snap to live (charts
+  // AND brush follow the right edge as new samples arrive). Otherwise
+  // commit the dragged window to coord — onDragMove only moved the
+  // draft, so coord is still parked at the drag's start until here (#590).
   if (coord.isAtLiveEdge(ended.max)) coord.setRange(null);
+  else coord.setRange({ min: ended.min, max: ended.max });
 }
 
 /** Alt+wheel on the brush rail zooms the focus-window duration. Same
@@ -775,35 +1215,61 @@ function onDragEnd() {
  *      live, snap to live tracking.
  *
  *  Plain wheel falls through to native page scroll. */
+/** Rail-wheel debounce (#590). Wheel events update only the draft (rail
+ *  moves live); the coordinated range commits ~160 ms after the wheel
+ *  goes quiet, so the heavy panels render once per gesture instead of
+ *  per tick. */
+let railWheelTimer: number | null = null;
+function scheduleRailCommit() {
+  if (railWheelTimer != null) clearTimeout(railWheelTimer);
+  railWheelTimer = window.setTimeout(commitRailDraft, 160);
+}
+function commitRailDraft() {
+  if (railWheelTimer != null) { clearTimeout(railWheelTimer); railWheelTimer = null; }
+  const d = draftRange.value;
+  if (!d) return;
+  draftRange.value = null;
+  const span = d.max - d.min;
+  if (span > 0) coord.setLiveSpan(span);
+  // Right edge at live → follow live with the new span; else pin.
+  if (coord.isAtLiveEdge(d.max)) coord.setRange(null);
+  else coord.setRange({ min: d.min, max: d.max });
+}
+
 function onRailWheel(e: WheelEvent) {
   const rail = railRef.value;
   const r = timeRange.value;
   if (!rail || !r) return;
-  // Horizontal scroll → pan the brush. deltaX/railWidth maps directly
-  // to fraction-of-full-data-range so a one-rail-width swipe pans by
-  // the entire visible data span. Unlike the line charts, the brush
-  // is CLAMPED to [r.min, r.max] so it never leaves the rail. See
-  // gh#461.
-  if (!e.altKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+  // Base the next window on the in-flight draft so successive wheel
+  // ticks compound before the debounced commit (#590).
+  // Horizontal pan: trackpad two-finger swipe (deltaX) OR Shift+wheel
+  // (the mouse way to scroll horizontally; magnitude lands on deltaX or
+  // deltaY depending on browser). deltaX/railWidth maps directly to
+  // fraction-of-full-data-range so a one-rail-width swipe pans by the
+  // entire visible data span. The brush is CLAMPED to [r.min, r.max] so
+  // it never leaves the rail. See gh#461.
+  if (!e.altKey && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY))) {
     e.preventDefault();
     e.stopPropagation();
     const widthPx = rail.clientWidth;
     if (widthPx <= 0) return;
-    const current = brushRange.value;
+    const current = railRange.value;
     const span = current.max - current.min;
-    const dms = (e.deltaX / widthPx) * (r.max - r.min);
+    const delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    const dms = (delta / widthPx) * (r.max - r.min);
     let s = current.min + dms;
     let f = current.max + dms;
     if (s < r.min) { s = r.min; f = s + span; }
     if (f > r.max) { f = r.max; s = f - span; }
-    coord.setRange({ min: s, max: f });
+    draftRange.value = { min: s, max: f };
+    scheduleRailCommit();
     return;
   }
   if (!e.altKey) return;
   e.preventDefault();
   e.stopPropagation();
   const fullSpan = Math.max(1, r.max - r.min);
-  const current = brushRange.value;
+  const current = railRange.value;
   const currentSpan = Math.max(1, current.max - current.min);
   const factor = e.deltaY < 0 ? 0.9 : 1 / 0.9;
   const MIN_SPAN_MS = 1_000;
@@ -811,8 +1277,9 @@ function onRailWheel(e: WheelEvent) {
   if (nextSpan === currentSpan) return;
 
   if (coord.isAtLiveEdge(current.max)) {
-    coord.setLiveSpan(nextSpan);
-    coord.setRange(null);
+    // At live: keep the right edge glued to live, grow/shrink leftward.
+    draftRange.value = { min: current.max - nextSpan, max: current.max };
+    scheduleRailCommit();
     return;
   }
   // Mouse-anchored: keep the timestamp under the cursor at the same
@@ -825,12 +1292,8 @@ function onRailWheel(e: WheelEvent) {
   let newEnd = newStart + nextSpan;
   if (newStart < r.min) { newStart = r.min; newEnd = newStart + nextSpan; }
   if (newEnd > r.max) { newEnd = r.max; newStart = newEnd - nextSpan; }
-  if (coord.isAtLiveEdge(newEnd)) {
-    coord.setLiveSpan(nextSpan);
-    coord.setRange(null);
-    return;
-  }
-  coord.setRange({ min: newStart, max: newEnd });
+  draftRange.value = { min: newStart, max: newEnd };
+  scheduleRailCommit();
 }
 
 function onRailMouseDown(e: MouseEvent) {
@@ -872,7 +1335,41 @@ watch(
   ([endMs]) => {
     const row = timeseries.events.lastAt(endMs);
     if (!row) return;
-    const adapted = chRowToPlayerRecord(row);
+    // Pass the events stream's min-bound as the play's first_seen_at
+    // so SessionDetails' "First Request" + "Session Duration" tiles
+    // render the play's true start, not the brush-cursor row's ts.
+    const bounds = timeseries.events.rangeBounds.value;
+    const minMs = bounds?.min;
+    // ISO-with-Z so SessionDetails' fmtDate parses it as UTC across
+    // all browsers (matches chRowAdapter.toISOWithZ normalisation
+    // applied to last_seen_at; same format on both ends keeps
+    // fmtDuration honest).
+    const firstSeenAt = (minMs != null && Number.isFinite(minMs))
+      ? new Date(minMs).toISOString()
+      : undefined;
+    // Max control_revision + max attempt_id across the whole play.
+    // attempt_id is the recovery counter (1 = no recovery, 2 = one
+    // restart, etc.); SessionDetails shows it as the "Attempt" tile.
+    // Both pulled from the same single inRange() walk.
+    let maxControlRevision: string | undefined;
+    let maxAttemptId: number | undefined;
+    if (bounds && Number.isFinite(bounds.min) && Number.isFinite(bounds.max)) {
+      const rows = timeseries.events.inRange(bounds.min, bounds.max);
+      // control_revision is RFC3339Nano post type-change-in-place;
+      // string-compare gives chronological order for ISO timestamps.
+      let crStr: string | undefined;
+      let att = 0;
+      for (const r of rows) {
+        const rec = r as Record<string, unknown>;
+        const candidate = typeof rec.control_revision === 'string' ? rec.control_revision : '';
+        if (candidate && (!crStr || candidate > crStr)) crStr = candidate;
+        const a = Number(rec.attempt_id ?? 0);
+        if (Number.isFinite(a) && a > att) att = a;
+      }
+      maxControlRevision = crStr;
+      if (att > 0) maxAttemptId = att;
+    }
+    const adapted = chRowToPlayerRecord(row, { firstSeenAt, maxControlRevision, maxAttemptId });
     setArchivePlayer(archivePlayerId.value, adapted);
     qc.setQueryData(playerKey(archivePlayerId.value), { player: adapted, etag: undefined });
   },
@@ -931,6 +1428,47 @@ function skipToEnd() {
 
 <template>
   <div class="session-display">
+    <!-- Compare-charts overlay (issue #579): one renderless SSE
+         subscriber per grouped sibling, mounted only while compare mode
+         is on. Each registers its events stream with the CompareContext
+         the charts consume. -->
+    <CompareSeriesSource
+      v-for="sib in compareSources"
+      :key="sib.playerId"
+      :player-id="sib.playerId"
+      :play-id="sib.playId ?? null"
+      :from-ms="archiveCompare ? startMs : null"
+      :to-ms="archiveCompare ? endMs : null"
+      @register="registerSibling"
+      @unregister="unregisterSibling"
+    />
+    <!-- #736 archive compare: the live page surfaces the Compare Charts
+         toggle via GroupBanner, but the session-viewer has no live group, so
+         render it here when opened over a grouped set. Defaults ON (seeded in
+         setup); unchecking it expands the per-session panels again. -->
+    <div v-if="archiveCompare" class="archive-compare-bar">
+      <button
+        type="button"
+        class="btn compare-toggle"
+        :class="{ checked: compareMode.state.enabled }"
+        @click="compareMode.toggle()"
+        :title="compareMode.state.enabled
+          ? 'Hide grouped overlays and re-expand the per-session panels'
+          : 'Overlay every grouped play\'s rate + buffer lines on the charts'"
+      >
+        {{ compareMode.state.enabled ? '●' : '○' }} Compare Charts ({{ effectiveSiblings.length + 1 }} sessions)
+      </button>
+    </div>
+    <!-- Test-run metadata — off the event axis (see docs/EVENT_TAXONOMY.md);
+         shown here so the viewer still says "this play was harness run X". -->
+    <div v-if="testRun" class="test-run-chip" :title="`Harness run ${testRun.run_id}`">
+      <span class="trc-icon">🧪</span>
+      <span class="trc-key">Test run</span>
+      <span v-if="testRun.test" class="trc-scenario">{{ testRun.test }}</span>
+      <span class="trc-run">run {{ testRun.run_id }}</span>
+      <span v-for="m in testRunMetrics" :key="m.label" class="trc-metric">{{ m.value }} {{ m.label }}</span>
+      <span v-if="testRunCompletedLabel" class="trc-metric">completed {{ testRunCompletedLabel }}</span>
+    </div>
     <!-- Brush + event filter + nav-bar live in a persistent fold so
          the operator can collapse them out of the way without losing
          the live view to a pause-state toggle. Pause-gated visibility
@@ -999,8 +1537,8 @@ function skipToEnd() {
             class="brush-window"
             :class="{ dragging: dragState }"
             :style="{
-              left: ((brushRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
-              right: ((scrubMax - brushRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+              left: Math.max(0, (railRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+              right: Math.max(0, (scrubMax - railRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
             }"
             @mousedown.stop="onBrushMouseDown($event, 'pan')"
           >
@@ -1024,11 +1562,11 @@ function skipToEnd() {
           v-if="timeRange"
           class="rail-focus-label"
           :style="{
-            left: ((brushRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
-            right: ((scrubMax - brushRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+            left: Math.max(0, (railRange.min - scrubMin) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
+            right: Math.max(0, (scrubMax - railRange.max) / Math.max(1, scrubMax - scrubMin) * 100) + '%',
           }"
         >
-          <span class="focus-pill">{{ fmtDurShort(windowSpanMs) }} · at end</span>
+          <span class="focus-pill">{{ fmtDurShort(windowSpanMs) }}{{ atLiveEdge ? ' · at end' : ' · ends ' + fmtTime(railRange.max) }}</span>
           <span class="focus-pill subtle">{{ samplesCount.toLocaleString() }} rendered</span>
         </span>
         <span class="rail-edge-label">{{ fmtTime(scrubMax) }}</span>
@@ -1038,22 +1576,15 @@ function skipToEnd() {
         <div class="kind-row">
           <span class="chips-label">Show:</span>
           <button
+            v-for="c in CATEGORY_ORDER"
+            :key="c"
             type="button"
-            class="kind-pill effect"
-            :class="{ off: !enabledKind.effect }"
-            @click="enabledKind.effect = !enabledKind.effect"
-            title="Effects — what the player or user saw"
+            class="kind-pill"
+            :class="[c, { off: !enabledKind[c] }]"
+            @click="enabledKind[c] = !enabledKind[c]"
+            :title="CATEGORY_META[c].title"
           >
-            {{ enabledKind.effect ? '✓' : '○' }} Effects · {{ kindCount('effect') }}
-          </button>
-          <button
-            type="button"
-            class="kind-pill cause"
-            :class="{ off: !enabledKind.cause }"
-            @click="enabledKind.cause = !enabledKind.cause"
-            title="Causes — proxy/system actions"
-          >
-            {{ enabledKind.cause ? '✓' : '○' }} Causes · {{ kindCount('cause') }}
+            {{ enabledKind[c] ? '✓' : '○' }} {{ CATEGORY_META[c].label }} · {{ kindCount(c) }}
           </button>
         </div>
 
@@ -1242,7 +1773,7 @@ function skipToEnd() {
       <PlayerMetrics :player-id="archivePlayerId" />
     </CollapsibleSection>
 
-    <CollapsibleSection title="Player State" :open="true" eager persist-key="player-state">
+    <CollapsibleSection title="Player State" :open="true" eager persist-key="player-state" :force-collapsed="compareEnabled">
       <!-- Cycle-band overlay — visible only when control_events for
            this play include at least one label_changed row carrying
            a cycle_id (characterization runs only). Aligned with the
@@ -1253,20 +1784,27 @@ function skipToEnd() {
         :from-ms="cycleBandsDomain.fromMs"
         :to-ms="cycleBandsDomain.toMs"
       />
-      <EventsTimeline :player-id="archivePlayerId" :events-stream="timeseries.events" />
+      <EventsTimeline :player-id="archivePlayerId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" :control-stream="timeseries.control" />
     </CollapsibleSection>
 
     <CollapsibleSection title="Bitrate Chart etc" :open="true" eager persist-key="bitrate-chart">
       <BitrateChartPanelToolbar :player-id="archivePlayerId" />
+      <!-- Compare mode: S1/S2 session chips — hover to highlight a whole
+           session across all charts, click to show/hide it (#579). -->
+      <CompareSessionLegend
+        v-if="compareEnabled"
+        :sessions="compareSessions"
+        :view="compareView"
+      />
       <div class="chart-stack">
-        <BandwidthChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
-        <RTTChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
+        <BandwidthChart :player-id="archivePlayerId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" />
         <BufferChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
+        <RTTChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
         <FPSChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
       </div>
     </CollapsibleSection>
 
-    <CollapsibleSection title="Network Log" persist-key="network-log">
+    <CollapsibleSection title="Network Log" persist-key="network-log" :force-collapsed="compareEnabled">
       <!-- The page-level brush in SessionDisplay is the only scrub
            surface — archive shows it always, live shows it once
            paused. NetworkLog's own in-panel brush would duplicate it
@@ -1275,7 +1813,7 @@ function skipToEnd() {
       <NetworkLog :player-id="archivePlayerId" :network-stream="timeseries.network" />
     </CollapsibleSection>
 
-    <CollapsibleSection title="Play Log" persist-key="play-log">
+    <CollapsibleSection title="Play Log" persist-key="play-log" :force-collapsed="compareEnabled">
       <!-- Time-multiplexed view of snapshots + network rows + events
            interleaved on one chronological scroll, with checkbox
            filters per source. The three streams come from the same
@@ -1288,6 +1826,7 @@ function skipToEnd() {
         :events-stream="timeseries.events"
         :network-stream="timeseries.network"
         :control-stream="timeseries.control"
+        :avmetrics-stream="timeseries.avmetrics"
       />
     </CollapsibleSection>
   </div>
@@ -1295,6 +1834,22 @@ function skipToEnd() {
 
 <style scoped>
 .session-display { display: contents; }
+/* #736 archive Compare Charts toggle — mirrors GroupBanner's compare-toggle
+ * (violet when on) so the archive view reads like the live page. */
+.archive-compare-bar {
+  display: flex; align-items: center; gap: 10px;
+  background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 10px;
+  padding: 8px; margin-bottom: 12px;
+}
+.archive-compare-bar .compare-toggle {
+  background: #f1f3f4; border: 1px solid #dadce0; border-radius: 6px;
+  padding: 4px 12px; font-size: 12px; font-weight: 500; color: #202124; cursor: pointer;
+}
+.archive-compare-bar .compare-toggle:hover { background: #e8eaed; }
+.archive-compare-bar .compare-toggle.checked {
+  background: #7c3aed; border-color: #6d28d9; color: #fff; font-weight: 600;
+}
+.archive-compare-bar .compare-toggle.checked:hover { background: #6d28d9; }
 
 /* Empty-state for the Focus Window before archive snapshots land. */
 .brush-empty {
@@ -1378,12 +1933,12 @@ function skipToEnd() {
   height: 30px;
   background: #d1fae5;
   border-radius: 6px;
-  /* Clip the brush window so it can't bleed past the rail edges
-   * (and onto the ⏮/⏭ scrub buttons) when the visible focus range
-   * extends past the data — e.g. a 10-min liveSpan on a fresh
-   * session that only has 1 min of samples puts brushRange.min 9
-   * min before scrubMin, which would be a -X% left value. */
-  overflow: hidden;
+  /* overflow VISIBLE so the brush window can extend above/below the rail
+   * as a taller grab target (those strips are tick-free, so they're a
+   * clean drag zone). Horizontal bleed past the rail edges onto the
+   * ⏮/⏭ buttons is instead prevented by clamping the window's left/right
+   * to ≥0 in the template binding. */
+  overflow: visible;
   cursor: crosshair;
 }
 .brush-rail .brush-tick {
@@ -1435,8 +1990,12 @@ function skipToEnd() {
 
 .brush-window {
   position: absolute;
-  top: 0;
-  bottom: 0;
+  /* Extend above and below the 30px rail so the grab target is taller
+   * than the rail itself — those strips are tick-free, so you can always
+   * grab the window (or its handles) for dragging without landing on a
+   * marker. */
+  top: -9px;
+  bottom: -9px;
   background: rgba(29, 78, 216, 0.18);
   border: 0;
   border-radius: 6px;
@@ -1450,8 +2009,10 @@ function skipToEnd() {
 .brush-window.dragging { cursor: grabbing; }
 .brush-handle {
   position: absolute;
-  top: -1px;
-  bottom: -1px;
+  /* Match the window's vertical extent so the resize grips are equally
+   * tall and easy to grab above/below the rail. */
+  top: -9px;
+  bottom: -9px;
   width: 8px;
   background: #1d4ed8;
   border-radius: 3px;
@@ -1498,6 +2059,20 @@ function skipToEnd() {
 
 /* Event filter ─── L0 / L1 / L2 / L3 */
 .chips-label { font-size: 11px; color: #6b7280; font-weight: 500; margin-right: 2px; }
+.test-run-chip {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  font-size: 12px; color: #475569;
+  background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 6px;
+  padding: 5px 10px; margin: 0 0 10px;
+}
+.test-run-chip .trc-icon { font-size: 13px; }
+.test-run-chip .trc-key { font-weight: 600; color: #334155; }
+.test-run-chip .trc-scenario { font-weight: 600; color: #0f766e; }
+.test-run-chip .trc-run, .test-run-chip .trc-metric { color: #64748b; }
+.test-run-chip .trc-scenario::before,
+.test-run-chip .trc-run::before,
+.test-run-chip .trc-metric::before { content: '·'; margin-right: 6px; color: #cbd5e1; }
+
 .kind-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
 .kind-pill {
   display: inline-flex;
@@ -1511,9 +2086,11 @@ function skipToEnd() {
   cursor: pointer;
   line-height: 1.4;
 }
-.kind-pill.effect { background: #dbeafe; border-color: #93c5fd; color: #1d4ed8; }
-.kind-pill.cause  { background: #fed7aa; border-color: #fdba74; color: #7c2d12; }
-.kind-pill.off    { opacity: 0.4; background: #f3f4f6; border-color: #d1d5db; color: #6b7280; }
+.kind-pill.action    { background: #ede9fe; border-color: #c4b5fd; color: #5b21b6; }
+.kind-pill.injected  { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
+.kind-pill.condition { background: #fef3c7; border-color: #fcd34d; color: #92400e; }
+.kind-pill.reaction  { background: #dbeafe; border-color: #93c5fd; color: #1d4ed8; }
+.kind-pill.off       { opacity: 0.4; background: #f3f4f6; border-color: #d1d5db; color: #6b7280; }
 
 .event-filter {
   margin: 10px 0 0;
@@ -1704,8 +2281,14 @@ function skipToEnd() {
 }
 .type-name-btn-row:hover { background: #f9fafb; }
 .type-row.active .type-name-btn-row { font-weight: 700; color: var(--tier-color); }
-.type-name { flex: 1; }
-.type-count { font-variant-numeric: tabular-nums; color: #6b7280; font-size: 10.5px; }
+/* count hugs the name instead of being pushed to the far edge by flex:1
+   (mirrors the Sessions label-filter fix). */
+.type-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.type-count { flex: none; font-variant-numeric: tabular-nums; color: #6b7280; font-size: 10.5px; }
 .type-row.active .type-count { color: var(--tier-color); }
 
 .instances {

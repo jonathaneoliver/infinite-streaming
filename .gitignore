@@ -95,3 +95,6 @@ content/dashboard-v3/node_modules/
 .claude/screenshots/
 .claude/settings.json
 .claude/worktrees/
+
+# fault-sweep local queue (#772) — ephemeral working state
+.sweep/

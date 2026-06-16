@@ -135,6 +135,56 @@ func TestServerContent(t *testing.T) {
 		})
 	}
 
+	// --- live_offset: EXT-X-START injected on the served master (#793). This
+	// is the wire check the suite was missing — the unit test only covers the
+	// rewrite FUNCTION, so a delivery regression (manipulation not reaching the
+	// served master) would go unnoticed. Fetch the master with live_offset set
+	// and assert the tag actually carries the value. ---
+	t.Run("master_live_offset", func(t *testing.T) {
+		if err := patchSession(p.c, p.apiBase, p.sess.SessionID, map[string]any{"content_live_offset": 24}); err != nil {
+			t.Fatalf("set live_offset: %v", err)
+		}
+		defer patchSession(p.c, p.apiBase, p.sess.SessionID, map[string]any{"content_live_offset": 0})
+		time.Sleep(500 * time.Millisecond)
+
+		got, _, err := getBytes(p.c, p.masterURL)
+		if err != nil {
+			t.Fatalf("manipulated master fetch: %v", err)
+		}
+		const want = "#EXT-X-START:TIME-OFFSET=-24"
+		present := bytes.Contains(got, []byte(want))
+		if !present {
+			n := len(got)
+			if n > 500 {
+				n = 500
+			}
+			t.Errorf("live_offset=24: served master is MISSING %q — manipulation not reaching the wire.\n--- served master (first %d bytes) ---\n%s", want, n, got[:n])
+		}
+		assertParseableMaster(t, "master/live_offset", got, p.masterURL, len(p.variants))
+		rows = append(rows, []string{"master/live_offset", want + " present=" + boolStr(present), boolStr(!bytes.Equal(base, got))})
+
+		// HOLD-BACK is a media-playlist-only tag and is what players actually
+		// key off for the join (#262: hls.js joins at HOLD-BACK; iOS uses
+		// recommendedTimeOffsetFromLive derived from it). EXT-X-START on the
+		// master alone is largely advisory. Verify the VARIANT HOLD-BACK is
+		// rewritten too — the content-manipulation gate is master-only, so this
+		// is expected to expose that the variant is never manipulated (#793).
+		vbody, _, err := getBytes(p.c, p.top.URL)
+		if err != nil {
+			t.Fatalf("variant playlist fetch: %v", err)
+		}
+		const wantHB = "HOLD-BACK=24"
+		hbPresent := bytes.Contains(vbody, []byte(wantHB))
+		if !hbPresent {
+			n := len(vbody)
+			if n > 500 {
+				n = 500
+			}
+			t.Errorf("live_offset=24: variant playlist HOLD-BACK NOT rewritten to 24 — players key off HOLD-BACK, so the live-offset has no effect even though the master EXT-X-START is set. The manipulation gate is master-only (main.go isMasterManifest).\n--- served variant (first %d bytes) ---\n%s", n, vbody[:n])
+		}
+		rows = append(rows, []string{"variant/live_offset", wantHB + " present=" + boolStr(hbPresent), "-"})
+	})
+
 	// --- segment corruption: fetch real, then corrupted (zero-filled) ---
 	t.Run("segment_corrupted", func(t *testing.T) {
 		segs := p.pullOnce(t)

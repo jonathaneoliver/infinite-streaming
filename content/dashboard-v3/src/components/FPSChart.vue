@@ -18,11 +18,19 @@ import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import { tsOfRow } from '@/composables/chRowAdapter';
 import type { PlayerRecord } from '@/repo/v2-repo';
+import { useCompareOverlays, useCompareSelf } from '@/composables/useCompareContext';
+import { compareFpsSeries } from '@/composables/compareSeries';
 
 const props = defineProps<{
   playerId: string;
   eventsStream: Stream<Record<string, unknown>>;
 }>();
+
+/** Grouped-sibling FPS overlays (issue #579). Each sibling derives its
+ *  own displayed/dropped FPS (stateful per-sibling accessors) so the
+ *  overlay shows that device's frame rate, not the active session's. */
+const compareOverlays = useCompareOverlays(compareFpsSeries);
+const compareSelf = useCompareSelf();
 
 // per-instance state: previous frame counters + the derived rate to
 // surface to MetricsLineChart through the synthetic accessor below.
@@ -55,7 +63,7 @@ watch(
       if (!Number.isFinite(t) || t <= lastSeenMs) continue;
       lastSeenMs = t;
       const fr = num(row.frames_displayed);
-      const dr = num(row.dropped_frames);
+      const dr = num(row.frames_dropped);
       const playId = typeof row.play_id === 'string' ? row.play_id : null;
       if (playId !== prevPlayId) {
         prevPlayId = playId;
@@ -95,7 +103,12 @@ watch(
   },
 );
 
-const series = computed<SeriesSpec[]>(() => [
+const series = computed<SeriesSpec[]>(() => {
+  // Compare mode: active session shows the same canonical tagged FPS set
+  // (solid `S<id>`) the siblings overlay; its derived FPS comes from the
+  // per-session makeCounterRate accessors, not the component refs below.
+  if (compareSelf.value) return compareFpsSeries(compareSelf.value);
+  return [
   {
     label: 'Displayed FPS',
     color: '#10b981',
@@ -109,11 +122,12 @@ const series = computed<SeriesSpec[]>(() => [
   {
     label: 'Dropped frames (total)',
     color: '#7c2d12',
-    accessor: (p: PlayerRecord) => p.player_metrics?.dropped_frames ?? null,
+    accessor: (p: PlayerRecord) => p.player_metrics?.frames_dropped ?? null,
     stepped: true,
     axis: 'y2',
   },
-]);
+  ];
+});
 
 </script>
 
@@ -124,6 +138,7 @@ const series = computed<SeriesSpec[]>(() => [
     unit="fps"
     :series="series"
     :events-stream="eventsStream"
+    :overlays="compareOverlays"
     :y-min="0"
     y2-title="dropped (count)"
     :y2-min="0"

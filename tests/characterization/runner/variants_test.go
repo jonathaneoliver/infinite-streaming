@@ -5,7 +5,8 @@ import (
 	"time"
 )
 
-func TestVariantRatesDescPrefersAverage(t *testing.T) {
+func TestStandardLadderRatesDualRungFilled(t *testing.T) {
+	t.Setenv("CHAR_LADDER_TOP_HEADROOM_PCT", "0") // isolate the dual-rung core
 	// Fixture matching the current test-dev master playlist: 5 variants,
 	// all carrying AVERAGE-BANDWIDTH alongside BANDWIDTH.
 	rec := mkPlayerWithVariants(t, []variantSeed{
@@ -16,126 +17,114 @@ func TestVariantRatesDescPrefersAverage(t *testing.T) {
 		{res: "3840x2160", avg: 10845181, peak: 15363854, url: "playlist_6s_2160p.m3u8"},
 	})
 
-	rates, err := VariantRatesDesc(rec, 5)
+	rates, err := StandardLadderRates(rec)
 	if err != nil {
-		t.Fatalf("VariantRatesDesc: %v", err)
+		t.Fatalf("StandardLadderRates: %v", err)
 	}
-	if len(rates) != 5 {
-		t.Fatalf("len=%d want 5", len(rates))
+	// 10 anchors (5 variants × {peak,avg}) + geometric fills.
+	if len(rates) <= 10 {
+		t.Fatalf("len=%d, want >10 (10 anchors + fills)", len(rates))
 	}
-	// Descending order check.
+	// Descending, within the target step ratio (slack for 3-dp rounding).
+	maxStep := LadderMaxStep()
 	for i := 1; i < len(rates); i++ {
 		if rates[i-1].CapMbps <= rates[i].CapMbps {
-			t.Errorf("rates not descending at %d: %.3f vs %.3f", i, rates[i-1].CapMbps, rates[i].CapMbps)
+			t.Errorf("not descending at %d: %.3f vs %.3f", i, rates[i-1].CapMbps, rates[i].CapMbps)
+		}
+		if r := rates[i-1].CapMbps / rates[i].CapMbps; r > maxStep+0.005 {
+			t.Errorf("step %d ratio %.3fx exceeds %.2fx", i, r, maxStep)
 		}
 	}
-	// Top rung (10.845 Mbps avg) × 1.05 (margin) × 1.07 (TCP) ≈ 12.184.
-	if got := rates[0].CapMbps; got < 12.17 || got > 12.20 {
-		t.Errorf("top cap %.3f Mbps, want ~12.184 (top avg × 1.05 × 1.07 TCP)", got)
+	// Top rung is the top variant's PEAK anchor ×1.05.
+	if rates[0].Source != "peak" || rates[0].Resolution != "3840x2160" {
+		t.Errorf("top rung = %s/%s, want 3840x2160/peak", rates[0].Resolution, rates[0].Source)
 	}
-	// Bottom rung (0.725 Mbps avg) × 1.05 × 1.07 ≈ 0.815.
-	if got := rates[len(rates)-1].CapMbps; got < 0.81 || got > 0.82 {
-		t.Errorf("bottom cap %.3f Mbps, want ~0.815 (bottom avg × 1.05 × 1.07 TCP)", got)
+	if got := rates[0].CapMbps; got < 16.12 || got > 16.14 {
+		t.Errorf("top cap %.3f Mbps, want ~16.132 (top peak × 1.05)", got)
 	}
-	// All five should report source=average since avg was populated.
+	// Bottom rung is attributed to the bottom variant; cap = bottom avg ×1.05.
+	last := rates[len(rates)-1]
+	if last.Resolution != "640x360" {
+		t.Errorf("bottom rung attributed to %s, want 640x360", last.Resolution)
+	}
+	if got := last.CapMbps; got < 0.755 || got > 0.766 {
+		t.Errorf("bottom cap %.3f Mbps, want ~0.761 (bottom avg × 1.05)", got)
+	}
+	// Every rung is attributed to a real variant + carries its peak.
 	for _, r := range rates {
-		if r.Source != "average" {
-			t.Errorf("%s reported source=%q want average", r.Resolution, r.Source)
+		if r.Resolution == "" || r.PeakBps <= 0 {
+			t.Errorf("rung cap=%.3f not attributed to a variant (res=%q peak=%d)", r.CapMbps, r.Resolution, r.PeakBps)
+		}
+		if r.Source != "peak" && r.Source != "avg" && r.Source != "fill" {
+			t.Errorf("rung cap=%.3f bad source %q", r.CapMbps, r.Source)
 		}
 	}
 }
 
-func TestVariantRatesDescFallsBackToPeak(t *testing.T) {
+func TestStandardLadderRatesPeakOnly(t *testing.T) {
+	t.Setenv("CHAR_LADDER_TOP_HEADROOM_PCT", "0")
+	// AVERAGE-BANDWIDTH absent ⇒ a single (peak) anchor per variant.
+	rec := mkPlayerWithVariants(t, []variantSeed{
+		{res: "640x360", avg: 0, peak: 1000000, url: "p.m3u8"},
+		{res: "1920x1080", avg: 0, peak: 6000000, url: "q.m3u8"},
+	})
+	rates, err := StandardLadderRates(rec)
+	if err != nil {
+		t.Fatalf("StandardLadderRates: %v", err)
+	}
+	if rates[0].Source != "peak" {
+		t.Errorf("top source=%q want peak", rates[0].Source)
+	}
+	// Top cap = 6.0 Mbps peak × 1.05 = 6.300.
+	if got := rates[0].CapMbps; got < 6.29 || got > 6.31 {
+		t.Errorf("top cap=%.3f want ~6.300 (peak 6.0 × 1.05)", got)
+	}
+}
+
+func TestStandardLadderRatesEnvBump(t *testing.T) {
+	t.Setenv("CHAR_LADDER_BUMP_PCT", "0")
+	t.Setenv("CHAR_LADDER_TOP_HEADROOM_PCT", "0")
 	rec := mkPlayerWithVariants(t, []variantSeed{
 		{res: "640x360", avg: 0, peak: 1000000, url: "p.m3u8"},
 	})
-	rates, err := VariantRatesDesc(rec, 0)
+	rates, err := StandardLadderRates(rec)
 	if err != nil {
-		t.Fatalf("VariantRatesDesc: %v", err)
+		t.Fatalf("StandardLadderRates: %v", err)
 	}
-	if rates[0].Source != "peak" {
-		t.Errorf("source=%q want peak (avg=0 forces fallback)", rates[0].Source)
-	}
-	// 1.0 Mbps × 1.0 (0% margin) × 1.07 (TCP) = 1.07
-	if got := rates[0].CapMbps; got < 1.06 || got > 1.08 {
-		t.Errorf("CapMbps=%.3f want ~1.070 (peak 1.0 × 0%% margin × 1.07 TCP)", got)
+	// bump 0 ⇒ cap = peak exactly (1.000 Mbps).
+	if got := rates[0].CapMbps; got < 0.999 || got > 1.001 {
+		t.Errorf("cap=%.3f want 1.000 (peak × bump 0%%)", got)
 	}
 }
 
-func TestVariantRatesDescEmptyManifest(t *testing.T) {
+func TestStandardLadderRatesTopHeadroom(t *testing.T) {
+	// Default 50% top-headroom: the top rung is the top variant's peak
+	// × 1.50, tagged source=headroom, above the +5% top anchor.
+	rec := mkPlayerWithVariants(t, []variantSeed{
+		{res: "640x360", avg: 724620, peak: 998009, url: "p.m3u8"},
+		{res: "3840x2160", avg: 10845181, peak: 15363854, url: "q.m3u8"},
+	})
+	rates, err := StandardLadderRates(rec)
+	if err != nil {
+		t.Fatalf("StandardLadderRates: %v", err)
+	}
+	top := rates[0]
+	if top.Source != "headroom" {
+		t.Errorf("top rung source=%q want headroom", top.Source)
+	}
+	// 15363854 × 1.50 / 1e6 = 23.046.
+	if top.CapMbps < 23.03 || top.CapMbps > 23.06 {
+		t.Errorf("headroom cap=%.3f want ~23.046 (top peak × 1.50)", top.CapMbps)
+	}
+	if top.Resolution != "3840x2160" {
+		t.Errorf("headroom rung attributed to %q, want 3840x2160", top.Resolution)
+	}
+}
+
+func TestStandardLadderRatesEmptyManifest(t *testing.T) {
 	rec := mkPlayerWithVariants(t, nil)
-	if _, err := VariantRatesDesc(rec, 5); err == nil {
+	if _, err := StandardLadderRates(rec); err == nil {
 		t.Error("expected error for empty variants")
-	}
-}
-
-func TestVariantRatesDescNegativeMarginAccepted(t *testing.T) {
-	rec := mkPlayerWithVariants(t, []variantSeed{
-		{res: "640x360", avg: 1000000, peak: 1500000, url: "p.m3u8"},
-	})
-	rates, err := VariantRatesDesc(rec, -5)
-	if err != nil {
-		t.Fatalf("VariantRatesDesc(-5): %v (negative margins must be allowed)", err)
-	}
-	// 1.0 Mbps × 0.95 × 1.07 (TCP) ≈ 1.017
-	if got := rates[0].CapMbps; got < 1.01 || got > 1.02 {
-		t.Errorf("CapMbps=%.3f want ~1.017 (peak 1.0 × −5%% × 1.07 TCP)", got)
-	}
-}
-
-func TestVariantSweepProducesStrictDescent(t *testing.T) {
-	rec := mkPlayerWithVariants(t, []variantSeed{
-		{res: "640x360", avg: 725000, peak: 1000000, url: "p.m3u8"},
-		{res: "960x540", avg: 1307000, peak: 1800000, url: "p.m3u8"},
-		{res: "1920x1080", avg: 4989000, peak: 7000000, url: "p.m3u8"},
-	})
-	margins := []int{50, 25, 10, 5, 0, -5}
-	sweep, err := VariantSweep(rec, margins)
-	if err != nil {
-		t.Fatalf("VariantSweep: %v", err)
-	}
-	// 3 variants × 6 margins = 18 candidates; with this widely-spaced
-	// ladder all should survive the strict-descent prune.
-	if len(sweep) != 18 {
-		t.Errorf("len=%d want 18 (no candidates should be dropped)", len(sweep))
-	}
-	for i := 1; i < len(sweep); i++ {
-		if sweep[i].CapMbps >= sweep[i-1].CapMbps {
-			t.Errorf("strict descent violated at %d: %.3f → %.3f",
-				i, sweep[i-1].CapMbps, sweep[i].CapMbps)
-		}
-	}
-	// First cap = 1080p × 1.50 × 1.07 (TCP) ≈ 8.007 Mbps;
-	// last = 360p × 0.95 × 1.07 ≈ 0.737 Mbps.
-	if got := sweep[0].CapMbps; got < 8.00 || got > 8.02 {
-		t.Errorf("first cap %.3f Mbps, want ~8.007", got)
-	}
-	if got := sweep[len(sweep)-1].CapMbps; got < 0.736 || got > 0.738 {
-		t.Errorf("last cap %.3f Mbps, want ~0.737", got)
-	}
-}
-
-func TestVariantSweepDropsAscendingOnTightLadder(t *testing.T) {
-	// Adjacent variants very close: 540p avg 1.0 Mbps, 720p avg 1.1 Mbps.
-	// 720p × 0.95 = 1.045; 540p × 1.50 = 1.500 — the lower variant's high
-	// margin would *increase* the cap vs. the higher variant's low margin,
-	// so the prune must drop it.
-	rec := mkPlayerWithVariants(t, []variantSeed{
-		{res: "960x540", avg: 1000000, peak: 1200000, url: "p.m3u8"},
-		{res: "1280x720", avg: 1100000, peak: 1300000, url: "p.m3u8"},
-	})
-	sweep, err := VariantSweep(rec, []int{50, 25, 10, 5, 0, -5})
-	if err != nil {
-		t.Fatalf("VariantSweep: %v", err)
-	}
-	// Some candidates must have been dropped; check strict descent.
-	for i := 1; i < len(sweep); i++ {
-		if sweep[i].CapMbps >= sweep[i-1].CapMbps {
-			t.Errorf("strict descent violated at %d: %s/%+d%% %.3f → %s/%+d%% %.3f",
-				i,
-				sweep[i-1].Resolution, sweep[i-1].MarginPct, sweep[i-1].CapMbps,
-				sweep[i].Resolution, sweep[i].MarginPct, sweep[i].CapMbps)
-		}
 	}
 }
 
@@ -172,8 +161,9 @@ func mkPlayerWithVariants(t *testing.T, seeds []variantSeed) *PlayerRecord {
 		ID: "00000000-0000-0000-0000-000000000001",
 	}
 	rec.CurrentPlay = &struct {
-		ID       string `json:"id"`
-		Manifest struct {
+		ID        string `json:"id"`
+		AttemptID int    `json:"attempt_id"`
+		Manifest  struct {
 			MasterURL string `json:"master_url"`
 			Variants  []struct {
 				Bandwidth        int    `json:"bandwidth"`

@@ -91,7 +91,10 @@ struct SettingsOverlay: View {
     private var panel: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: Space.s3) {
+                // #630: single-Back chevron — pops picker → main list →
+                // closes the drawer; appium taps it to exit settings.
                 BackChevronButton { handleBack() }
+                    .accessibilityIdentifier("settings-back-button")
                 Spacer()
             }
             Spacer().frame(height: isCompact ? Space.s2 : Space.s4)
@@ -164,26 +167,33 @@ private struct MainList: View {
                            compact: compact,
                            onTap: { onPick(.stream) })
                     .focused($rowIdx, equals: 1)
+                    .accessibilityIdentifier("settings-row-stream")
                 SettingRow(label: "Protocol",
                            value: vm.streamProtocol.label,
                            compact: compact,
                            onTap: { onPick(.proto) })
                     .focused($rowIdx, equals: 2)
+                    .accessibilityIdentifier("settings-row-protocol")
                 SettingRow(label: "Segment length",
                            value: vm.segment.label,
                            compact: compact,
                            onTap: { onPick(.segment) })
                     .focused($rowIdx, equals: 3)
+                    // #630: appium drives this row to switch 2s↔6s between
+                    // back-to-back characterization sweeps.
+                    .accessibilityIdentifier("settings-row-segment")
                 SettingRow(label: "Codec",
                            value: vm.codec.label,
                            compact: compact,
                            onTap: { onPick(.codec) })
                     .focused($rowIdx, equals: 4)
+                    .accessibilityIdentifier("settings-row-codec")
                 SettingRow(label: "Advanced",
                            value: "",
                            compact: compact,
                            onTap: { onPick(.advanced) })
                     .focused($rowIdx, equals: 5)
+                    .accessibilityIdentifier("settings-row-advanced")
             }
         }
         .onAppear {
@@ -300,65 +310,78 @@ private struct PickerList: View {
             }
         case .proto:
             ForEach(Array(StreamProtocol.allCases.enumerated()), id: \.element.id) { idx, p in
-                PickerItem(label: p.label, selected: p == vm.streamProtocol, compact: compact) {
+                PickerItem(label: p.label, selected: p == vm.streamProtocol, compact: compact,
+                           axID: "proto-\(p.rawValue)") {
                     vm.setProtocol(p); onBack()
                 }
                 .focused($itemIdx, equals: idx)
             }
         case .segment:
             ForEach(Array(SegmentLength.allCases.enumerated()), id: \.element.id) { idx, s in
-                PickerItem(label: s.label, selected: s == vm.segment, compact: compact) {
+                // #630: stable id ("segment-2s" / "segment-6s") so appium can
+                // pick a specific length; label text alone isn't a reliable
+                // WebDriver target.
+                PickerItem(label: s.label, selected: s == vm.segment, compact: compact,
+                           axID: "segment-\(s.label.lowercased())") {
                     vm.setSegment(s); onBack()
                 }
                 .focused($itemIdx, equals: idx)
             }
         case .codec:
             ForEach(Array(CodecFilter.allCases.enumerated()), id: \.element.id) { idx, c in
-                PickerItem(label: c.label, selected: c == vm.codec, compact: compact) {
+                PickerItem(label: c.label, selected: c == vm.codec, compact: compact,
+                           axID: "codec-\(c.rawValue)") {
                     vm.setCodec(c); onBack()
                 }
                 .focused($itemIdx, equals: idx)
             }
         case .advanced:
             ToggleRow(label: "4K (allow >1080p)",
-                      isOn: vm.allow4K, compact: compact) { vm.setAllow4K($0) }
+                      isOn: vm.allow4K, compact: compact, axID: "toggle-4k") { vm.setAllow4K($0) }
                 .focused($itemIdx, equals: 0)
-            ToggleRow(label: "Local Proxy",
-                      isOn: vm.localProxy, compact: compact) { vm.setLocalProxy($0) }
-                .focused($itemIdx, equals: 1)
-            ToggleRow(label: "Auto-Recovery",
-                      isOn: vm.autoRecovery, compact: compact) { vm.setAutoRecovery($0) }
+            PreferredPeakBitRateRow(mbps: vm.preferredPeakBitRateMbps, compact: compact) {
+                vm.setPreferredPeakBitRateMbps($0)
+            }
+            .focused($itemIdx, equals: 1)
+            ToggleRow(label: "Start on first variant",
+                      isOn: vm.startsOnFirstEligibleVariant, compact: compact, axID: "toggle-starts-first-variant") { vm.setStartsOnFirstEligibleVariant($0) }
                 .focused($itemIdx, equals: 2)
-            ToggleRow(label: "Go Live",
-                      isOn: vm.goLive, compact: compact) { vm.setGoLive($0) }
+            ToggleRow(label: "Local Proxy",
+                      isOn: vm.localProxy, compact: compact, axID: "toggle-local-proxy") { vm.setLocalProxy($0) }
                 .focused($itemIdx, equals: 3)
+            ToggleRow(label: "Auto-Recovery",
+                      isOn: vm.autoRecovery, compact: compact, axID: "toggle-auto-recovery") { vm.setAutoRecovery($0) }
+                .focused($itemIdx, equals: 4)
+            ToggleRow(label: "Go Live",
+                      isOn: vm.goLive, compact: compact, axID: "toggle-go-live") { vm.setGoLive($0) }
+                .focused($itemIdx, equals: 5)
             LiveOffsetRow(seconds: vm.liveOffsetSeconds, compact: compact) {
                 vm.setLiveOffsetSeconds($0)
             }
-            .focused($itemIdx, equals: 4)
+            .focused($itemIdx, equals: 6)
             PlayIdRotationRow(seconds: vm.playIdRotationSeconds, compact: compact) {
                 vm.setPlayIdRotationSeconds($0)
             }
-            .focused($itemIdx, equals: 5)
+            .focused($itemIdx, equals: 7)
             ToggleRow(label: "Skip Home on launch",
-                      isOn: vm.skipHomeOnLaunch, compact: compact) { vm.setSkipHomeOnLaunch($0) }
-                .focused($itemIdx, equals: 6)
+                      isOn: vm.skipHomeOnLaunch, compact: compact, axID: "toggle-skip-home") { vm.setSkipHomeOnLaunch($0) }
+                .focused($itemIdx, equals: 8)
             ToggleRow(label: "Mute audio",
-                      isOn: vm.isMuted, compact: compact) { vm.setIsMuted($0) }
-                .focused($itemIdx, equals: 7)
+                      isOn: vm.isMuted, compact: compact, axID: "toggle-mute") { vm.setIsMuted($0) }
+                .focused($itemIdx, equals: 9)
             PreviewVideoSlotsRow(slots: vm.previewVideoSlots,
                                  hardwareCap: DecodeBudget.shared.hardwareCap,
                                  compact: compact) {
                 vm.setPreviewVideoSlots($0)
             }
-            .focused($itemIdx, equals: 8)
+            .focused($itemIdx, equals: 10)
             ToggleRow(label: "HUD",
-                      isOn: vm.developerMode, compact: compact) { vm.setDeveloperMode($0) }
-                .focused($itemIdx, equals: 9)
+                      isOn: vm.developerMode, compact: compact, axID: "toggle-hud") { vm.setDeveloperMode($0) }
+                .focused($itemIdx, equals: 11)
             DestructiveRow(label: "Reset All Settings", compact: compact) {
                 showResetConfirm = true
             }
-            .focused($itemIdx, equals: 10)
+            .focused($itemIdx, equals: 12)
         }
     }
 }
@@ -367,6 +390,10 @@ private struct PickerItem: View {
     let label: String
     let selected: Bool
     let compact: Bool
+    // Optional stable accessibility id for UI automation (#630). When nil the
+    // item carries no identifier (SwiftUI default) — only the pickers a test
+    // needs to drive set one.
+    var axID: String? = nil
     let onTap: () -> Void
 
     var body: some View {
@@ -388,6 +415,7 @@ private struct PickerItem: View {
         .cinematicFocus(cornerRadius: Radius.row)
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)
+        .accessibilityIdentifier(axID ?? "")
     }
 }
 
@@ -516,6 +544,69 @@ private struct PlayIdRotationRow: View {
     }
 }
 
+/// Preset picker for `AVPlayerItem.preferredPeakBitRate` (#683). "Off" = no
+/// cap (Apple default); the Mbps presets cap the variants AVPlayer will
+/// select — including the startup pick — giving the characterization rig a
+/// deterministic ceiling to pair with the Content variant-reorder probe
+/// (#682). Same preset-button shape as `PlayIdRotationRow`; each button
+/// carries a stable accessibility id (`peak-bitrate-off` / `-2` / …) so the
+/// Appium harness can flip it per run (mirrors #630's segment picker AX ids).
+private struct PreferredPeakBitRateRow: View {
+    let mbps: Int
+    let compact: Bool
+    let onChange: (Int) -> Void
+
+    private static let presets: [(label: String, mbps: Int, axSuffix: String)] = [
+        ("Off", 0, "off"),
+        ("1", 1, "1"),
+        ("2", 2, "2"),
+        ("4", 4, "4"),
+        ("8", 8, "8"),
+        ("16", 16, "16"),
+        ("32", 32, "32"),
+    ]
+
+    private var subtitle: String {
+        mbps <= 0 ? "Off — AVPlayer's own ceiling" : "Cap selectable variants at \(mbps) Mbps"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Peak bitrate cap")
+                .font(compact ? AppType.body(size: 15) : AppType.body())
+                .foregroundColor(Tokens.fg)
+                .lineLimit(1)
+            Text(subtitle)
+                .font(AppType.monoSm())
+                .foregroundColor(Tokens.fgFaint)
+            HStack(spacing: Space.s2) {
+                ForEach(Self.presets, id: \.mbps) { preset in
+                    Button { onChange(preset.mbps) } label: {
+                        Text(preset.label)
+                            .font(AppType.monoSm())
+                            .foregroundColor(mbps == preset.mbps ? Tokens.bg : Tokens.fg)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(mbps == preset.mbps ? Tokens.accent : Tokens.bgCard)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .cinematicFocusFollower(cornerRadius: 8)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("peak-bitrate-\(preset.axSuffix)")
+                    #if os(tvOS)
+                    .focusEffectDisabled()
+                    #endif
+                }
+            }
+        }
+        .padding(.horizontal, compact ? Space.s3 : Space.s4)
+        .padding(.vertical, compact ? Space.s2 : Space.s3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Tokens.bgSoft)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.row, style: .continuous))
+    }
+}
+
 /// Numeric stepper for the LIVE preview-row decode budget. 0 = preview
 /// video off (every tile shows its thumbnail). Otherwise the value is
 /// the number of simultaneous decodes allowed; tiles past this number
@@ -597,6 +688,9 @@ private struct ToggleRow: View {
     let label: String
     let isOn: Bool
     let compact: Bool
+    // Optional stable accessibility id for UI automation (#630). nil ⇒ no
+    // identifier (SwiftUI default).
+    var axID: String? = nil
     let onChange: (Bool) -> Void
 
     var body: some View {
@@ -615,6 +709,7 @@ private struct ToggleRow: View {
         .cinematicFocus(cornerRadius: Radius.row)
         .contentShape(Rectangle())
         .onTapGesture { onChange(!isOn) }
+        .accessibilityIdentifier(axID ?? "")
     }
 
     private var switchGraphic: some View {
