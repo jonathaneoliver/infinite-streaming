@@ -124,5 +124,18 @@ except Exception: print("")' 2>/dev/null)
 	fi
 fi
 
+# Leave the pool quiet: terminate the player app on each sim. Warming (and any
+# prior run) leaves the app foregrounded — streaming + heartbeating a player to
+# the server — which is just noise when no test is using it. WDA is a SEPARATE
+# process and stays resident, so the next session is still fast; and every test
+# does appium:forceAppLaunch anyway, so an off app costs the next run nothing.
+# Opt out with DF_KEEP_APP_RUNNING=1.
+if [ "${DF_KEEP_APP_RUNNING:-0}" != "1" ]; then
+	echo "terminating $DF_BUNDLE_ID on the pool (WDA stays resident; quiet until a test launches it)…"
+	for u in $UDIDS; do
+		xcrun simctl terminate "$u" "$DF_BUNDLE_ID" >/dev/null 2>&1 || true
+	done
+fi
+
 echo "pool ready. start the server with tools/appium-device-farm/run.sh (if not already running)."
 [ "$missing_app" = "0" ] || { echo "WARNING: one or more sims are missing $DF_BUNDLE_ID — install it before running." >&2; exit 2; }
