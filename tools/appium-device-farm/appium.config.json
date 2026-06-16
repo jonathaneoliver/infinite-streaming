@@ -1,10 +1,8 @@
 {
-  "_comment": "Appium server + Device Farm plugin config. Loaded via `appium --config`. The key knob is bootedSimulators:true — Device Farm then ONLY allocates among already-booted simulators and never tries to cold-boot one. On this machine cold-booting an arbitrary sim (e.g. a never-booted iPhone 17 Pro) times out / fails (code 22), and DF's naive selection kept choosing those. Booting ONLY the known-good, app-installed, latest-OS Fleet sims makes the booted set the de-facto allowlist: DF allocates among them, queues when busy, auto-assigns WDA/MJPEG ports. Real iOS/tvOS/Android hardware is always 'booted', so iosDeviceType/androidDeviceType:both still picks attached devices up.",
   "server": {
     "port": 4723,
     "keep-alive-timeout": 800,
     "use-plugins": ["device-farm"],
-    "use-drivers": ["xcuitest", "uiautomator2"],
     "plugin": {
       "device-farm": {
         "platform": "both",
