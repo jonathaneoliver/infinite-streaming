@@ -57,7 +57,13 @@ type AppiumLauncher struct {
 
 	mu       sync.Mutex
 	sessions map[string]string // device UDID → Appium session id
-	hc       *http.Client
+	// allocatedUDID is the UDID Device Farm assigned to this launcher's
+	// session, read back from the create-session response. Under DF the caller
+	// requests a device by capability (no UDID up front), so downstream methods
+	// that receive a UDID-less Device resolve the session through this. Empty in
+	// the non-DF path (the caller's Device already carries its UDID).
+	allocatedUDID string
+	hc            *http.Client
 }
 
 // NewAppiumLauncher returns a launcher pointing at the configured server.
@@ -116,10 +122,16 @@ func (a *AppiumLauncher) Launch(ctx context.Context, d Device) (*Session, error)
 	if err != nil {
 		return nil, err
 	}
+	// A step that fails AFTER the session is open must tear it down, or the
+	// session lingers until newCommandTimeout (2 h) holding the device busy —
+	// under Device Farm that blocks every later allocation. sess.Device carries
+	// the (DF-allocated) UDID so discardSession finds it.
 	if err := a.ResumePlayback(ctx, d); err != nil {
+		a.discardSession(sess.Device)
 		return nil, err
 	}
 	if err := a.waitForHeartbeat(ctx, sess); err != nil {
+		a.discardSession(sess.Device)
 		return nil, err
 	}
 	return sess, nil
@@ -242,7 +254,12 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 	if err := a.healthCheck(ctx); err != nil {
 		return nil, fmt.Errorf("appium server not reachable at %s: %w (start with `appium`, or unset LAUNCH_MODE=appium)", a.URL, err)
 	}
-	caps := appiumCapabilities(d, bundleID)
+	df := DeviceFarmEnabled()
+	var platformVersion string
+	if df {
+		platformVersion = dfPlatformVersion(ctx, d.Platform)
+	}
+	caps := appiumCapabilities(d, bundleID, df, platformVersion)
 	// Always fold in the baseline test flags (4K on, peak clamp off unless the
 	// mode set it) so a sim's stale persisted UserDefaults can't leak in.
 	effectiveArgs := withBaselineTestFlags(a.launchArgs)
@@ -261,12 +278,21 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 			caps["appium:processArguments"] = map[string]any{"args": effectiveArgs}
 		}
 	}
-	sessID, err := a.createSession(ctx, caps)
+	sessID, allocatedUDID, err := a.createSession(ctx, caps)
 	if err != nil {
 		return nil, fmt.Errorf("appium create session: %w", err)
 	}
+	// Under Device Farm the device wasn't pinned — the plugin chose it. Adopt
+	// the allocated UDID so the session map, screenshots, logs, and
+	// ReleaseDevice key off the real device. The returned Session carries the
+	// updated Device so the caller's cleanup (CloseViaUI / ReleaseDevice) sees
+	// it too.
+	if df && allocatedUDID != "" {
+		d.UDID = allocatedUDID
+	}
 	a.mu.Lock()
 	a.sessions[d.UDID] = sessID
+	a.allocatedUDID = d.UDID
 	a.mu.Unlock()
 
 	// A freshly-installed/erased sim can come up on the blocking
@@ -276,6 +302,7 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 	switch d.Platform {
 	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
 		if err := a.navigateServerPickerIfPresent(ctx, sessID, bootstrapBaseURL()); err != nil {
+			a.discardSession(d) // don't leak the just-opened session on this error path
 			return nil, fmt.Errorf("server picker navigation: %w", err)
 		}
 	}
@@ -298,9 +325,7 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 // that drive the phases separately call Session.WaitForHeartbeat
 // themselves afterward.
 func (a *AppiumLauncher) ResumePlayback(ctx context.Context, d Device) error {
-	a.mu.Lock()
-	sessID := a.sessions[d.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(d)
 	if sessID == "" {
 		return errors.New("ResumePlayback: no active appium session for device")
 	}
@@ -336,9 +361,7 @@ func (a *AppiumLauncher) ResumePlaybackClip(ctx context.Context, d Device, clipI
 	if clipID == "" {
 		return a.ResumePlayback(ctx, d)
 	}
-	a.mu.Lock()
-	sessID := a.sessions[d.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(d)
 	if sessID == "" {
 		return errors.New("ResumePlaybackClip: no active appium session for device")
 	}
@@ -394,9 +417,7 @@ func (a *AppiumLauncher) waitForHeartbeat(ctx context.Context, sess *Session) er
 // session entirely if terminate isn't supported on this driver.
 func (a *AppiumLauncher) Kill(ctx context.Context, d Device) error {
 	bundleID := a.BundleIDs[d.Platform]
-	a.mu.Lock()
-	sessID := a.sessions[d.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(d)
 	if sessID == "" {
 		return nil // never launched; nothing to kill
 	}
@@ -423,9 +444,7 @@ func (a *AppiumLauncher) SetSegmentLength(ctx context.Context, d Device, value s
 	default:
 		return fmt.Errorf("SetSegmentLength: unsupported platform %s", d.Platform)
 	}
-	a.mu.Lock()
-	sessID := a.sessions[d.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(d)
 	if sessID == "" {
 		return errors.New("SetSegmentLength: no active appium session for device")
 	}
@@ -456,9 +475,7 @@ func (a *AppiumLauncher) SetSegmentLength(ctx context.Context, d Device, value s
 // affordance isn't present (already on home / play already ended), it's a
 // no-op rather than an error where possible. Satisfies runner.UICloser.
 func (a *AppiumLauncher) ClosePlaybackViaUI(ctx context.Context, d Device) error {
-	a.mu.Lock()
-	sessID := a.sessions[d.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(d)
 	if sessID == "" {
 		return nil // never launched; nothing to close
 	}
@@ -548,9 +565,7 @@ func (a *AppiumLauncher) ReleaseDevice(ctx context.Context, d Device) error {
 // Returns the path on success. Intended to be called from a sweep
 // runner to attach visual context to interesting steps.
 func (a *AppiumLauncher) Screenshot(ctx context.Context, d Device, path string) (string, error) {
-	a.mu.Lock()
-	sessID := a.sessions[d.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(d)
 	if sessID == "" {
 		return "", errors.New("screenshot: no active session for device")
 	}
@@ -661,9 +676,7 @@ func (a *AppiumLauncher) TapByAccessibilityID(ctx context.Context, sess *Session
 	if id == "" {
 		return errors.New("TapByAccessibilityID: empty id")
 	}
-	a.mu.Lock()
-	sessID := a.sessions[sess.Device.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(sess.Device)
 	if sessID == "" {
 		return errors.New("TapByAccessibilityID: no active appium session for device")
 	}
@@ -677,9 +690,7 @@ func (a *AppiumLauncher) TapTileByClipID(ctx context.Context, sess *Session, cli
 	if clipID == "" {
 		return errors.New("TapTileByClipID: empty clip_id")
 	}
-	a.mu.Lock()
-	sessID := a.sessions[sess.Device.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(sess.Device)
 	if sessID == "" {
 		return errors.New("TapTileByClipID: no active appium session for device")
 	}
@@ -700,9 +711,7 @@ func (a *AppiumLauncher) ReadPlayerID(ctx context.Context, sess *Session) (strin
 	if sess == nil {
 		return "", errors.New("ReadPlayerID: nil session")
 	}
-	a.mu.Lock()
-	sessID := a.sessions[sess.Device.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(sess.Device)
 	if sessID == "" {
 		return "", errors.New("ReadPlayerID: no active appium session for device")
 	}
@@ -864,7 +873,12 @@ func (a *AppiumLauncher) healthCheck(ctx context.Context) error {
 	return nil
 }
 
-func (a *AppiumLauncher) createSession(ctx context.Context, caps map[string]any) (string, error) {
+// createSession opens a WebDriver session and returns its id plus the UDID of
+// the device Appium actually bound to (read back from the response's negotiated
+// capabilities). Under Device Farm the request carries no UDID, so this is how
+// we learn which device the plugin allocated; in the non-DF path it echoes back
+// the UDID we pinned. Empty allocatedUDID means the driver didn't surface one.
+func (a *AppiumLauncher) createSession(ctx context.Context, caps map[string]any) (sessID, allocatedUDID string, err error) {
 	body := map[string]any{
 		"capabilities": map[string]any{
 			"alwaysMatch": caps,
@@ -873,20 +887,78 @@ func (a *AppiumLauncher) createSession(ctx context.Context, caps map[string]any)
 	}
 	raw, err := a.doRequest(ctx, "POST", "/session", body)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	var resp struct {
 		Value struct {
-			SessionID string `json:"sessionId"`
+			SessionID    string         `json:"sessionId"`
+			Capabilities map[string]any `json:"capabilities"`
 		} `json:"value"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if resp.Value.SessionID == "" {
-		return "", fmt.Errorf("appium returned empty sessionId; body: %s", string(raw))
+		return "", "", fmt.Errorf("appium returned empty sessionId; body: %s", string(raw))
 	}
-	return resp.Value.SessionID, nil
+	udid := capString(resp.Value.Capabilities, "udid")
+	if udid == "" {
+		udid = capString(resp.Value.Capabilities, "appium:udid")
+	}
+	return resp.Value.SessionID, udid, nil
+}
+
+// capString reads a string-valued capability from a negotiated-capabilities map,
+// returning "" if absent or non-string.
+func capString(caps map[string]any, key string) string {
+	if caps == nil {
+		return ""
+	}
+	if v, ok := caps[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// sessionID resolves the Appium session id for a device. Normally it's keyed by
+// the device's UDID; under Device Farm the caller may hold a capability-
+// requested Device with no UDID, but this launcher owns exactly one allocated
+// session — so we fall back to the UDID Device Farm assigned (allocatedUDID).
+func (a *AppiumLauncher) sessionID(d Device) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if s, ok := a.sessions[d.UDID]; ok {
+		return s
+	}
+	if a.allocatedUDID != "" {
+		return a.sessions[a.allocatedUDID]
+	}
+	return ""
+}
+
+// discardSession deletes the Appium session bound to d (best-effort) and drops
+// it from the launcher's map, so a launch that fails AFTER createSession doesn't
+// leak a session — which would hold the device busy until newCommandTimeout
+// (2 h) and, under Device Farm, block every later allocation. Uses its OWN short
+// context: the common trigger is a heartbeat timeout, where the caller's ctx is
+// already expired and would make the DELETE fail instantly.
+func (a *AppiumLauncher) discardSession(d Device) {
+	a.mu.Lock()
+	sessID := a.sessions[d.UDID]
+	if sessID == "" && a.allocatedUDID != "" {
+		sessID = a.sessions[a.allocatedUDID]
+	}
+	delete(a.sessions, d.UDID)
+	if a.allocatedUDID != "" {
+		delete(a.sessions, a.allocatedUDID)
+	}
+	a.mu.Unlock()
+	if sessID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, _ = a.doRequest(ctx, "DELETE", "/session/"+sessID, nil)
 }
 
 func (a *AppiumLauncher) doRequest(ctx context.Context, method, path string, body any) ([]byte, error) {
@@ -932,11 +1004,17 @@ func truncate(s string, n int) string {
 // capabilities object Appium expects in session creation. noReset=true
 // keeps the app's state (so skipHomeOnLaunch + lastPlayed survive across
 // sessions); fullReset=false avoids wiping settings between runs.
-func appiumCapabilities(d Device, bundleID string) map[string]any {
+//
+// When df is true (CHAR_DEVICE_FARM=1) the device-allocation caps are dropped so
+// the appium-device-farm plugin arbitrates instead of us: no appium:udid (DF
+// picks the device), no deviceName (don't over-constrain the match), no
+// hand-offset WDA/MJPEG ports or derivedDataPath (DF auto-assigns ports). For
+// sims we pin appium:platformVersion (passed in by the caller) so DF never
+// allocates an old-OS sim; real hardware is left unconstrained.
+func appiumCapabilities(d Device, bundleID string, df bool, platformVersion string) map[string]any {
 	caps := map[string]any{
 		"appium:noReset":   true,
 		"appium:fullReset": false,
-		"appium:udid":      d.UDID,
 		"appium:bundleId":  bundleID,
 		// newCommandTimeout default is 60 s — Appium auto-terminates the
 		// session (and the app with it) if no WebDriver command lands
@@ -952,30 +1030,50 @@ func appiumCapabilities(d Device, bundleID string) map[string]any {
 		// starting state per run. App data (settings, lastPlayed) is
 		// preserved because noReset=true.
 		"appium:forceAppLaunch": true,
+		// shouldTerminateApp terminates the app when the WebDriver session ends.
+		// Both drivers honour it (XCUITest defaults it OFF, which is why the app
+		// otherwise lingers — streaming + heartbeating a player — after a run;
+		// UiAutomator2 recognises it too). We delete the session in Close()
+		// (test end) and discardSession() (failed launch), so this auto-quiets
+		// the app on every teardown path, cross-platform, with no simctl/adb —
+		// the device is left WDA-warm but app-off when no test is using it.
+		"appium:shouldTerminateApp": true,
 	}
-	if d.Label != "" {
-		caps["appium:deviceName"] = d.Label
+	if !df {
+		// Non-DF: we pin the exact device (and surface its name). Under DF the
+		// plugin chooses the device by capability, so omitting these lets it
+		// allocate freely from the pool.
+		caps["appium:udid"] = d.UDID
+		if d.Label != "" {
+			caps["appium:deviceName"] = d.Label
+		}
+	}
+	if df && platformVersion != "" {
+		caps["appium:platformVersion"] = platformVersion
 	}
 	switch d.Platform {
 	case PlatformIPhone, PlatformIPad:
 		caps["platformName"] = "iOS"
 		caps["appium:automationName"] = "XCUITest"
-		setXCUITestFleetPorts(caps, d.FleetIndex)
-		// Real-device WDA bring-up is the slow part: by default Appium runs
-		// xcodebuild + deploys WebDriverAgent into a throwaway DerivedData dir
-		// every session. Pin a STABLE derivedDataPath so the build persists
-		// across runs — xcodebuild goes incremental and the WDA app stays
-		// installed, cutting per-session bring-up. Always safe (still builds on
-		// first run). Per fleet index so parallel real devices don't share one
-		// build dir. (Sims are fast enough not to need this.)
-		caps["appium:derivedDataPath"] = iosWDADerivedDataPath(d.FleetIndex)
-		// CHAR_IOS_PREBUILT_WDA=1 skips the xcodebuild step entirely and reuses
-		// the WDA already built at derivedDataPath — the big speedup. Off by
-		// default because Appium ERRORS when usePrebuiltWDA is set but nothing
-		// has been built there yet: run once WITHOUT it to populate the path,
-		// then flip it on. (See the run-prebuilt-wda guide.)
-		if os.Getenv("CHAR_IOS_PREBUILT_WDA") == "1" {
-			caps["appium:usePrebuiltWDA"] = true
+		if !df {
+			setXCUITestFleetPorts(caps, d.FleetIndex)
+			// Real-device WDA bring-up is the slow part: by default Appium runs
+			// xcodebuild + deploys WebDriverAgent into a throwaway DerivedData dir
+			// every session. Pin a STABLE derivedDataPath so the build persists
+			// across runs — xcodebuild goes incremental and the WDA app stays
+			// installed, cutting per-session bring-up. Always safe (still builds on
+			// first run). Per fleet index so parallel real devices don't share one
+			// build dir. (Sims are fast enough not to need this.) Under DF the
+			// plugin owns port + session allocation, so we don't hand-pin these.
+			caps["appium:derivedDataPath"] = iosWDADerivedDataPath(d.FleetIndex)
+			// CHAR_IOS_PREBUILT_WDA=1 skips the xcodebuild step entirely and reuses
+			// the WDA already built at derivedDataPath — the big speedup. Off by
+			// default because Appium ERRORS when usePrebuiltWDA is set but nothing
+			// has been built there yet: run once WITHOUT it to populate the path,
+			// then flip it on. (See the run-prebuilt-wda guide.)
+			if os.Getenv("CHAR_IOS_PREBUILT_WDA") == "1" {
+				caps["appium:usePrebuiltWDA"] = true
+			}
 		}
 	case PlatformIPadSim:
 		caps["platformName"] = "iOS"
@@ -984,11 +1082,15 @@ func appiumCapabilities(d Device, bundleID string) map[string]any {
 		// step Appium does by default — WDA only needs (re)deploy on
 		// real devices.
 		caps["appium:useNewWDA"] = false
-		setXCUITestFleetPorts(caps, d.FleetIndex)
+		if !df {
+			setXCUITestFleetPorts(caps, d.FleetIndex)
+		}
 	case PlatformAppleTV:
 		caps["platformName"] = "tvOS"
 		caps["appium:automationName"] = "XCUITest"
-		setXCUITestFleetPorts(caps, d.FleetIndex)
+		if !df {
+			setXCUITestFleetPorts(caps, d.FleetIndex)
+		}
 	case PlatformAndroidTV:
 		caps["platformName"] = "Android"
 		caps["appium:automationName"] = "UiAutomator2"

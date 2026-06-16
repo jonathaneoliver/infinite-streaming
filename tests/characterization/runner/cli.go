@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -494,6 +495,68 @@ func mapSimRuntime(rt string) Platform {
 		return PlatformAppleTV
 	}
 	return ""
+}
+
+// LatestSimRuntimeVersion returns the highest installed, available simulator
+// runtime version for the given OS family ("iOS" / "tvOS"), e.g. "26.4". The
+// Device Farm launch path pins this as appium:platformVersion so DF never
+// allocates an old-OS sim. Returns an error if xcrun is unavailable or no
+// matching runtime is installed.
+func LatestSimRuntimeVersion(ctx context.Context, osName string) (string, error) {
+	if _, err := exec.LookPath("xcrun"); err != nil {
+		return "", errors.New("xcrun not on $PATH")
+	}
+	cmd := exec.CommandContext(ctx, "xcrun", "simctl", "list", "runtimes", "--json")
+	raw, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("xcrun simctl list runtimes: %w", err)
+	}
+	var resp struct {
+		Runtimes []struct {
+			Version     string `json:"version"`
+			Platform    string `json:"platform"`
+			IsAvailable bool   `json:"isAvailable"`
+		} `json:"runtimes"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return "", fmt.Errorf("decode runtimes: %w", err)
+	}
+	var best string
+	for _, rt := range resp.Runtimes {
+		if !rt.IsAvailable || !strings.EqualFold(rt.Platform, osName) {
+			continue
+		}
+		if best == "" || compareSemverish(rt.Version, best) > 0 {
+			best = rt.Version
+		}
+	}
+	if best == "" {
+		return "", fmt.Errorf("no available %s simulator runtime installed", osName)
+	}
+	return best, nil
+}
+
+// compareSemverish compares dotted numeric version strings ("26.4" vs "26.10")
+// segment-by-segment numerically, so 26.10 > 26.4 (lexical compare would get it
+// wrong). Non-numeric or missing segments sort as 0. Returns -1/0/1.
+func compareSemverish(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		var ai, bi int
+		if i < len(as) {
+			ai, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			bi, _ = strconv.Atoi(bs[i])
+		}
+		if ai != bi {
+			if ai < bi {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 func simctlTerminate(ctx context.Context, udid, bundleID string) error {
