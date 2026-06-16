@@ -20,7 +20,7 @@ const variants = computed(() => {
   return rawVariants.value.slice().sort((a, b) => (b.bandwidth ?? 0) - (a.bandwidth ?? 0));
 });
 
-const LIVE_OFFSET_CHOICES = [0, 6, 18, 24] as const;
+const LIVE_OFFSET_CHOICES = [0, 2, 4, 6, 12, 18, 24, 30, 36, 42] as const;
 type LiveOffset = (typeof LIVE_OFFSET_CHOICES)[number];
 
 const VARIANT_ORDER_CHOICES = [
@@ -211,9 +211,13 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
       </label>
     </div>
     <p class="note">
-      HLS-only. Forces the player to fall back further from the live edge by
-      stripping the most-recent N seconds of segments from the manifest.
-      Pairs well with `delay_ms` to surface live-offset-driven stalls.
+      HLS-only. Rewrites the manifest's <code>EXT-X-START:TIME-OFFSET</code>
+      (join point) and <code>EXT-X-SERVER-CONTROL:HOLD-BACK</code> (target
+      offset) to N seconds, on both the master <em>and</em> the variant
+      playlists. Players honour the variant <code>HOLD-BACK</code> for their
+      join offset (iOS / Android / web). Note the HLS spec requires
+      <code>HOLD-BACK ≥ 3× the max segment duration</code> — below that AVPlayer
+      rejects the playlist (<code>-12646</code>). It does NOT strip segments.
     </p>
 
     <div class="order-row" data-testid="content-variant-order">

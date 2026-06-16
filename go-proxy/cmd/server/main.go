@@ -6320,11 +6320,16 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	var bytesOut int64
 
-	// Apply content manipulation for master playlists
-	if isMasterManifest && shouldApplyContentManipulation(sessionData) {
+	// Apply content manipulation. Master playlists get the full set (strip /
+	// overstate / live-offset EXT-X-START). Media (VARIANT) playlists get the
+	// live-offset rewrite too — HOLD-BACK + EXT-X-START live in the variant and
+	// are what players actually key off, so a master-only rewrite has no effect
+	// (#793, regression caught by server_content_test master_live_offset).
+	liveOffsetOnVariant := isManifest && !isMasterManifest && getInt(sessionData, "content_live_offset") > 0
+	if (isMasterManifest && shouldApplyContentManipulation(sessionData)) || liveOffsetOnVariant {
 		bodyBytes, err := io.ReadAll(resp.Body)
 		if err != nil {
-			log.Printf("ERROR: Failed to read master playlist body: %v", err)
+			log.Printf("ERROR: Failed to read playlist body for manipulation: %v", err)
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(proxyCtx.Err(), context.DeadlineExceeded) {
 				bumpFaultCounter(sessionData, "transfer_active_timeout")
 				logFaultEvent(sessionData, externalPort, "transfer_active_timeout", requestKind, "transfer_active_timeout_mid_body")
@@ -6333,11 +6338,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		modifiedBody, err := a.applyContentManipulation(bodyBytes, sessionData, contentType)
-		if err != nil {
-			log.Printf("ERROR: Failed to manipulate master playlist: %v", err)
-			// Fall back to original content
-			modifiedBody = bodyBytes
+		var modifiedBody []byte
+		if isMasterManifest {
+			modifiedBody, err = a.applyContentManipulation(bodyBytes, sessionData, contentType)
+			if err != nil {
+				log.Printf("ERROR: Failed to manipulate master playlist: %v", err)
+				modifiedBody = bodyBytes // fall back to original
+			}
+		} else {
+			// Media (variant) playlist: live-offset only — rewrite HOLD-BACK +
+			// EXT-X-START to the requested value.
+			modifiedBody = rewriteVariantLiveOffsetTags(bodyBytes, getInt(sessionData, "content_live_offset"))
 		}
 
 		w.Header().Set("Content-Length", strconv.Itoa(len(modifiedBody)))

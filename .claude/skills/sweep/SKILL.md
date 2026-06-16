@@ -104,6 +104,7 @@ When `harness sweep status` shows no `backlog`/`running`, summarize what was fou
 
 ## See also
 - `docs/sweep-design.md` — the full design (oracle trichotomy §3, store §4, scheduler §5, A/B isolation §6, the loop §7, robustness/prereqs §11).
+- `docs/live-offset-testing.md` — how to configure live_offset (manifest/proxy vs app override), the 3×-max-segment floor, which fields each lever moves, how to drive + measure it on the probe, and per-platform coverage (Android `master_2s` drivable via `is.segment`, #798; both Android levers track the value once the persisted `advanced_live_offset_s` confound is reset to 0).
 - `forensics` / `investigate` / `finding` / `triage` — the reasoning + capture skills this loop reuses on a hit.
 - `shape` / `fault` — the underlying control surfaces `sweep apply` wraps.
 - `harness sweep help` — the subcommand surface.

@@ -1907,13 +1907,13 @@ export interface components {
              * @default default
              * @enum {string}
              */
-            variant_order?: "default" | "ascending" | "descending" | "first_4mbps";
+            variant_order: "default" | "ascending" | "descending" | "first_4mbps";
             /**
-             * @description Live edge offset window in seconds. 0 = no offset.
+             * @description Live edge offset window in seconds. 0 = no offset. Values 2/4/12/30/36/42 added (#793) for the segment×live-offset matrix.
              * @default 0
              * @enum {integer}
              */
-            live_offset: 0 | 6 | 18 | 24;
+            live_offset: 0 | 2 | 4 | 6 | 12 | 18 | 24 | 30 | 36 | 42;
         };
         Manifest: {
             /** Format: uri */
@@ -1991,6 +1991,16 @@ export interface components {
              * @description Player-reported offset behind live edge (seconds).
              */
             live_offset_s?: number | null;
+            /**
+             * Format: float
+             * @description Manifest-recommended target offset from live (iOS recommendedTimeOffsetFromLive / ExoPlayer liveConfiguration.targetOffsetMs). Gates the qoe_live_offset_* labels.
+             */
+            recommended_offset_s?: number | null;
+            /**
+             * Format: float
+             * @description Configured target offset from live (iOS configuredTimeOffsetFromLive; on Android equals recommended_offset_s).
+             */
+            configured_offset_s?: number | null;
             /**
              * Format: float
              * @description Wall-clock offset between player position and real time (seconds).
