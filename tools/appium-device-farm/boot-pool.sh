@@ -104,10 +104,13 @@ if [ "$DF_WARM_WDA" = "1" ]; then
 		echo "warming WebDriverAgent via DF on :$DF_PORT (first build per sim is slow; cached after)…"
 		for u in $UDIDS; do
 			# || true: a slow/failed warm on one sim must not abort the loop (set -e).
+			# shouldTerminateApp:true so releasing this session leaves the app off
+			# (WDA stays resident) — the same native mechanism the harness uses.
 			resp=$(curl -s --max-time 180 -X POST "http://localhost:$DF_PORT/session" -H 'Content-Type: application/json' -d '{
 				"capabilities":{"alwaysMatch":{"platformName":"iOS","appium:automationName":"XCUITest",
 				"appium:udid":"'"$u"'","appium:bundleId":"'"$DF_BUNDLE_ID"'","appium:noReset":true,
-				"appium:forceAppLaunch":false,"appium:useNewWDA":false,"appium:newCommandTimeout":60},
+				"appium:forceAppLaunch":false,"appium:useNewWDA":false,"appium:shouldTerminateApp":true,
+				"appium:newCommandTimeout":60},
 				"firstMatch":[{}]}}' 2>/dev/null || true)
 			sid=$(printf '%s' "$resp" | python3 -c 'import sys,json
 try: print(json.load(sys.stdin)["value"].get("sessionId",""))
@@ -124,18 +127,9 @@ except Exception: print("")' 2>/dev/null)
 	fi
 fi
 
-# Leave the pool quiet: terminate the player app on each sim. Warming (and any
-# prior run) leaves the app foregrounded — streaming + heartbeating a player to
-# the server — which is just noise when no test is using it. WDA is a SEPARATE
-# process and stays resident, so the next session is still fast; and every test
-# does appium:forceAppLaunch anyway, so an off app costs the next run nothing.
-# Opt out with DF_KEEP_APP_RUNNING=1.
-if [ "${DF_KEEP_APP_RUNNING:-0}" != "1" ]; then
-	echo "terminating $DF_BUNDLE_ID on the pool (WDA stays resident; quiet until a test launches it)…"
-	for u in $UDIDS; do
-		xcrun simctl terminate "$u" "$DF_BUNDLE_ID" >/dev/null 2>&1 || true
-	done
-fi
+# The warm sessions above set appium:shouldTerminateApp, so releasing them already
+# leaves the app off (WDA stays resident — it's a separate process). The harness
+# test sessions do the same, so the pool is left quiet without any simctl/adb.
 
 echo "pool ready. start the server with tools/appium-device-farm/run.sh (if not already running)."
 [ "$missing_app" = "0" ] || { echo "WARNING: one or more sims are missing $DF_BUNDLE_ID — install it before running." >&2; exit 2; }

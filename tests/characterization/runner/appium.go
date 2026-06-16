@@ -1030,6 +1030,14 @@ func appiumCapabilities(d Device, bundleID string, df bool, platformVersion stri
 		// starting state per run. App data (settings, lastPlayed) is
 		// preserved because noReset=true.
 		"appium:forceAppLaunch": true,
+		// shouldTerminateApp terminates the app when the WebDriver session ends.
+		// Both drivers honour it (XCUITest defaults it OFF, which is why the app
+		// otherwise lingers — streaming + heartbeating a player — after a run;
+		// UiAutomator2 recognises it too). We delete the session in Close()
+		// (test end) and discardSession() (failed launch), so this auto-quiets
+		// the app on every teardown path, cross-platform, with no simctl/adb —
+		// the device is left WDA-warm but app-off when no test is using it.
+		"appium:shouldTerminateApp": true,
 	}
 	if !df {
 		// Non-DF: we pin the exact device (and surface its name). Under DF the
