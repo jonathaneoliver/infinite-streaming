@@ -173,6 +173,8 @@ func TestConfigOnConnect_StripProxyArgs(t *testing.T) {
 		{"drops cfg too", "proxy.cfg=ABC&player_id=x", "player_id=x"},
 		{"preserves order", "a=1&proxy.x=2&b=3&proxy.y=4&c=5", "a=1&b=3&c=5"},
 		{"all proxy", "proxy.a=1&proxy.b=2", ""},
+		{"drops app.* too (#800)", "player_id=abc&app.segment=s2&play_id=def", "player_id=abc&play_id=def"},
+		{"mixed proxy + app", "a=1&proxy.x=2&app.protocol=dash&b=3", "a=1&b=3"},
 		{"empty", "", ""},
 		{"nothing to strip", "player_id=abc", "player_id=abc"},
 	}
@@ -182,6 +184,74 @@ func TestConfigOnConnect_StripProxyArgs(t *testing.T) {
 				t.Errorf("stripProxyArgs(%q) = %q, want %q", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+// TestConfigOnConnect_ParseAppConfig — `app.<field>` args (#800) project onto
+// the same merge-patch tree as proxy.*, nested under `app_config`.
+func TestConfigOnConnect_ParseAppConfig(t *testing.T) {
+	patch, has, err := parseProxyArgs(mustQuery(t,
+		"player_id=abc&app.segment=s2&app.protocol=dash&app.live_offset_s=12&app.peak_bitrate_mbps=4"))
+	if err != nil || !has {
+		t.Fatalf("parse: has=%v err=%v", has, err)
+	}
+	want := map[string]any{
+		"app_config": map[string]any{
+			"segment":           "s2",
+			"protocol":          "dash",
+			"live_offset_s":     12.0,
+			"peak_bitrate_mbps": 4.0,
+		},
+	}
+	if !reflect.DeepEqual(patch, want) {
+		t.Fatalf("patch mismatch\n got: %#v\nwant: %#v", patch, want)
+	}
+}
+
+// TestConfigOnConnect_AppConfigRoundTrip — parse → translate stores app_config
+// as a nested object on the session map (what GET /api/sessions exposes).
+func TestConfigOnConnect_AppConfigRoundTrip(t *testing.T) {
+	patch, _, err := parseProxyArgs(mustQuery(t, "app.segment=ll&app.peak_bitrate_mbps=8"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	sess := SessionData{}
+	if aerr := v2server.ApplyConfigPatch(sess, patch); aerr != nil {
+		t.Fatalf("ApplyConfigPatch: %v", aerr)
+	}
+	ac, ok := sess["app_config"].(map[string]any)
+	if !ok {
+		t.Fatalf("session app_config not a map: %#v", sess["app_config"])
+	}
+	if ac["segment"] != "ll" {
+		t.Errorf("app_config.segment = %#v, want ll", ac["segment"])
+	}
+	if ac["peak_bitrate_mbps"] != 8 {
+		t.Errorf("app_config.peak_bitrate_mbps = %#v, want 8 (int)", ac["peak_bitrate_mbps"])
+	}
+}
+
+// TestConfigOnConnect_AppConfigRejectsBadEnum — an out-of-vocab segment is
+// dropped at translation (the object the client reads stays trustworthy)
+// rather than poisoning app_config.
+func TestConfigOnConnect_AppConfigRejectsBadEnum(t *testing.T) {
+	patch, _, err := parseProxyArgs(mustQuery(t, "app.segment=nope&app.protocol=dash"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	sess := SessionData{}
+	if aerr := v2server.ApplyConfigPatch(sess, patch); aerr != nil {
+		t.Fatalf("ApplyConfigPatch: %v", aerr)
+	}
+	ac, _ := sess["app_config"].(map[string]any)
+	if ac == nil {
+		t.Fatalf("app_config missing; want protocol kept")
+	}
+	if _, present := ac["segment"]; present {
+		t.Errorf("bad enum segment was kept: %#v", ac["segment"])
+	}
+	if ac["protocol"] != "dash" {
+		t.Errorf("app_config.protocol = %#v, want dash", ac["protocol"])
 	}
 }
 

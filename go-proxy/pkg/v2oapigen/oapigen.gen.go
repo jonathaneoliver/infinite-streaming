@@ -22,6 +22,45 @@ const (
 	BasicAuthScopes basicAuthContextKey = "basicAuth.Scopes"
 )
 
+// Defines values for AppConfigProtocol.
+const (
+	Dash AppConfigProtocol = "dash"
+	Hls  AppConfigProtocol = "hls"
+)
+
+// Valid indicates whether the value is a known member of the AppConfigProtocol enum.
+func (e AppConfigProtocol) Valid() bool {
+	switch e {
+	case Dash:
+		return true
+	case Hls:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AppConfigSegment.
+const (
+	Ll AppConfigSegment = "ll"
+	S2 AppConfigSegment = "s2"
+	S6 AppConfigSegment = "s6"
+)
+
+// Valid indicates whether the value is a known member of the AppConfigSegment enum.
+func (e AppConfigSegment) Valid() bool {
+	switch e {
+	case Ll:
+		return true
+	case S2:
+		return true
+	case S6:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ContentManipulationLiveOffset.
 const (
 	ContentManipulationLiveOffsetN0  ContentManipulationLiveOffset = 0
@@ -657,6 +696,39 @@ func (e GetApiV2PlayersParamsState) Valid() bool {
 		return false
 	}
 }
+
+// AppConfig Client-side ("app behaviour") config the player applies at its next
+// play boundary — the per-play, no-restart counterpart to the cold-start
+// launch args (`is.segment` etc., #797). The proxy stores these per
+// session and surfaces them on `GET /api/sessions`; the player overlays
+// any non-null field onto its own state when it opens the next play
+// (segment/protocol drive the manifest URL; live_offset_s and
+// peak_bitrate_mbps drive the ExoPlayer/AVPlayer track selector). A
+// null/omitted field leaves the player's own value untouched.
+//
+// Server-side (`proxy.*` / ContentManipulation) config already
+// reconfigures per-play with no restart; this brings the client-side
+// half in line. Settable via `PATCH /api/session/{id}` or the
+// `app.<field>` config-on-connect URL args. Issue #800.
+type AppConfig struct {
+	// LiveOffsetS Live-edge offset in seconds for the next play (maps to `is.flag.live_offset_s`). 0 = let the manifest HOLD-BACK / Go Live decide.
+	LiveOffsetS *float32 `json:"live_offset_s,omitempty"`
+
+	// PeakBitrateMbps ABR peak-bitrate ceiling in Mbps for the next play (maps to `is.flag.peak_bitrate_mbps`). 0 = no cap.
+	PeakBitrateMbps *int `json:"peak_bitrate_mbps,omitempty"`
+
+	// Protocol Streaming protocol for the next play (maps to `is.protocol`).
+	Protocol *AppConfigProtocol `json:"protocol,omitempty"`
+
+	// Segment Segment ladder for the next play (maps to the client `is.segment` lever). ll / s2 / s6.
+	Segment *AppConfigSegment `json:"segment,omitempty"`
+}
+
+// AppConfigProtocol Streaming protocol for the next play (maps to `is.protocol`).
+type AppConfigProtocol string
+
+// AppConfigSegment Segment ladder for the next play (maps to the client `is.segment` lever). ll / s2 / s6.
+type AppConfigSegment string
 
 // ContentManipulation Master playlist mutations applied at manifest serve time. Takes
 // effect on the next master manifest fetch. Used to test player
@@ -1500,6 +1572,21 @@ type PlayerMetrics struct {
 // (`POST/PATCH/DELETE /api/v2/players/{id}/fault-rules/{rule_id}`)
 // are a planned addition; not in this initial spec.
 type PlayerPatch struct {
+	// AppConfig Client-side ("app behaviour") config the player applies at its next
+	// play boundary — the per-play, no-restart counterpart to the cold-start
+	// launch args (`is.segment` etc., #797). The proxy stores these per
+	// session and surfaces them on `GET /api/sessions`; the player overlays
+	// any non-null field onto its own state when it opens the next play
+	// (segment/protocol drive the manifest URL; live_offset_s and
+	// peak_bitrate_mbps drive the ExoPlayer/AVPlayer track selector). A
+	// null/omitted field leaves the player's own value untouched.
+	//
+	// Server-side (`proxy.*` / ContentManipulation) config already
+	// reconfigures per-play with no restart; this brings the client-side
+	// half in line. Settable via `PATCH /api/session/{id}` or the
+	// `app.<field>` config-on-connect URL args. Issue #800.
+	AppConfig *AppConfig `json:"app_config,omitempty"`
+
 	// Content Master playlist mutations applied at manifest serve time. Takes
 	// effect on the next master manifest fetch. Used to test player
 	// robustness against malformed / restricted / shifted manifests.
@@ -1551,6 +1638,12 @@ type PlayerPatch struct {
 // per-device and do not broadcast. Each property's description
 // notes which side it falls on.
 type PlayerRecord struct {
+	// AppConfig Client-side config the player applies at its next play boundary
+	// (#800). Stored server-side; the player reads it from
+	// `GET /api/sessions` and overlays it on the next play.
+	// *Broadcasts to group on PATCH.*
+	AppConfig *AppConfig `json:"app_config,omitempty"`
+
 	// Content Master playlist mutations applied at manifest serve time:
 	// strip CODECS, strip AVERAGE-BANDWIDTH, overstate bandwidth,
 	// allowed-variants whitelist, live-offset window. Takes effect

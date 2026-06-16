@@ -962,6 +962,14 @@ components:
           description: |
             Network shaping (rate / delay / loss / transport_fault).
             *Broadcasts to group on PATCH.*
+        app_config:
+          allOf:
+            - $ref: '#/components/schemas/AppConfig'
+          description: |
+            Client-side config the player applies at its next play boundary
+            (#800). Stored server-side; the player reads it from
+            `GET /api/sessions` and overlays it on the next play.
+            *Broadcasts to group on PATCH.*
         fault_counters:
           allOf:
             - $ref: '#/components/schemas/FaultCounters'
@@ -1078,6 +1086,7 @@ components:
         shape:             { $ref: '#/components/schemas/Shape' }
         transfer_timeouts: { $ref: '#/components/schemas/TransferTimeouts' }
         content:           { $ref: '#/components/schemas/ContentManipulation' }
+        app_config:        { $ref: '#/components/schemas/AppConfig' }
 
     PlayRecord:
       description: |
@@ -1545,6 +1554,44 @@ components:
           default: 0
           description: 'Live edge offset window in seconds. 0 = no offset.'
 
+    AppConfig:
+      description: |
+        Client-side ("app behaviour") config the player applies at its next
+        play boundary — the per-play, no-restart counterpart to the cold-start
+        launch args (`is.segment` etc., #797). The proxy stores these per
+        session and surfaces them on `GET /api/sessions`; the player overlays
+        any non-null field onto its own state when it opens the next play
+        (segment/protocol drive the manifest URL; live_offset_s and
+        peak_bitrate_mbps drive the ExoPlayer/AVPlayer track selector). A
+        null/omitted field leaves the player's own value untouched.
+
+        Server-side (`proxy.*` / ContentManipulation) config already
+        reconfigures per-play with no restart; this brings the client-side
+        half in line. Settable via `PATCH /api/session/{id}` or the
+        `app.<field>` config-on-connect URL args. Issue #800.
+      type: object
+      additionalProperties: false
+      properties:
+        segment:
+          type: string
+          enum: [ll, s2, s6]
+          nullable: true
+          description: 'Segment ladder for the next play (maps to the client `is.segment` lever). ll / s2 / s6.'
+        protocol:
+          type: string
+          enum: [hls, dash]
+          nullable: true
+          description: 'Streaming protocol for the next play (maps to `is.protocol`).'
+        live_offset_s:
+          type: number
+          format: float
+          nullable: true
+          description: 'Live-edge offset in seconds for the next play (maps to `is.flag.live_offset_s`). 0 = let the manifest HOLD-BACK / Go Live decide.'
+        peak_bitrate_mbps:
+          type: integer
+          nullable: true
+          description: 'ABR peak-bitrate ceiling in Mbps for the next play (maps to `is.flag.peak_bitrate_mbps`). 0 = no cap.'
+
     # ----- Manifest / metrics --------------------------------------------
 
     Manifest:
@@ -1590,6 +1637,8 @@ components:
         seekable_end_s:      { type: number, format: float, nullable: true, description: 'Player-reported end of seekable range (seconds).' }
         live_edge_s:         { type: number, format: float, nullable: true, description: 'Player-reported live edge timestamp (seconds).' }
         live_offset_s:       { type: number, format: float, nullable: true, description: 'Player-reported offset behind live edge (seconds).' }
+        recommended_offset_s: { type: number, format: float, nullable: true, description: 'Manifest-recommended target offset from live (iOS recommendedTimeOffsetFromLive / ExoPlayer liveConfiguration.targetOffsetMs). Gates the qoe_live_offset_* labels.' }
+        configured_offset_s: { type: number, format: float, nullable: true, description: 'Configured target offset from live (iOS configuredTimeOffsetFromLive; on Android equals recommended_offset_s).' }
         true_offset_s:       { type: number, format: float, nullable: true, description: 'Wall-clock offset between player position and real time (seconds).' }
         position_s:          { type: number, format: float, nullable: true, description: 'Player current position (seconds).' }
         playback_rate:       { type: number, format: float, nullable: true, description: 'Player playback rate (1.0 = normal).' }

@@ -32,6 +32,14 @@ import (
 // proxyArgPrefix is the namespace every config-on-connect URL arg lives under.
 const proxyArgPrefix = "proxy."
 
+// appArgPrefix is the client-side config-on-connect namespace (#800). An
+// `app.<field>` arg is sugar for `proxy.app_config.<field>` — it rides the same
+// merge-patch tree and translator as proxy.*, but lands under the PlayerPatch
+// `app_config` object the player reads back at its next play boundary. Kept as a
+// distinct top-level prefix (not literal `proxy.app_config.`) so client vs
+// server config stay visually separate on the bootstrap URL.
+const appArgPrefix = "app."
+
 // proxyCfgKey is the base64url(JSON) escape-hatch key (full PlayerPatch body).
 const proxyCfgKey = "proxy.cfg"
 
@@ -74,19 +82,29 @@ func parseProxyArgs(q url.Values) (patch map[string]any, hasProxy bool, err erro
 		}
 	}
 
-	// Tier 2 (overrides): individual proxy.<path> args, per-field overlaying cfg.
+	// Tier 2 (overrides): individual proxy.<path> args (per-field overlaying
+	// cfg) plus app.<field> client-config args (#800), both projected onto the
+	// same merge-patch tree.
 	for key, vals := range q {
-		if key == proxyCfgKey || !strings.HasPrefix(key, proxyArgPrefix) {
-			continue
-		}
 		if len(vals) == 0 {
 			continue
 		}
+		var path string
+		switch {
+		case key == proxyCfgKey:
+			continue
+		case strings.HasPrefix(key, proxyArgPrefix):
+			path = strings.TrimPrefix(key, proxyArgPrefix)
+		case strings.HasPrefix(key, appArgPrefix):
+			// app.<field> → app_config.<field> in the PlayerPatch tree (#800).
+			path = "app_config." + strings.TrimPrefix(key, appArgPrefix)
+		default:
+			continue
+		}
 		hasProxy = true
-		path := strings.TrimPrefix(key, proxyArgPrefix)
 		steps, perr := parseArgPath(path)
 		if perr != nil {
-			return nil, false, fmt.Errorf("proxy arg %q: %w", key, perr)
+			return nil, false, fmt.Errorf("config arg %q: %w", key, perr)
 		}
 		// Last value wins for a repeated key (arrays are expressed via [i],
 		// not repetition, so this only matters for accidental duplicates).
@@ -203,8 +221,8 @@ func decodeBase64URL(s string) ([]byte, error) {
 	return base64.URLEncoding.DecodeString(s)
 }
 
-// stripProxyArgs rebuilds a raw query string with every proxy.* arg removed,
-// preserving the original order and verbatim encoding of the kept pairs
+// stripProxyArgs rebuilds a raw query string with every proxy.* and app.* arg
+// removed, preserving the original order and verbatim encoding of the kept pairs
 // (player_id, play_id, any passthrough). Used so the 302 redirect to the
 // session port carries no config args — config has already been materialized,
 // and a clean redirect URL keeps proxy.* off the session port and out of the
@@ -226,7 +244,7 @@ func stripProxyArgs(rawQuery string) string {
 		if decoded, err := url.QueryUnescape(name); err == nil {
 			name = decoded
 		}
-		if strings.HasPrefix(name, proxyArgPrefix) {
+		if strings.HasPrefix(name, proxyArgPrefix) || strings.HasPrefix(name, appArgPrefix) {
 			continue
 		}
 		kept = append(kept, p)
