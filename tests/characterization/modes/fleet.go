@@ -66,6 +66,15 @@ func fleetSubtestName(dev runner.Device) string {
 // a helper has already issued t.Skip — the caller then returns early.
 func resolveFleet(t *testing.T, p runner.Platform) []runner.Device {
 	t.Helper()
+	// Device Farm path: the plugin owns device allocation, so the roster is just
+	// N LOGICAL devices (no discovery, booting, UDID-pinning, or per-UDID server
+	// seeding). Each LaunchToHome requests a device by capability and DF hands
+	// out a free one + auto-assigns ports; the server is set by LaunchToHome's
+	// navigateServerPickerIfPresent (replacing seedFleetServer). FleetIndex stays
+	// logical (arm assignment + fleet barriers). See HANDOFF.md Stage 2.
+	if runner.DeviceFarmEnabled() {
+		return resolveFleetDeviceFarm(t, p)
+	}
 	if raw := strings.TrimSpace(os.Getenv("CHAR_FLEET_UDIDS")); raw != "" {
 		return resolveFleetFromUDIDs(t, p, splitFleetCSV(raw))
 	}
@@ -73,6 +82,31 @@ func resolveFleet(t *testing.T, p runner.Platform) []runner.Device {
 		return resolveFleetByCount(t, p, n)
 	}
 	return resolveSingleDevice(t, p)
+}
+
+// resolveFleetDeviceFarm builds the Device Farm roster: N logical devices of
+// platform p, FleetIndex by position, no UDID (DF allocates by capability). N is
+// CHAR_FLEET_COUNT (default 1); if CHAR_FLEET_UDIDS is set its identities are
+// ignored under DF — only its length matters, as a fleet-size hint. The
+// operator boots the pool (the latest-OS, app-installed Fleet sims) up front;
+// see tools/appium-device-farm/boot-pool.sh.
+func resolveFleetDeviceFarm(t *testing.T, p runner.Platform) []runner.Device {
+	t.Helper()
+	n := envInt("CHAR_FLEET_COUNT", 1)
+	if raw := strings.TrimSpace(os.Getenv("CHAR_FLEET_UDIDS")); raw != "" {
+		if ids := splitFleetCSV(raw); len(ids) > 0 {
+			t.Logf("CHAR_DEVICE_FARM=1: ignoring CHAR_FLEET_UDIDS device identities (DF allocates by capability); using fleet size %d", len(ids))
+			n = len(ids)
+		}
+	}
+	if n < 1 {
+		n = 1
+	}
+	fleet := make([]runner.Device, n)
+	for i := range fleet {
+		fleet[i] = runner.Device{Platform: p, FleetIndex: i}
+	}
+	return fleet
 }
 
 // resolveSingleDevice reproduces the legacy discover→first-match selection:
@@ -355,6 +389,11 @@ func (b *fleetStartBarrier) giveUp() {
 // so this only affects bring-up order. Index 0 never waits.
 func staggerFleetLaunch(t *testing.T, fleetIndex int) {
 	t.Helper()
+	// Under Device Farm the plugin queues concurrent session-creates internally
+	// (maxSessions), so there's nothing to spread out — the stagger is redundant.
+	if runner.DeviceFarmEnabled() {
+		return
+	}
 	if fleetIndex <= 0 {
 		return
 	}

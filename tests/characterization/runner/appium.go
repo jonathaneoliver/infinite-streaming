@@ -248,7 +248,7 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 	if err := a.healthCheck(ctx); err != nil {
 		return nil, fmt.Errorf("appium server not reachable at %s: %w (start with `appium`, or unset LAUNCH_MODE=appium)", a.URL, err)
 	}
-	df := deviceFarmEnabled()
+	df := DeviceFarmEnabled()
 	var platformVersion string
 	if df {
 		platformVersion = dfPlatformVersion(ctx, d.Platform)

@@ -1,9 +1,10 @@
 # Device Farm — harness simplification: handoff & plan
 
-Status as of this handoff: **Stage 1 (capability-based launch path, gated) is
-CODE-COMPLETE and committed.** Stage 0 validated earlier; Device Farm runs on
-:4723. The next work is **Stage 2 (seeding + retire port plumbing)** and **Stage 3
-(migrate callers)**. This doc is self-contained so a fresh session can pick it up.
+Status as of this handoff: **Stages 1 & 2 are CODE-COMPLETE and committed.** Stage 0
+validated earlier; Device Farm runs on :4723. Stage 1 = the gated capability-based
+launch path; Stage 2 = DF fleet roster (logical devices), retired seeding/stagger,
+and the `boot-pool.sh` helper. The next work is **Stage 3 (migrate callers + the
+deferred e2e)**. This doc is self-contained so a fresh session can pick it up.
 
 **Stage 1 done (see §6):** `runner/devicefarm.go` (`deviceFarmEnabled` / `dfPlatformVersion`
 + `majorMinor`), `runner/cli.go` (`LatestSimRuntimeVersion` + version compare), and a
@@ -179,12 +180,24 @@ first — see §4 decision 3).
 - **Smoke-test after Stage 1** before touching modes: run one mode (e.g.
   `TestStartupIPadSim`) with `CHAR_DEVICE_FARM=1`, no `CHAR_FLEET_UDIDS`.
 
-### Stage 2 — seeding + retire port plumbing
+### Stage 2 — seeding + retire port plumbing ✅ DONE
 - Under DF, seed via `navigateServerPickerIfPresent` (already called in
   `LaunchToHome`); drop `seedFleetServer`/`CHAR_FLEET_SEED_SERVER` from the DF path.
+  → Done: the DF roster (`resolveFleetDeviceFarm`) never calls `seedFleetServer`;
+  the server is set by the picker nav in `LaunchToHome`.
 - Retire `CHAR_FLEET_PORT_OFFSET` + `staggerFleetLaunch` under DF (DF queues).
+  → `staggerFleetLaunch` is a no-op under DF. `CHAR_FLEET_PORT_OFFSET` was never in
+  code (concept only) — nothing to retire.
 - Add a small **"boot the pool"** helper: boot N latest-OS Fleet sims (+ verify the
   app is installed) so "fire up N sims" is one command before the run.
+  → `tools/appium-device-farm/boot-pool.sh`: boots N latest-OS `Fleet` sims,
+  verifies the app, and warms each sim's WDA via DF (the Stage 1 cold-WDA finding).
+
+**The DF fleet roster** (`modes/fleet.go`): under `CHAR_DEVICE_FARM=1`,
+`resolveFleet` → `resolveFleetDeviceFarm` returns N logical devices (platform p,
+no UDID, FleetIndex by position; N = `CHAR_FLEET_COUNT`, default 1). No discovery,
+booting, UDID-pinning, or seeding — DF allocates per session. `CHAR_FLEET_UDIDS`
+identities are ignored under DF (length used as a size hint only).
 
 ### Stage 3 — migrate callers
 - Point the 7 modes + `overnight.sh` / `Makefile` `characterize-*` at the DF path
@@ -210,18 +223,23 @@ first — see §4 decision 3).
 - **Concurrent sessions on this machine** (a `TestSweepProbe` loop has run here):
   DF arbitration now prevents the 8100 port collisions that previously forced
   `CHAR_FLEET_PORT_OFFSET` — a bonus of this work.
+- **Leaked DF sessions hold sims busy (Stage 3 cleanup).** A test that dies before
+  `AppiumLauncher.Close()` leaves its DF session open; with `newCommandTimeout=7200`
+  the sim stays `busy` for up to 2 h and DF queues new requests against it (this bit
+  the WDA warm). Don't shorten the timeout (long sweeps send no UI commands for
+  30 min legitimately) — instead make `Close()` reliably deferred per run, and/or
+  add a "release all DF sessions" cleanup. Manual unstick: read the busy
+  `sessionId`s from `GET /device-farm/api/device` and `DELETE /session/<id>` each
+  (or restart `run.sh`).
 
 ---
 
 ## 8. Quick reference
 
 ```sh
-# (re)start Device Farm (boot the Fleet pool first)
-for u in 4D62CB39-BAB7-4294-99D7-8E28FBCD0FF0 0EA208D3-6E04-48BF-8309-F6ACAF383A59 \
-         7C6110A4-754C-47DA-B225-E95ED11F9F60 B3A40CBF-87F4-414C-9C01-6A756060DBDF; do
-  xcrun simctl boot "$u" 2>/dev/null
-done
-tools/appium-device-farm/run.sh        # serves :4723 + /device-farm dashboard
+# (re)start Device Farm — boot+warm the pool, then start the server (Stage 2)
+tools/appium-device-farm/run.sh         # serves :4723 + /device-farm dashboard
+tools/appium-device-farm/boot-pool.sh   # boot N Fleet sims + verify app + warm WDA
 
 # capability-only allocation smoke test (no UDID, latest OS, our app)
 curl -s -X POST http://localhost:4723/session -H 'Content-Type: application/json' -d '{

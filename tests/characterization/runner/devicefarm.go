@@ -15,8 +15,9 @@ import (
 // and auto-assign the per-session ports. The non-DF path (plain Appium) stays
 // intact as the fallback for CI / no-DF machines.
 
-// deviceFarmEnabled reports whether the Device Farm allocation path is on.
-func deviceFarmEnabled() bool {
+// DeviceFarmEnabled reports whether the Device Farm allocation path is on.
+// Exported so the modes package (fleet roster) can branch on it too.
+func DeviceFarmEnabled() bool {
 	return strings.TrimSpace(os.Getenv("CHAR_DEVICE_FARM")) == "1"
 }
 
