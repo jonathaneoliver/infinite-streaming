@@ -212,34 +212,51 @@ func clipIDFromContent(name string) string {
 
 // armContentConfig resolves this fleet member's per-member content treatment for
 // an A/B run, applied at ALLOCATE (left of the group barrier — content is not
-// broadcast-eligible, so it stays per-member). CHAR_ARM_<idx>_VARIANT_KEEP
-// (e.g. "every_other") selects a variant keep-rule; the keep-set is computed
-// from the catalogue ladder for CHAR_CONTENT — read straight from /api/content,
-// which is fault-immune and session-independent — and resolved to RESOLUTION
-// terms (the proxy matches allowed_variants by resolution). Returns nil when no
-// arm is configured for this index (member streams the full ladder).
+// broadcast-eligible, so it stays per-member, even inside a CHAR_FLEET_GROUP).
+// Two independent, combinable knobs:
+//
+//   - CHAR_ARM_<idx>_STRIP_AVG_BW=1|true strips the AVERAGE-BANDWIDTH attribute
+//     from this member's master playlist (proxy key content.strip_average_bandwidth).
+//     Lets an A/B group compare the SAME shaping with vs without AVERAGE-BANDWIDTH
+//     present, to see whether the player's ABR (and thus the charts) diverges when
+//     it can only see peak BANDWIDTH.
+//   - CHAR_ARM_<idx>_VARIANT_KEEP (e.g. "every_other") selects a variant keep-rule;
+//     the keep-set is computed from the catalogue ladder for CHAR_CONTENT — read
+//     straight from /api/content, which is fault-immune and session-independent —
+//     and resolved to RESOLUTION terms (the proxy matches allowed_variants by
+//     resolution).
+//
+// Returns nil when neither knob is set for this index (member streams the full
+// ladder, AVERAGE-BANDWIDTH intact).
 func armContentConfig(ctx context.Context, t *testing.T, fleetIndex int) runner.BootstrapConfig {
+	cfg := runner.BootstrapConfig{}
+
+	if v := strings.TrimSpace(os.Getenv(fmt.Sprintf("CHAR_ARM_%d_STRIP_AVG_BW", fleetIndex))); v == "1" || strings.EqualFold(v, "true") {
+		cfg["content.strip_average_bandwidth"] = "true"
+		t.Logf("arm[%d] strip_average_bandwidth=true", fleetIndex)
+	}
+
 	rule := strings.TrimSpace(os.Getenv(fmt.Sprintf("CHAR_ARM_%d_VARIANT_KEEP", fleetIndex)))
-	if rule == "" || rule == "all" {
+	if rule != "" && rule != "all" {
+		clip := strings.TrimSpace(os.Getenv("CHAR_CONTENT"))
+		if clip == "" {
+			t.Logf("arm[%d] variant_keep=%q ignored: CHAR_CONTENT unset (can't resolve the ladder)", fleetIndex, rule)
+		} else if variants, err := runner.FetchContentVariants(ctx, clip); err != nil {
+			t.Logf("arm[%d] variant_keep=%q: %v — falling back to full ladder", fleetIndex, rule, err)
+		} else if keep := runner.ApplyKeep(rule, variants); len(keep) == 0 {
+			t.Logf("arm[%d] variant_keep=%q resolved to no thinning (full ladder)", fleetIndex, rule)
+		} else {
+			t.Logf("arm[%d] variant_keep=%q → kept %d/%d rungs: %v", fleetIndex, rule, len(keep), len(variants), keep)
+			for k, v := range runner.ContentAllowedVariantsConfig(keep) {
+				cfg[k] = v
+			}
+		}
+	}
+
+	if len(cfg) == 0 {
 		return nil
 	}
-	clip := strings.TrimSpace(os.Getenv("CHAR_CONTENT"))
-	if clip == "" {
-		t.Logf("arm[%d] variant_keep=%q ignored: CHAR_CONTENT unset (can't resolve the ladder)", fleetIndex, rule)
-		return nil
-	}
-	variants, err := runner.FetchContentVariants(ctx, clip)
-	if err != nil {
-		t.Logf("arm[%d] variant_keep=%q: %v — falling back to full ladder", fleetIndex, rule, err)
-		return nil
-	}
-	keep := runner.ApplyKeep(rule, variants)
-	if len(keep) == 0 {
-		t.Logf("arm[%d] variant_keep=%q resolved to no thinning (full ladder)", fleetIndex, rule)
-		return nil
-	}
-	t.Logf("arm[%d] variant_keep=%q → kept %d/%d rungs: %v", fleetIndex, rule, len(keep), len(variants), keep)
-	return runner.ContentAllowedVariantsConfig(keep)
+	return cfg
 }
 
 // OpenSession picks a launcher per $LAUNCH_MODE, discovers a device for
