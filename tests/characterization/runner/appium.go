@@ -122,10 +122,16 @@ func (a *AppiumLauncher) Launch(ctx context.Context, d Device) (*Session, error)
 	if err != nil {
 		return nil, err
 	}
+	// A step that fails AFTER the session is open must tear it down, or the
+	// session lingers until newCommandTimeout (2 h) holding the device busy —
+	// under Device Farm that blocks every later allocation. sess.Device carries
+	// the (DF-allocated) UDID so discardSession finds it.
 	if err := a.ResumePlayback(ctx, d); err != nil {
+		a.discardSession(sess.Device)
 		return nil, err
 	}
 	if err := a.waitForHeartbeat(ctx, sess); err != nil {
+		a.discardSession(sess.Device)
 		return nil, err
 	}
 	return sess, nil
@@ -296,6 +302,7 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 	switch d.Platform {
 	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
 		if err := a.navigateServerPickerIfPresent(ctx, sessID, bootstrapBaseURL()); err != nil {
+			a.discardSession(d) // don't leak the just-opened session on this error path
 			return nil, fmt.Errorf("server picker navigation: %w", err)
 		}
 	}
@@ -927,6 +934,31 @@ func (a *AppiumLauncher) sessionID(d Device) string {
 		return a.sessions[a.allocatedUDID]
 	}
 	return ""
+}
+
+// discardSession deletes the Appium session bound to d (best-effort) and drops
+// it from the launcher's map, so a launch that fails AFTER createSession doesn't
+// leak a session — which would hold the device busy until newCommandTimeout
+// (2 h) and, under Device Farm, block every later allocation. Uses its OWN short
+// context: the common trigger is a heartbeat timeout, where the caller's ctx is
+// already expired and would make the DELETE fail instantly.
+func (a *AppiumLauncher) discardSession(d Device) {
+	a.mu.Lock()
+	sessID := a.sessions[d.UDID]
+	if sessID == "" && a.allocatedUDID != "" {
+		sessID = a.sessions[a.allocatedUDID]
+	}
+	delete(a.sessions, d.UDID)
+	if a.allocatedUDID != "" {
+		delete(a.sessions, a.allocatedUDID)
+	}
+	a.mu.Unlock()
+	if sessID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, _ = a.doRequest(ctx, "DELETE", "/session/"+sessID, nil)
 }
 
 func (a *AppiumLauncher) doRequest(ctx context.Context, method, path string, body any) ([]byte, error) {

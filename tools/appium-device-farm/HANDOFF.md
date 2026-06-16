@@ -1,10 +1,12 @@
 # Device Farm — harness simplification: handoff & plan
 
-Status as of this handoff: **Stages 1 & 2 are CODE-COMPLETE and committed.** Stage 0
-validated earlier; Device Farm runs on :4723. Stage 1 = the gated capability-based
-launch path; Stage 2 = DF fleet roster (logical devices), retired seeding/stagger,
-and the `boot-pool.sh` helper. The next work is **Stage 3 (migrate callers + the
-deferred e2e)**. This doc is self-contained so a fresh session can pick it up.
+Status as of this handoff: **Stages 1, 2, and 3 are committed.** Stage 0 validated
+earlier; Device Farm runs on :4723. Stage 1 = the gated capability-based launch
+path; Stage 2 = DF fleet roster (logical devices), retired seeding/stagger, and
+`boot-pool.sh`; Stage 3 = orchestration (`overnight.sh` DF-aware) + docs + the
+failed-launch session-leak fix. The one **remaining** item is the deferred green
+e2e, which needs the warmup-binding → config-on-connect refactor (see Stage 3
+below). This doc is self-contained so a fresh session can pick it up.
 
 **Stage 1 done (see §6):** `runner/devicefarm.go` (`deviceFarmEnabled` / `dfPlatformVersion`
 + `majorMinor`), `runner/cli.go` (`LatestSimRuntimeVersion` + version compare), and a
@@ -199,10 +201,32 @@ no UDID, FleetIndex by position; N = `CHAR_FLEET_COUNT`, default 1). No discover
 booting, UDID-pinning, or seeding — DF allocates per session. `CHAR_FLEET_UDIDS`
 identities are ignored under DF (length used as a size hint only).
 
-### Stage 3 — migrate callers
+### Stage 3 — migrate callers ✅ MOSTLY DONE
 - Point the 7 modes + `overnight.sh` / `Makefile` `characterize-*` at the DF path
   (default when `CHAR_DEVICE_FARM=1`). Keep plain-appium fallback intact.
-- Update `tests/characterization/README.md` (+ this dir's `README.md`).
+  → The modes already inherit DF through the shared launcher + roster (Stages 1–2);
+  no per-mode change needed. `CHAR_DEVICE_FARM` propagates `make characterize-* →
+  overnight.sh → go test` via the environment. `overnight.sh` now logs
+  `device_farm:on` and boots the sim pool (`boot-pool.sh`) for `ipad-sim` under DF.
+- Update `tests/characterization/README.md` (+ this dir's `README.md`). → Done
+  (added a **Device Farm** launch-mode section + `CHAR_DEVICE_FARM` / `CHAR_DF_*` /
+  `CHAR_FLEET_COUNT` env rows).
+- **Session-leak fix** (the Stage 2 finding): `AppiumLauncher.Launch`/`LaunchToHome`
+  now call `discardSession()` on any post-`createSession` failure (uses its own
+  context, so it cleans up even when the trigger is the caller's ctx expiring), so
+  a failed launch no longer holds a sim busy until `newCommandTimeout`.
+
+**Remaining (the deferred e2e):** `TestStartupIPadSim` still can't go green because
+the *initial* manifest-warmup bind is heuristic. `OpenSessionOnDevice` (sweep.go)
+binds the warmup play via `launcher.Launch → waitForHeartbeat → pickPlayerFor`
+(single-device path) — which on a shared server with iPhone-15 sims (classified
+`ipad-sim`, UA `iphone` ≠ hint `ipad`) and a persistent-UUID `player_id` can't
+match. This is **launcher-agnostic** (fails the same in non-DF). The robust fix is
+to give the warmup a known `player_id` via **config-on-connect** (as the per-cycle
+path already does), so binding is by id, not heuristics. NOTE before touching it:
+the fleet path (`bars != nil`) calls `s.WaitForHeartbeat` without setting
+`PlayerID` — reconcile how the fleet warmup binds today before refactoring both
+paths, so committed multi-sim runs don't regress.
 
 ---
 
