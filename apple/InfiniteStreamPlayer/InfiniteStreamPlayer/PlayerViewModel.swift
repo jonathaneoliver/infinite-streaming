@@ -316,6 +316,33 @@ final class PlayerViewModel: ObservableObject {
     /// representative, not a playlist-fetch artefact); this extra settle
     /// lets a couple more segments land before ABR may climb past the clamp.
     private static let startupPeakCapReleaseDelay: TimeInterval = 3
+    /// The peak-bitrate cap (bps) currently imposed on the live item —
+    /// either the cold-start clamp (#683) or the #814 recovery cap. Tracks
+    /// the applied value regardless of source so the post-first-frame
+    /// release (`scheduleStartupPeakCapRelease`) can fire for a recovery
+    /// resume even when no cold-start clamp is configured. 0 = no cap.
+    private var appliedItemPeakCapBps: Double = 0
+    /// #814 — pre-retry sustainable bitrate (bps) captured at retry time and
+    /// used as the recovery item's peak cap INSTEAD of the cold-start clamp,
+    /// so an auto-recovered stream resumes near where it left off rather than
+    /// pinned at the startup floor. 0 = nothing captured (recovery before any
+    /// video decoded) → apply4kPreference keeps the cold-start default.
+    private var recoveryPeakCapBps: Double = 0
+    /// Headroom on the captured pre-retry bitrate so the same rung stays
+    /// selectable under the recovery cap (`preferredPeakBitRate` admits
+    /// variants whose peak ≤ cap) without unlocking the next rung up — ABR
+    /// ladders are spaced wider than this, so 1.1× keeps the resume variant
+    /// without overshooting into a re-stall.
+    private static let recoveryCapHeadroom: Double = 1.1
+    /// #814 — how recent a `variantBitrateSamples` / `observedBitrateSamples`
+    /// reading must be to seed the recovery cap when the live access-log fields
+    /// are nil (post-swap). Tight enough that the rung still reflects pre-retry
+    /// conditions, not a stale earlier play state. When a longer backoff chain
+    /// pushes the last good sample past this, the keep-last-good guard in
+    /// captureRecoveryThroughputCap still carries the earlier attempt's value
+    /// forward, so the cap survives — this just bounds how stale a FRESH read
+    /// may be.
+    private static let recoveryThroughputRecency: TimeInterval = 30
     // #603 — set by a restart (manual retry / auto-recovery) before it
     // re-issues loadStream. startPlayback reads it to PRESERVE the play's
     // startup measurement (video_start_time / first frame) and fold the
@@ -535,6 +562,9 @@ final class PlayerViewModel: ObservableObject {
         // schedules the post-first-frame release.
         if let item = player.currentItem {
             item.preferredPeakBitRate = preferredPeakBitRateBps
+            // Keep the release-arming mirror in step with the manual value
+            // (#814) — a mid-play setter overrides any recovery cap in force.
+            appliedItemPeakCapBps = preferredPeakBitRateBps
         }
     }
 
@@ -547,13 +577,17 @@ final class PlayerViewModel: ObservableObject {
     /// its own clamp.
     private func scheduleStartupPeakCapRelease(for item: AVPlayerItem) {
         peakCapReleaseTask?.cancel()
-        guard preferredPeakBitRateMbps > 0 else { return }
-        let mbps = preferredPeakBitRateMbps
+        // Releases whichever cap apply4kPreference imposed — the cold-start
+        // clamp (#683) or the #814 recovery cap — once the resumed/started
+        // item has its first frame + a settle window.
+        guard appliedItemPeakCapBps > 0 else { return }
+        let mbps = appliedItemPeakCapBps / 1_000_000
         peakCapReleaseTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(Self.startupPeakCapReleaseDelay * 1_000_000_000))
             guard let self, !Task.isCancelled else { return }
             item.preferredPeakBitRate = 0
-            self.log("Released startup peak-bitrate clamp (\(mbps) Mbps) — ABR now free to climb")
+            self.appliedItemPeakCapBps = 0
+            self.log(String(format: "Released peak-bitrate cap (%.1f Mbps) — ABR now free to climb", mbps))
         }
     }
     func setStartsOnFirstEligibleVariant(_ on: Bool) {
@@ -1200,6 +1234,15 @@ final class PlayerViewModel: ObservableObject {
             diagnostics.snapshotForRestart()
             diagnostics.reset()
             resumingFromRestart = false
+            // #814 — deliberately DON'T clear recoveryPeakCapBps here. This
+            // block fires when an item becomes ready/playing, including an
+            // INTERMEDIATE attempt in a restart chain that then fails again;
+            // clearing here would strand a later attempt (which often can't
+            // re-measure throughput) with no cap, resuming uncapped. Keeping
+            // it lets the captured rung persist across the whole chain so the
+            // attempt that finally sticks resumes capped + decays. It can't
+            // leak: isRecovery is gated on resumingFromRestart (just cleared),
+            // and the fresh-play branch below zeroes it for the next play.
         } else {
             hasReportedFirstFrame = false
             // Reset per-playback metrics state and emit the `playing` event.
@@ -1215,6 +1258,9 @@ final class PlayerViewModel: ObservableObject {
             lastReportedStallCount = 0
             lastReportedStallDuration = 0
             bufferingStartedAt = nil
+            // #814 — a brand-new play: discard any recovery cap left over from
+            // a prior play's restart chain so it can't apply to fresh content.
+            recoveryPeakCapBps = 0
         }
         zeroBufferStartedAt = nil
         metricsSessionId = nil
@@ -1343,26 +1389,93 @@ final class PlayerViewModel: ObservableObject {
         preferredPeakBitRateMbps <= 0 ? 0 : Double(preferredPeakBitRateMbps) * 1_000_000
     }
 
+    /// #814 — snapshot the pre-retry sustainable bitrate at the moment a
+    /// recovery restart is decided, so apply4kPreference can cap the resumed
+    /// item there instead of at the cold-start floor. Uses the last INDICATED
+    /// variant bitrate (the rung ABR had settled on) — it's responsive and,
+    /// unlike avg/observed throughput, doesn't over-read under a cap on iOS
+    /// (repo memory: ios_avg_bitrate_overreads). Falls back to the
+    /// average-video bitrate. 0 when no video has decoded yet (a start-failure
+    /// recovery) → apply4kPreference keeps the cold-start default. Must run
+    /// BEFORE loadStream replaces the item: the periodic access-log refresh
+    /// clears these fields once the new (empty) item is installed.
+    private func captureRecoveryThroughputCap() {
+        // Pre-retry throughput, preferred source first. The live access-log
+        // fields are nil'd by the item replacement (refreshLiveAccessLogMetrics
+        // clears them until the rebuilt item fetches a segment — under a
+        // sustained fault that can span a whole attempt), so each tier falls
+        // back to the 5-min rolling history, which survives the swap. This lets
+        // EVERY attempt in a multi-restart chain resume at the pre-retry level,
+        // not just one that happened to catch a live reading.
+        //   1. indicated variant — the exact rung ABR settled on; never over-reads.
+        //   2. average video bitrate.
+        //   3. recent variant-rung history.
+        //   4. observed network throughput (live, then history) — mostly
+        //      accurate; can burst-over-read under a hard rate cap (repo memory
+        //      ios_avg_bitrate_overreads), but that only relaxes the cap toward
+        //      "uncapped" (safe — it can't cause the #814 low-pin), so it's a
+        //      sound signal once the variant-rung sources are exhausted.
+        var base = diagnostics.indicatedBitrate ?? 0
+        var source = "indicated variant"
+        if base <= 0 { base = diagnostics.averageVideoBitrate ?? 0; source = "avg video bitrate" }
+        if base <= 0, let v = diagnostics.recentBitrateBps(.variant, within: Self.recoveryThroughputRecency) {
+            base = v; source = "recent variant history"
+        }
+        if base <= 0 { base = diagnostics.observedBitrate ?? 0; source = "observed throughput" }
+        if base <= 0, let o = diagnostics.recentBitrateBps(.observed, within: Self.recoveryThroughputRecency) {
+            base = o; source = "recent observed history"
+        }
+        guard base > 0 else {
+            // No reading anywhere (live or recent history) — e.g. a recovery
+            // before any video ever decoded (start failure). KEEP any value an
+            // earlier attempt captured rather than clobbering it to 0, so the
+            // successful attempt still resumes capped instead of uncapped
+            // (which re-opens the overshoot→re-stall the cap prevents). Stays
+            // 0 only if no attempt ever had history → cold-start fallback.
+            return
+        }
+        recoveryPeakCapBps = base * Self.recoveryCapHeadroom
+        log(String(format: "Recovery: captured pre-retry throughput cap %.1f Mbps (from %@)",
+                   recoveryPeakCapBps / 1_000_000, source))
+    }
+
     private func apply4kPreference(to item: AVPlayerItem) {
         // 0 = no cap (Apple default); otherwise the user-chosen Mbps clamp
         // from Advanced settings (#683). Applied to EVERY fresh item — cold
         // start, restart/recovery, segment switch, content swap, proxy
         // toggle — since this is the universal item-build chokepoint. The
-        // clamp is then released a few seconds after this item's first
-        // frame (armed in markFirstFrameRendered). Drop any pending release
-        // from the prior item and re-arm at nil so the next first frame
-        // schedules a fresh one.
-        item.preferredPeakBitRate = preferredPeakBitRateBps
-        if preferredPeakBitRateMbps > 0 {
+        // cap is then released a few seconds after this item's first frame
+        // (armed in markFirstFrameRendered). Drop any pending release from
+        // the prior item and re-arm at nil so the next first frame schedules
+        // a fresh one.
+        //
+        // #814 — on a recovery restart with throughput history
+        // (resumingFromRestart + a captured pre-retry bitrate), DON'T
+        // re-impose the cold-start controls: the clamp and
+        // startsOnFirstEligibleVariant govern the COLD pick only and
+        // re-applying them mid-play pins an auto-recovered stream at the
+        // startup floor (observed live: 540p for a whole run after one
+        // recovery). Instead cap at the pre-retry throughput so it resumes
+        // at a sustainable rung, and let AVPlayer's heuristic — not the
+        // lowest-variant force — pick the resume variant.
+        let isRecovery = resumingFromRestart && recoveryPeakCapBps > 0
+        let capBps = isRecovery ? recoveryPeakCapBps : preferredPeakBitRateBps
+        item.preferredPeakBitRate = capBps
+        appliedItemPeakCapBps = capBps
+        if isRecovery {
+            log(String(format: "Recovery: capped resume at pre-retry throughput (%.1f Mbps), skipping cold-start clamp + first-variant force", capBps / 1_000_000))
+        } else if preferredPeakBitRateMbps > 0 {
             log("Set startup peak-bitrate clamp (\(preferredPeakBitRateMbps) Mbps) on item")
         }
         peakCapReleaseTask?.cancel()
         peakCapReleaseTask = nil
         // Deterministic startup variant (#683) — forces the first-listed
         // master entry instead of AVPlayer's throughput heuristic. iOS/tvOS
-        // 14+; on older OSes the toggle is simply inert.
+        // 14+; on older OSes the toggle is simply inert. Skipped on a
+        // recovery resume (#814) — forcing the lowest variant mid-play is
+        // the same cold-start pin we're undoing.
         if #available(iOS 14.0, tvOS 14.0, *) {
-            item.startsOnFirstEligibleVariant = startsOnFirstEligibleVariant
+            item.startsOnFirstEligibleVariant = isRecovery ? false : startsOnFirstEligibleVariant
         }
         guard #available(iOS 15.0, tvOS 15.0, *) else { return }
         if allow4K {
@@ -1469,6 +1582,9 @@ final class PlayerViewModel: ObservableObject {
             "player_restarts": playerRestarts,
         ])
         Task { [weak self] in await self?.sendPlayerMetrics(payload: restartPayload) }
+        // #814 — capture the pre-retry throughput NOW, before loadStream
+        // swaps the item and the access-log refresh clears the bitrate.
+        captureRecoveryThroughputCap()
         resumingFromRestart = true
         loadStream(url: refreshed)
     }
@@ -1780,18 +1896,19 @@ final class PlayerViewModel: ObservableObject {
     /// viewCount bookkeeping AND fires the `video_first_frame` metric
     /// event with the flip-instant timestamp.
     func markFirstFrameRendered(at firstFrameAt: Date) {
-        // Arm the startup peak-bitrate-clamp release (#683) BEFORE the
-        // per-play `firstFrameReported` latch below — that latch only
-        // suppresses the metric emit, but PlayerView still calls this on
-        // EVERY item's first frame (the layer re-flips isReadyForDisplay on
-        // replaceCurrentItem), so arming here covers restart/recovery/
-        // rebuilds too, not just cold start. First frame guarantees a video
-        // segment was downloaded + decoded, so the player's own throughput
-        // estimate is representative (not a playlist-fetch artefact) when
-        // the clamp lifts. `peakCapReleaseTask == nil` dedups repeat
-        // first-frame deliveries within one item (apply4kPreference nils it
-        // per build).
-        if peakCapReleaseTask == nil, preferredPeakBitRateMbps > 0, let item = player.currentItem {
+        // Arm the peak-bitrate-cap release BEFORE the per-play
+        // `firstFrameReported` latch below — that latch only suppresses the
+        // metric emit, but PlayerView still calls this on EVERY item's first
+        // frame (the layer re-flips isReadyForDisplay on replaceCurrentItem),
+        // so arming here covers restart/recovery/rebuilds too, not just cold
+        // start. First frame guarantees a video segment was downloaded +
+        // decoded, so the player's own throughput estimate is representative
+        // (not a playlist-fetch artefact) when the cap lifts. Gated on
+        // `appliedItemPeakCapBps > 0` so it fires for both the cold-start
+        // clamp (#683) and the #814 recovery cap. `peakCapReleaseTask == nil`
+        // dedups repeat first-frame deliveries within one item
+        // (apply4kPreference nils it per build).
+        if peakCapReleaseTask == nil, appliedItemPeakCapBps > 0, let item = player.currentItem {
             scheduleStartupPeakCapRelease(for: item)
         }
         // Idempotent: PlayerView re-installs its KVO observer on player
@@ -1898,6 +2015,10 @@ final class PlayerViewModel: ObservableObject {
             "player_metrics_restart_detail": reason,
             "player_restarts": playerRestarts,
         ])
+        // #814 — capture pre-retry throughput synchronously (before the
+        // backoff sleep + item swap) so the codec-retry resume is capped at
+        // the sustainable rung, not the cold-start floor.
+        captureRecoveryThroughputCap()
         Task { @MainActor [weak self] in
             await self?.sendPlayerMetrics(payload: restartPayload)
             try? await Task.sleep(nanoseconds: UInt64(150_000_000 * retries))
