@@ -1,9 +1,39 @@
 # Device Farm — harness simplification: handoff & plan
 
-Status as of this handoff: **Device Farm is running and Stage 0 is validated.** The
-next work is **Stage 1+ (simplify the characterization harness to lean on Device
-Farm)**, not yet started. This doc is self-contained so a fresh session can pick
-it up.
+Status as of this handoff: **Stage 1 (capability-based launch path, gated) is
+CODE-COMPLETE and committed.** Stage 0 validated earlier; Device Farm runs on
+:4723. The next work is **Stage 2 (seeding + retire port plumbing)** and **Stage 3
+(migrate callers)**. This doc is self-contained so a fresh session can pick it up.
+
+**Stage 1 done (see §6):** `runner/devicefarm.go` (`deviceFarmEnabled` / `dfPlatformVersion`
++ `majorMinor`), `runner/cli.go` (`LatestSimRuntimeVersion` + version compare), and a
+DF-aware `runner/appium.go` (`appiumCapabilities` omits udid/deviceName/fleet-ports/
+derivedDataPath under DF and pins `platformVersion`; `createSession` reads back the
+allocated UDID; `sessionID()` resolves the sole session for a UDID-less Device).
+Validated: build/vet/`runner` unit green; a standalone `POST /session` proved DF
+accepts the exact capability request the launcher emits and returns the allocated
+udid + auto-assigned ports; DF-driven test launches produced live iPhone players
+streaming to the server.
+
+**Deferred e2e (NOT a Stage 1 defect):** `TestStartupIPadSim` still fails at the
+*initial* manifest-warmup `Launch` (sweep.go `OpenSessionOnDevice`, single-device
+path, 90 s ctx) because `pickPlayerFor` can't bind: the Fleet pool is **iPhone 15**
+sims classified as `ipad-sim` (UA hint `"ipad"` ≠ the sims' `"iphone"` UA), the
+`player_id` is a persistent UUID (not the sim UDID), and the shared dev server has
+other heartbeaters (so "sole heartbeater" fails). This fails identically with and
+without `CHAR_DEVICE_FARM`. The per-cycle path uses config-on-connect (pre-set
+`player_id`) and is unaffected — so the natural fix is **Stage 3**: give the initial
+OpenSession warmup a known `player_id` via config-on-connect too (or run on real
+iPad sims / a non-shared server).
+
+**Two debugging artifacts to remember:**
+- The `Cannot read properties of undefined (reading '0')` 500 was a **malformed
+  curl** (missing `"firstMatch":[{}]`), NOT a DF wedge — DF reads `firstMatch[0]`.
+  The harness always sends it, so it's unaffected. DF is healthy.
+- Under DF the **first** session per cold sim cold-builds WDA into DF's own
+  `DerivedData/WebDriverAgent-<UDID>` (~40 s), which blows the 90 s single-device
+  ctx. Warm the pool first (one allocate+release per sim). Fold WDA-warming into the
+  Stage 2 "boot the pool" helper.
 
 Branch: `feat/appium-device-farm` (off `origin/dev`). Worktree:
 `/Users/jonathanoliver/Projects/smashing-device-farm`.
@@ -133,11 +163,15 @@ first — see §4 decision 3).
 
 ## 6. The staged plan
 
-### Stage 1 — capability-based launch path (gated)
+### Stage 1 — capability-based launch path (gated) ✅ DONE
 - Add `CHAR_DEVICE_FARM=1` detection (helper in `runner`, e.g. `deviceFarmEnabled()`).
-- In `appiumCapabilities()`, when DF mode: **omit** `appium:udid`,
+- In `appiumCapabilities()`, when DF mode: **omit** `appium:udid`, `deviceName`,
   `setXCUITestFleetPorts`, `appium:derivedDataPath`; **set** `platformName` +
   `appium:platformVersion=<latest computed>` (sims) — hardware unconstrained.
+  - **Gotcha (fixed):** DF matches `platformVersion` against its device `sdk`,
+    which is **major.minor** (`iOS-26-4` runtime, simctl `version` "26.4.1",
+    surfaces as sdk "26.4"). Pin **major.minor** (`dfPlatformVersion` →
+    `majorMinor`); the full "26.4.1" matches nothing and DF queues to a timeout.
 - After `createSession`, **read back the allocated UDID** from the returned session
   caps (`value.capabilities.udid` / `appium:udid`) and stash it on the `Session`/
   `Device` so logs, screenshots, and `ReleaseDevice` still work.
