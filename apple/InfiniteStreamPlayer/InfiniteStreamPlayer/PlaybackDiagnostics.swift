@@ -1563,6 +1563,26 @@ final class PlaybackDiagnostics: ObservableObject {
         }
     }
 
+    /// #814 — which rolling bitrate series to read a recent reading from.
+    enum RecentBitrateSeries { case variant, observed }
+
+    /// The most recent sample (in bits/sec) from the chosen series, if one
+    /// landed within `window`. These rolling series carry the pre-retry signal
+    /// and — unlike the live `indicatedBitrate` / `observedBitrate` fields,
+    /// which `refreshLiveAccessLogMetrics` deliberately nils the instant a
+    /// replaced item's access log is empty — survive an AVPlayerItem swap
+    /// (they're only wiped at the next play's `reset()`). So a recovery restart
+    /// can read the pre-retry throughput even when no segment has decoded on
+    /// the rebuilt item yet. `.variant` = the rung ABR was riding (indicated,
+    /// else average); `.observed` = measured network throughput. nil when the
+    /// series holds nothing inside the window.
+    func recentBitrateBps(_ series: RecentBitrateSeries, within window: TimeInterval) -> Double? {
+        let samples = series == .variant ? variantBitrateSamples : observedBitrateSamples
+        guard let last = samples.last else { return nil }
+        guard Date().timeIntervalSince(last.timestamp) <= window else { return nil }
+        return last.value * 1_000_000 // samples are stored in Mbps
+    }
+
     // Compact one-line snapshot of playback state for log correlation.
     // `netBuf` is the network/segment buffer (loadedTimeRanges ahead of currentTime).
     // `empty/full/keepUp` are AVPlayer's decoder-buffer judgments — the only public
