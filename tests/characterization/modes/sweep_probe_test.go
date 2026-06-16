@@ -84,37 +84,20 @@ func TestSweepProbe(t *testing.T) {
 	// Launch args bind the app to the bootstrapped session and pin the same
 	// launch-state flags the characterization modes force (rotation off so the
 	// run stays one play; land on home so ResumePlayback drives the intended
-	// play; HUD on for live observation). We do NOT call wireConfigOnConnect —
-	// the session is already configured, so re-running ConfigureOnConnect would
-	// overwrite the sweep's shape with a no-op default.
-	args := []string{
-		"-is.player_id", playerID,
-		"-is.flag.play_id_rotation_s", "0",
-		"-is.flag.skip_home", "false",
-		"-is.flag.dev_mode", "true",
-	}
-	if clip := strings.TrimSpace(os.Getenv("CHAR_CONTENT")); clip != "" {
-		args = append(args, "-is.lastPlayed", clip)
-	}
-	// Segment variant (#793 live-offset matrix): s2|s6|ll selects which
-	// master the app requests (master_2s/master_6s/master). Empty leaves the
-	// app default (s6). The hold-back floor scales with segment duration, so a
-	// given live_offset can be legal on one and sub-spec on another.
-	if seg := strings.TrimSpace(os.Getenv("CHAR_SWEEP_SEGMENT")); seg != "" {
-		args = append(args, "-is.segment", seg)
-	}
-	// App-side live-offset override (#793): is.flag.live_offset_s sets the
-	// player's own target — it seeks to liveEdge−N and OVERRIDES the manifest
-	// HOLD-BACK when >0. ALWAYS pin it (default "0") so a run never inherits the
-	// app's persisted/stepper value, which would silently confound a
-	// manifest-only test (the launch-arg domain wins over the saved default).
-	// CHAR_SWEEP_LIVE_OFFSET sets a non-zero value to exercise the app lever /
-	// the manifest × app-override combination matrix.
-	lo := strings.TrimSpace(os.Getenv("CHAR_SWEEP_LIVE_OFFSET"))
-	if lo == "" {
-		lo = "0"
-	}
-	args = append(args, "-is.flag.live_offset_s", lo)
+	// play; HUD on for live observation; live_offset always pinned). We do NOT
+	// call wireConfigOnConnect — the session is already configured, so re-running
+	// ConfigureOnConnect would overwrite the sweep's shape with a no-op default.
+	//
+	// CHAR_SWEEP_LIVE_OFFSET exercises the app lever / the manifest × app-override
+	// combination matrix (#793). The arg construction is shared with the
+	// `harness char matrix` runner via runner.ProbeLaunchArgs (#811).
+	args := runner.ProbeLaunchArgs(runner.ProbeConfig{
+		PlayerID:    playerID,
+		Content:     strings.TrimSpace(os.Getenv("CHAR_CONTENT")),
+		Segment:     strings.TrimSpace(os.Getenv("CHAR_SWEEP_SEGMENT")),
+		LiveOffsetS: strings.TrimSpace(os.Getenv("CHAR_SWEEP_LIVE_OFFSET")),
+		Protocol:    strings.TrimSpace(os.Getenv("CHAR_SWEEP_PROTOCOL")),
+	})
 	appium.SetLaunchArgs(args)
 
 	sess, err := appium.LaunchToHome(setupCtx, *picked)

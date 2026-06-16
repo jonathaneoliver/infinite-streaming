@@ -117,6 +117,51 @@ Each mode test skips with `t.Skip` if no device of its platform is reachable, so
 | `hysteresis-gap` | stairs up 0.5 → 6, then down, find gap per variant | ~6 min |
 | `emergency-downshift` | drop to 0.05 Mbps briefly, measure recovery | ~2.5 min |
 
+## Declarative matrix runner (`harness char matrix`, #811)
+
+Instead of hand-rolling a nested bash loop of `CHAR_*` env vars to sweep a
+combinatorial matrix (segment × live_offset × lever × …), describe it in YAML and
+let the harness expand + drive it:
+
+```bash
+# Sanity-check the expansion — pure, touches no session:
+harness char matrix tests/characterization/matrix/live-offset.yaml --dry-run
+
+# Run it sequentially: per-arm config-on-connect bootstrap → appium probe →
+# achieved-offset table.
+harness char matrix tests/characterization/matrix/live-offset.yaml
+```
+
+The spec format (`matrix/live-offset.yaml` is a worked example):
+
+- **`axes:`** → cartesian product (an odometer over sorted axis names, so arm ids
+  are reproducible). Known axes: `platform`, `protocol`, `content`, `segment`,
+  `mode`, `class`, `lever`, `live_offset`, `peak_bitrate_mbps`, `duration_s`,
+  `reps`. An unknown axis fails fast.
+- **`defaults:`** → a base arm every expanded/explicit arm is layered over.
+- **`arms:`** → explicit-arm escape hatch (appended after the cartesian product),
+  each layered over `defaults`. Nested `shape:` / `fault:` /
+  `content_manipulation:` / `transfer_timeouts:` blocks decode straight into the
+  reused `internal/sweep` recipe types (same `json:` tags, no dual-tagging).
+- **`lever:`** routes a `live_offset` value — `proxy` to the server manifest
+  hold-back (config-on-connect, no relaunch), `app` to the client
+  `-is.flag.live_offset_s` override (cold launch per arm). The post-run
+  manipulation check (#793) measures the achieved offset either way.
+
+Each arm reuses the sweep's bootstrap path (`experimentPlayerPatch` →
+`shaperBootstrapURL`) for the server recipe and `TestSweepProbe` (via
+`runner.ProbeLaunchArgs`) for the client launch args. Measurement is keyed by
+`player_id` (survives play_id rotation + cross-traffic).
+
+**Sequential vs parallel.** `parallel: false` (default) runs arms one at a time
+on a single device. `parallel: true` fans every arm out **simultaneously** on the
+fleet backend — the CLI bootstraps each arm's server recipe up front, then runs
+`TestCharMatrixFleet` once with `CHAR_FLEET_COUNT=N` and the per-arm knobs in
+`CHAR_ARM_<i>_*` env (one arm per device, gated to a common start by the fleet
+HOME barrier), then measures all. A parallel matrix must be **single-platform**
+(the fleet draws from one device pool) and needs at least N booted devices of
+that platform — boot more sims or split the matrix by platform otherwise.
+
 ## Per-play client reconfig without relaunch (#800)
 
 Client-side config (segment / live_offset / protocol / peak_bitrate) is normally

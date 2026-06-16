@@ -1,0 +1,18 @@
+# Two-arm PARALLEL smoke matrix — exercises the fleet backend end-to-end:
+# both arms bootstrap up front, then stream simultaneously (one sim each),
+# then get measured into one table. Verifies the #811 parallel path.
+#
+#     harness char matrix tests/characterization/matrix/parallel-smoke.yaml
+#
+# Needs ≥2 booted sims of the platform (single-platform requirement).
+name: parallel-smoke
+class: config
+parallel: true
+duration_s: 30
+defaults:
+  platform: ipad-sim
+  content: insane_new_p200_h264
+axes:
+  segment: [s6]
+  live_offset: [24, 30]
+  lever: [proxy]
