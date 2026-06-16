@@ -180,6 +180,14 @@ func withBaselineTestFlags(args []string) []string {
 			out = append(out, kv[0], kv[1])
 		}
 	}
+	// Pin auto-recovery to a deterministic value every launch (the app defaults
+	// it ON) so a sim's stale persisted toggle can't leak in. CHAR_AUTO_RECOVERY=0
+	// (false/off) turns it OFF for modes that want the player's RAW, unmasked stall
+	// behavior — otherwise the recovery ladder (live-resync seek → rebuild) self-
+	// heals stalls a mode may be trying to measure. A mode that set it explicitly wins.
+	if !present["-is.flag.auto_recovery"] {
+		out = append(out, "-is.flag.auto_recovery", charAutoRecovery())
+	}
 	// Pin the played clip (is.lastPlayed) unless the mode already set one, so
 	// every test streams identical content by default. The clip name is config,
 	// not source: CHAR_CONTENT (shell) overrides, else it's read from .env. No
@@ -190,6 +198,20 @@ func withBaselineTestFlags(args []string) []string {
 		}
 	}
 	return out
+}
+
+// charAutoRecovery resolves CHAR_AUTO_RECOVERY to the value forced onto
+// -is.flag.auto_recovery on every characterization launch. Default "true"
+// (matches the app's own default); "0" / "false" / "off" / "no" force it OFF —
+// for modes that need to observe the player's raw, unmasked stall behavior
+// rather than have the recovery ladder self-heal it.
+func charAutoRecovery() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CHAR_AUTO_RECOVERY"))) {
+	case "0", "false", "off", "no":
+		return "false"
+	default:
+		return "true"
+	}
 }
 
 // defaultContentClip resolves the clip every appium test plays: CHAR_CONTENT
