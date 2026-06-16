@@ -25,7 +25,7 @@
 import { computed, ref, toRef } from 'vue';
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
-import { useManifestVariants, nearestVariantByBitrate, displayedVariantPeakMbps } from '@/composables/useManifestVariants';
+import { useManifestVariants, nearestVariantByBitrate, displayedVariantPeakMbps, latestManifestVariants, type VariantLite } from '@/composables/useManifestVariants';
 import { usePlayer } from '@/composables/usePlayer';
 import { useCompareOverlays, useCompareSelf, useCompareSiblings, sessionMarkerColor, SELF_MARKER_COLOR } from '@/composables/useCompareContext';
 import { compareBandwidthSeries } from '@/composables/compareSeries';
@@ -59,24 +59,38 @@ interface ManifestVariantLite {
 }
 
 /** Append one horizontal reference line per ladder rung at its published PEAK
- *  bandwidth (EXT-X-STREAM-INF BANDWIDTH), all collapsed under the single
- *  "Variant peak bandwidth" legend chip. `hidden` starts the whole group off
- *  (compare mode) or on (single-session, the rate ABR keys on). Shared so the
- *  ladder reads identically in both modes. */
-function appendPeakLadder(out: SeriesSpec[], ladder: ManifestVariantLite[], hidden: boolean): void {
+ *  bandwidth (EXT-X-STREAM-INF BANDWIDTH), all collapsed under a single
+ *  "Variant peak bandwidth" legend chip. `opts.hidden` starts the whole group
+ *  off (compare mode) or on (single-session, the rate ABR keys on).
+ *
+ *  When `opts.tag` is set (compare mode) the chip and each rung label carry
+ *  the session's `(Sx)` so each session gets its OWN ladder built from its OWN
+ *  manifest, and `sessionTag` wires the rungs to the S1/S2 session legend so a
+ *  session's lines hide/highlight in lockstep (issue #812). `opts.dash` styles
+ *  the rungs by the per-session dash convention ([] solid = active session).
+ *  Without a tag the single-session ladder reads exactly as before. */
+function appendPeakLadder(
+  out: SeriesSpec[],
+  ladder: ReadonlyArray<VariantLite>,
+  opts: { hidden: boolean; tag?: string; dash?: number[] },
+): void {
   const PEAK_COLOR = '#cbd5e1';
+  const groupLegend = opts.tag ? `Variant peak bandwidth (${opts.tag})` : 'Variant peak bandwidth';
+  const borderDash = opts.dash ?? [6, 4];
   for (const v of ladder) {
     const peakBw = Number(v.bandwidth);
     if (!Number.isFinite(peakBw) || peakBw <= 0) continue;
     const mbps = peakBw / 1_000_000;
+    const label = `Variant peak ${v.resolution ?? '?'} (${mbps.toFixed(2)} Mbps)`;
     out.push({
-      label: `Variant peak ${v.resolution ?? '?'} (${mbps.toFixed(2)} Mbps)`,
+      label: opts.tag ? `${label} (${opts.tag})` : label,
       color: PEAK_COLOR,
       accessor: () => mbps,
       stepped: false,
-      borderDash: [6, 4],
-      groupLegend: 'Variant peak bandwidth',
-      hidden,
+      borderDash,
+      groupLegend,
+      ...(opts.tag ? { sessionTag: opts.tag } : {}),
+      hidden: opts.hidden,
     });
   }
 }
@@ -88,21 +102,9 @@ function appendPeakLadder(out: SeriesSpec[], ladder: ManifestVariantLite[], hidd
  *  the manifest because the archive record is built without it. The
  *  events stream rows DO carry `manifest_variants` (it's part of the
  *  charts_minimal projection), so read from there. Issue #486. */
-const eventsStreamVariants = computed<ManifestVariantLite[]>(() => {
-  void props.eventsStream.version.value;
-  const rows = props.eventsStream.inRange(0, Number.MAX_SAFE_INTEGER);
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const mv = (rows[i] as Record<string, unknown>).manifest_variants;
-    if (Array.isArray(mv) && mv.length) return mv as ManifestVariantLite[];
-    if (typeof mv === 'string' && mv.length > 0 && mv !== 'null') {
-      try {
-        const parsed = JSON.parse(mv);
-        if (Array.isArray(parsed) && parsed.length) return parsed as ManifestVariantLite[];
-      } catch { /* ignore */ }
-    }
-  }
-  return [];
-});
+const eventsStreamVariants = computed<ManifestVariantLite[]>(
+  () => latestManifestVariants(props.eventsStream) as ManifestVariantLite[],
+);
 
 const variants = computed<ManifestVariantLite[]>(() => {
   const fromPlayer = usePlayerVariants.value;
@@ -380,12 +382,14 @@ const series = computed<SeriesSpec[]>(() => {
   // (solid, `S<id>`) the siblings overlay — not its full single-session
   // series — so every session reads identically (issue #579).
   if (compareSelf.value) {
-    const compareOut = compareBandwidthSeries(compareSelf.value);
-    // Variant peak-bandwidth ladder, also available in compare mode but
-    // hidden by default (toggle via the single "Variant peak bandwidth" legend
-    // chip). The manifest ladder is content-level — the same across the
-    // compared sessions — so it's drawn ONCE here, not tagged per sibling.
-    appendPeakLadder(compareOut, variants.value, true);
+    const self = compareSelf.value;
+    const compareOut = compareBandwidthSeries(self);
+    // Active session's own variant-peak ladder — hidden by default, tagged
+    // `(Sx)` and styled with the session dash so it reads as this session's
+    // rungs. Each sibling builds its OWN ladder from its OWN manifest in the
+    // useCompareOverlays closure below, so manifests that differ across the
+    // compared sessions show distinct rung sets (issue #812).
+    appendPeakLadder(compareOut, variants.value, { hidden: true, tag: self.tag, dash: self.dash });
     return compareOut;
   }
   const out = [...baseSeries];
@@ -446,8 +450,8 @@ const series = computed<SeriesSpec[]>(() => {
     }
   }
   // Variant peak ladder — default ON in single-session (the rung rate ABR
-  // keys on). Same builder feeds the default-OFF compare-mode ladder above.
-  appendPeakLadder(out, ladder, false);
+  // keys on). Same builder feeds the default-OFF compare-mode ladders above.
+  appendPeakLadder(out, ladder, { hidden: false });
   return out;
 });
 
@@ -458,7 +462,19 @@ const series = computed<SeriesSpec[]>(() => {
  *  visible; Player Est / Server Variant / Shaper Avg legend-toggleable).
  *  On the shared 'y' axis so the rate axis sizes across every overlaid
  *  session (the #165 union-sizing fix). */
-const compareOverlays = useCompareOverlays(compareBandwidthSeries);
+const compareOverlays = useCompareOverlays((sib) => {
+  const specs = compareBandwidthSeries(sib);
+  // Each sibling's own variant-peak ladder, read from its OWN manifest via
+  // its events stream — so comparing two sessions whose manifests differ
+  // shows each one's distinct rung set. Hidden by default, tagged + dashed
+  // per session so the S1/S2 legend toggles it in lockstep (issue #812).
+  appendPeakLadder(specs, latestManifestVariants(sib.stream), {
+    hidden: true,
+    tag: sib.tag,
+    dash: sib.dash,
+  });
+  return specs;
+});
 </script>
 
 <template>

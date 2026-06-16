@@ -111,13 +111,17 @@ export function sessionMarkerColor(index: number): string {
 
 /**
  * useCompareOverlays — turn the provided compare context into a chart's
- * `overlays` prop. `specsFor` maps one session identity to the
- * SeriesSpec[] that chart wants (its own accessors, tagged + styled per
- * session). Returns [] when compare mode is off or no context is
- * provided (so a chart mounted outside SessionDisplay is unaffected).
+ * `overlays` prop. `specsFor` maps one grouped sibling to the SeriesSpec[]
+ * that chart wants (its own accessors, tagged + styled per session).
+ * The callback receives the full `CompareSibling` — most chart builders
+ * only read its `CompareSeriesIdentity` (tag + dash), but a builder can
+ * also reach the sibling's own `stream` to derive per-session series from
+ * its manifest (the bandwidth chart's per-session variant ladder, #812).
+ * Returns [] when compare mode is off or no context is provided (so a
+ * chart mounted outside SessionDisplay is unaffected).
  */
 export function useCompareOverlays(
-  specsFor: (id: CompareSeriesIdentity) => SeriesSpec[],
+  specsFor: (sib: CompareSibling) => SeriesSpec[],
 ): ComputedRef<ChartOverlaySource[]> {
   const ctx = inject(CompareContextKey, null);
   return computed<ChartOverlaySource[]>(() => {

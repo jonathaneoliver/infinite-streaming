@@ -383,6 +383,7 @@ function buildOverlayDatasetObjs(): any[] {
   for (const d of existing) if (d._dsKey) byKey.set(d._dsKey, d);
   const out: any[] = [];
   for (const src of sources) {
+    const rtExisted = overlayRuntime.has(src.key);
     let rt = overlayRuntime.get(src.key);
     if (!rt) {
       rt = { datasets: [], watermark: -Infinity, epoch: src.eventsStream.epoch.value };
@@ -390,6 +391,7 @@ function buildOverlayDatasetObjs(): any[] {
     }
     while (rt.datasets.length < src.series.length) rt.datasets.push([]);
     while (rt.datasets.length > src.series.length) rt.datasets.pop();
+    let addedSeries = false;
     for (let i = 0; i < src.series.length; i++) {
       const s = src.series[i];
       const dsKey = src.key + '|' + s.label;
@@ -409,7 +411,21 @@ function buildOverlayDatasetObjs(): any[] {
         const data = rt.datasets[i] ?? [];
         rt.datasets[i] = data;
         out.push(makeDsObj(dsKey, s, data, false));
+        if (rtExisted) addedSeries = true;
       }
+    }
+    // A series appearing on an ALREADY-draining overlay (e.g. a sibling's
+    // variant-peak ladder once its manifest_variants row is parsed, #812)
+    // lands after the ingest watermark, so a forward-only drain would never
+    // backfill it — the dataset stays empty on a static/archived view and
+    // only partially fills live. Reset the watermark + clear every array so
+    // the next drainOverlays re-seeds the whole set from the start. Mirrors
+    // the epoch-reset path in drainOverlays; safe because the callers update
+    // once while the arrays are empty before draining (see the structure
+    // watcher's empty-prime note, #579).
+    if (addedSeries) {
+      rt.watermark = -Infinity;
+      for (const arr of rt.datasets) arr.length = 0;
     }
   }
   return out;
