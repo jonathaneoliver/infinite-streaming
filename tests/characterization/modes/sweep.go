@@ -557,10 +557,16 @@ func RunVariantSweep(ctx context.Context, t *testing.T, sess *runner.Session, mo
 			return r
 		}
 		// Wedge detection: if the player's playhead hasn't moved over
-		// the last 10 s, it's given up. Remaining caps are strictly
+		// the last 2 min, it's given up. Remaining caps are strictly
 		// lower (descending sweep) so we'd just stack more stalls onto
 		// a dead player. Mark the rest skipped and exit so the report
 		// reflects "we stopped here because the player wedged."
+		//
+		// 2-min window (was 10 s): a startup-overshoot player can park on a
+		// too-high rung and rebuffer for a while before the ABR recovers down
+		// to the capped rung — a 10 s window declared that a wedge and aborted
+		// a player that was still working through it. 2 min only fires on a
+		// player that's genuinely dead, not one slowly recovering.
 		//
 		// #632: skip this on the FIRST step. The entry step is where the
 		// player resumes (often probing high — e.g. 4K with no
@@ -569,7 +575,7 @@ func RunVariantSweep(ctx context.Context, t *testing.T, sess *runner.Session, mo
 		// during that downshift+rebuffer, which is NOT a wedge — declaring
 		// one here aborts a player that's actively recovering. Later steps
 		// start from a settled buffer, so the check is valid there.
-		if i > 0 && playerWedged(s, 10*time.Second) {
+		if i > 0 && playerWedged(s, 2*time.Minute) {
 			t.Logf("  player wedged (position not advancing) — skipping remaining %d step(s)",
 				len(steps)-i-1)
 			for k := i + 1; k < len(steps); k++ {
