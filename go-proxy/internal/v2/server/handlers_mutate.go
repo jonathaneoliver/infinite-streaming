@@ -365,6 +365,9 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 //	endpoints have their own paths and don't run through here).
 //
 // Phase K: + shape.pattern (drives v1's pattern step-engine).
+// #800: + app_config (client-side per-play config; applyAppConfigPatch stores
+//
+//	it nested on the session for the player to read back — no kernel side).
 func unsupportedPaths(paths []string) []string {
 	var bad []string
 	for _, p := range paths {
@@ -379,6 +382,7 @@ func unsupportedPaths(paths []string) []string {
 		case p == "fault_rules":
 		case p == "transfer_timeouts", strings.HasPrefix(p, "transfer_timeouts."):
 		case p == "content", strings.HasPrefix(p, "content."):
+		case p == "app_config", strings.HasPrefix(p, "app_config."):
 		default:
 			bad = append(bad, p)
 		}

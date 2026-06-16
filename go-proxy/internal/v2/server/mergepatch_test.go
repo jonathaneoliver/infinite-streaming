@@ -187,3 +187,26 @@ func TestApplyAppConfigPatch(t *testing.T) {
 		}
 	})
 }
+
+// TestUnsupportedPaths_AppConfig — #800: app_config (and its sub-fields) must
+// be admitted by the v2 PATCH guard so harness/probe PATCHes reach
+// applyAppConfigPatch instead of 501ing. Regression for the guard gap where
+// the translator branch existed but the path wasn't allowlisted.
+func TestUnsupportedPaths_AppConfig(t *testing.T) {
+	ok := []string{
+		"app_config",
+		"app_config.segment",
+		"app_config.protocol",
+		"app_config.live_offset_s",
+		"app_config.peak_bitrate_mbps",
+	}
+	if bad := unsupportedPaths(ok); len(bad) != 0 {
+		t.Fatalf("app_config paths wrongly rejected: %v", bad)
+	}
+	// A genuinely unknown top-level path is still rejected (guard didn't go
+	// permissive). Unknown app_config.* sub-keys ride the prefix match like
+	// content.*/shape.* do — applyAppConfigPatch ignores keys it doesn't know.
+	if bad := unsupportedPaths([]string{"totally_unknown"}); len(bad) != 1 {
+		t.Fatalf("expected unknown top-level path rejected, got %v", bad)
+	}
+}
