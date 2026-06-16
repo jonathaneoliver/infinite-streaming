@@ -13,6 +13,7 @@
  */
 import { computed, type Ref } from 'vue';
 import { usePlayer } from './usePlayer';
+import type { Stream } from './useSessionTimeSeries';
 import type { components } from '@/types/v2';
 
 type ManifestVariant = components['schemas']['ManifestVariant'];
@@ -85,6 +86,32 @@ export function parseManifestVariants(value: unknown): VariantLite[] {
     try { v = JSON.parse(v); } catch { return []; }
   }
   return Array.isArray(v) ? (v as VariantLite[]) : [];
+}
+
+/**
+ * Most-recent non-empty `manifest_variants` value from a charts_minimal
+ * events stream, scanning newest row first. The per-row `manifest_variants`
+ * column is part of the charts_minimal projection both the live/active
+ * stream and each compare-mode sibling stream carry, so reading it here
+ * lets a chart build a per-session variant ladder from whichever stream it
+ * holds — the active session's own (single-session / self) or a sibling's
+ * (compare-mode overlay, issue #812).
+ *
+ * Reads `stream.version.value` so a caller invoking this inside a `computed`
+ * re-derives when the stream ingests new rows. Returns `[]` for a null
+ * stream or one with no usable manifest yet (e.g. pre-manifest heartbeats).
+ */
+export function latestManifestVariants(
+  stream: Stream<Record<string, unknown>> | null | undefined,
+): VariantLite[] {
+  if (!stream) return [];
+  void stream.version.value;
+  const rows = stream.inRange(0, Number.MAX_SAFE_INTEGER);
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const parsed = parseManifestVariants((rows[i] as Record<string, unknown>).manifest_variants);
+    if (parsed.length) return parsed;
+  }
+  return [];
 }
 
 /**
