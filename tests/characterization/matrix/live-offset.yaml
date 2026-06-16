@@ -1,0 +1,29 @@
+# Declarative characterization matrix (issue #811).
+#
+# Run sequentially, expanding + driving each arm and printing an achieved-offset
+# table:
+#
+#     harness char matrix tests/characterization/matrix/live-offset.yaml
+#
+# Sanity-check the expansion without touching any session:
+#
+#     harness char matrix tests/characterization/matrix/live-offset.yaml --dry-run
+#
+# This reproduces the #793 live-offset matrix (segment × live_offset × lever)
+# that was previously a hand-rolled nested bash loop.
+name: live-offset
+class: config
+duration_s: 90
+
+# Shared across every arm; an axis or explicit arm overrides per-field.
+defaults:
+  platform: ipad-sim
+  content: insane_new_p200_h264
+
+# Cartesian product → segment{s2,s6} × live_offset{24,30} × lever{proxy,app} = 8 arms.
+# - lever: proxy → server-side manifest hold-back (config-on-connect, no relaunch)
+# - lever: app   → client-side -is.flag.live_offset_s override (cold launch per arm)
+axes:
+  segment: [s2, s6]
+  live_offset: [24, 30]
+  lever: [proxy, app]

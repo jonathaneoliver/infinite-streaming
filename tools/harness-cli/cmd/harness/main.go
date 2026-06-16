@@ -68,6 +68,10 @@ Operator/CLI:
   procedure soak|abr-sweep|fault-soak <target>
                                multi-step composed test procedures
   sweep seed|status|ls|next    automated fault-sweep queue (#772)
+  char matrix <spec.yaml>      run a declarative YAML characterization
+                               matrix: axes → cartesian arms, per-arm
+                               config-on-connect + probe + offset table
+                               (--dry-run to just expand; #811)
   post characterization <file> upload a characterization-test report
                                JSON to the forwarder (test framework
                                calls this from WriteReport)
@@ -166,6 +170,8 @@ func main() {
 		exit(cmdProcedure(client, args[1:], g.asJSON))
 	case "sweep":
 		exit(cmdSweep(client, args[1:], g.asJSON))
+	case "char":
+		exit(cmdChar(client, args[1:], g.asJSON))
 	case "post":
 		exit(cmdPost(client, args[1:], g.asJSON))
 	case "help", "--help", "-h":

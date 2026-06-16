@@ -1,0 +1,13 @@
+# Single-arm smoke matrix — exercises the full char-matrix path end-to-end
+# (expand → config-on-connect bootstrap → appium probe → achieved-offset table)
+# against one device. Used to verify the #811 runner; not a real test plan.
+name: smoke
+class: config
+duration_s: 30
+defaults:
+  platform: ipad-sim
+  content: insane_new_p200_h264
+axes:
+  segment: [s6]
+  live_offset: [24]
+  lever: [proxy]

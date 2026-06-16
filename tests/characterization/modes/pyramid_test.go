@@ -145,6 +145,18 @@ func runPyramidOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars
 	if os.Getenv("CHAR_TRANSFER_TIMEOUT") == "" {
 		cfg.xferTimeout = 6 * time.Second
 	}
+	// Per-arm segment override (CHAR_ARM_<idx>_SEGMENT) — lets a fleet GROUP run
+	// ONE broadcast pyramid against different segment durations per member (e.g.
+	// arm 0 = 6s, arm 1 = 2s) for an apples-to-apples segment A/B under identical
+	// shaping. Falls back to the fleet-wide CHAR_SEGMENT when unset for this index.
+	// Mirrors the CHAR_ARM_<idx>_* per-member convention (armContentConfig).
+	if v := strings.TrimSpace(os.Getenv(fmt.Sprintf("CHAR_ARM_%d_SEGMENT", dev.FleetIndex))); v != "" {
+		if _, ok := segmentRawValue[v]; !ok {
+			t.Fatalf("CHAR_ARM_%d_SEGMENT must be one of 2s|6s|ll (got %q)", dev.FleetIndex, v)
+		}
+		cfg.segment = v
+		t.Logf("arm[%d] segment override → %s (config-on-connect launch arg)", dev.FleetIndex, v)
+	}
 	segment := cfg.segment
 
 	var sess *runner.Session
