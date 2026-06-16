@@ -6028,6 +6028,14 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionData["manifest_url"] = filename
 	}
 	if playlistInfo != nil {
+		// getContentType parsed the UNMANIPULATED upstream master, so playlistInfo
+		// is the full ladder. Thin it to the session's allowed_variants so
+		// manifest_variants matches the MANIPULATED master the player receives —
+		// otherwise the bandwidth chart (#815) draws every rung for a thinned
+		// session and the per-session compare is meaningless (#820).
+		if allowed := getStringSlice(sessionData, "content_allowed_variants"); len(allowed) > 0 {
+			playlistInfo = filterPlaylistInfoByAllowed(playlistInfo, allowed)
+		}
 		sessionData["manifest_variants"] = playlistInfo
 	}
 	inferServerVideoRendition(sessionData, filename, isManifest, isSegment)
@@ -6631,23 +6639,53 @@ func (a *App) applyContentManipulation(body []byte, session SessionData, content
 // durations whose served URIs differ — the harness/dashboard need not know the
 // per-segment URI scheme.
 func variantAllowed(v *m3u8.Variant, allowed map[string]bool) bool {
-	if allowed[v.URI] {
+	return variantSelectorAllowed(v.URI, v.Resolution, allowed)
+}
+
+// variantSelectorAllowed is the shared allowed_variants matcher: an entry is
+// kept if the allow-set contains its served URI, its full resolution
+// ("640x360"), its bare height ("360"), or "360p". Both the master rewrite
+// (variantAllowed) and the manifest_variants metric (filterPlaylistInfoByAllowed)
+// route through it so they agree on exactly which rungs the player ends up with.
+func variantSelectorAllowed(uri, resolution string, allowed map[string]bool) bool {
+	if uri != "" && allowed[uri] {
 		return true
 	}
-	res := v.Resolution // "640x360"
-	if res == "" {
+	if resolution == "" || resolution == "unknown" {
 		return false
 	}
-	if allowed[res] {
+	if allowed[resolution] {
 		return true
 	}
-	if i := strings.LastIndex(res, "x"); i >= 0 {
-		h := res[i+1:] // "360"
+	if i := strings.LastIndex(resolution, "x"); i >= 0 {
+		h := resolution[i+1:] // "360"
 		if allowed[h] || allowed[h+"p"] {
 			return true
 		}
 	}
 	return false
+}
+
+// filterPlaylistInfoByAllowed thins a parsed master variant list to the
+// allowed_variants keep-set, so the `manifest_variants` metric reflects the
+// MANIPULATED master the player actually receives — not the unmanipulated
+// upstream getContentType parsed (#820). Returns the input unchanged when no
+// allow-set is configured.
+func filterPlaylistInfoByAllowed(infos []PlaylistInfo, allowed []string) []PlaylistInfo {
+	if len(allowed) == 0 || len(infos) == 0 {
+		return infos
+	}
+	allowedMap := make(map[string]bool, len(allowed))
+	for _, a := range allowed {
+		allowedMap[a] = true
+	}
+	out := make([]PlaylistInfo, 0, len(infos))
+	for _, p := range infos {
+		if variantSelectorAllowed(p.URL, p.Resolution, allowedMap) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func manipulateHLSMaster(body []byte, cm ContentManipulation) ([]byte, error) {
