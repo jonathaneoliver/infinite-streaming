@@ -439,6 +439,7 @@ final class PlayerViewModel: ObservableObject {
         if let o = willTerminateObserver { NotificationCenter.default.removeObserver(o) }
         if let o = didEnterBackgroundObserver { NotificationCenter.default.removeObserver(o) }
         playIdRotationTask?.cancel()
+        appConfigTask?.cancel()
     }
 
     // MARK: - Server list
@@ -647,7 +648,7 @@ final class PlayerViewModel: ObservableObject {
         // to 1 for the fresh play.
         regeneratePlayID()
         resetAttemptID()
-        buildURLAndLoad()
+        buildURLAndLoad(freshPlay: true)
     }
 
     func setHUDVisible(_ visible: Bool) { hudVisible = visible }
@@ -791,7 +792,7 @@ final class PlayerViewModel: ObservableObject {
             regeneratePlayID()
             resetAttemptID()
         }
-        if wasPlaying && (pickChanged || rebuildIfUnchanged) { buildURLAndLoad() }
+        if wasPlaying && (pickChanged || rebuildIfUnchanged) { buildURLAndLoad(freshPlay: pickChanged) }
     }
 
     // MARK: - Content fetch
@@ -833,7 +834,25 @@ final class PlayerViewModel: ObservableObject {
 
     // MARK: - URL build + load
 
-    private func buildURLAndLoad() {
+    /// #800 per-play app-config push. On a fresh-play boundary, pull the latest
+    /// server-pushed `app_config` and overlay it before composing the URL, so a
+    /// harness PATCH / config-on-connect change takes effect on THIS next play
+    /// with no process restart — the client-side counterpart to the proxy
+    /// applying server config on the next manifest fetch. Best-effort; a fetch
+    /// miss leaves the play on its launch-arg / Settings values. Settings-tweak
+    /// reloads (`freshPlay: false`) compose synchronously as before.
+    private var appConfigTask: Task<Void, Never>?
+    private func buildURLAndLoad(freshPlay: Bool = false) {
+        guard freshPlay else { composeURLAndLoad(); return }
+        appConfigTask?.cancel()
+        appConfigTask = Task { @MainActor [weak self] in
+            await self?.applyServerAppConfig()
+            if Task.isCancelled { return }
+            self?.composeURLAndLoad()
+        }
+    }
+
+    private func composeURLAndLoad() {
         guard let server = activeServer, !selectedContent.isEmpty else { return }
         // play_id / attempt_id rotation is driven by the CALLER, not
         // here — buildURLAndLoad is called both for "new content / new
@@ -884,6 +903,67 @@ final class PlayerViewModel: ObservableObject {
         schedulePlayIdRotation()
     }
 
+    /// #800 server-pushed per-play app config (the subset the harness can vary
+    /// per play). A nil field = "leave the player's own value".
+    private struct ServerAppConfig {
+        var segment: SegmentLength?
+        var streamProtocol: StreamProtocol?
+        var liveOffsetSeconds: Double?
+        var peakBitrateMbps: Int?
+    }
+
+    /// Overlay the latest server-pushed app_config onto the play-affecting
+    /// state so the next play composed by `composeURLAndLoad` honours it.
+    /// Best-effort and only while routing through the proxy (`localProxy`) —
+    /// the app_config lives on the proxy session. A fetch miss is a no-op. #800.
+    private func applyServerAppConfig() async {
+        guard localProxy else { return }
+        guard let cfg = await fetchServerAppConfig() else { return }
+        // segment/protocol/live_offset ride the manifest URL + the live-offset
+        // seek; the peak cap is read off this property when the next
+        // AVPlayerItem is built — all consumed in the composeURLAndLoad/
+        // startPlayback path that runs right after this overlay.
+        if let s = cfg.segment { segment = s }
+        if let p = cfg.streamProtocol { streamProtocol = p }
+        if let o = cfg.liveOffsetSeconds { liveOffsetSeconds = o }
+        if let pk = cfg.peakBitrateMbps { preferredPeakBitRateMbps = pk }
+        log("app_config: applied server overlay seg=\(cfg.segment?.rawValue ?? "-") "
+            + "proto=\(cfg.streamProtocol?.rawValue ?? "-") "
+            + "offset=\(cfg.liveOffsetSeconds.map { String($0) } ?? "-") "
+            + "peak=\(cfg.peakBitrateMbps.map(String.init) ?? "-")")
+    }
+
+    /// GET the proxy's /api/sessions, find this player's entry, and parse the
+    /// nested `app_config` object (#800; set by config-on-connect or a per-play
+    /// PATCH). Reuses the same base + headers + player_id match as the metrics
+    /// session lookup. 2 s timeout, fully best-effort: any error / missing
+    /// field → nil (the play keeps its current config).
+    private func fetchServerAppConfig() async -> ServerAppConfig? {
+        guard let baseURL = metricsBaseURL() else { return nil }
+        let lookupURL = baseURL.appendingPathComponent("api/sessions")
+        var request = URLRequest(url: lookupURL)
+        request.timeoutInterval = 2
+        applyPlayerHeaders(to: &request)
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  let arr = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+                  let entry = arr.first(where: { ($0["player_id"] as? String) == playerId }),
+                  let ac = entry["app_config"] as? [String: Any]
+            else { return nil }
+            var cfg = ServerAppConfig()
+            if let s = ac["segment"] as? String { cfg.segment = SegmentLength(rawValue: s) }
+            if let p = ac["protocol"] as? String { cfg.streamProtocol = StreamProtocol(rawValue: p) }
+            if let o = ac["live_offset_s"] as? Double { cfg.liveOffsetSeconds = max(0, o) }
+            else if let o = ac["live_offset_s"] as? Int { cfg.liveOffsetSeconds = Double(max(0, o)) }
+            if let pk = ac["peak_bitrate_mbps"] as? Int { cfg.peakBitrateMbps = max(0, pk) }
+            else if let pk = ac["peak_bitrate_mbps"] as? Double { cfg.peakBitrateMbps = max(0, Int(pk)) }
+            return cfg
+        } catch {
+            return nil
+        }
+    }
+
     /// Cancel any pending rotation Task and (if the setting is non-zero)
     /// arm a fresh one for the *remaining* time relative to
     /// `playIdMintedAt`. Called on every `buildURLAndLoad` and whenever
@@ -917,7 +997,7 @@ final class PlayerViewModel: ObservableObject {
             // play's recovery counter starts clean.
             self.regeneratePlayID()
             self.resetAttemptID()
-            self.buildURLAndLoad()
+            self.buildURLAndLoad(freshPlay: true)
         }
     }
 
@@ -1587,7 +1667,7 @@ final class PlayerViewModel: ObservableObject {
         // branch, which now emits play_start for EVERY play-open
         // boundary. The reload-only emit from #603 would double-stamp.
         currentURL = nil
-        buildURLAndLoad()
+        buildURLAndLoad(freshPlay: true)
     }
 
     // MARK: - App lifecycle
