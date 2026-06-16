@@ -139,6 +139,10 @@ surprise — exactly how we'd chase whether the over-downshift is iOS-specific, 
 
 ### 3.1 Manipulation check — the independent-variable must actually move (the validity gate, #793)
 
+> For the live_offset IV specifically — the two levers (manifest/proxy vs app override), the
+> 3×-max-segment floor, which fields each moves, how to drive + measure it, and per-platform
+> coverage — see **`docs/live-offset-testing.md`**.
+
 The oracle classifies QoE *outcomes*. But a recipe that varies a manifest **input** (a config-class IV like
 `content_manipulation.live_offset`) is only interpretable if that input demonstrably *took effect*. Otherwise a
 run is attributing an outcome to a cause that never varied. This is a **manipulation check**, and it runs
