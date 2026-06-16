@@ -1442,9 +1442,14 @@ func (t *TcTrafficManager) ClearPortShaping(port int) {
 		return
 	}
 	log.Printf("NETSHAPE port_shaping_clear port=%d classid=%s reason=session_start", port, classid)
-	_ = exec.Command("tc", "filter", "del", "dev", t.interfaceName, "protocol", "ip",
-		"parent", "1:0", "prio", "1", "u32",
-		"match", "ip", "sport", fmt.Sprintf("%d", port), "0xffff").Run()
+	// Delete THIS port's u32 filter by its exact handle (#816). This previously
+	// inlined `tc filter del … prio 1 u32 match ip sport <port>`, which at the
+	// shared prio 1 collaterally removed OTHER live sessions' filters — and since
+	// ClearPortShaping is the config-on-start sweep, it was the production
+	// trigger of the cross-session uncap. RemoveFilter resolves the exact handle
+	// (no-op when absent). Safe under the tcMu we already hold — RemoveFilter
+	// takes no lock.
+	_ = t.RemoveFilter(port)
 	// Also clear the per-port ICMP-to-player_ip filter installed for
 	// the path-ping prio routing (issue #404). Per-port pref makes
 	// this a single by-attribute delete; the tracking map is then
@@ -1541,13 +1546,62 @@ func (t *TcTrafficManager) ReadActualRateMbps(port int) float64 {
 	return -1
 }
 
+// RemoveFilter deletes ONLY this port's u32 classifier filter, resolved to its
+// exact kernel handle first. The previous implementation deleted by match-spec
+// at the shared `prio 1` (`tc filter del … prio 1 u32 match ip sport <port>`),
+// which the kernel/iproute2 can apply to the WRONG filter at that prio —
+// collaterally removing ANOTHER live session's filter. The victim's traffic
+// then fell through to the 10 Gbps HTB `default 999` class (uncapped) until its
+// next rate-set re-added its filter. This surfaced when a concurrent session's
+// config-on-start clear sweep (ClearPortShaping) ran while peers were streaming
+// (#816). Deleting by the resolved handle touches exactly one filter — or
+// nothing, when this port has no filter (a fresh session's sweep), which must
+// NOT fall back to a match-spec delete (that is the over-deletion being fixed).
 func (t *TcTrafficManager) RemoveFilter(port int) error {
+	show := exec.Command("tc", "filter", "show", "dev", t.interfaceName, "parent", "1:0")
+	out, _ := show.CombinedOutput()
+	handle := u32HandleForPort(string(out), port)
+	if handle == "" {
+		return nil // no filter classifies this port — nothing to remove
+	}
 	cmd := exec.Command(
-		"tc", "filter", "del", "dev", t.interfaceName, "protocol", "ip", "parent", "1:0", "prio", "1", "u32",
-		"match", "ip", "sport", fmt.Sprintf("%d", port), "0xffff",
+		"tc", "filter", "del", "dev", t.interfaceName, "parent", "1:0", "prio", "1",
+		"handle", handle, "u32",
 	)
-	_ = cmd.Run()
+	if outDel, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("NETSHAPE tc filter del failed port=%d handle=%s: %s", port, handle, strings.TrimSpace(string(outDel)))
+	}
 	return nil
+}
+
+// u32HandleForPort scans `tc filter show … parent 1:0` output and returns the
+// handle (e.g. "800::800") of the u32 filter whose selector matches the given
+// port — as a source port (the primary form ensurePortFilter installs) or a
+// destination port (the dport fallback). Returns "" when no filter classifies
+// the port. Pure/string-only so it is unit-testable off-box.
+//
+// iproute2 prints each u32 leaf filter as a header line carrying
+// `fh <handle> … flowid 1:<minor>` followed by one or more
+// `  match <hex>/<mask> at <off>` lines. ensurePortFilter encodes sport at
+// offset 20 as `<port>0000/ffff0000` and the dport fallback as
+// `0000<port>/0000ffff`, so each match is associated with the most recent leaf
+// handle line (the `fh 800:` hashtable line is skipped — only `::` leaf handles
+// classify traffic).
+func u32HandleForPort(filterShow string, port int) string {
+	sportHex := "match " + fmt.Sprintf("%04x0000/ffff0000", port) // sport at offset 20
+	dportHex := "match " + fmt.Sprintf("0000%04x/0000ffff", port) // dport at offset 20
+	handle := ""
+	for _, line := range strings.Split(filterShow, "\n") {
+		if i := strings.Index(line, "fh "); i >= 0 {
+			if tok := strings.Fields(line[i+3:]); len(tok) > 0 && strings.Contains(tok[0], "::") {
+				handle = tok[0]
+			}
+		}
+		if handle != "" && (strings.Contains(line, sportHex) || strings.Contains(line, dportHex)) {
+			return handle
+		}
+	}
+	return ""
 }
 
 func (t *TcTrafficManager) ensurePortFilter(port int, classid string) error {
