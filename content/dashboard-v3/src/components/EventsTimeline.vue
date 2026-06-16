@@ -180,15 +180,9 @@ const PLAYER_STATE_COLOR: Record<string, string> = {
 function playerStateColor(s: string | null | undefined): string {
   return PLAYER_STATE_COLOR[String(s ?? '').trim().toLowerCase()] || '#d1d5db';
 }
-function variantColor(mbps: number): string {
-  if (!Number.isFinite(mbps) || mbps <= 0) return '#9ca3af';
-  if (mbps < 1)  return '#dc2626';
-  if (mbps < 2)  return '#ea580c';
-  if (mbps < 4)  return '#f59e0b';
-  if (mbps < 8)  return '#84cc16';
-  if (mbps < 16) return '#16a34a';
-  return '#10b981';
-}
+// Fixed resolution palette — used as a fallback before the variant
+// ladder has been discovered, or for a displayed resolution that isn't
+// one of the manifest rungs.
 function displayResColor(res: string | null | undefined): string {
   const r = String(res ?? '').toLowerCase();
   if (r.includes('2160')) return '#7c3aed';
@@ -198,6 +192,39 @@ function displayResColor(res: string | null | undefined): string {
   if (r.includes('480'))  return '#f97316';
   if (r.includes('360'))  return '#ef4444';
   return '#6b7280';
+}
+
+// Distinct resolutions in the discovered ladder, ascending by Mbps
+// (lowest quality first). `variantOrder` is sorted descending by Mbps.
+function ladderResolutionsAsc(): string[] {
+  const seen = new Set<string>();
+  const asc: string[] = [];
+  for (let i = variantOrder.length - 1; i >= 0; i--) {
+    const r = variantOrder[i].resolution;
+    if (r && !seen.has(r)) { seen.add(r); asc.push(r); }
+  }
+  return asc;
+}
+
+// Single source of truth for resolution colour, shared by the
+// "VIDEO RES" rail and the per-variant fetch rows so a given resolution
+// gets the SAME colour on both. Colour by the resolution's rung in the
+// discovered ladder — warm (red) at the bottom → cool (green) at the
+// top — which also keeps adjacent rungs distinct (the old absolute-Mbps
+// buckets collapsed e.g. 1.06 / 1.42 / 1.89 Mbps into one colour).
+// Falls back to the fixed palette when the ladder isn't known yet or
+// the resolution isn't one of the manifest rungs.
+function colorForResolution(res: string | null | undefined): string {
+  const r = String(res ?? '').trim();
+  if (!r) return '#9ca3af';
+  const ladder = ladderResolutionsAsc();
+  const idx = ladder.indexOf(r);
+  if (idx >= 0) {
+    const t = ladder.length === 1 ? 1 : idx / (ladder.length - 1);
+    const hue = Math.round(t * 140); // 0 = red (low) → 140 = green (high)
+    return `hsl(${hue}, 70%, 45%)`;
+  }
+  return displayResColor(r);
 }
 
 const props = defineProps<{
@@ -1003,19 +1030,17 @@ function renderStatefulLanes(nowMs: number) {
     'DISPLAY_RES',
     () => 'DISPLAY_RES',
     (e) => e.resolution ?? '?',
-    // Colour by the matching variant's Mbps when available so
-    // 1920x1080 here reads with the same swatch as 1920x1080 on
-    // the VARIANT lane. Pre-manifest heartbeats (no match) fall
-    // back to the legacy resolution-bucket palette. Issue #486.
-    (e) => (e.mbps && e.mbps > 0
-      ? variantColor(e.mbps)
-      : displayResColor(e.resolution ?? null)),
+    // Colour by resolution via the shared ladder-rung mapping so a
+    // given resolution reads with the same swatch on both this rail
+    // and the VARIANT lane (issue #486), while keeping adjacent rungs
+    // distinct. Falls back to the fixed palette pre-manifest.
+    (e) => colorForResolution(e.resolution ?? null),
   );
   coalesce(
     'VARIANT',
     (e) => e.variantKey ?? 'VARIANT',
     () => '', // ranges are blank bars; label sits on the group header
-    (e) => variantColor(e.mbps ?? 0),
+    (e) => colorForResolution(e.variantRes ?? null),
   );
 
   // PLAY_ID — one range per contiguous run of the same play_id.
