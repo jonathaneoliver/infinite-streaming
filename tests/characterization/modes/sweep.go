@@ -347,41 +347,73 @@ func OpenSessionOnDevice(t *testing.T, platform runner.Platform, dev *runner.Dev
 	}
 
 	var sess *runner.Session
-	if appium, isAppium := launcher.(*runner.AppiumLauncher); isAppium && bars != nil {
-		// Fleet path: split the launch so the home barrier can gate the
-		// simultaneous playback start. The launcher already carries any launch
-		// args the caller set (none for the high-start modes). A generous
-		// setup window — an early sim holds at the home barrier until the last
-		// (most-staggered) sim arrives.
-		setupCtx, setupCancel := context.WithTimeout(context.Background(), 12*time.Minute)
-		defer setupCancel()
+	if appium, isAppium := launcher.(*runner.AppiumLauncher); isAppium {
+		// Appium binds via CONFIG-ON-CONNECT (a minted player_id) rather than the
+		// heuristic pickPlayerFor inside launcher.Launch. pickPlayerFor guesses the
+		// player by UDID-prefix / UA-substring / "sole heartbeater" — all of which
+		// fail under Device Farm and on a shared server: the player_id is a random
+		// UUID (not the sim UDID), iPhone sims classify as ipad-sim (UA "iphone" ≠
+		// hint "ipad"), and a fleet/shared box has many heartbeaters. Minting the id
+		// and waiting on THAT (the same path pyramid/rampup already use) makes the
+		// warmup bind deterministic regardless of how many players are live.
+		//
+		// Fleet runs need a generous window (an early sim holds at the home barrier
+		// until the last, most-staggered sim arrives); single runs keep 90 s.
+		bindCtx := ctx
+		if bars != nil {
+			var bindCancel context.CancelFunc
+			bindCtx, bindCancel = context.WithTimeout(context.Background(), 12*time.Minute)
+			defer bindCancel()
+		}
 		// If we die before reaching the home barrier (e.g. LaunchToHome fails),
 		// drop ourselves from its expected set so the survivors still release
-		// together. t.Fatalf runs deferred funcs via runtime.Goexit.
+		// together. t.Fatalf runs deferred funcs via runtime.Goexit. (nil bars =
+		// single-device run, no barrier.)
 		homeArrived := false
-		defer func() {
-			if !homeArrived {
-				bars.home.giveUp()
-			}
-		}()
-		s, lerr := appium.LaunchToHome(setupCtx, *picked)
+		if bars != nil {
+			defer func() {
+				if !homeArrived {
+					bars.home.giveUp()
+				}
+			}()
+		}
+		// Uncapped warmup (cap=0 → no shape): OpenSession just opens + binds; the
+		// mode applies its own rates afterward. groupID="" — grouping for the
+		// measured sweep is the mode's job, not the warmup's.
+		pid := runner.NewPlayerID()
+		wireConfigOnConnect(bindCtx, t, appium, nil, pid, 0, 0, 0, "", false, nil)
+		s, lerr := appium.LaunchToHome(bindCtx, *picked)
 		if lerr != nil {
 			t.Fatalf("LaunchToHome: %v", lerr)
 		}
-		// Fleet sync #1 (home): hold until every sim is at home, then all start
-		// playback at once.
-		homeArrived = true
-		t.Logf("at home — waiting at fleet HOME barrier (playback starts together)")
-		bars.home.arriveAndWait(setupCtx)
-		t.Logf("HOME barrier released — starting playback")
-		if rerr := appium.ResumePlayback(setupCtx, *picked); rerr != nil {
+		s.PlayerID = pid
+		if bars != nil {
+			// Fleet sync #1 (home): hold until every sim is at home, then all start
+			// playback at once.
+			homeArrived = true
+			t.Logf("at home — waiting at fleet HOME barrier (playback starts together)")
+			bars.home.arriveAndWait(bindCtx)
+			t.Logf("HOME barrier released — starting playback")
+		}
+		// Tap the pinned clip's tile when CHAR_CONTENT is set (deterministic
+		// content), else the continue-watching hero. Mirrors pyramid.
+		var rerr error
+		if clip := os.Getenv("CHAR_CONTENT"); clip != "" {
+			rerr = appium.ResumePlaybackClip(bindCtx, *picked, clipIDFromContent(clip))
+		} else {
+			rerr = appium.ResumePlayback(bindCtx, *picked)
+		}
+		if rerr != nil {
 			t.Fatalf("ResumePlayback: %v", rerr)
 		}
-		if herr := s.WaitForHeartbeat(setupCtx, 90*time.Second); herr != nil {
+		if herr := s.WaitForHeartbeat(bindCtx, 90*time.Second); herr != nil {
 			t.Fatalf("WaitForHeartbeat: %v", herr)
 		}
 		sess = s
 	} else {
+		// CLI / Manual can't inject a player_id, so they bind heuristically
+		// (the app uses its own persistent id). launcher.Launch = home + resume +
+		// pickPlayerFor heartbeat.
 		s, lerr := launcher.Launch(ctx, *picked)
 		if lerr != nil {
 			t.Fatalf("launch %s: %v", picked, lerr)

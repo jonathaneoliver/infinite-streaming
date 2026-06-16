@@ -17,8 +17,19 @@ import (
 
 // DeviceFarmEnabled reports whether the Device Farm allocation path is on.
 // Exported so the modes package (fleet roster) can branch on it too.
+//
+// DEFAULT ON: Device Farm is now the standard appium allocation path. Opt OUT
+// with CHAR_DEVICE_FARM=0 (or false/off) — for CI / machines without the DF
+// server running. Resolution order (mirrors CHAR_CONTENT): the process env
+// wins, else the nearest .env, else the default (on). So a no-DF machine sets
+// CHAR_DEVICE_FARM=0 in its env or .env; everywhere else appium runs go through
+// the farm with no flag at all.
 func DeviceFarmEnabled() bool {
-	return strings.TrimSpace(os.Getenv("CHAR_DEVICE_FARM")) == "1"
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("CHAR_DEVICE_FARM")))
+	if v == "" {
+		v = strings.ToLower(strings.TrimSpace(dotenvValue("CHAR_DEVICE_FARM")))
+	}
+	return v != "0" && v != "false" && v != "off"
 }
 
 // dfPlatformVersion returns the appium:platformVersion to pin for a Device-Farm
