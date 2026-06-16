@@ -82,8 +82,10 @@ final class PlayerViewModel: ObservableObject {
     @Published var startsOnFirstEligibleVariant: Bool = false
     /// Stream URL goes through the per-session go-proxy port. Off → API port.
     @Published var localProxy: Bool = true
-    /// Auto-retry the current stream on non-codec player errors.
-    @Published var autoRecovery: Bool = false
+    /// Auto-retry the current stream on non-codec player errors. Defaults ON —
+    /// the recovery ladder (live-resync seek → rebuild, stuck/failed restart) is
+    /// the standard playback-resilience path; opt out via `is.flag.auto_recovery`.
+    @Published var autoRecovery: Bool = true
     /// Seek to the live edge on every (re)load.
     @Published var goLive: Bool = false
     /// Skip Home on cold launch when a saved server + lastPlayed both exist.
@@ -2001,7 +2003,11 @@ final class PlayerViewModel: ObservableObject {
         developerMode    = d.bool(forKey: Self.flagDevMode)
         allow4K          = d.object(forKey: Self.flag4K) as? Bool ?? true
         localProxy       = d.object(forKey: Self.flagLocalProxy) as? Bool ?? true
-        autoRecovery     = d.bool(forKey: Self.flagAutoRecovery)
+        // Default ON when unset; honor an explicit persisted bool OR an
+        // NSArgumentDomain launch-arg string (`-is.flag.auto_recovery false`).
+        // `object(forKey:)==nil` ⇒ absent in every domain ⇒ default true;
+        // otherwise d.bool parses both the NSNumber and the launch-arg string.
+        autoRecovery     = d.object(forKey: Self.flagAutoRecovery) == nil ? true : d.bool(forKey: Self.flagAutoRecovery)
         goLive           = d.bool(forKey: Self.flagGoLive)
         skipHomeOnLaunch = d.bool(forKey: Self.flagSkipHome)
         isMuted = d.bool(forKey: Self.flagMuted)
