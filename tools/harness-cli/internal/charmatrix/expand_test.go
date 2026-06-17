@@ -312,6 +312,119 @@ func TestExpand_BoolConvenienceCompare(t *testing.T) {
 	}
 }
 
+func TestExpand_ObjectAxisHashIDs(t *testing.T) {
+	// An object-valued axis sweeps whole proxy.shape blocks; unlabelled values get
+	// a stable obj-<hash> id slug, and each block decodes onto the arm.
+	yaml := `
+name: m
+defaults: { platform: ipad-sim }
+axes:
+  proxy.shape:
+    - { pattern: pyramid, step_seconds: 12 }
+    - { pattern: ramp_down, step_seconds: 12 }
+`
+	spec, err := Load([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	arms, err := Expand(spec)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if len(arms) != 2 {
+		t.Fatalf("got %d arms, want 2", len(arms))
+	}
+	for _, a := range arms {
+		if a.Shape == nil || a.Shape.Pattern == "" {
+			t.Errorf("arm %s: proxy.shape not decoded: %+v", a.ID, a.Shape)
+		}
+		if !strings.Contains(a.ID, "proxy.shape-obj-") {
+			t.Errorf("arm %s: id missing obj-hash slug", a.ID)
+		}
+	}
+	if arms[0].ID == arms[1].ID {
+		t.Error("distinct shape blocks must hash to distinct ids")
+	}
+	// Hashing is stable run-to-run.
+	again, _ := Expand(spec)
+	if again[0].ID != arms[0].ID {
+		t.Errorf("object-axis id not stable: %q vs %q", again[0].ID, arms[0].ID)
+	}
+}
+
+func TestExpand_ObjectAxisLabel(t *testing.T) {
+	// A reserved `label:` inside the object gives a readable id and is stripped
+	// before the block decodes (so it doesn't trip strict decoding).
+	yaml := `
+name: m
+defaults: { platform: ipad-sim }
+axes:
+  proxy.shape:
+    - { label: gentle, pattern: pyramid, step_seconds: 12 }
+`
+	spec, err := Load([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	arms, err := Expand(spec)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if arms[0].ID != "m/proxy.shape-gentle" {
+		t.Errorf("id = %q, want m/proxy.shape-gentle", arms[0].ID)
+	}
+	if arms[0].Shape == nil || arms[0].Shape.Pattern != "pyramid" {
+		t.Errorf("labelled shape not decoded: %+v", arms[0].Shape)
+	}
+}
+
+func TestExpand_ObjectAxisCompare(t *testing.T) {
+	// compare: works on an object axis — first block is control, rest variants.
+	spec := &Spec{
+		Name:     "m",
+		Parallel: true,
+		Defaults: &Arm{Platform: "ipad-sim"},
+		Compare:  "proxy.fault",
+		Axes: map[string][]any{
+			"proxy.fault": {
+				map[string]any{"label": "five-hundred", "type": "500", "request_kind": "segment"},
+				map[string]any{"label": "timeout", "type": "timeout", "request_kind": "segment"},
+			},
+		},
+	}
+	arms, err := Expand(spec)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if len(arms) != 2 || arms[0].Role != "control" || arms[1].Role != "variant" {
+		t.Fatalf("roles: %d arms, %q/%q", len(arms), arms[0].Role, arms[1].Role)
+	}
+	if arms[0].Group == "" || arms[0].Group != arms[1].Group {
+		t.Errorf("arms should share a group: %q vs %q", arms[0].Group, arms[1].Group)
+	}
+	if arms[0].Fault == nil || arms[0].Fault.Type != "500" {
+		t.Errorf("control fault not decoded: %+v", arms[0].Fault)
+	}
+}
+
+func TestExpand_ObjectAxisTypoRejected(t *testing.T) {
+	// A typo'd key inside an object axis value is caught by strict decoding rather
+	// than silently dropped.
+	yaml := `
+name: m
+axes:
+  proxy.shape:
+    - { patern: pyramid }
+`
+	spec, err := Load([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := Expand(spec); err == nil || !strings.Contains(err.Error(), "patern") {
+		t.Fatalf("expected unknown-field error for object-internal typo, got %v", err)
+	}
+}
+
 func TestExpand_DefaultsLayered(t *testing.T) {
 	spec := &Spec{
 		Name:      "m",

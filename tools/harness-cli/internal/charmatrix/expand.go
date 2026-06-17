@@ -1,8 +1,10 @@
 package charmatrix
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,12 +18,24 @@ import (
 // big to read), so Expand rejects it up front.
 const maxArmsPerGroup = 4
 
+// objectAxisKeys are the object-valued knobs an `axes:` block may sweep — each
+// value is a whole recipe block (a sweep.Shape / Fault / ContentManipulation /
+// TransferTimeouts), not a scalar. An object axis value replaces the defaults'
+// block wholesale (shallow overlay, same as an explicit arm) and gets a
+// `label`-or-hash id slug (see axisSlugAndValue) so a {pattern:…} block produces
+// a clean id, not a stringified map. The Expand-assigned id/group/role are never
+// axis-swept.
+var objectAxisKeys = map[string]bool{
+	"proxy.shape":                true,
+	"proxy.fault":                true,
+	"proxy.content_manipulation": true,
+	"proxy.transfer_timeouts":    true,
+}
+
 // axisKeys is the set of scalar arm fields an `axes:` block may sweep, keyed by
-// the dotted namespace the YAML uses. Object fields (proxy.shape / proxy.fault /
-// proxy.content_manipulation / proxy.transfer_timeouts) and the Expand-assigned
-// id/group/role are deliberately excluded — those are set on defaults, explicit
-// arms, or groups, not cartesian-swept. Unknown axis names are a validation error
-// so a typo fails fast instead of silently expanding nothing.
+// the dotted namespace the YAML uses. Unknown axis names (not in axisKeys or
+// objectAxisKeys) are a validation error so a typo fails fast instead of silently
+// expanding nothing.
 var axisKeys = map[string]bool{
 	"platform":                  true,
 	"content":                   true,
@@ -71,22 +85,26 @@ func Expand(spec *Spec) ([]*Arm, error) {
 	// --- cartesian product over the axes ---
 	names := sortedAxisNames(spec.Axes)
 	if len(names) > 0 {
+		// Precompute each axis value's id-slug + decode-value once: object axis
+		// values get a `label`-or-hash slug (so a {pattern:…} block yields a clean
+		// id, not a stringified map); scalars keep their plain slug.
+		axisVals := buildAxisVals(spec.Axes)
 		// Odometer: indices[i] selects the current value of axis names[i].
 		indices := make([]int, len(names))
 		for {
 			combo := cloneMap(baseMap)
 			for i, name := range names {
-				combo[name] = spec.Axes[name][indices[i]]
+				combo[name] = axisVals[name][indices[i]].val
 			}
 			arm, err := mapToArm(combo)
 			if err != nil {
 				return nil, err
 			}
-			arm.ID = comboID(spec.Name, names, indices, spec.Axes)
+			arm.ID = comboID(spec.Name, names, indices, axisVals)
 			// compare: groups arms that agree on every OTHER axis, with the
 			// first value of the compare axis as control and the rest variants.
 			if spec.Compare != "" {
-				arm.Group = comboGroupID(spec.Name, names, indices, spec.Axes, spec.Compare, arm.Platform)
+				arm.Group = comboGroupID(spec.Name, names, indices, axisVals, spec.Compare, arm.Platform)
 				arm.Role = comboRole(spec.Compare, names, indices, spec.Axes)
 			}
 			if err := validateArm(arm); err != nil {
@@ -279,7 +297,7 @@ func (a *Arm) IntendedLiveOffset() (float64, bool) {
 
 func validateSpec(spec *Spec) error {
 	for name, vals := range spec.Axes {
-		if !axisKeys[name] {
+		if !axisKeys[name] && !objectAxisKeys[name] {
 			return fmt.Errorf("unknown axis %q (known: %s)", name, knownAxisList())
 		}
 		if len(vals) == 0 {
@@ -383,11 +401,12 @@ func sortedAxisNames(axes map[string][]any) []string {
 
 // comboID builds a reproducible, label-safe id from the current odometer
 // position: name/axis-value pairs in sorted-axis order, joined by '.'. Uses '-'
-// and '.' (never '=' or ',', which the forwarder label vocab forbids).
-func comboID(specName string, names []string, indices []int, axes map[string][]any) string {
+// and '.' (never '=' or ',', which the forwarder label vocab forbids). The slug
+// is precomputed per axis value (scalar slug, or object label/hash).
+func comboID(specName string, names []string, indices []int, av map[string][]axisVal) string {
 	parts := make([]string, 0, len(names))
 	for i, name := range names {
-		parts = append(parts, name+"-"+slug(axes[name][indices[i]]))
+		parts = append(parts, name+"-"+av[name][indices[i]].slug)
 	}
 	return specName + "/" + strings.Join(parts, ".")
 }
@@ -396,13 +415,13 @@ func comboID(specName string, names []string, indices []int, axes map[string][]a
 // by platform — so every arm differing only on the compare axis lands in one
 // group, and arms on different devices never cross-compare (mirrors seed.go's
 // grp-<slug>-<platform> convention).
-func comboGroupID(specName string, names []string, indices []int, axes map[string][]any, compare, platform string) string {
+func comboGroupID(specName string, names []string, indices []int, av map[string][]axisVal, compare, platform string) string {
 	parts := make([]string, 0, len(names))
 	for i, name := range names {
 		if name == compare || name == "platform" {
 			continue
 		}
-		parts = append(parts, name+"-"+slug(axes[name][indices[i]]))
+		parts = append(parts, name+"-"+av[name][indices[i]].slug)
 	}
 	base := specName
 	if len(parts) > 0 {
@@ -460,12 +479,70 @@ func formatNum(f float64) string {
 }
 
 func knownAxisList() string {
-	names := make([]string, 0, len(axisKeys))
+	names := make([]string, 0, len(axisKeys)+len(objectAxisKeys))
 	for n := range axisKeys {
+		names = append(names, n)
+	}
+	for n := range objectAxisKeys {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 	return strings.Join(names, ", ")
+}
+
+// axisVal pairs an axis value's id-slug with the value to merge into the arm map.
+type axisVal struct {
+	slug string
+	val  any
+}
+
+// buildAxisVals precomputes the (slug, decode-value) for every axis value so the
+// combo build and comboID stay consistent.
+func buildAxisVals(axes map[string][]any) map[string][]axisVal {
+	out := make(map[string][]axisVal, len(axes))
+	for name, vals := range axes {
+		av := make([]axisVal, len(vals))
+		for i, v := range vals {
+			s, decoded := axisSlugAndValue(v)
+			av[i] = axisVal{slug: s, val: decoded}
+		}
+		out[name] = av
+	}
+	return out
+}
+
+// axisSlugAndValue derives an id-slug for one axis value and the value to merge.
+// Scalars keep their plain slug. An object value (a recipe block) uses an optional
+// reserved `label:` key for a readable id — stripped before the block is decoded
+// — or, absent a label, a short stable hash of the block's canonical JSON.
+func axisSlugAndValue(v any) (string, any) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return slug(v), v
+	}
+	if lbl, ok := m["label"].(string); ok && lbl != "" {
+		clean := make(map[string]any, len(m))
+		for k, vv := range m {
+			if k == "label" {
+				continue
+			}
+			clean[k] = vv
+		}
+		return slug(lbl), clean
+	}
+	return hashObject(m), m
+}
+
+// hashObject is a short, label-safe, stable id for an unlabelled object axis
+// value. json.Marshal sorts map keys, so the same block always hashes the same.
+func hashObject(m map[string]any) string {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return "obj"
+	}
+	h := fnv.New32a()
+	_, _ = h.Write(b)
+	return fmt.Sprintf("obj-%08x", h.Sum32())
 }
 
 // overlayArm layers an explicit/group arm over the defaults map (arm wins) and
@@ -495,13 +572,20 @@ func armToMap(a *Arm) (map[string]any, error) {
 	return m, nil
 }
 
+// mapToArm decodes a merged arm map strictly: DisallowUnknownFields applies
+// recursively, so a typo'd key inside an object axis value (e.g. proxy.shape:
+// {patern: pyramid}) is rejected rather than silently dropped. Combo keys are
+// always valid Arm fields (axis names are validated; defaults come from a valid
+// Arm), so the only thing strict mode adds is catching object-internal typos.
 func mapToArm(m map[string]any) (*Arm, error) {
 	b, err := json.Marshal(m)
 	if err != nil {
 		return nil, err
 	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
 	var a Arm
-	if err := json.Unmarshal(b, &a); err != nil {
+	if err := dec.Decode(&a); err != nil {
 		return nil, err
 	}
 	return &a, nil

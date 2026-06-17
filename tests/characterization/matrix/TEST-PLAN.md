@@ -1053,14 +1053,12 @@ axes:
 - **Namespaced `is.*` / `proxy.*` knobs** — `is.` matches the real launch args (`-is.flag.live_offset_s`); `proxy.live_offset` + `is.live_offset` are orthogonal (the precedence cell).
 - **`groups:`** control+variants and **`compare:`** axis — both stamp `group`/`role` onto the experiment, pre-paired for the dashboard. `compare:` requires `parallel: true` and ≤4 arms/group.
 - **Flat content-manip conveniences** — `proxy.strip_*`, `proxy.allowed_variants`, `proxy.variant_order`, `proxy.overstate_bandwidth` fold onto `ContentManipulation` (nested `proxy.content_manipulation` wins per-field).
+- **Object-valued axes** — `proxy.shape` / `proxy.fault` / `proxy.content_manipulation` / `proxy.transfer_timeouts` can be swept as lists of whole blocks (§3.1 / §3.5 / §5.x). Each value gets a `label:`-or-hash id slug (the `label:` is stripped before the block decodes); a typo'd key inside the block is rejected by strict decoding. See `shape-patterns.yaml`.
 
 **Still open:**
-1. **Object-valued axes** — 3.1 / 3.4 / 5.x sweep `proxy.shape` / `proxy.fault` as lists of
-   objects. The model only axis-es scalars. Either allow object axis-values, or these stay
-   explicit-`arms:` form. Decision needed.
-2. **Counterbalancing** — every PAIR says `reps: 2`; the swap-assignment-across-reps logic lives
+1. **Counterbalancing** — every PAIR says `reps: 2`; the swap-assignment-across-reps logic lives
    in the runner, not the spec. Spec just declares the rep count.
-3. **`allowed_variants` drop-bottom / keep-top primitive** — §4.2/§6.2 floor-removal arms need a
+2. **`allowed_variants` drop-bottom / keep-top primitive** — §4.2/§6.2 floor-removal arms need a
    spec the proxy doesn't resolve yet.
 
 ---
@@ -1104,8 +1102,8 @@ written" vs "not possible."
   fields each CONCLUDE keys on. Until that's listed, conclusions aren't machine-checkable (and risk
   duplicating the oracle — see "Relationship to existing tooling").
 - **Counterbalancing** asserted (`reps: 2`) but the swap-assignment logic is a runner TODO.
-- **Grammar gaps** — object-valued axes, `allowed_variants` drop-bottom primitive (see "Spec
-  grammar — landed vs open" above; `groups:`/`compare:`/namespacing have landed).
+- **Grammar gaps** — `allowed_variants` drop-bottom primitive (see "Spec grammar — landed vs open"
+  above; namespacing, `groups:`/`compare:`, flat conveniences, and object-valued axes have landed).
 
 ## Suggested build order
 
