@@ -286,7 +286,14 @@ func bootstrapMatrixSession(ctx context.Context, client *api.Client, clip, playe
 		return nil, err
 	}
 	cfgB64 := base64.RawURLEncoding.EncodeToString(cfgJSON)
-	bootURL, err := shaperBootstrapURL(client.BaseURL, clip, playerID, group, cfgB64)
+	// The arm's own group (stamped by compare:/groups: in Expand) wins so paired
+	// arms arrive born-grouped on the dashboard; the --group CLI flag is the
+	// fallback for an ungrouped matrix the operator wants to tag by hand.
+	groupID := e.Group
+	if groupID == "" {
+		groupID = group
+	}
+	bootURL, err := shaperBootstrapURL(client.BaseURL, clip, playerID, groupID, cfgB64)
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +403,8 @@ func planSummaries(arms []*charmatrix.Arm) []map[string]any {
 			"platform":      a.Platform,
 			"segment":       a.Segment,
 			"protocol":      a.Protocol,
-			"lever":         a.Lever,
+			"group":         a.Group,
+			"role":          a.Role,
 			"live_offset":   intendedOf(a),
 			"client_offset": a.ClientLiveOffsetS(),
 			"class":         e.Class,
