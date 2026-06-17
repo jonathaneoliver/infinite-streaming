@@ -12,13 +12,13 @@ func f64(v float64) *float64 { return &v }
 func shapeRate(v float64) *sweep.Shape { return &sweep.Shape{RateMbps: &v} }
 
 func TestExpand_CartesianCount(t *testing.T) {
-	// segment{s2,s6} × live_offset{12,24,30} × lever{proxy,app} = 12 arms.
+	// is.segment{s2,s6} × proxy.live_offset{12,24,30} × is.protocol{hls,dash} = 12 arms.
 	spec := &Spec{
 		Name: "m",
 		Axes: map[string][]any{
-			"segment":     {"s2", "s6"},
-			"live_offset": {12.0, 24.0, 30.0},
-			"lever":       {"proxy", "app"},
+			"is.segment":        {"s2", "s6"},
+			"proxy.live_offset": {12.0, 24.0, 30.0},
+			"is.protocol":       {"hls", "dash"},
 		},
 	}
 	arms, err := Expand(spec)
@@ -31,14 +31,13 @@ func TestExpand_CartesianCount(t *testing.T) {
 }
 
 func TestExpand_ReproducibleSortedIDs(t *testing.T) {
-	// Axes are swept in sorted-name order (lever, live_offset, segment), with the
-	// rightmost axis advancing fastest — so ids are deterministic run-to-run.
+	// Axes are swept in sorted-name order with the rightmost advancing fastest, so
+	// ids are deterministic run-to-run.
 	spec := &Spec{
 		Name: "m",
 		Axes: map[string][]any{
-			"segment":     {"s6"},
-			"lever":       {"proxy", "app"},
-			"live_offset": {24.0},
+			"is.segment":        {"s6"},
+			"proxy.live_offset": {24.0, 30.0},
 		},
 	}
 	arms, err := Expand(spec)
@@ -46,8 +45,8 @@ func TestExpand_ReproducibleSortedIDs(t *testing.T) {
 		t.Fatalf("Expand: %v", err)
 	}
 	want := []string{
-		"m/lever-proxy.live_offset-24.segment-s6",
-		"m/lever-app.live_offset-24.segment-s6",
+		"m/is.segment-s6.proxy.live_offset-24",
+		"m/is.segment-s6.proxy.live_offset-30",
 	}
 	for i, w := range want {
 		if arms[i].ID != w {
@@ -56,63 +55,181 @@ func TestExpand_ReproducibleSortedIDs(t *testing.T) {
 	}
 }
 
-func TestExpand_LeverRouting(t *testing.T) {
+func TestArm_OffsetRouting(t *testing.T) {
+	// proxy.live_offset → server manifest hold-back, client flag "0".
+	proxyArm := &Arm{ProxyLiveOffset: f64(24)}
+	pe := proxyArm.ToExperiment()
+	if pe.ContentManipulation == nil || pe.ContentManipulation.LiveOffset == nil || *pe.ContentManipulation.LiveOffset != 24 {
+		t.Fatalf("proxy offset: expected server ContentManipulation.LiveOffset=24, got %+v", pe.ContentManipulation)
+	}
+	if got := proxyArm.ClientLiveOffsetS(); got != "0" {
+		t.Errorf("proxy offset: client flag = %q, want 0", got)
+	}
+
+	// is.live_offset → NO server manipulation, client flag carries the value.
+	appArm := &Arm{AppLiveOffset: f64(24)}
+	ae := appArm.ToExperiment()
+	if ae.ContentManipulation != nil && ae.ContentManipulation.LiveOffset != nil {
+		t.Error("app offset: server ContentManipulation.LiveOffset must be nil")
+	}
+	if got := appArm.ClientLiveOffsetS(); got != "24" {
+		t.Errorf("app offset: client flag = %q, want 24", got)
+	}
+	if off, ok := appArm.IntendedLiveOffset(); !ok || off != 24 {
+		t.Errorf("app offset IntendedLiveOffset = %g,%v, want 24,true", off, ok)
+	}
+}
+
+func TestArm_PrecedenceCell(t *testing.T) {
+	// The cell the old lever model could never reach: both surfaces set at once.
+	both := &Arm{ProxyLiveOffset: f64(24), AppLiveOffset: f64(18)}
+	be := both.ToExperiment()
+	if be.ContentManipulation == nil || be.ContentManipulation.LiveOffset == nil || *be.ContentManipulation.LiveOffset != 24 {
+		t.Fatalf("precedence: server hold-back should be 24, got %+v", be.ContentManipulation)
+	}
+	if got := both.ClientLiveOffsetS(); got != "18" {
+		t.Errorf("precedence: client flag = %q, want 18", got)
+	}
+	// IntendedLiveOffset prefers the server offset (the one that lands as a manifest change).
+	if off, ok := both.IntendedLiveOffset(); !ok || off != 24 {
+		t.Errorf("precedence IntendedLiveOffset = %g,%v, want 24,true", off, ok)
+	}
+}
+
+func TestExpand_PrecedenceMatrix(t *testing.T) {
+	// proxy.live_offset{0,24} × is.live_offset{0,18} → the 4 precedence cells.
 	spec := &Spec{
 		Name: "m",
 		Axes: map[string][]any{
-			"live_offset": {24.0},
-			"lever":       {"proxy", "app"},
+			"proxy.live_offset": {0.0, 24.0},
+			"is.live_offset":    {0.0, 18.0},
 		},
 	}
 	arms, err := Expand(spec)
 	if err != nil {
 		t.Fatalf("Expand: %v", err)
 	}
-	// arms sorted by (lever, live_offset): lever-proxy first, lever-app second.
-	proxyArm, appArm := arms[0], arms[1]
-	if proxyArm.Lever != "proxy" || appArm.Lever != "app" {
-		t.Fatalf("unexpected lever order: %q, %q", proxyArm.Lever, appArm.Lever)
+	if len(arms) != 4 {
+		t.Fatalf("got %d arms, want 4", len(arms))
 	}
-
-	// proxy lever → server manifest hold-back on the experiment, client flag "0".
-	pe := proxyArm.ToExperiment()
-	if pe.ContentManipulation == nil || pe.ContentManipulation.LiveOffset == nil {
-		t.Fatal("proxy lever: expected ContentManipulation.LiveOffset set")
+	var foundBaseline, foundBoth bool
+	for _, a := range arms {
+		p := a.ProxyLiveOffset != nil && *a.ProxyLiveOffset > 0
+		c := a.AppLiveOffset != nil && *a.AppLiveOffset > 0
+		switch {
+		case !p && !c:
+			foundBaseline = true
+		case p && c:
+			foundBoth = true
+			if got := a.ClientLiveOffsetS(); got != "18" {
+				t.Errorf("both-set: client flag = %q, want 18", got)
+			}
+		}
 	}
-	if *pe.ContentManipulation.LiveOffset != 24 {
-		t.Errorf("proxy lever: server live_offset = %g, want 24", *pe.ContentManipulation.LiveOffset)
+	if !foundBaseline {
+		t.Error("expected a (0,0) baseline cell")
 	}
-	if got := proxyArm.ClientLiveOffsetS(); got != "0" {
-		t.Errorf("proxy lever: client offset = %q, want 0", got)
-	}
-
-	// app lever → NO server manipulation, client flag carries the value.
-	ae := appArm.ToExperiment()
-	if ae.ContentManipulation != nil && ae.ContentManipulation.LiveOffset != nil {
-		t.Error("app lever: server ContentManipulation.LiveOffset must be nil")
-	}
-	if got := appArm.ClientLiveOffsetS(); got != "24" {
-		t.Errorf("app lever: client offset = %q, want 24", got)
-	}
-
-	// Either lever reports the same intended offset for the measurement gate.
-	if off, ok := appArm.IntendedLiveOffset(); !ok || off != 24 {
-		t.Errorf("app lever IntendedLiveOffset = %g,%v, want 24,true", off, ok)
+	if !foundBoth {
+		t.Error("expected a (24,18) precedence cell")
 	}
 }
 
-func TestExpand_DefaultLeverIsProxy(t *testing.T) {
+func TestExpand_CompareGroups(t *testing.T) {
+	// compare: is.protocol → hls=control, dash=variant within each (segment) group.
 	spec := &Spec{
-		Name: "m",
-		Axes: map[string][]any{"live_offset": {18.0}},
+		Name:     "m",
+		Parallel: true,
+		Defaults: &Arm{Platform: "ipad-sim"},
+		Compare:  "is.protocol",
+		Axes: map[string][]any{
+			"is.segment":  {"s2", "s6"},
+			"is.protocol": {"hls", "dash"},
+		},
 	}
 	arms, err := Expand(spec)
 	if err != nil {
 		t.Fatalf("Expand: %v", err)
 	}
-	e := arms[0].ToExperiment()
-	if e.ContentManipulation == nil || e.ContentManipulation.LiveOffset == nil || *e.ContentManipulation.LiveOffset != 18 {
-		t.Fatal("no lever ⇒ defaults to proxy (server-side live_offset)")
+	if len(arms) != 4 {
+		t.Fatalf("got %d arms, want 4", len(arms))
+	}
+	byGroup := map[string][]*Arm{}
+	for _, a := range arms {
+		if a.Group == "" {
+			t.Errorf("arm %s has no group", a.ID)
+		}
+		byGroup[a.Group] = append(byGroup[a.Group], a)
+	}
+	if len(byGroup) != 2 {
+		t.Fatalf("got %d groups, want 2: %v", len(byGroup), byGroup)
+	}
+	for g, members := range byGroup {
+		if len(members) != 2 {
+			t.Fatalf("group %s has %d arms, want 2", g, len(members))
+		}
+		var controls, variants int
+		for _, a := range members {
+			switch a.Role {
+			case string(sweep.ArmControl):
+				controls++
+				if a.Protocol != "hls" {
+					t.Errorf("control in %s has protocol %q, want hls (first compare value)", g, a.Protocol)
+				}
+			case string(sweep.ArmVariant):
+				variants++
+				if a.Protocol != "dash" {
+					t.Errorf("variant in %s has protocol %q, want dash", g, a.Protocol)
+				}
+			default:
+				t.Errorf("arm %s has role %q", a.ID, a.Role)
+			}
+			// roles must survive onto the experiment for the dashboard pairing.
+			if e := a.ToExperiment(); string(e.Arm) != a.Role || e.Group != a.Group {
+				t.Errorf("arm %s: ToExperiment lost group/role (got group=%q arm=%q)", a.ID, e.Group, e.Arm)
+			}
+		}
+		if controls != 1 || variants != 1 {
+			t.Errorf("group %s: controls=%d variants=%d, want 1/1", g, controls, variants)
+		}
+	}
+}
+
+func TestExpand_GroupsBlock(t *testing.T) {
+	spec := &Spec{
+		Name:     "m",
+		Defaults: &Arm{Platform: "ipad-sim", Content: "c"},
+		Groups: []*Group{
+			{
+				ID:      "avgbw",
+				Control: &Arm{Segment: "s6"},
+				Variants: []*Arm{
+					{Segment: "s6", ContentManipulation: &sweep.ContentManipulation{StripAvgBandwidth: true}},
+				},
+			},
+		},
+	}
+	arms, err := Expand(spec)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if len(arms) != 2 {
+		t.Fatalf("got %d arms, want 2", len(arms))
+	}
+	ctrl, variant := arms[0], arms[1]
+	if ctrl.Role != string(sweep.ArmControl) || ctrl.ID != "m/avgbw/control" {
+		t.Errorf("control: role=%q id=%q", ctrl.Role, ctrl.ID)
+	}
+	if variant.Role != string(sweep.ArmVariant) || variant.ID != "m/avgbw/var0" {
+		t.Errorf("variant: role=%q id=%q", variant.Role, variant.ID)
+	}
+	if ctrl.Group != "m/avgbw" || variant.Group != "m/avgbw" {
+		t.Errorf("group ids: %q, %q", ctrl.Group, variant.Group)
+	}
+	if ctrl.Platform != "ipad-sim" || variant.Platform != "ipad-sim" {
+		t.Error("group members should inherit defaults platform")
+	}
+	if variant.ContentManipulation == nil || !variant.ContentManipulation.StripAvgBandwidth {
+		t.Error("variant should carry strip_avg_bandwidth")
 	}
 }
 
@@ -122,7 +239,7 @@ func TestExpand_DefaultsLayered(t *testing.T) {
 		Class:     "config",
 		DurationS: 90,
 		Defaults:  &Arm{Platform: "ipad-sim", Content: "insane_new_p200_h264"},
-		Axes:      map[string][]any{"segment": {"s2", "s6"}},
+		Axes:      map[string][]any{"is.segment": {"s2", "s6"}},
 	}
 	arms, err := Expand(spec)
 	if err != nil {
@@ -150,8 +267,8 @@ func TestExpand_ExplicitArmsEscapeHatch(t *testing.T) {
 		Name:     "m",
 		Defaults: &Arm{Platform: "ipad-sim"},
 		Arms: []*Arm{
-			{Segment: "s6", LiveOffset: f64(24), Lever: "proxy"},
-			{Segment: "s2", LiveOffset: f64(12), Lever: "app", Platform: "androidtv"},
+			{Segment: "s6", ProxyLiveOffset: f64(24)},
+			{Segment: "s2", AppLiveOffset: f64(12), Platform: "androidtv"},
 		},
 	}
 	arms, err := Expand(spec)
@@ -175,7 +292,7 @@ func TestExpand_ExplicitArmsEscapeHatch(t *testing.T) {
 func TestExpand_AxesAndExplicitArmsCombine(t *testing.T) {
 	spec := &Spec{
 		Name: "m",
-		Axes: map[string][]any{"segment": {"s2", "s6"}},
+		Axes: map[string][]any{"is.segment": {"s2", "s6"}},
 		Arms: []*Arm{{Segment: "ll", Mode: "pyramid"}},
 	}
 	arms, err := Expand(spec)
@@ -189,7 +306,7 @@ func TestExpand_AxesAndExplicitArmsCombine(t *testing.T) {
 
 func TestExpand_NoArmsIsError(t *testing.T) {
 	if _, err := Expand(&Spec{Name: "m"}); err == nil {
-		t.Fatal("expected error for a spec with no axes and no arms")
+		t.Fatal("expected error for a spec with no axes, arms, or groups")
 	}
 }
 
@@ -200,14 +317,19 @@ func TestExpand_Validation(t *testing.T) {
 		want string
 	}{
 		{"unknown axis", &Spec{Name: "m", Axes: map[string][]any{"bogus": {"x"}}}, "unknown axis"},
-		{"empty axis", &Spec{Name: "m", Axes: map[string][]any{"segment": {}}}, "no values"},
-		{"bad lever", &Spec{Name: "m", Axes: map[string][]any{"lever": {"sideways"}, "live_offset": {24.0}}}, "lever"},
-		{"bad segment", &Spec{Name: "m", Axes: map[string][]any{"segment": {"s9"}}}, "segment"},
+		{"empty axis", &Spec{Name: "m", Axes: map[string][]any{"is.segment": {}}}, "no values"},
+		{"bad segment", &Spec{Name: "m", Axes: map[string][]any{"is.segment": {"s9"}}}, "segment"},
 		{"bad platform", &Spec{Name: "m", Axes: map[string][]any{"platform": {"toaster"}}}, "platform"},
-		{"bad protocol", &Spec{Name: "m", Axes: map[string][]any{"protocol": {"quic"}}}, "protocol"},
-		{"offset out of window", &Spec{Name: "m", Axes: map[string][]any{"live_offset": {7.0}}}, "supported window"},
-		{"non-integral offset", &Spec{Name: "m", Axes: map[string][]any{"live_offset": {6.5}}}, "supported window"},
-		{"bad class", &Spec{Name: "m", Class: "chaos", Axes: map[string][]any{"segment": {"s6"}}}, "class"},
+		{"bad protocol", &Spec{Name: "m", Axes: map[string][]any{"is.protocol": {"quic"}}}, "protocol"},
+		{"offset out of window", &Spec{Name: "m", Axes: map[string][]any{"proxy.live_offset": {7.0}}}, "supported window"},
+		{"non-integral offset", &Spec{Name: "m", Axes: map[string][]any{"proxy.live_offset": {6.5}}}, "supported window"},
+		{"bad class", &Spec{Name: "m", Class: "chaos", Axes: map[string][]any{"is.segment": {"s6"}}}, "class"},
+		{"compare not an axis", &Spec{Name: "m", Parallel: true, Compare: "is.protocol", Axes: map[string][]any{"is.segment": {"s6"}}}, "not one of the axes"},
+		{"compare needs parallel", &Spec{Name: "m", Compare: "is.protocol", Axes: map[string][]any{"is.protocol": {"hls", "dash"}}}, "requires parallel"},
+		{"compare too wide", &Spec{Name: "m", Parallel: true, Compare: "proxy.live_offset", Axes: map[string][]any{"proxy.live_offset": {0.0, 6.0, 12.0, 18.0, 24.0}}}, "at most"},
+		{"group too large", &Spec{Name: "m", Groups: []*Group{{ID: "g", Control: &Arm{}, Variants: []*Arm{{Segment: "s2"}, {Segment: "s6"}, {Segment: "ll"}, {Mode: "steps"}}}}}, "at most"},
+		{"group no variants", &Spec{Name: "m", Groups: []*Group{{ID: "g", Control: &Arm{}}}}, "at least one variant"},
+		{"bad role on explicit arm", &Spec{Name: "m", Arms: []*Arm{{Role: "sideways"}}}, "role"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -224,9 +346,9 @@ func TestExpand_Validation(t *testing.T) {
 
 func TestExpand_SupportedWindowAccepted(t *testing.T) {
 	for _, off := range []any{0.0, 2.0, 4.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0} {
-		spec := &Spec{Name: "m", Axes: map[string][]any{"live_offset": {off}}}
+		spec := &Spec{Name: "m", Axes: map[string][]any{"proxy.live_offset": {off}}}
 		if _, err := Expand(spec); err != nil {
-			t.Errorf("live_offset %v should be valid: %v", off, err)
+			t.Errorf("proxy.live_offset %v should be valid: %v", off, err)
 		}
 	}
 }
@@ -237,7 +359,7 @@ func TestArm_ToExperimentNoSharedPointers(t *testing.T) {
 	spec := &Spec{
 		Name:     "m",
 		Defaults: &Arm{Shape: shapeRate(5.0)},
-		Axes:     map[string][]any{"segment": {"s2", "s6"}},
+		Axes:     map[string][]any{"is.segment": {"s2", "s6"}},
 	}
 	arms, err := Expand(spec)
 	if err != nil {

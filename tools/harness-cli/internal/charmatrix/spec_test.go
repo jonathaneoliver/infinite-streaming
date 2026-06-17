@@ -6,8 +6,8 @@ import (
 )
 
 func TestLoad_AcceptanceMatrix(t *testing.T) {
-	// The #811 acceptance matrix: segment:[s6] × live_offset:[24,30] ×
-	// lever:[proxy,app], platform pinned via defaults → 4 arms.
+	// A namespaced matrix: is.segment:[s6] × proxy.live_offset:[24,30] ×
+	// is.protocol:[hls,dash], platform pinned via defaults → 4 arms.
 	yaml := `
 name: live-offset-acceptance
 class: config
@@ -16,9 +16,9 @@ defaults:
   platform: ipad-sim
   content: insane_new_p200_h264
 axes:
-  segment: [s6]
-  live_offset: [24, 30]
-  lever: [proxy, app]
+  is.segment: [s6]
+  proxy.live_offset: [24, 30]
+  is.protocol: [hls, dash]
 `
 	spec, err := Load([]byte(yaml))
 	if err != nil {
@@ -49,23 +49,24 @@ axes:
 }
 
 func TestLoad_NestedRecipeBlocks(t *testing.T) {
-	// The reused sweep types' json tags must drive the nested YAML blocks with no
-	// dual-tagging: shape.rate_mbps, content_manipulation.strip_average_bandwidth,
-	// transfer_timeouts.active_seconds, fault.type.
+	// The reused sweep types' json tags must drive the nested YAML blocks under the
+	// proxy.* namespace with no dual-tagging: proxy.shape.rate_mbps,
+	// proxy.content_manipulation.strip_avg_bandwidth, proxy.transfer_timeouts.*,
+	// proxy.fault.type.
 	yaml := `
 name: recipe
 arms:
   - platform: ipad-sim
-    shape:
+    proxy.shape:
       rate_mbps: 4.5
-    content_manipulation:
+    proxy.content_manipulation:
       strip_avg_bandwidth: true
-    transfer_timeouts:
+    proxy.transfer_timeouts:
       active_seconds: 8
       applies_segments: true
   - platform: appletv
     class: fault
-    fault:
+    proxy.fault:
       type: "500"
       request_kind: segment
       frequency: 3
@@ -80,13 +81,13 @@ arms:
 	}
 	a0 := arms[0]
 	if a0.Shape == nil || a0.Shape.RateMbps == nil || *a0.Shape.RateMbps != 4.5 {
-		t.Errorf("shape.rate_mbps not decoded: %+v", a0.Shape)
+		t.Errorf("proxy.shape.rate_mbps not decoded: %+v", a0.Shape)
 	}
 	if a0.ContentManipulation == nil || !a0.ContentManipulation.StripAvgBandwidth {
-		t.Errorf("content_manipulation.strip_average_bandwidth not decoded")
+		t.Errorf("proxy.content_manipulation.strip_avg_bandwidth not decoded")
 	}
 	if a0.TransferTimeouts == nil || a0.TransferTimeouts.ActiveSeconds != 8 || !a0.TransferTimeouts.AppliesSegments {
-		t.Errorf("transfer_timeouts not decoded: %+v", a0.TransferTimeouts)
+		t.Errorf("proxy.transfer_timeouts not decoded: %+v", a0.TransferTimeouts)
 	}
 	// The recipe blocks must survive ToExperiment for the server config path.
 	e0 := a0.ToExperiment()
@@ -95,10 +96,44 @@ arms:
 	}
 	a1 := arms[1]
 	if a1.Fault == nil || a1.Fault.Type != "500" || a1.Fault.RequestKind != "segment" || a1.Fault.Frequency != 3 {
-		t.Errorf("fault block not decoded: %+v", a1.Fault)
+		t.Errorf("proxy.fault block not decoded: %+v", a1.Fault)
 	}
 	if a1.ToExperiment().Class != "fault" {
 		t.Error("arm 1 class should be fault")
+	}
+}
+
+func TestLoad_GroupsBlock(t *testing.T) {
+	// The groups: control+variants form decodes and Expand pre-pairs it.
+	yaml := `
+name: manip
+class: config
+parallel: true
+defaults:
+  platform: ipad-sim
+  content: c
+groups:
+  - id: avgbw
+    control: {}
+    variants:
+      - proxy.content_manipulation: { strip_avg_bandwidth: true }
+`
+	spec, err := Load([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	arms, err := Expand(spec)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if len(arms) != 2 {
+		t.Fatalf("got %d arms, want 2", len(arms))
+	}
+	if arms[0].Role != "control" || arms[1].Role != "variant" {
+		t.Errorf("roles: %q, %q", arms[0].Role, arms[1].Role)
+	}
+	if arms[0].Group != "manip/avgbw" {
+		t.Errorf("group = %q, want manip/avgbw", arms[0].Group)
 	}
 }
 
@@ -115,7 +150,7 @@ arms:
 }
 
 func TestLoad_MissingNameRejected(t *testing.T) {
-	if _, err := Load([]byte("axes:\n  segment: [s6]\n")); err == nil || !strings.Contains(err.Error(), "name") {
+	if _, err := Load([]byte("axes:\n  is.segment: [s6]\n")); err == nil || !strings.Contains(err.Error(), "name") {
 		t.Fatalf("expected name-required error, got %v", err)
 	}
 }

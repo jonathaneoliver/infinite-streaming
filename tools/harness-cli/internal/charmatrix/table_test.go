@@ -6,8 +6,8 @@ import (
 )
 
 func TestRenderTable_LandedColumn(t *testing.T) {
-	armA := &Arm{ID: "m/a", Platform: "ipad-sim", Segment: "s6", Lever: "proxy", LiveOffset: f64(24)}
-	armB := &Arm{ID: "m/b", Platform: "ipad-sim", Segment: "s2", Lever: "app", LiveOffset: f64(30)}
+	armA := &Arm{ID: "m/a", Platform: "ipad-sim", Segment: "s6", ProxyLiveOffset: f64(24)}
+	armB := &Arm{ID: "m/b", Platform: "ipad-sim", Segment: "s2", AppLiveOffset: f64(30)}
 	armC := &Arm{ID: "m/c", Platform: "ipad-sim", Segment: "s6"} // not a live-offset arm
 
 	results := []ArmResult{
@@ -28,7 +28,7 @@ func TestRenderTable_LandedColumn(t *testing.T) {
 	if !strings.Contains(lines[4], "NO") {
 		t.Errorf("arm B should be landed=NO: %q", lines[4])
 	}
-	// arm C: no intended offset, so lever/intended/achieved/landed all "-".
+	// arm C: no intended offset, so src/intended/achieved/landed all "-".
 	if strings.Contains(lines[5], "yes") || strings.Contains(lines[5], "NO") {
 		t.Errorf("arm C (no offset) should not show a landed verdict: %q", lines[5])
 	}
@@ -37,7 +37,7 @@ func TestRenderTable_LandedColumn(t *testing.T) {
 func TestRenderTable_DryRunNoFalseLanded(t *testing.T) {
 	// A live-offset arm with no measurement (dry run) must show "-" for landed,
 	// not a no-data default reading as pass/fail.
-	arm := &Arm{ID: "m/a", Platform: "ipad-sim", Lever: "proxy", LiveOffset: f64(24)}
+	arm := &Arm{ID: "m/a", Platform: "ipad-sim", ProxyLiveOffset: f64(24)}
 	out := RenderTable("m", []ArmResult{{Arm: arm, IntendedOff: 24}})
 	dataLine := strings.Split(strings.TrimRight(out, "\n"), "\n")[3]
 	if strings.Contains(dataLine, "yes") || strings.Contains(dataLine, "NO") {
