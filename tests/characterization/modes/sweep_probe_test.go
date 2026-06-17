@@ -92,11 +92,14 @@ func TestSweepProbe(t *testing.T) {
 	// combination matrix (#793). The arg construction is shared with the
 	// `harness char matrix` runner via runner.ProbeLaunchArgs (#811).
 	args := runner.ProbeLaunchArgs(runner.ProbeConfig{
-		PlayerID:    playerID,
-		Content:     strings.TrimSpace(os.Getenv("CHAR_CONTENT")),
-		Segment:     strings.TrimSpace(os.Getenv("CHAR_SWEEP_SEGMENT")),
-		LiveOffsetS: strings.TrimSpace(os.Getenv("CHAR_SWEEP_LIVE_OFFSET")),
-		Protocol:    strings.TrimSpace(os.Getenv("CHAR_SWEEP_PROTOCOL")),
+		PlayerID:           playerID,
+		Content:            strings.TrimSpace(os.Getenv("CHAR_CONTENT")),
+		Segment:            strings.TrimSpace(os.Getenv("CHAR_SWEEP_SEGMENT")),
+		LiveOffsetS:        strings.TrimSpace(os.Getenv("CHAR_SWEEP_LIVE_OFFSET")),
+		Protocol:           strings.TrimSpace(os.Getenv("CHAR_SWEEP_PROTOCOL")),
+		Codec:              strings.TrimSpace(os.Getenv("CHAR_SWEEP_CODEC")),
+		PeakBitrateMbps:    envInt("CHAR_SWEEP_PEAK_BITRATE", 0),
+		StartsFirstVariant: strings.TrimSpace(os.Getenv("CHAR_SWEEP_FIRST_VARIANT")),
 	})
 	appium.SetLaunchArgs(args)
 

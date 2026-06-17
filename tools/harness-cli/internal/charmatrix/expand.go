@@ -278,6 +278,16 @@ func (a *Arm) ClientLiveOffsetS() string {
 	return "0"
 }
 
+// StartsFirstVariantS is the value for the -is.flag.starts_first_variant launch
+// arg: "true"/"false" when the knob is set, or "" (omit) when unset — false is
+// meaningful (let ABR pick the join rung), so it can't collapse to the zero value.
+func (a *Arm) StartsFirstVariantS() string {
+	if a.StartsFirstVariant == nil {
+		return ""
+	}
+	return strconv.FormatBool(*a.StartsFirstVariant)
+}
+
 // IntendedLiveOffset is the offset the arm means to impose, for the post-run
 // manipulation check (AchievedOffsetFromEvents / ManipulationLanded). The server
 // offset (proxy.live_offset) is the one that lands as a manifest change, so it
