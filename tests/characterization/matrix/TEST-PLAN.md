@@ -626,13 +626,13 @@ groups:
 ## 4.6 `variant-order` — manifest order vs bandwidth sort (PAIR, HLS-only)
 
 ```yaml
-# WHY:   Shuffle the variant order in the manifest. Does the player honour manifest
-#        order for initial pick, or always sort by BANDWIDTH?
-# WATCH: First rung selected at startup, clean vs shuffled.
+# WHY:   Reverse the variant order in the manifest (descending). Does the player
+#        honour manifest order for initial pick, or always sort by BANDWIDTH?
+# WATCH: First rung selected at startup, default order vs descending.
 # CONCLUDE:
 #   startup rung follows manifest order → honours order; first-listed is the initial pick.
-#   startup rung identical to clean     → sorts by bandwidth internally; order irrelevant.
-# NOTE:  HLS-only knob; pin is.protocol: hls.
+#   startup rung identical to default   → sorts by bandwidth internally; order irrelevant.
+# NOTE:  HLS-only knob; pin is.protocol: hls. variant_order ∈ default|ascending|descending.
 name: variant-order
 class: config
 parallel: true
@@ -642,7 +642,7 @@ defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6, i
 groups:
   - id: order
     control:  {}
-    variants: [{ proxy.variant_order: shuffle }]
+    variants: [{ proxy.variant_order: descending }]
 ```
 
 ---
@@ -1047,17 +1047,21 @@ axes:
 | `proxy.transfer_timeouts` | 5.4 |
 | precedence (client×server) | 1.3 |
 
-## Open questions for the spec grammar
+## Spec grammar — landed vs open
 
+**Landed** (feat/811-namespaced-knobs):
+- **Namespaced `is.*` / `proxy.*` knobs** — `is.` matches the real launch args (`-is.flag.live_offset_s`); `proxy.live_offset` + `is.live_offset` are orthogonal (the precedence cell).
+- **`groups:`** control+variants and **`compare:`** axis — both stamp `group`/`role` onto the experiment, pre-paired for the dashboard. `compare:` requires `parallel: true` and ≤4 arms/group.
+- **Flat content-manip conveniences** — `proxy.strip_*`, `proxy.allowed_variants`, `proxy.variant_order`, `proxy.overstate_bandwidth` fold onto `ContentManipulation` (nested `proxy.content_manipulation` wins per-field).
+
+**Still open:**
 1. **Object-valued axes** — 3.1 / 3.4 / 5.x sweep `proxy.shape` / `proxy.fault` as lists of
-   objects. The #811 model only axis-es scalars. Either allow object axis-values, or these stay
+   objects. The model only axis-es scalars. Either allow object axis-values, or these stay
    explicit-`arms:` form. Decision needed.
-2. **`groups:` block** — used throughout Section 4–6 for control+variants; not in #811 today
-   (only `axes:`+`arms:`). This plan assumes it lands.
-3. **Counterbalancing** — every PAIR says `reps: 2`; the swap-assignment-across-reps logic lives
+2. **Counterbalancing** — every PAIR says `reps: 2`; the swap-assignment-across-reps logic lives
    in the runner, not the spec. Spec just declares the rep count.
-4. **`is.*` vs `app.*`** — pick one client namespace. `is.` matches the real launch args
-   (`-is.flag.live_offset_s`); this plan uses `is.`.
+3. **`allowed_variants` drop-bottom / keep-top primitive** — §4.2/§6.2 floor-removal arms need a
+   spec the proxy doesn't resolve yet.
 
 ---
 
@@ -1100,8 +1104,8 @@ written" vs "not possible."
   fields each CONCLUDE keys on. Until that's listed, conclusions aren't machine-checkable (and risk
   duplicating the oracle — see "Relationship to existing tooling").
 - **Counterbalancing** asserted (`reps: 2`) but the swap-assignment logic is a runner TODO.
-- **Grammar gaps** — object-valued axes, `groups:`, `allowed_variants` drop-bottom primitive (all
-  in Open questions above).
+- **Grammar gaps** — object-valued axes, `allowed_variants` drop-bottom primitive (see "Spec
+  grammar — landed vs open" above; `groups:`/`compare:`/namespacing have landed).
 
 ## Suggested build order
 

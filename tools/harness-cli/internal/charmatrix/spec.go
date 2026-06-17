@@ -89,8 +89,17 @@ type Arm struct {
 	ProxyLiveOffset     *float64                   `json:"proxy.live_offset,omitempty"` // manifest hold-back (server live edge)
 	Shape               *sweep.Shape               `json:"proxy.shape,omitempty"`
 	Fault               *sweep.Fault               `json:"proxy.fault,omitempty"`
-	ContentManipulation *sweep.ContentManipulation `json:"proxy.content_manipulation,omitempty"`
+	ContentManipulation *sweep.ContentManipulation `json:"proxy.content_manipulation,omitempty"` // full nested form (per-field wins over the flat conveniences below)
 	TransferTimeouts    *sweep.TransferTimeouts    `json:"proxy.transfer_timeouts,omitempty"`
+
+	// --- flat content-manipulation conveniences (proxy.* → folded onto
+	// ContentManipulation in ToExperiment; the nested block above wins per-field) ---
+	StripCodecs        *bool    `json:"proxy.strip_codecs,omitempty"`
+	StripAvgBandwidth  *bool    `json:"proxy.strip_avg_bandwidth,omitempty"`
+	StripResolution    *bool    `json:"proxy.strip_resolution,omitempty"`
+	AllowedVariants    string   `json:"proxy.allowed_variants,omitempty"` // ladder spec: drop-top-rung | drop-top-<N> | keep-bottom-<N>
+	VariantOrder       string   `json:"proxy.variant_order,omitempty"`    // default | ascending | descending
+	OverstateBandwidth *float64 `json:"proxy.overstate_bandwidth,omitempty"`
 }
 
 // Load parses a YAML matrix spec via the JSON shim: yaml.v3 → generic map →
