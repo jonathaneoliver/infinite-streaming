@@ -233,6 +233,85 @@ func TestExpand_GroupsBlock(t *testing.T) {
 	}
 }
 
+func TestArm_FlatContentManipConveniences(t *testing.T) {
+	// Flat proxy.* conveniences fold onto ContentManipulation.
+	yaml := `
+name: m
+arms:
+  - platform: ipad-sim
+    proxy.strip_avg_bandwidth: true
+    proxy.allowed_variants: drop-top-rung
+    proxy.overstate_bandwidth: 2.0
+    proxy.variant_order: descending
+`
+	spec, err := Load([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	arms, err := Expand(spec)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	cm := arms[0].ToExperiment().ContentManipulation
+	if cm == nil {
+		t.Fatal("flat conveniences produced no ContentManipulation")
+	}
+	if !cm.StripAvgBandwidth {
+		t.Error("strip_avg_bandwidth not folded")
+	}
+	if cm.AllowedVariants != "drop-top-rung" {
+		t.Errorf("allowed_variants = %q", cm.AllowedVariants)
+	}
+	if cm.OverstateBandwidth == nil || *cm.OverstateBandwidth != 2.0 {
+		t.Errorf("overstate_bandwidth not folded: %v", cm.OverstateBandwidth)
+	}
+	if cm.VariantOrder != "descending" {
+		t.Errorf("variant_order = %q", cm.VariantOrder)
+	}
+}
+
+func TestArm_NestedContentManipWinsOverFlat(t *testing.T) {
+	// When both the nested block and a flat convenience set the same field, the
+	// nested block wins (it is the explicit full form).
+	tru := true
+	arm := &Arm{
+		AllowedVariants:     "drop-top-rung",                                              // flat
+		ContentManipulation: &sweep.ContentManipulation{AllowedVariants: "keep-bottom-2"}, // nested
+		StripResolution:     &tru,
+	}
+	cm := arm.ToExperiment().ContentManipulation
+	if cm.AllowedVariants != "keep-bottom-2" {
+		t.Errorf("nested should win: allowed_variants = %q, want keep-bottom-2", cm.AllowedVariants)
+	}
+	if !cm.StripResolution {
+		t.Error("flat strip_resolution should still fold when nested leaves it unset")
+	}
+}
+
+func TestExpand_BoolConvenienceCompare(t *testing.T) {
+	// A bool convenience axis pairs cleanly: false=control, true=variant.
+	spec := &Spec{
+		Name:     "m",
+		Parallel: true,
+		Defaults: &Arm{Platform: "ipad-sim"},
+		Compare:  "proxy.strip_avg_bandwidth",
+		Axes:     map[string][]any{"proxy.strip_avg_bandwidth": {false, true}},
+	}
+	arms, err := Expand(spec)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if len(arms) != 2 {
+		t.Fatalf("got %d arms, want 2", len(arms))
+	}
+	if arms[0].Role != "control" || arms[1].Role != "variant" {
+		t.Errorf("roles: %q, %q", arms[0].Role, arms[1].Role)
+	}
+	if arms[0].Group == "" || arms[0].Group != arms[1].Group {
+		t.Errorf("arms should share a group: %q, %q", arms[0].Group, arms[1].Group)
+	}
+}
+
 func TestExpand_DefaultsLayered(t *testing.T) {
 	spec := &Spec{
 		Name:      "m",
@@ -330,6 +409,7 @@ func TestExpand_Validation(t *testing.T) {
 		{"group too large", &Spec{Name: "m", Groups: []*Group{{ID: "g", Control: &Arm{}, Variants: []*Arm{{Segment: "s2"}, {Segment: "s6"}, {Segment: "ll"}, {Mode: "steps"}}}}}, "at most"},
 		{"group no variants", &Spec{Name: "m", Groups: []*Group{{ID: "g", Control: &Arm{}}}}, "at least one variant"},
 		{"bad role on explicit arm", &Spec{Name: "m", Arms: []*Arm{{Role: "sideways"}}}, "role"},
+		{"bad variant_order", &Spec{Name: "m", Arms: []*Arm{{VariantOrder: "shuffle"}}}, "variant_order"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

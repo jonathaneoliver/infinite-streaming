@@ -23,19 +23,25 @@ const maxArmsPerGroup = 4
 // arms, or groups, not cartesian-swept. Unknown axis names are a validation error
 // so a typo fails fast instead of silently expanding nothing.
 var axisKeys = map[string]bool{
-	"platform":                true,
-	"content":                 true,
-	"mode":                    true,
-	"class":                   true,
-	"duration_s":              true,
-	"reps":                    true,
-	"is.segment":              true,
-	"is.protocol":             true,
-	"is.codec":                true,
-	"is.live_offset":          true,
-	"is.peak_bitrate_mbps":    true,
-	"is.starts_first_variant": true,
-	"proxy.live_offset":       true,
+	"platform":                  true,
+	"content":                   true,
+	"mode":                      true,
+	"class":                     true,
+	"duration_s":                true,
+	"reps":                      true,
+	"is.segment":                true,
+	"is.protocol":               true,
+	"is.codec":                  true,
+	"is.live_offset":            true,
+	"is.peak_bitrate_mbps":      true,
+	"is.starts_first_variant":   true,
+	"proxy.live_offset":         true,
+	"proxy.strip_codecs":        true,
+	"proxy.strip_avg_bandwidth": true,
+	"proxy.strip_resolution":    true,
+	"proxy.allowed_variants":    true,
+	"proxy.variant_order":       true,
+	"proxy.overstate_bandwidth": true,
 }
 
 // Expand turns a spec into its ordered list of arms: the cartesian product of
@@ -183,21 +189,65 @@ func (a *Arm) ToExperiment() *sweep.Experiment {
 		Arm:                 sweep.Arm(a.Role),
 		Shape:               cloneShape(a.Shape),
 		Fault:               cloneFault(a.Fault),
-		ContentManipulation: cloneCM(a.ContentManipulation),
+		ContentManipulation: a.contentManipulation(),
 		TransferTimeouts:    cloneXfer(a.TransferTimeouts),
 	}
-	if a.ProxyLiveOffset != nil && *a.ProxyLiveOffset > 0 {
-		if e.ContentManipulation == nil {
-			e.ContentManipulation = &sweep.ContentManipulation{}
-		}
-		// An explicit content_manipulation.live_offset on the arm wins over the
-		// proxy.live_offset knob (the escape hatch is intentional).
-		if e.ContentManipulation.LiveOffset == nil {
-			v := *a.ProxyLiveOffset
-			e.ContentManipulation.LiveOffset = &v
+	return e
+}
+
+// contentManipulation folds the flat proxy.* conveniences (proxy.live_offset,
+// proxy.strip_*, proxy.allowed_variants, proxy.variant_order,
+// proxy.overstate_bandwidth) onto the nested proxy.content_manipulation block.
+// The nested block wins per-field (it is the explicit full form); a flat
+// convenience only fills a field the block left unset. Returns nil when nothing
+// manipulates the manifest.
+func (a *Arm) contentManipulation() *sweep.ContentManipulation {
+	cm := cloneCM(a.ContentManipulation) // nested block, or nil
+	ensure := func() {
+		if cm == nil {
+			cm = &sweep.ContentManipulation{}
 		}
 	}
-	return e
+	if a.ProxyLiveOffset != nil && *a.ProxyLiveOffset > 0 {
+		ensure()
+		if cm.LiveOffset == nil {
+			v := *a.ProxyLiveOffset
+			cm.LiveOffset = &v
+		}
+	}
+	// Bool strips OR in (a nested-true stays true; a flat-true sets it).
+	if a.StripCodecs != nil && *a.StripCodecs {
+		ensure()
+		cm.StripCodecs = true
+	}
+	if a.StripAvgBandwidth != nil && *a.StripAvgBandwidth {
+		ensure()
+		cm.StripAvgBandwidth = true
+	}
+	if a.StripResolution != nil && *a.StripResolution {
+		ensure()
+		cm.StripResolution = true
+	}
+	if a.AllowedVariants != "" {
+		ensure()
+		if cm.AllowedVariants == "" {
+			cm.AllowedVariants = a.AllowedVariants
+		}
+	}
+	if a.VariantOrder != "" {
+		ensure()
+		if cm.VariantOrder == "" {
+			cm.VariantOrder = a.VariantOrder
+		}
+	}
+	if a.OverstateBandwidth != nil {
+		ensure()
+		if cm.OverstateBandwidth == nil {
+			v := *a.OverstateBandwidth
+			cm.OverstateBandwidth = &v
+		}
+	}
+	return cm
 }
 
 // ClientLiveOffsetS is the value for the client's -is.flag.live_offset_s launch
@@ -279,6 +329,11 @@ func validateArm(a *Arm) error {
 	}
 	if a.Role != "" && a.Role != string(sweep.ArmControl) && a.Role != string(sweep.ArmVariant) {
 		return fmt.Errorf("role %q invalid (control|variant)", a.Role)
+	}
+	switch a.VariantOrder {
+	case "", "default", "ascending", "descending":
+	default:
+		return fmt.Errorf("variant_order %q invalid (default|ascending|descending)", a.VariantOrder)
 	}
 	if a.Class != "" {
 		if err := validateClass(a.Class); err != nil {
