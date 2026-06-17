@@ -24,12 +24,14 @@ func TestProbeLaunchArgs_Defaults(t *testing.T) {
 
 func TestProbeLaunchArgs_AllKnobs(t *testing.T) {
 	got := ProbeLaunchArgs(ProbeConfig{
-		PlayerID:        "pid",
-		Content:         "insane_new_p200_h264",
-		Segment:         "s2",
-		LiveOffsetS:     "24",
-		Protocol:        "dash",
-		PeakBitrateMbps: 3,
+		PlayerID:           "pid",
+		Content:            "insane_new_p200_h264",
+		Segment:            "s2",
+		LiveOffsetS:        "24",
+		Protocol:           "dash",
+		Codec:              "hevc",
+		PeakBitrateMbps:    3,
+		StartsFirstVariant: "true",
 	})
 	want := []string{
 		"-is.player_id", "pid",
@@ -40,7 +42,9 @@ func TestProbeLaunchArgs_AllKnobs(t *testing.T) {
 		"-is.segment", "s2",
 		"-is.flag.live_offset_s", "24",
 		"-is.protocol", "dash",
+		"-is.codec", "hevc",
 		"-is.flag.peak_bitrate_mbps", "3",
+		"-is.flag.starts_first_variant", "true",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("all knobs:\n got %q\nwant %q", got, want)

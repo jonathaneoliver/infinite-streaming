@@ -41,13 +41,16 @@ func TestCharMatrixFleet(t *testing.T) {
 // are only what the probe needs to bind + cold-launch with the right client
 // knobs.
 type armProbeConfig struct {
-	playerID    string
-	platform    string
-	segment     string
-	liveOffsetS string
-	protocol    string
-	content     string
-	durationS   int
+	playerID           string
+	platform           string
+	segment            string
+	liveOffsetS        string
+	protocol           string
+	codec              string
+	peakBitrate        int
+	startsFirstVariant string
+	content            string
+	durationS          int
 }
 
 func readArmProbeConfig(fleetIndex int) armProbeConfig {
@@ -55,13 +58,16 @@ func readArmProbeConfig(fleetIndex int) armProbeConfig {
 		return strings.TrimSpace(os.Getenv(fmt.Sprintf("CHAR_ARM_%d_%s", fleetIndex, suffix)))
 	}
 	return armProbeConfig{
-		playerID:    p("PLAYER_ID"),
-		platform:    envOr(fmt.Sprintf("CHAR_ARM_%d_PLATFORM", fleetIndex), string(runner.PlatformIPadSim)),
-		segment:     p("SEGMENT"),
-		liveOffsetS: envOr(fmt.Sprintf("CHAR_ARM_%d_LIVE_OFFSET", fleetIndex), "0"),
-		protocol:    p("PROTOCOL"),
-		content:     envOr(fmt.Sprintf("CHAR_ARM_%d_CONTENT", fleetIndex), strings.TrimSpace(os.Getenv("CHAR_CONTENT"))),
-		durationS:   envInt("CHAR_SWEEP_DURATION_S", 60),
+		playerID:           p("PLAYER_ID"),
+		platform:           envOr(fmt.Sprintf("CHAR_ARM_%d_PLATFORM", fleetIndex), string(runner.PlatformIPadSim)),
+		segment:            p("SEGMENT"),
+		liveOffsetS:        envOr(fmt.Sprintf("CHAR_ARM_%d_LIVE_OFFSET", fleetIndex), "0"),
+		protocol:           p("PROTOCOL"),
+		codec:              p("CODEC"),
+		peakBitrate:        envInt(fmt.Sprintf("CHAR_ARM_%d_PEAK_BITRATE", fleetIndex), 0),
+		startsFirstVariant: p("FIRST_VARIANT"),
+		content:            envOr(fmt.Sprintf("CHAR_ARM_%d_CONTENT", fleetIndex), strings.TrimSpace(os.Getenv("CHAR_CONTENT"))),
+		durationS:          envInt("CHAR_SWEEP_DURATION_S", 60),
 	}
 }
 
@@ -121,11 +127,14 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	// uses, plus this arm's client knobs (segment / app live_offset / protocol),
 	// all via the shared ProbeLaunchArgs projection.
 	args := runner.ProbeLaunchArgs(runner.ProbeConfig{
-		PlayerID:    cfg.playerID,
-		Content:     cfg.content,
-		Segment:     cfg.segment,
-		LiveOffsetS: cfg.liveOffsetS,
-		Protocol:    cfg.protocol,
+		PlayerID:           cfg.playerID,
+		Content:            cfg.content,
+		Segment:            cfg.segment,
+		LiveOffsetS:        cfg.liveOffsetS,
+		Protocol:           cfg.protocol,
+		Codec:              cfg.codec,
+		PeakBitrateMbps:    cfg.peakBitrate,
+		StartsFirstVariant: cfg.startsFirstVariant,
 	})
 	appium.SetLaunchArgs(args)
 

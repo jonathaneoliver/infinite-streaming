@@ -174,6 +174,9 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 			fmt.Sprintf("CHAR_ARM_%d_SEGMENT=%s", i, a.Segment),
 			fmt.Sprintf("CHAR_ARM_%d_LIVE_OFFSET=%s", i, a.ClientLiveOffsetS()),
 			fmt.Sprintf("CHAR_ARM_%d_PROTOCOL=%s", i, a.Protocol),
+			fmt.Sprintf("CHAR_ARM_%d_CODEC=%s", i, a.Codec),
+			fmt.Sprintf("CHAR_ARM_%d_PEAK_BITRATE=%d", i, a.PeakBitrateMbps),
+			fmt.Sprintf("CHAR_ARM_%d_FIRST_VARIANT=%s", i, a.StartsFirstVariantS()),
 			fmt.Sprintf("CHAR_ARM_%d_CONTENT=%s", i, clip),
 		)
 	}
@@ -344,6 +347,9 @@ func driveProbe(client *api.Client, a *charmatrix.Arm, playerID, clip string, du
 		"CHAR_SWEEP_SEGMENT="+a.Segment,
 		"CHAR_SWEEP_LIVE_OFFSET="+a.ClientLiveOffsetS(),
 		"CHAR_SWEEP_PROTOCOL="+a.Protocol,
+		"CHAR_SWEEP_CODEC="+a.Codec,
+		"CHAR_SWEEP_PEAK_BITRATE="+strconv.Itoa(a.PeakBitrateMbps),
+		"CHAR_SWEEP_FIRST_VARIANT="+a.StartsFirstVariantS(),
 		"CHAR_CONTENT="+clip,
 	)
 	if err := cmd.Run(); err != nil {
@@ -407,6 +413,9 @@ func planSummaries(arms []*charmatrix.Arm) []map[string]any {
 			"role":          a.Role,
 			"live_offset":   intendedOf(a),
 			"client_offset": a.ClientLiveOffsetS(),
+			"codec":         a.Codec,
+			"peak_bitrate":  a.PeakBitrateMbps,
+			"first_variant": a.StartsFirstVariantS(),
 			"class":         e.Class,
 			"duration_s":    e.DurationS,
 		}

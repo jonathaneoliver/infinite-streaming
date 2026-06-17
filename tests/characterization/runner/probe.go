@@ -13,12 +13,14 @@ import "strconv"
 // per-play push is #800), which is why the matrix runner cold-launches per arm
 // whenever one of these moves.
 type ProbeConfig struct {
-	PlayerID        string // -is.player_id — the bootstrapped session id (required)
-	Content         string // -is.lastPlayed — pin the resumed clip (optional)
-	Segment         string // -is.segment — s2|s6|ll master variant (optional; empty = app default s6)
-	LiveOffsetS     string // -is.flag.live_offset_s — app-side live-offset override; "" → "0" (always pinned)
-	Protocol        string // -is.protocol — hls|dash (optional; empty = app default)
-	PeakBitrateMbps int    // -is.flag.peak_bitrate_mbps — startup peak-bitrate clamp; 0 = omit (#683)
+	PlayerID           string // -is.player_id — the bootstrapped session id (required)
+	Content            string // -is.lastPlayed — pin the resumed clip (optional)
+	Segment            string // -is.segment — s2|s6|ll master variant (optional; empty = app default s6)
+	LiveOffsetS        string // -is.flag.live_offset_s — app-side live-offset override; "" → "0" (always pinned)
+	Protocol           string // -is.protocol — hls|dash (optional; empty = app default)
+	Codec              string // -is.codec — h264|hevc|av1 (optional; empty = app default)
+	PeakBitrateMbps    int    // -is.flag.peak_bitrate_mbps — startup peak-bitrate clamp; 0 = omit (#683)
+	StartsFirstVariant string // -is.flag.starts_first_variant — true|false; "" = omit (false is meaningful)
 }
 
 // ProbeLaunchArgs builds the NSArgumentDomain launch-arg slice for an appium
@@ -68,10 +70,19 @@ func ProbeLaunchArgs(c ProbeConfig) []string {
 	if c.Protocol != "" {
 		args = append(args, "-is.protocol", c.Protocol)
 	}
+	// Codec: h264|hevc|av1 — which codec rendition the app selects.
+	if c.Codec != "" {
+		args = append(args, "-is.codec", c.Codec)
+	}
 	// Startup peak-bitrate clamp (#683): cold-start on a variant the cap can
 	// sustain instead of reaching for the top rung. 0 ⇒ omit (app's natural pick).
 	if c.PeakBitrateMbps > 0 {
 		args = append(args, "-is.flag.peak_bitrate_mbps", strconv.Itoa(c.PeakBitrateMbps))
+	}
+	// Join policy: start on the first manifest rung vs let ABR pick the join rung.
+	// false is meaningful, so only the empty string omits the flag.
+	if c.StartsFirstVariant != "" {
+		args = append(args, "-is.flag.starts_first_variant", c.StartsFirstVariant)
 	}
 	return args
 }
