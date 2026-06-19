@@ -25,6 +25,22 @@ cached in `/tmp/cnet_*.json` / `/tmp/cev_*.json`.
   by `report.py`; also runnable standalone (`--episodes`, `--json`).
 - **`CORPUS_PLAN.md`** — the design: token alphabet, fault taxonomy + back-off, the
   condition-anchored program (conditions-as-features → play-end-as-label), corpus plan.
+- **`startup_view.py`** — standalone (not part of the #508 scorer line). Prints the
+  per-segment **client-side** startup timeline for one play —
+  `python3 startup_view.py <play_id> [--verbose] [--all]`. Delivery dur/rate/ttfb come
+  from iOS AVMetrics `derived_*` fields (real client delivery, **not** go-proxy
+  `total_ms`); server segment numbers are recovered best-effort by zipping against
+  `network` rows (`--no-seq` to skip). Archive-backed, so it works for any play from
+  ~30 days back with no device attached.
+  - **Stop boundary:** `--until keepup` (default) stops at `InitialLikelyToKeepUpEvent`
+    — the real startup-complete signal, not first-frame. `--until playing` stops at the
+    first `rate=1`; `--until time --window N` is the old fixed window (also the fallback
+    when the marker is absent); `--all` shows the whole play.
+  - **`--chunks`** — intra-segment view. With `--log <capture>` it parses LocalProxy
+    `[NETCHUNK]`/`[NETBYTES]` lines (smashing-811-knobs instrumentation), matches
+    `play_id` case-insensitively (iOS logs it UPPERCASE), and applies the same keep-up
+    trim; `--verbose` dumps each per-chunk byte arrival. Without `--log` it falls back to
+    LL-HLS `partial` network rows.
 
 ## How to read the `conditions` report
 
