@@ -62,6 +62,13 @@ interface SessionEvent {
 }
 import { usePlayer } from '@/composables/usePlayer';
 import { useSessionTimeSeries, type Stream } from '@/composables/useSessionTimeSeries';
+import {
+  useLifecycleMarkers,
+  useLifecycleLineVisibility,
+  LIFECYCLE_STYLE,
+  LIFECYCLE_KINDS,
+  type LifecycleKind,
+} from '@/composables/useLifecycleMarkers';
 import { useCompareMode } from '@/composables/useCompareMode';
 import { useGroupSiblings } from '@/composables/useGroupSiblings';
 import { CompareContextKey, sessionDash, type CompareSibling, type CompareSeriesIdentity } from '@/composables/useCompareContext';
@@ -571,6 +578,16 @@ const timeseries = useSessionTimeSeries(
     toMs: tsToMs,
   },
 );
+
+// Player-lifecycle vertical lines (restart / play_start / play_end) — derived
+// ONCE here from the shared events stream and passed to every chart + the
+// events timeline so the lines align across panels. Per-type visibility is a
+// shared, persisted toggle surfaced by the legend above the chart stack.
+const { markers: lifecycleMarkers } = useLifecycleMarkers(timeseries.events);
+const { lineVisibility, setLineVisibility } = useLifecycleLineVisibility();
+function onLifecycleToggle(kind: LifecycleKind, e: Event) {
+  setLineVisibility(kind, (e.target as HTMLInputElement).checked);
+}
 
 // Fallback: when the URL didn't carry start_time/end_time, capture
 // the play's bounds the first time samples arrive in archive mode
@@ -1803,7 +1820,7 @@ function skipToEnd() {
         :from-ms="cycleBandsDomain.fromMs"
         :to-ms="cycleBandsDomain.toMs"
       />
-      <EventsTimeline :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" :control-stream="timeseries.control" />
+      <EventsTimeline :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" :control-stream="timeseries.control" :lifecycle-markers="lifecycleMarkers" />
     </CollapsibleSection>
 
     <CollapsibleSection title="Bitrate Chart etc" :open="true" eager persist-key="bitrate-chart">
@@ -1815,11 +1832,22 @@ function skipToEnd() {
         :sessions="compareSessions"
         :view="compareView"
       />
+      <!-- Lifecycle vertical-line toggles — govern the restart / play-start /
+           play-end lines drawn across every chart AND the events timeline.
+           Per-type, persisted; reason / play_id / status show on line hover. -->
+      <div class="lifecycle-toggles">
+        <span class="lt-label">Lifecycle lines:</span>
+        <label v-for="k in LIFECYCLE_KINDS" :key="k" class="lt-item">
+          <input type="checkbox" :checked="lineVisibility[k]" @change="onLifecycleToggle(k, $event)" />
+          <span class="lt-sw" :style="{ background: LIFECYCLE_STYLE[k].color }" />
+          {{ LIFECYCLE_STYLE[k].label }}
+        </label>
+      </div>
       <div class="chart-stack">
-        <BandwidthChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" />
-        <BufferChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" />
-        <RTTChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" />
-        <FPSChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" />
+        <BandwidthChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" :lifecycle-markers="lifecycleMarkers" />
+        <BufferChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :lifecycle-markers="lifecycleMarkers" />
+        <RTTChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :lifecycle-markers="lifecycleMarkers" />
+        <FPSChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :lifecycle-markers="lifecycleMarkers" />
       </div>
     </CollapsibleSection>
 
@@ -2456,4 +2484,30 @@ function skipToEnd() {
 }
 
 .chart-stack { display: grid; gap: 12px; }
+
+/* Lifecycle-line toggles — a compact legend/control row above the charts. */
+.lifecycle-toggles {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 4px 0 8px;
+  font-size: 11px;
+  color: #4b5563;
+}
+.lifecycle-toggles .lt-label { font-weight: 600; color: #374151; }
+.lifecycle-toggles .lt-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  user-select: none;
+}
+.lifecycle-toggles .lt-item input { margin: 0; cursor: pointer; }
+.lifecycle-toggles .lt-sw {
+  display: inline-block;
+  width: 14px;
+  height: 3px;
+  border-radius: 1px;
+}
 </style>
