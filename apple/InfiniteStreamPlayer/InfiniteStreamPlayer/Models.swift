@@ -247,6 +247,17 @@ enum SegmentLength: String, CaseIterable, Identifiable, Codable {
         case .s6: return "_6s"
         }
     }
+
+    /// Worst-case (max) segment duration in seconds — segments aren't exactly the
+    /// nominal length, so this is the ceiling the manifest declares. Used to size
+    /// the startup forward-buffer cap (3× this): 6s-nominal tops out ~7s, 2s-
+    /// nominal ~9s (LL shares the 6s ceiling).
+    var maxSegmentSeconds: Double {
+        switch self {
+        case .ll, .s6: return 7
+        case .s2: return 9
+        }
+    }
 }
 
 enum CodecFilter: String, CaseIterable, Identifiable, Codable {

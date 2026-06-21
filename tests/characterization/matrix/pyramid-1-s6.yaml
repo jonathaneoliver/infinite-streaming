@@ -1,0 +1,16 @@
+# Single-arm s6 (6s segments), CONSTANT 1.5 Mbps, FULL ladder — real-iPhone test of
+# the abandon-threshold hypothesis: s6 gives a ~6s live-edge abandon budget (vs s2's
+# ~2s), so deliverable variants complete in time → no abandon→climb-up runaway.
+name: pyramid-1-s6
+class: config
+parallel: true
+reps: 1
+duration_s: 120
+defaults:
+  platform: iphone
+  content: insane_newer_p200_h264
+  is.peak_bitrate_mbps: 1
+  proxy.shape:
+    rate_mbps: 1.5
+axes:
+  is.segment: [s6]

@@ -82,7 +82,7 @@ type Arm struct {
 	Protocol           string   `json:"is.protocol,omitempty"`             // hls | dash
 	Codec              string   `json:"is.codec,omitempty"`                // h264 | hevc | av1
 	AppLiveOffset      *float64 `json:"is.live_offset,omitempty"`          // app-side target-latency override
-	PeakBitrateMbps    int      `json:"is.peak_bitrate_mbps,omitempty"`    // startup/steady bitrate clamp; 0 = off (#683)
+	PeakBitrateMbps    int      `json:"is.peak_bitrate_mbps,omitempty"`    // startup peak-bitrate clamp (Mbps; app truncates to Int) → low start rung; 0 = off (#683)
 	StartsFirstVariant *bool    `json:"is.starts_first_variant,omitempty"` // join on first manifest rung vs let ABR pick
 
 	// --- server knobs (proxy.* — config-on-connect, no relaunch) ---

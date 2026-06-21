@@ -1,0 +1,20 @@
+# 2-sim group, same recipe as the s6 single: s6 segments, pyramid @ 1 Mbps initial
+# cap + 1 Mbps client cap, NO live_offset, NO alternating. control=master arms the
+# pyramid, 1 slave follows via proxy group propagation.
+name: pyramid-2sim-s6
+class: config
+parallel: true
+reps: 1
+duration_s: 300
+defaults:
+  platform: ipad-sim
+  content: insane_new_p200_h264
+  is.segment: s6
+  is.peak_bitrate_mbps: 1
+  proxy.shape:
+    rate_mbps: 1.5                  # CONSTANT 1.5 Mbps at config-on-connect, no pattern
+groups:
+  - id: pair
+    control: { id: master }
+    variants:
+      - { id: slave1 }
