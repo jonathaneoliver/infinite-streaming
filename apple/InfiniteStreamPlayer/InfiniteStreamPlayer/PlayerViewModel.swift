@@ -1815,9 +1815,11 @@ final class PlayerViewModel: ObservableObject {
         seekToLiveEdge(item: item)
 
         // Verify-then-escalate: if the nudge restored progress, treat it as a
-        // natural recovery; otherwise fall through to the rebuild ladder.
+        // natural recovery; otherwise fall through to the rebuild ladder. #1 — a
+        // full restart is a LAST RESORT, so give the seek a long window (15s) to
+        // self-heal before going nuclear, rather than escalating after 5s.
         let scheduledAtTime = diagnostics.currentTime
-        Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+        Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.liveResyncInFlight = false
@@ -2613,6 +2615,11 @@ extension PlayerViewModel {
                 if self.autoRecovery {
                     self.attemptLiveResyncSeek()
                 } else {
+                    // auto_recovery off: the diagnostics `[LIVE_RESYNC] arming`
+                    // detection still logs (it just reports the stall), but NO seek
+                    // or restart fires. Log the suppression so a trace can't be
+                    // misread as "recovery happened despite auto_recovery=false".
+                    self.log("LIVE_RESYNC: SUPPRESSED — auto_recovery off (no seek, no restart; HAR snapshot only)")
                     Task { await self.requestHARSnapshot(reason: "live_resync") }
                 }
             }
