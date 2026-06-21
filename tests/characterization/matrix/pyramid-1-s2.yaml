@@ -1,0 +1,17 @@
+# Single-arm s2, CONSTANT 1.5 Mbps, FULL ladder — the iPhone (1 device) sibling of
+# pyramid-2sim-s2's full-ladder localProxy-on fail-rate test. 1 Mbps startup cap,
+# no live_offset, no ladder trim (so over-selection CAN happen). Platform overridable
+# via CHAR_SWEEP_PLATFORM (iphone for real hardware).
+name: pyramid-1-s2
+class: config
+parallel: true                     # FLEET backend, 1 device
+reps: 1
+duration_s: 120
+defaults:
+  platform: iphone
+  content: insane_newer_p200_h264
+  is.peak_bitrate_mbps: 1
+  proxy.shape:
+    rate_mbps: 1.5                  # CONSTANT 1.5 Mbps at config-on-connect, no pattern
+axes:
+  is.segment: [s2]

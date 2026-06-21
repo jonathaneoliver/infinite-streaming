@@ -205,8 +205,29 @@ struct PlayerView: UIViewControllerRepresentable {
             // already ready (e.g. SwiftUI re-rendered after first frame
             // already landed).
             readyObservation = layer.observe(\.isReadyForDisplay, options: [.new, .initial]) { [weak self] observed, _ in
-                guard let self, observed.isReadyForDisplay, !self.didReportForCurrentLayer else { return }
+                guard let self else { return }
+                // #3 fix — isReadyForDisplay flips FALSE when an item is swapped
+                // out (recovery/rebuild via replaceCurrentItem on the SAME layer).
+                // Reset the per-report latch on that falling edge so the rebuilt
+                // item's next first frame re-fires onFirstFrame → the VM re-arms
+                // the peak-cap release. Without this the latch stayed set across a
+                // same-layer swap and the recovery cap was stranded (#814).
+                guard observed.isReadyForDisplay else {
+                    if self.didReportForCurrentLayer {
+                        print("[FIRSTFRAME] isReadyForDisplay→false (item swap) — resetting latch so the rebuilt item re-reports")
+                        self.didReportForCurrentLayer = false
+                    }
+                    return
+                }
+                // Dedup repeat `.initial` deliveries of the SAME first frame within
+                // one item. A recovery is no longer suppressed here — the falling
+                // edge above already cleared the latch.
+                guard !self.didReportForCurrentLayer else {
+                    print("[FIRSTFRAME] already reported for this item — SUPPRESSED (duplicate delivery)")
+                    return
+                }
                 self.didReportForCurrentLayer = true
+                print("[FIRSTFRAME] reporting first frame → onFirstFrame")
                 let now = Date()
                 if Thread.isMainThread {
                     self.onFirstFrame?(now)

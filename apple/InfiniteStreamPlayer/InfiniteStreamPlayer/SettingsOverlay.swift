@@ -339,49 +339,55 @@ private struct PickerList: View {
             ToggleRow(label: "4K (allow >1080p)",
                       isOn: vm.allow4K, compact: compact, axID: "toggle-4k") { vm.setAllow4K($0) }
                 .focused($itemIdx, equals: 0)
-            PreferredPeakBitRateRow(mbps: vm.preferredPeakBitRateMbps, compact: compact) {
-                vm.setPreferredPeakBitRateMbps($0)
+            PreferredPeakBitRateRow(mbps: vm.startupPeakBitrateMbps, compact: compact) {
+                vm.setStartupPeakBitrateMbps($0)
             }
             .focused($itemIdx, equals: 1)
+            PreferredPeakBitRateRow(mbps: vm.persistentPeakBitrateMbps, compact: compact,
+                                    title: "Persistent peak cap",
+                                    axPrefix: "persistent-peak-bitrate") {
+                vm.setPersistentPeakBitrateMbps($0)
+            }
+            .focused($itemIdx, equals: 2)
             ToggleRow(label: "Start on first variant",
                       isOn: vm.startsOnFirstEligibleVariant, compact: compact, axID: "toggle-starts-first-variant") { vm.setStartsOnFirstEligibleVariant($0) }
-                .focused($itemIdx, equals: 2)
+                .focused($itemIdx, equals: 3)
             ToggleRow(label: "Local Proxy",
                       isOn: vm.localProxy, compact: compact, axID: "toggle-local-proxy") { vm.setLocalProxy($0) }
-                .focused($itemIdx, equals: 3)
+                .focused($itemIdx, equals: 4)
             ToggleRow(label: "Auto-Recovery",
                       isOn: vm.autoRecovery, compact: compact, axID: "toggle-auto-recovery") { vm.setAutoRecovery($0) }
-                .focused($itemIdx, equals: 4)
+                .focused($itemIdx, equals: 5)
             ToggleRow(label: "Go Live",
                       isOn: vm.goLive, compact: compact, axID: "toggle-go-live") { vm.setGoLive($0) }
-                .focused($itemIdx, equals: 5)
+                .focused($itemIdx, equals: 6)
             LiveOffsetRow(seconds: vm.liveOffsetSeconds, compact: compact) {
                 vm.setLiveOffsetSeconds($0)
             }
-            .focused($itemIdx, equals: 6)
+            .focused($itemIdx, equals: 7)
             PlayIdRotationRow(seconds: vm.playIdRotationSeconds, compact: compact) {
                 vm.setPlayIdRotationSeconds($0)
             }
-            .focused($itemIdx, equals: 7)
+            .focused($itemIdx, equals: 8)
             ToggleRow(label: "Skip Home on launch",
                       isOn: vm.skipHomeOnLaunch, compact: compact, axID: "toggle-skip-home") { vm.setSkipHomeOnLaunch($0) }
-                .focused($itemIdx, equals: 8)
+                .focused($itemIdx, equals: 9)
             ToggleRow(label: "Mute audio",
                       isOn: vm.isMuted, compact: compact, axID: "toggle-mute") { vm.setIsMuted($0) }
-                .focused($itemIdx, equals: 9)
+                .focused($itemIdx, equals: 10)
             PreviewVideoSlotsRow(slots: vm.previewVideoSlots,
                                  hardwareCap: DecodeBudget.shared.hardwareCap,
                                  compact: compact) {
                 vm.setPreviewVideoSlots($0)
             }
-            .focused($itemIdx, equals: 10)
+            .focused($itemIdx, equals: 11)
             ToggleRow(label: "HUD",
                       isOn: vm.developerMode, compact: compact, axID: "toggle-hud") { vm.setDeveloperMode($0) }
-                .focused($itemIdx, equals: 11)
+                .focused($itemIdx, equals: 12)
             DestructiveRow(label: "Reset All Settings", compact: compact) {
                 showResetConfirm = true
             }
-            .focused($itemIdx, equals: 12)
+            .focused($itemIdx, equals: 13)
         }
     }
 }
@@ -554,6 +560,8 @@ private struct PlayIdRotationRow: View {
 private struct PreferredPeakBitRateRow: View {
     let mbps: Int
     let compact: Bool
+    var title: String = "Peak bitrate cap"
+    var axPrefix: String = "peak-bitrate"
     let onChange: (Int) -> Void
 
     private static let presets: [(label: String, mbps: Int, axSuffix: String)] = [
@@ -572,7 +580,7 @@ private struct PreferredPeakBitRateRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Peak bitrate cap")
+            Text(title)
                 .font(compact ? AppType.body(size: 15) : AppType.body())
                 .foregroundColor(Tokens.fg)
                 .lineLimit(1)
@@ -592,7 +600,7 @@ private struct PreferredPeakBitRateRow: View {
                             .cinematicFocusFollower(cornerRadius: 8)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityIdentifier("peak-bitrate-\(preset.axSuffix)")
+                    .accessibilityIdentifier("\(axPrefix)-\(preset.axSuffix)")
                     #if os(tvOS)
                     .focusEffectDisabled()
                     #endif

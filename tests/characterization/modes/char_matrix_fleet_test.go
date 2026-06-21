@@ -136,6 +136,35 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		PeakBitrateMbps:    cfg.peakBitrate,
 		StartsFirstVariant: cfg.startsFirstVariant,
 	})
+	// Diagnostic toggle: CHAR_AUTO_RECOVERY=false feeds -is.flag.auto_recovery
+	// false to every arm, disabling the iOS restart/live-resync ladder so we can
+	// observe the player's NATURAL startup ABR behavior in isolation (does it
+	// climb to 4K and wedge without any recovery papering over it?). Unset →
+	// app default (auto-recovery ON).
+	if v := strings.TrimSpace(os.Getenv("CHAR_AUTO_RECOVERY")); v != "" {
+		args = append(args, "-is.flag.auto_recovery", v)
+	}
+	// Startup forward-buffer-cap experiment knobs (audio over-banking probe).
+	// CHAR_FWD_BUFFER_S overrides the cap value (seconds); CHAR_FWD_RELEASE picks
+	// when it's lifted (ttff | keepup | ttff_settle). Unset → app defaults
+	// (3× max segment duration, released at TTFF+3s settle).
+	if v := strings.TrimSpace(os.Getenv("CHAR_FWD_BUFFER_S")); v != "" {
+		args = append(args, "-is.flag.startup_forward_buffer_s", v)
+	}
+	if v := strings.TrimSpace(os.Getenv("CHAR_FWD_RELEASE")); v != "" {
+		args = append(args, "-is.flag.startup_fwd_release", v)
+	}
+	// Persistent (never-released) peak-bitrate ceiling, in Mbps — the floor the
+	// startup variant cap relaxes TO after first frame. Unset → no permanent cap.
+	if v := strings.TrimSpace(os.Getenv("CHAR_PERSIST_PEAK")); v != "" {
+		args = append(args, "-is.flag.persistent_peak_bitrate_mbps", v)
+	}
+	// On-device LocalHTTPProxy toggle. Unset → app default (ON). CHAR_LOCAL_PROXY=false
+	// takes the on-device proxy out of the path so AVPlayer fetches origin directly —
+	// used to isolate whether segment re-downloads are AVPlayer's or the proxy's.
+	if v := strings.TrimSpace(os.Getenv("CHAR_LOCAL_PROXY")); v != "" {
+		args = append(args, "-is.flag.local_proxy", v)
+	}
 	appium.SetLaunchArgs(args)
 
 	sess, lerr := appium.LaunchToHome(setupCtx, *picked)

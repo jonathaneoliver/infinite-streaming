@@ -1,0 +1,16 @@
+# Single-arm s2, CONSTANT 1.5 Mbps — iPhone-SIMULATOR sibling of pyramid-1-s2
+# (harness tags all iOS sims as platform 'ipad-sim', incl. iPhone sims). 1 Mbps
+# startup cap, full ladder, content via CHAR_CONTENT (-is.lastPlayed).
+name: pyramid-1-s2-sim
+class: config
+parallel: true
+reps: 1
+duration_s: 120
+defaults:
+  platform: ipad-sim
+  content: insane_newer_p200_h264
+  is.peak_bitrate_mbps: 1
+  proxy.shape:
+    rate_mbps: 1.5
+axes:
+  is.segment: [s2]
