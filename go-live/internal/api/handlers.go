@@ -385,6 +385,7 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 	}
 	content := worker.content
 	inputPath := worker.inputPath
+	workerStart := time.Now()
 	logf("[GO-LIVE] HLS worker started: content=%s\n", content)
 	logf("  Input: %s\n", inputPath)
 
@@ -445,6 +446,11 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 	llMasterWritten := false
 	master2sWritten := false
 	master6sWritten := false
+	// One-shot "content fully warm" timing: how long from worker spawn until all
+	// three master playlists (LL + 2s + 6s) are generated — i.e. how long a
+	// pre-warm curl must wait before every variant is discoverable. The per-
+	// variant media-playlist gen times are logged separately below.
+	warmupLogged := false
 	lastLLUpdate := time.Time{}
 	lastSegLL := int64(-1)
 	lastSeg2 := int64(-1)
@@ -531,6 +537,11 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 					logf("ERROR: Failed to write 6s master playlist: %v\n", err)
 				}
 			}
+		}
+		if !warmupLogged && llMasterWritten && master2sWritten && master6sWritten {
+			warmupLogged = true
+			logf("[GO-LIVE][WARMUP] all master playlists ready: content=%s warmup=%.3fs variants=%d\n",
+				content, time.Since(workerStart).Seconds(), len(variantURIs))
 		}
 
 		updatedLL := false

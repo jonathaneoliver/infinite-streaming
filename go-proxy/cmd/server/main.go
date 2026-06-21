@@ -1680,6 +1680,46 @@ func (t *TcTrafficManager) ensureClassCore(port int, rateMbps float64) error {
 // UpdateNetem subsequently replaces the per-band netems with user-
 // configured values. Idempotent — exits fast when the prio handle
 // already shows up under `tc qdisc show parent <classid>`.
+// addFairLeaf attaches sfq (Stochastic Fair Queuing) UNDER a prio band's netem
+// qdisc, so that concurrent flows sharing the same rate-capped class — e.g. a
+// player's separate video + audio HTTP/1.1 connections — are dequeued FAIRLY
+// per flow (round-robin over a 5-tuple hash) instead of one starving the other
+// in netem's internal FIFO. sfq is chosen over fq_codel deliberately: fq_codel's
+// CoDel AQM fights the shaper's *intentional* queue (the throttle pushes latency
+// past CoDel's 5ms target, so it ECN-marks/drops aggressively → TCP backs off →
+// throughput falls below the shaped rate). sfq gives the same per-flow fairness
+// with NO latency-based AQM, so it doesn't interfere with the rate shaping.
+// `perturb 10` re-hashes periodically so a hash collision can't persist.
+// netem applies any delay/loss first, then hands off to sfq. Must be re-applied
+// whenever the band's netem is (re)placed, since replacing a qdisc drops its
+// children. Best-effort: logs on failure.
+func (t *TcTrafficManager) addFairLeaf(port, band int) {
+	// SFQ is OFF by default: the prio band falls back to netem's internal FIFO,
+	// where the byte-heavy video flow dominates the queue and audio backs up
+	// behind it (no per-flow round-robin). The A/B test concluded the SFQ-driven
+	// audio fairness was feeding AVPlayer's bandwidth over-read / variant
+	// over-selection, so FIFO is the default. Opt back IN with PROXY_ENABLE_SFQ=1
+	// to restore the per-flow fair-queue leaf.
+	if os.Getenv("PROXY_ENABLE_SFQ") != "1" {
+		return
+	}
+	portSuffix := fmt.Sprintf("%03d", port%1000)
+	netemHandle := fmt.Sprintf("%s%d:", portSuffix, band)    // e.g. 1811:
+	fairHandle := fmt.Sprintf("%s%d:", portSuffix, band+4)   // PPP5:/6:/7: — distinct from prio (PPP0:) + netem (PPP1-3:)
+	// delete-then-add, NOT replace: `tc qdisc replace` does an in-place CHANGE
+	// when a qdisc already exists at that parent, which tc rejects across a
+	// qdisc-TYPE switch (e.g. a leftover fq_codel from a prior build — host tc
+	// state survives container restarts). del is best-effort (errors harmlessly
+	// when nothing is there).
+	_ = exec.Command("tc", "qdisc", "del", "dev", t.interfaceName, "parent", netemHandle).Run()
+	if out, err := exec.Command(
+		"tc", "qdisc", "add", "dev", t.interfaceName,
+		"parent", netemHandle, "handle", fairHandle, "sfq", "perturb", "10",
+	).CombinedOutput(); err != nil {
+		log.Printf("NETSHAPE sfq leaf install failed port=%d band=%d: %s", port, band, strings.TrimSpace(string(out)))
+	}
+}
+
 func (t *TcTrafficManager) ensurePrioLeafForPort(port int) error {
 	portSuffix := fmt.Sprintf("%03d", port%1000)
 	classid := fmt.Sprintf("1:%s", portSuffix)
@@ -1708,6 +1748,7 @@ func (t *TcTrafficManager) ensurePrioLeafForPort(port int) error {
 		).CombinedOutput(); err != nil {
 			return fmt.Errorf("tc netem (band %d) replace failed: %s", band, strings.TrimSpace(string(out)))
 		}
+		t.addFairLeaf(port, band)
 	}
 	return nil
 }
@@ -1786,6 +1827,7 @@ func (t *TcTrafficManager) updateNetemCore(port int, delayMs int, lossPct float6
 		if out, err := exec.Command("tc", args...).CombinedOutput(); err != nil {
 			return fmt.Errorf("tc netem band %d failed: %s", band, strings.TrimSpace(string(out)))
 		}
+		t.addFairLeaf(port, band)
 	}
 	if delayMs <= 0 && lossPct <= 0 {
 		t.logTcState("netem_clear", port)
@@ -2247,7 +2289,7 @@ func main() {
 	errorCh := make(chan error, len(ports))
 	for _, port := range ports {
 		addr := fmt.Sprintf(":%d", port)
-		go func(bind string) {
+		go func(bind string, p int) {
 			srv := &http.Server{
 				Addr:    bind,
 				Handler: router,
@@ -2257,6 +2299,17 @@ func main() {
 				// read. Issue #401.
 				ConnContext: withTCPConnContext,
 			}
+			// Disable HTTP/2 on the per-session MEDIA ports so a player's video
+			// and audio fetch over SEPARATE HTTP/1.1 connections rather than
+			// multiplexing on one rate-capped h2 connection — where audio starves
+			// behind video in the kernel/tc FIFO (the origin fetch is instant, but
+			// the audio response queues ~the whole video drain). A non-nil empty
+			// TLSNextProto suppresses the stdlib's automatic h2 ALPN. Keep h2 on
+			// the API port (30081), where the dashboard/forwarder SSE streams rely
+			// on multiplexing many event-streams over one connection.
+			if p != 30081 {
+				srv.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
+			}
 			if tlsEnabled {
 				log.Printf("go-proxy listening on %s (TLS)", bind)
 				errorCh <- srv.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
@@ -2264,7 +2317,7 @@ func main() {
 				log.Printf("go-proxy listening on %s (plain HTTP)", bind)
 				errorCh <- srv.ListenAndServe()
 			}
-		}(addr)
+		}(addr, port)
 	}
 
 	err := <-errorCh
@@ -7702,11 +7755,19 @@ func (a *App) doRequestWithTracing(ctx context.Context, req *http.Request) (*htt
 
 	req = req.WithContext(httptrace.WithClientTrace(ctx, trace))
 
+	// Time the upstream fetch itself: a.client.Do returns once the response
+	// HEADERS arrive, so do_ms is how long the origin (nginx/go-live) took to
+	// start answering. If the audio request's do_ms is ~1.5s while video's is
+	// ~10ms, the stall is the origin fetch — not go-proxy's streaming.
+	doStart := time.Now()
 	resp, err := a.client.Do(req)
+	doMs := float64(time.Since(doStart).Microseconds()) / 1000.0
 	if err != nil {
 		entry.TotalMs = float64(time.Since(start).Microseconds()) / 1000.0
+		log.Printf("[UPSTREAM_DO] url=%s do_ms=%.1f err=%v", req.URL.String(), doMs, err)
 		return nil, entry, err
 	}
+	log.Printf("[UPSTREAM_DO] url=%s do_ms=%.1f upstream_ttfb_ms=%.1f status=%d", req.URL.String(), doMs, entry.TTFBMs, resp.StatusCode)
 
 	// If we got first byte, calculate transfer time after body is read
 	// Note: We'll update TransferMs after body is copied
