@@ -449,6 +449,7 @@ SEGMENT_DURATION="${SEGMENT_DURATION:-6}"    # Target segment duration in second
 PARTIAL_DURATION="${PARTIAL_DURATION:-0.2}"  # Partial fragment duration in seconds
 GOP_DURATION="${GOP_DURATION:-1.0}"          # GOP/keyframe duration in seconds
 MAXRATE_PERCENT="${MAXRATE_PERCENT:-124}"    # Peak cap percentage of target bitrate (<125% guidance)
+BUFSIZE_MULT="${BUFSIZE_MULT:-1}"            # VBV bufsize = this × target kbps. 1× ≈ ~1s window → tight per-segment peaks so each 2s chunk hugs target (was 2×, which let 2s chunks burst ~1.5× target).
 MULTI_DURATION_LCM=12           # LCM of 2s/4s/6s for multi-duration support
 PADDING_THRESHOLD=0.1           # Minimum remainder to trigger padding (seconds)
 PADDING_WARNING_RATIO=50        # Warn if padding exceeds this % of total duration
@@ -2055,7 +2056,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -allow_sw 1 \
                    -b:v "${bitrate_kbps}k" \
                    -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-                   -bufsize "$((bitrate_kbps * 2))k" \
+                   -bufsize "$((bitrate_kbps * BUFSIZE_MULT))k" \
                    -g "$KEYINT" \
                    -force_key_frames "expr:gte(n,n_forced*$KEYINT)" \
                    -tag:v hvc1 \
@@ -2071,7 +2072,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -c:v libx265 \
                    -b:v "${bitrate_kbps}k" \
                    -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-                   -bufsize "$((bitrate_kbps * 2))k" \
+                   -bufsize "$((bitrate_kbps * BUFSIZE_MULT))k" \
                    -preset "$preset" \
                    -threads 0 \
                    -x265-params "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0:pools=+:frame-threads=0" \
@@ -2091,7 +2092,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -allow_sw 1 \
                    -b:v "${bitrate_kbps}k" \
                    -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-                   -bufsize "$((bitrate_kbps * 2))k" \
+                   -bufsize "$((bitrate_kbps * BUFSIZE_MULT))k" \
                    -g "$KEYINT" \
                    -force_key_frames "expr:gte(n,n_forced*$KEYINT)" \
                    -tag:v avc1 \
@@ -2107,7 +2108,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -c:v libx264 \
                    -b:v "${bitrate_kbps}k" \
                    -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-                   -bufsize "$((bitrate_kbps * 2))k" \
+                   -bufsize "$((bitrate_kbps * BUFSIZE_MULT))k" \
                    -preset "$preset" \
                    -threads 0 \
                    -x264-params "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0" \
@@ -2126,7 +2127,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                -preset 8 \
                -b:v "${bitrate_kbps}k" \
                -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-               -bufsize "$((bitrate_kbps * 2))k" \
+               -bufsize "$((bitrate_kbps * BUFSIZE_MULT))k" \
                -g "$KEYINT" \
                -force_key_frames "expr:gte(n,n_forced*$KEYINT)" \
                -svtav1-params "keyint=${KEYINT}:scd=0" \
