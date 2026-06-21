@@ -16,7 +16,7 @@
  * to `windowMs * 2` ms on the older side so a zoom-out / pan-back still
  * has data to show. The chart never holds more than ~2× window worth.
  */
-import { computed, inject, onBeforeUnmount, ref, toRef, watch, type PropType } from 'vue';
+import { computed, inject, onBeforeUnmount, ref, watch, type PropType } from 'vue';
 import { ensureChartJs } from '@/composables/useChartJs';
 import { CompareContextKey } from '@/composables/useCompareContext';
 import { useChartCoordination, fmtTickHMSms, DEFAULT_FOCUS_MS, type ChartViewport } from '@/composables/useChartCoordination';
@@ -80,6 +80,10 @@ export interface ChartOverlaySource {
 
 const props = defineProps({
   playerId: { type: String, required: true },
+  /** Coordination scope key (per-player, stable across plays). Drives
+   *  useChartCoordination only; data still keys off playerId. Falls back to
+   *  playerId when absent. */
+  coordId: { type: String, default: undefined },
   title: { type: String, default: '' },
   unit: { type: String, default: '' },
   series: { type: Array as PropType<SeriesSpec[]>, required: true },
@@ -135,7 +139,7 @@ const emit = defineEmits<{
 const canvas = ref<HTMLCanvasElement | null>(null);
 const wrap = ref<HTMLDivElement | null>(null);
 const canvasWrap = ref<HTMLDivElement | null>(null);
-const coord = useChartCoordination(toRef(props, 'playerId'));
+const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
 
 // Compare-mode session legend (issue #579). When mounted inside a
 // SessionDisplay that's in compare mode, the S1/S2 chips drive this

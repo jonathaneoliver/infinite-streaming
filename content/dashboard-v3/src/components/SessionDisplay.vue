@@ -298,6 +298,16 @@ const archivePlayerId = computed(() =>
   `archive:${props.playerId}:${props.playId ?? 'all'}`,
 );
 
+// Coordination scope for the chart VIEW state (Bitrate Y-max, zoom width,
+// cursor, expanded) — deliberately play-INDEPENDENT, so a new play on the same
+// player doesn't reset the operator's chosen axis/zoom. Data stays keyed by
+// `archivePlayerId` (with play_id). `compareKey` already resolves to a stable
+// per-player id normally and a stable group id in archive-compare (#736), so it
+// is exactly the right scope (per-player live; per-group + stable across
+// member-tab switches in compare). The position fields are reset per play via
+// coord.resetForNewPlay() in the play_id watcher below.
+const coordId = computed(() => `view:${compareKey.value}`);
+
 // Event accordion source. The events stream isn't on the v3 timeseries
 // endpoint yet (out of scope for TS6); kept here so the brush-rail
 // tick markers, the priority/tier filter UI, and the prev/next nav
@@ -584,7 +594,16 @@ watch(
 // `coord.state.lastSampleMs` (live edge) without a temporal dead zone
 // — and so any earlier reactive code (window watcher, brush clamps)
 // sees a coord instance even though it gets consumed mostly later.
-const coord = useChartCoordination(archivePlayerId);
+const coord = useChartCoordination(coordId);
+
+// A new play (new play_id) on the same player keeps the chosen Bitrate Y-max +
+// zoom width (the view scope is play-independent), but the absolute-position
+// state (live edge, pinned range, cursor) belongs to the OLD play's time
+// domain — reset it so the fresh play follows live instead of showing a stale
+// pinned window. Skipped in archive mode (playId is fixed there).
+watch(() => props.playId, (next, prev) => {
+  if (next !== prev) coord.resetForNewPlay();
+});
 
 /* Refetch-on-pan driver (#587). Watches the committed focus range (the
  * #590 brush debounce means this fires once per gesture, not per
@@ -1784,11 +1803,11 @@ function skipToEnd() {
         :from-ms="cycleBandsDomain.fromMs"
         :to-ms="cycleBandsDomain.toMs"
       />
-      <EventsTimeline :player-id="archivePlayerId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" :control-stream="timeseries.control" />
+      <EventsTimeline :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" :control-stream="timeseries.control" />
     </CollapsibleSection>
 
     <CollapsibleSection title="Bitrate Chart etc" :open="true" eager persist-key="bitrate-chart">
-      <BitrateChartPanelToolbar :player-id="archivePlayerId" />
+      <BitrateChartPanelToolbar :player-id="archivePlayerId" :coord-id="coordId" />
       <!-- Compare mode: S1/S2 session chips — hover to highlight a whole
            session across all charts, click to show/hide it (#579). -->
       <CompareSessionLegend
@@ -1797,10 +1816,10 @@ function skipToEnd() {
         :view="compareView"
       />
       <div class="chart-stack">
-        <BandwidthChart :player-id="archivePlayerId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" />
-        <BufferChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
-        <RTTChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
-        <FPSChart :player-id="archivePlayerId" :events-stream="timeseries.events" />
+        <BandwidthChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" />
+        <BufferChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" />
+        <RTTChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" />
+        <FPSChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" />
       </div>
     </CollapsibleSection>
 
@@ -1810,7 +1829,7 @@ function skipToEnd() {
            paused. NetworkLog's own in-panel brush would duplicate it
            (or worse, show a brush in live-not-paused when nothing
            else does), so always opt out of it here. -->
-      <NetworkLog :player-id="archivePlayerId" :network-stream="timeseries.network" />
+      <NetworkLog :player-id="archivePlayerId" :coord-id="coordId" :network-stream="timeseries.network" />
     </CollapsibleSection>
 
     <CollapsibleSection title="Play Log" persist-key="play-log" :force-collapsed="compareEnabled">
