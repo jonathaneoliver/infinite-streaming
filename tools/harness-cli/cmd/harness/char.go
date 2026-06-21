@@ -65,10 +65,16 @@ func cmdCharMatrix(client *api.Client, args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	arms, err := charmatrix.Expand(spec)
+	// A per-run id (UTC timestamp) is appended to every auto-generated group id so
+	// two runs of the same spec never share a group_id — the dashboard won't join a
+	// prior run's grouped sessions with this one. The spec name stays in the id for
+	// readability; the timestamp makes it unique and records when the run started.
+	runID := time.Now().UTC().Format("20060102T150405Z")
+	arms, err := charmatrix.ExpandWithRunID(spec, runID)
 	if err != nil {
 		return err
 	}
+	fmt.Fprintf(os.Stderr, "char matrix run id: %s\n", runID)
 
 	// Dry run: show the plan (one row per arm, no measurements) and stop. Pure —
 	// no network, so it's the fast way to sanity-check a spec's expansion.
@@ -132,6 +138,34 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 		}
 	}
 
+	// For a grouped pattern run, ONE master arms the pattern; the proxy propagates
+	// it to the group's slaves (NETSHAPE group pattern propagation), so every arm
+	// shares ONE bandwidth timeline instead of each running an independent,
+	// possibly out-of-phase pyramid. The master must have ALL variants — a thinned
+	// ladder would build a pyramid that only spans its reduced range. Prefer the
+	// first full-ladder arm carrying the pattern; fall back to the first pattern
+	// arm (with a warning) if none is full.
+	patternMaster, firstPatternArm := -1, -1
+	for i, a := range arms {
+		if shapePattern(a) == "" {
+			continue
+		}
+		if firstPatternArm < 0 {
+			firstPatternArm = i
+		}
+		e := a.ToExperiment()
+		if e.ContentManipulation == nil || e.ContentManipulation.AllowedVariants == "" {
+			patternMaster = i
+			break
+		}
+	}
+	if patternMaster < 0 {
+		patternMaster = firstPatternArm
+		if patternMaster >= 0 {
+			fmt.Fprintf(os.Stderr, "warn: no full-ladder arm to master the pattern — arm %d masters with a thinned ladder\n", patternMaster)
+		}
+	}
+
 	results := make([]charmatrix.ArmResult, len(arms))
 	var armEnv []string
 	window := 0
@@ -174,6 +208,13 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 			fmt.Sprintf("CHAR_ARM_%d_SEGMENT=%s", i, a.Segment),
 			fmt.Sprintf("CHAR_ARM_%d_LIVE_OFFSET=%s", i, a.ClientLiveOffsetS()),
 			fmt.Sprintf("CHAR_ARM_%d_PROTOCOL=%s", i, a.Protocol),
+			fmt.Sprintf("CHAR_ARM_%d_CODEC=%s", i, a.Codec),
+			fmt.Sprintf("CHAR_ARM_%d_PEAK_BITRATE=%d", i, a.PeakBitrateMbps),
+			fmt.Sprintf("CHAR_ARM_%d_FIRST_VARIANT=%s", i, a.StartsFirstVariantS()),
+			fmt.Sprintf("CHAR_ARM_%d_PATTERN=%s", i, shapePattern(a)),
+			fmt.Sprintf("CHAR_ARM_%d_STEP_S=%d", i, shapeStepS(a)),
+			fmt.Sprintf("CHAR_ARM_%d_MARGIN=%d", i, shapeMargin(a)),
+			fmt.Sprintf("CHAR_ARM_%d_PATTERN_MASTER=%t", i, i == patternMaster),
 			fmt.Sprintf("CHAR_ARM_%d_CONTENT=%s", i, clip),
 		)
 	}
@@ -286,7 +327,14 @@ func bootstrapMatrixSession(ctx context.Context, client *api.Client, clip, playe
 		return nil, err
 	}
 	cfgB64 := base64.RawURLEncoding.EncodeToString(cfgJSON)
-	bootURL, err := shaperBootstrapURL(client.BaseURL, clip, playerID, group, cfgB64)
+	// The arm's own group (stamped by compare:/groups: in Expand) wins so paired
+	// arms arrive born-grouped on the dashboard; the --group CLI flag is the
+	// fallback for an ungrouped matrix the operator wants to tag by hand.
+	groupID := e.Group
+	if groupID == "" {
+		groupID = group
+	}
+	bootURL, err := shaperBootstrapURL(client.BaseURL, clip, playerID, groupID, cfgB64)
 	if err != nil {
 		return nil, err
 	}
@@ -337,6 +385,12 @@ func driveProbe(client *api.Client, a *charmatrix.Arm, playerID, clip string, du
 		"CHAR_SWEEP_SEGMENT="+a.Segment,
 		"CHAR_SWEEP_LIVE_OFFSET="+a.ClientLiveOffsetS(),
 		"CHAR_SWEEP_PROTOCOL="+a.Protocol,
+		"CHAR_SWEEP_CODEC="+a.Codec,
+		"CHAR_SWEEP_PEAK_BITRATE="+strconv.Itoa(a.PeakBitrateMbps),
+		"CHAR_SWEEP_FIRST_VARIANT="+a.StartsFirstVariantS(),
+		"CHAR_SWEEP_PATTERN="+shapePattern(a),
+		"CHAR_SWEEP_STEP_S="+strconv.Itoa(shapeStepS(a)),
+		"CHAR_SWEEP_MARGIN="+strconv.Itoa(shapeMargin(a)),
 		"CHAR_CONTENT="+clip,
 	)
 	if err := cmd.Run(); err != nil {
@@ -380,6 +434,31 @@ func measureArm(client *api.Client, a *charmatrix.Arm, playerID string, res *cha
 
 // --- small local helpers --------------------------------------------------
 
+// shapePattern / shapeStepS / shapeMargin extract the post-launch bandwidth
+// pattern from an arm's proxy.shape. The pattern is NOT applied by the
+// config-on-connect bootstrap (experimentPlayerPatch defers it); the probe arms
+// it after playback starts via ApplyPattern, so the runner passes it through env.
+func shapePattern(a *charmatrix.Arm) string {
+	if a.Shape != nil {
+		return a.Shape.Pattern
+	}
+	return ""
+}
+
+func shapeStepS(a *charmatrix.Arm) int {
+	if a.Shape != nil && a.Shape.StepSeconds > 0 {
+		return a.Shape.StepSeconds
+	}
+	return 12
+}
+
+func shapeMargin(a *charmatrix.Arm) int {
+	if a.Shape != nil && a.Shape.MarginPct > 0 {
+		return a.Shape.MarginPct
+	}
+	return 5
+}
+
 func intendedOf(a *charmatrix.Arm) float64 {
 	if off, ok := a.IntendedLiveOffset(); ok {
 		return off
@@ -396,9 +475,13 @@ func planSummaries(arms []*charmatrix.Arm) []map[string]any {
 			"platform":      a.Platform,
 			"segment":       a.Segment,
 			"protocol":      a.Protocol,
-			"lever":         a.Lever,
+			"group":         a.Group,
+			"role":          a.Role,
 			"live_offset":   intendedOf(a),
 			"client_offset": a.ClientLiveOffsetS(),
+			"codec":         a.Codec,
+			"peak_bitrate":  a.PeakBitrateMbps,
+			"first_variant": a.StartsFirstVariantS(),
 			"class":         e.Class,
 			"duration_s":    e.DurationS,
 		}

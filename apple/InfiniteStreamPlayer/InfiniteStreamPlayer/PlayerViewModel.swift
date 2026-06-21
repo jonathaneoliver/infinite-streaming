@@ -66,14 +66,20 @@ final class PlayerViewModel: ObservableObject {
     /// removes higher variants from ABR selection *including the startup
     /// pick* — Apple's recommended lever for a deterministic initial
     /// variant. It is NOT a permanent ceiling: it's applied to each fresh
-    /// item (in `apply4kPreference`, every start/restart/rebuild) and then
+    /// item (in `applyStartupPreference`, every start/restart/rebuild) and then
     /// **auto-released** (set back to 0) a few seconds after that item
     /// pulls its first segment data, once the startup variant has been
     /// chosen under the clamp — so playback presets its startup variant
     /// and then adapts freely. Pairs with the Content variant-reorder probe
     /// (#682) for the order × ceiling startup experiment (#683). For a
     /// genuinely permanent ceiling, shape the network (tc rate) instead.
-    @Published var preferredPeakBitRateMbps: Int = 0
+    @Published var startupPeakBitrateMbps: Int = 0
+    /// PERSISTENT peak-bitrate ceiling, in Mbps. 0 = no ceiling (default). Unlike
+    /// `startupPeakBitrateMbps` (the temporary startup clamp), this is NEVER
+    /// released: it's the floor the startup variant cap relaxes TO after first
+    /// frame, so the player never exceeds it. The bitrate analogue of `allow4K`'s
+    /// resolution ceiling. Composed with the startup cap as the tighter of the two.
+    @Published var persistentPeakBitrateMbps: Int = 0
     /// Force AVPlayer's startup variant to be the first-listed master
     /// entry (`AVPlayerItem.startsOnFirstEligibleVariant`, iOS/tvOS 14+)
     /// instead of its opaque throughput heuristic. Off → native heuristic.
@@ -82,10 +88,13 @@ final class PlayerViewModel: ObservableObject {
     @Published var startsOnFirstEligibleVariant: Bool = false
     /// Stream URL goes through the per-session go-proxy port. Off → API port.
     @Published var localProxy: Bool = true
-    /// Auto-retry the current stream on non-codec player errors. Defaults ON —
-    /// the recovery ladder (live-resync seek → rebuild, stuck/failed restart) is
-    /// the standard playback-resilience path; opt out via `is.flag.auto_recovery`.
-    @Published var autoRecovery: Bool = true
+    /// Auto-retry the current stream on non-codec player errors. Default OFF for
+    /// now: the recovery ladder's #814 pre-retry re-cap trusts the iOS throughput
+    /// estimate, which over-reads on a throttled path and re-caps ABR ABOVE the
+    /// real bandwidth → over-selection / rate-cap breach. Opt in via
+    /// `is.flag.auto_recovery true` once the recovery cap is clamped to a reliable
+    /// (server-measured) rate.
+    @Published var autoRecovery: Bool = false
     /// Seek to the live edge on every (re)load.
     @Published var goLive: Bool = false
     /// Skip Home on cold launch when a saved server + lastPlayed both exist.
@@ -173,7 +182,9 @@ final class PlayerViewModel: ObservableObject {
             d.removeObject(forKey: "bossPlayerId")
             return legacy
         }
-        let fresh = UUID().uuidString
+        // Lowercase at source — same reason as currentPlayID: keep player_id
+        // matching the lowercase archive/harness/dashboard with no case-folding.
+        let fresh = UUID().uuidString.lowercased()
         d.set(fresh, forKey: "isPlayerId")
         return fresh
     }()
@@ -192,7 +203,11 @@ final class PlayerViewModel: ObservableObject {
     /// - `applyContentFilter` when the filter forces a content swap
     /// - `reload()` (user-pressed Reload — "start fresh")
     /// - Soak rotation Task firing
-    private var currentPlayID: String = UUID().uuidString
+    // Lowercased at the source: Swift's UUID().uuidString is UPPERCASE, but the
+    // forwarder/archive/dashboard all canonicalise play_id to lowercase. Emitting
+    // it lowercase here keeps the wire + LocalProxy logs matching everything
+    // downstream with no case-folding needed (see canonicalV2ID).
+    private var currentPlayID: String = UUID().uuidString.lowercased()
 
     /// #621 — the play_id whose `play_start` boundary has already been
     /// emitted. startPlayback's fresh branch compares against this so a
@@ -306,28 +321,47 @@ final class PlayerViewModel: ObservableObject {
     private var firstFrameReported: Bool = false
     private var playingReported: Bool = false
     /// In-flight startup peak-bitrate-clamp release (see
-    /// `scheduleStartupPeakCapRelease`). Cancelled + nilled on each item
+    /// `scheduleStartupCapsRelease`). Cancelled + nilled on each item
     /// build and on a manual cap change; non-nil means "already armed for
     /// the current item" (per-item one-shot dedup).
-    private var peakCapReleaseTask: Task<Void, Never>?
+    private var startupCapsReleaseTask: Task<Void, Never>?
     /// Delay after first frame before the startup peak-bitrate clamp is
     /// released. First frame already guarantees a video segment was
     /// downloaded + decoded (so AVPlayer's throughput estimate is
     /// representative, not a playlist-fetch artefact); this extra settle
     /// lets a couple more segments land before ABR may climb past the clamp.
-    private static let startupPeakCapReleaseDelay: TimeInterval = 3
+    private static let startupCapsReleaseDelay: TimeInterval = 3
     /// The peak-bitrate cap (bps) currently imposed on the live item —
     /// either the cold-start clamp (#683) or the #814 recovery cap. Tracks
     /// the applied value regardless of source so the post-first-frame
-    /// release (`scheduleStartupPeakCapRelease`) can fire for a recovery
+    /// release (`scheduleStartupCapsRelease`) can fire for a recovery
     /// resume even when no cold-start clamp is configured. 0 = no cap.
-    private var appliedItemPeakCapBps: Double = 0
+    private var appliedStartupVariantCapBps: Double = 0
+    /// The startupForwardBufferCap currently on the item (seconds), applied in
+    /// applyStartupCaps ONLY when startupForwardBufferOverrideS > 0, and lifted to
+    /// automatic (0) per the release trigger below. 0 = no clamp on the item (we
+    /// left AVPlayer's automatic forward buffering untouched).
+    private var appliedStartupForwardBufferS: Double = 0
+    /// Opt-in override for the startup forward-buffer cap VALUE (seconds), via the
+    /// `is.flag.startup_forward_buffer_s` launch arg. 0 / unset = DON'T clamp —
+    /// leave AVPlayer's automatic forward buffering (no hardwired default).
+    private var startupForwardBufferOverrideS: Double = 0
+    /// When the startup forward-buffer cap is lifted (experiment knob).
+    enum StartupFwdRelease: String {
+        case ttffSettle = "ttff_settle" // default/legacy: with variant cap, first frame + 3s
+        case ttff = "ttff"              // immediately at first frame
+        case keepup = "keepup"          // variant + fwd held until isPlaybackLikelyToKeepUp (video playing)
+    }
+    private var startupFwdReleaseTrigger: StartupFwdRelease = .ttffSettle
+    /// One-shot observer that lifts the forward-buffer cap on the keepup
+    /// transition (only armed when startupFwdReleaseTrigger == .keepup).
+    private var keepUpFwdReleaseCancellable: AnyCancellable?
     /// #814 — pre-retry sustainable bitrate (bps) captured at retry time and
     /// used as the recovery item's peak cap INSTEAD of the cold-start clamp,
     /// so an auto-recovered stream resumes near where it left off rather than
     /// pinned at the startup floor. 0 = nothing captured (recovery before any
-    /// video decoded) → apply4kPreference keeps the cold-start default.
-    private var recoveryPeakCapBps: Double = 0
+    /// video decoded) → applyStartupPreference keeps the cold-start default.
+    private var recoveryVariantCapBps: Double = 0
     /// Headroom on the captured pre-retry bitrate so the same rung stays
     /// selectable under the recovery cap (`preferredPeakBitRate` admits
     /// variants whose peak ≤ cap) without unlocking the next rung up — ABR
@@ -546,55 +580,144 @@ final class PlayerViewModel: ObservableObject {
 
     func setDeveloperMode(_ on: Bool) { developerMode = on; persistFlags() }
     func setAllow4K(_ on: Bool) { allow4K = on; persistFlags() }
-    func setPreferredPeakBitRateMbps(_ mbps: Int) {
-        preferredPeakBitRateMbps = max(0, mbps)
+    func setStartupPeakBitrateMbps(_ mbps: Int) {
+        startupPeakBitrateMbps = max(0, mbps)
         persistFlags()
         // A manual change is an explicit operator action — cancel any
         // pending startup-clamp release so it doesn't overwrite this value
         // a few seconds later. Stays nil (no new first frame fires from a
         // mid-play setter), so the manual value sticks until the next item.
-        peakCapReleaseTask?.cancel()
-        peakCapReleaseTask = nil
+        if startupCapsReleaseTask != nil {
+            log(String(format: "[STARTUPCAPS] setStartupPeakBitrateMbps(%d): cancelling pending release (manual override) — value sticks until next item, NO re-arm", mbps))
+        }
+        startupCapsReleaseTask?.cancel()
+        startupCapsReleaseTask = nil
         // preferredPeakBitRate is mutable mid-play — apply to the current
         // item immediately so a characterization run can change the clamp
         // without a reload; AVPlayer re-evaluates ABR against it on the next
-        // segment. New items pick it up via apply4kPreference, which also
+        // segment. New items pick it up via applyStartupPreference, which also
         // schedules the post-first-frame release.
         if let item = player.currentItem {
-            item.preferredPeakBitRate = preferredPeakBitRateBps
+            log(String(format: "[STARTUPCAPS] setStartupPeakBitrateMbps: applied %.2f Mbps to current item mid-play", startupPeakBitrateBps / 1_000_000))
+            item.preferredPeakBitRate = startupPeakBitrateBps
             // Keep the release-arming mirror in step with the manual value
             // (#814) — a mid-play setter overrides any recovery cap in force.
-            appliedItemPeakCapBps = preferredPeakBitRateBps
+            appliedStartupVariantCapBps = startupPeakBitrateBps
+        }
+    }
+
+    /// Set the PERSISTENT (never-released) bitrate ceiling, in Mbps. 0 = no ceiling.
+    /// Persists, and applies to the current item immediately as the tighter of the
+    /// still-active startup cap and this ceiling — so once the startup clamp has
+    /// released, this becomes the live ceiling without a reload. New items pick it
+    /// up via applyStartupCaps (tighterCap) and the post-first-frame release target.
+    func setPersistentPeakBitrateMbps(_ mbps: Int) {
+        persistentPeakBitrateMbps = max(0, mbps)
+        persistFlags()
+        if let item = player.currentItem {
+            let eff = tighterCap(appliedStartupVariantCapBps, persistentPeakBitrateBps)
+            item.preferredPeakBitRate = eff
+            log(String(format: "[STARTUPCAPS] setPersistentPeakBitrateMbps(%d): ceiling %.2f Mbps (effective on item %.2f Mbps)", mbps, persistentPeakBitrateBps / 1_000_000, eff / 1_000_000))
         }
     }
 
     /// Schedule the startup peak-bitrate clamp to release a few seconds
-    /// after first frame (#683). The clamp (`apply4kPreference`) presets a
+    /// after first frame (#683). The clamp (`applyStartupPreference`) presets a
     /// conservative startup variant; releasing it once the player has
     /// pulled segments lets ABR climb naturally — "preset the start, then
     /// adapt." No-op when no clamp is set. Targets the exact item that
     /// rendered first frame, so a play that starts in the meantime keeps
     /// its own clamp.
-    private func scheduleStartupPeakCapRelease(for item: AVPlayerItem) {
-        peakCapReleaseTask?.cancel()
-        // Releases whichever cap apply4kPreference imposed — the cold-start
-        // clamp (#683) or the #814 recovery cap — once the resumed/started
-        // item has its first frame + a settle window.
-        guard appliedItemPeakCapBps > 0 else { return }
-        let mbps = appliedItemPeakCapBps / 1_000_000
-        peakCapReleaseTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(Self.startupPeakCapReleaseDelay * 1_000_000_000))
-            guard let self, !Task.isCancelled else { return }
-            item.preferredPeakBitRate = 0
-            self.appliedItemPeakCapBps = 0
-            self.log(String(format: "Released peak-bitrate cap (%.1f Mbps) — ABR now free to climb", mbps))
+    private func scheduleStartupCapsRelease(for item: AVPlayerItem) {
+        startupCapsReleaseTask?.cancel()
+        keepUpFwdReleaseCancellable = nil
+        // Releases the TEMPORARY startup caps (variant + forward buffer) imposed by
+        // applyStartupCaps. Release timing is the experiment knob (startupFwdReleaseTrigger):
+        //   .ttff       → forward buffer now (first frame); variant at +settle.
+        //   .ttffSettle → both at first frame + settle (legacy default).
+        //   .keepup     → BOTH held until the item is actually playing
+        //                 (isPlaybackLikelyToKeepUp), then released together —
+        //                 keeps the variant cap through the first-frame→playing
+        //                 window, exactly where ABR is most prone to over-select.
+        guard appliedStartupVariantCapBps > 0 || appliedStartupForwardBufferS > 0 else {
+            log("[STARTUPCAPS] release NOT scheduled — no startup caps on this item to lift")
+            return
         }
+        let mbps = appliedStartupVariantCapBps / 1_000_000
+        let fwd = appliedStartupForwardBufferS
+        // .keepup: hold the variant cap (and forward buffer) until video is playing,
+        // then release both on the isPlaybackLikelyToKeepUp transition.
+        if startupFwdReleaseTrigger == .keepup {
+            log(String(format: "[STARTUPCAPS] holding variant+fwd caps (%.2f Mbps; fwd-buffer %.0fs) until keepup (video playing)", mbps, fwd))
+            armKeepUpStartupRelease(item)
+            return
+        }
+        // .ttff: lift the forward buffer immediately; the variant follows at +settle.
+        if startupFwdReleaseTrigger == .ttff {
+            releaseStartupForwardBuffer(item, reason: "TTFF (immediate)")
+        }
+        log(String(format: "[STARTUPCAPS] arming variant-cap release (%.2f Mbps; fwd-buffer %.0fs, release=%@) in %.0fs (after first frame)", mbps, fwd, startupFwdReleaseTrigger.rawValue, Self.startupCapsReleaseDelay))
+        let releaseFwdInSettle = (startupFwdReleaseTrigger == .ttffSettle)
+        startupCapsReleaseTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.startupCapsReleaseDelay * 1_000_000_000))
+            guard let self, !Task.isCancelled else {
+                self?.log("[STARTUPCAPS] release task cancelled before firing (rebuild/manual override pre-empted it) — caps stay")
+                return
+            }
+            // variant cap → persistent floor (0 = no ceiling).
+            item.preferredPeakBitRate = self.persistentPeakBitrateBps
+            self.appliedStartupVariantCapBps = 0
+            if releaseFwdInSettle {
+                self.releaseStartupForwardBuffer(item, reason: "TTFF+\(Int(Self.startupCapsReleaseDelay))s settle")
+            }
+            self.log(String(format: "[STARTUPCAPS] released variant cap (was %.2f Mbps → persistent %.2f Mbps)", mbps, self.persistentPeakBitrateBps / 1_000_000))
+        }
+    }
+
+    /// Lifts the startup forward-buffer cap on `item` back to automatic (0).
+    /// Idempotent — no-op if no cap is currently applied.
+    private func releaseStartupForwardBuffer(_ item: AVPlayerItem, reason: String) {
+        keepUpFwdReleaseCancellable = nil
+        guard appliedStartupForwardBufferS > 0 else { return }
+        let was = appliedStartupForwardBufferS
+        item.preferredForwardBufferDuration = 0
+        appliedStartupForwardBufferS = 0
+        log(String(format: "[STARTUPCAPS] released forward-buffer cap (was %.0fs → auto) [%@]", was, reason))
+    }
+
+    /// Arms a one-shot observer that lifts the startup caps the first time the
+    /// item reports isPlaybackLikelyToKeepUp (video playing) — the .keepup
+    /// trigger. Releases BOTH the variant cap and the forward-buffer cap, so the
+    /// variant cap is held through the fragile first-frame→playing window where
+    /// ABR over-selects. If keepup never fires (a start that never plays), the
+    /// caps stay — which is the safe outcome.
+    private func armKeepUpStartupRelease(_ item: AVPlayerItem) {
+        let fire: (String) -> Void = { [weak self, weak item] why in
+            guard let self, let item else { return }
+            if self.appliedStartupVariantCapBps > 0 {
+                let was = self.appliedStartupVariantCapBps / 1_000_000
+                item.preferredPeakBitRate = self.persistentPeakBitrateBps
+                self.appliedStartupVariantCapBps = 0
+                self.log(String(format: "[STARTUPCAPS] released variant cap (was %.2f Mbps → persistent %.2f Mbps) [%@]",
+                                 was, self.persistentPeakBitrateBps / 1_000_000, why))
+            }
+            self.releaseStartupForwardBuffer(item, reason: why)
+        }
+        if item.isPlaybackLikelyToKeepUp {
+            fire("keepup (already playing)")
+            return
+        }
+        keepUpFwdReleaseCancellable = item.publisher(for: \.isPlaybackLikelyToKeepUp)
+            .filter { $0 }
+            .first()
+            .receive(on: DispatchQueue.main)
+            .sink { _ in fire("keepup (video playing)") }
     }
     func setStartsOnFirstEligibleVariant(_ on: Bool) {
         startsOnFirstEligibleVariant = on
         persistFlags()
         // Only affects the *initial* variant selection, so it's applied
-        // when the next AVPlayerItem is built (apply4kPreference) — setting
+        // when the next AVPlayerItem is built (applyStartupPreference) — setting
         // it on an already-playing item has no retroactive effect.
     }
     func setLocalProxy(_ on: Bool) {
@@ -903,13 +1026,19 @@ final class PlayerViewModel: ObservableObject {
         // bottom once playback has been handed off.
         playIdMintedAt = Date()
         playIdLastActivityAt = .distantPast
+        // Session playback ALWAYS routes through the shaped go-proxy port
+        // (playbackURL). The `localProxy` flag only toggles the ON-DEVICE
+        // LocalHTTPProxy in startPlayback (rewrite-through-127.0.0.1 vs direct),
+        // NOT whether traffic is shaped. Previously localProxy=false fell back to
+        // the unshaped content port, conflating "no on-device proxy" with "no
+        // throttle" — so a localProxy-off test was silently unthrottled.
         var url = StreamURLBuilder.playbackURL(
             server: server,
             contentName: selectedContent,
             protocolOption: streamProtocol,
             segment: segment,
             playerId: playerId,
-            localProxy: localProxy
+            localProxy: true
         )
         guard let resolved = url else { return }
         // k3s-dev content port (40000) doesn't accept ?player_id= —
@@ -962,7 +1091,7 @@ final class PlayerViewModel: ObservableObject {
         if let s = cfg.segment { segment = s }
         if let p = cfg.streamProtocol { streamProtocol = p }
         if let o = cfg.liveOffsetSeconds { liveOffsetSeconds = o }
-        if let pk = cfg.peakBitrateMbps { preferredPeakBitRateMbps = pk }
+        if let pk = cfg.peakBitrateMbps { startupPeakBitrateMbps = pk }
         log("app_config: applied server overlay seg=\(cfg.segment?.rawValue ?? "-") "
             + "proto=\(cfg.streamProtocol?.rawValue ?? "-") "
             + "offset=\(cfg.liveOffsetSeconds.map { String($0) } ?? "-") "
@@ -1093,7 +1222,7 @@ final class PlayerViewModel: ObservableObject {
     /// Mint a fresh `play_id` UUID. Called only at content-selection
     /// boundaries (see currentPlayID doc). NOT called on restart.
     private func regeneratePlayID() {
-        currentPlayID = UUID().uuidString
+        currentPlayID = UUID().uuidString.lowercased()  // lowercase at source — see currentPlayID decl
         // Rotate the play-scoped start with the play_id (#587).
         currentStartTime = PlayerViewModel.metricsTimestampFormatter.string(from: Date())
         // Fresh play boundary — reset the per-play counters so the new play's
@@ -1176,7 +1305,13 @@ final class PlayerViewModel: ObservableObject {
         // edge on every stall and leaves zero safety margin before the
         // oldest-edge of the window.
         item.automaticallyPreservesTimeOffsetFromLive = true
-        apply4kPreference(to: item)
+        // NOTE: do NOT set item.configuredTimeOffsetFromLive here. On this
+        // VOD-backed "live" content it hangs AVPlayer's startup — the player
+        // waits indefinitely to position itself at liveEdge−offset and never
+        // begins, leaving the UI stuck at STATE=IDLE with no first frame and no
+        // segment fetches. The custom offset is applied via scheduleLiveOffsetSeek
+        // after play() instead (see below).
+        applyStartupPreference(to: item)
         player.replaceCurrentItem(with: item)
         // iOS 18 AVMetrics raw-event subscriber for the comparison spike
         // (issue #486). Rebuilt per-item so the streams stay bound to the
@@ -1234,7 +1369,7 @@ final class PlayerViewModel: ObservableObject {
             diagnostics.snapshotForRestart()
             diagnostics.reset()
             resumingFromRestart = false
-            // #814 — deliberately DON'T clear recoveryPeakCapBps here. This
+            // #814 — deliberately DON'T clear recoveryVariantCapBps here. This
             // block fires when an item becomes ready/playing, including an
             // INTERMEDIATE attempt in a restart chain that then fails again;
             // clearing here would strand a later attempt (which often can't
@@ -1260,7 +1395,7 @@ final class PlayerViewModel: ObservableObject {
             bufferingStartedAt = nil
             // #814 — a brand-new play: discard any recovery cap left over from
             // a prior play's restart chain so it can't apply to fresh content.
-            recoveryPeakCapBps = 0
+            recoveryVariantCapBps = 0
         }
         zeroBufferStartedAt = nil
         metricsSessionId = nil
@@ -1383,20 +1518,25 @@ final class PlayerViewModel: ObservableObject {
     /// is gone — sim now honours `allow4K`. If a particular host can't
     /// decode, AVPlayer surfaces `decodeFailedNotification` and the
     /// existing recovery pipeline kicks in (same path real devices use).
-    /// `preferredPeakBitRateMbps` expressed in bits/sec for
+    /// `startupPeakBitrateMbps` expressed in bits/sec for
     /// `AVPlayerItem.preferredPeakBitRate` (0 stays 0 = "no cap").
-    private var preferredPeakBitRateBps: Double {
-        preferredPeakBitRateMbps <= 0 ? 0 : Double(preferredPeakBitRateMbps) * 1_000_000
+    private var startupPeakBitrateBps: Double {
+        startupPeakBitrateMbps <= 0 ? 0 : Double(startupPeakBitrateMbps) * 1_000_000
+    }
+    /// `persistentPeakBitrateMbps` in bits/sec — the never-released ceiling the
+    /// startup variant cap relaxes to after first frame (0 = no ceiling).
+    private var persistentPeakBitrateBps: Double {
+        persistentPeakBitrateMbps <= 0 ? 0 : Double(persistentPeakBitrateMbps) * 1_000_000
     }
 
     /// #814 — snapshot the pre-retry sustainable bitrate at the moment a
-    /// recovery restart is decided, so apply4kPreference can cap the resumed
+    /// recovery restart is decided, so applyStartupPreference can cap the resumed
     /// item there instead of at the cold-start floor. Uses the last INDICATED
     /// variant bitrate (the rung ABR had settled on) — it's responsive and,
     /// unlike avg/observed throughput, doesn't over-read under a cap on iOS
     /// (repo memory: ios_avg_bitrate_overreads). Falls back to the
     /// average-video bitrate. 0 when no video has decoded yet (a start-failure
-    /// recovery) → apply4kPreference keeps the cold-start default. Must run
+    /// recovery) → applyStartupPreference keeps the cold-start default. Must run
     /// BEFORE loadStream replaces the item: the periodic access-log refresh
     /// clears these fields once the new (empty) item is installed.
     private func captureRecoveryThroughputCap() {
@@ -1434,55 +1574,102 @@ final class PlayerViewModel: ObservableObject {
             // 0 only if no attempt ever had history → cold-start fallback.
             return
         }
-        recoveryPeakCapBps = base * Self.recoveryCapHeadroom
-        log(String(format: "Recovery: captured pre-retry throughput cap %.1f Mbps (from %@)",
-                   recoveryPeakCapBps / 1_000_000, source))
+        let derived = base * Self.recoveryCapHeadroom
+        // #814 fix — floor the recovery cap at the operator-set startup clamp
+        // (and any prior recovery cap), so a recovery can only relax the cap
+        // UPWARD toward the real throughput, never ratchet it down. The pre-retry
+        // reading is taken off the rung we were pinned on, so under a throttled /
+        // slow start it reads at the floor (360p ≈ 0.59 → ×1.1 = 0.65 Mbps) and
+        // would otherwise drop the cap BELOW the 1.0 Mbps startup clamp — and
+        // re-ratchet lower on each subsequent restart, a downward spiral that
+        // bottoms out at the lowest rung. startupPeakBitrateBps is 0 ("no cap")
+        // when unset, so max() ignores it then.
+        recoveryVariantCapBps = max(derived, startupPeakBitrateBps, recoveryVariantCapBps)
+        log(String(format: "Recovery: cap %.2f Mbps (pre-retry %.2f from %@, floored at startup %.2f)",
+                   recoveryVariantCapBps / 1_000_000, derived / 1_000_000, source, startupPeakBitrateBps / 1_000_000))
     }
 
-    private func apply4kPreference(to item: AVPlayerItem) {
-        // 0 = no cap (Apple default); otherwise the user-chosen Mbps clamp
-        // from Advanced settings (#683). Applied to EVERY fresh item — cold
-        // start, restart/recovery, segment switch, content swap, proxy
-        // toggle — since this is the universal item-build chokepoint. The
-        // cap is then released a few seconds after this item's first frame
-        // (armed in markFirstFrameRendered). Drop any pending release from
-        // the prior item and re-arm at nil so the next first frame schedules
-        // a fresh one.
-        //
-        // #814 — on a recovery restart with throughput history
-        // (resumingFromRestart + a captured pre-retry bitrate), DON'T
-        // re-impose the cold-start controls: the clamp and
-        // startsOnFirstEligibleVariant govern the COLD pick only and
-        // re-applying them mid-play pins an auto-recovered stream at the
-        // startup floor (observed live: 540p for a whole run after one
-        // recovery). Instead cap at the pre-retry throughput so it resumes
-        // at a sustainable rung, and let AVPlayer's heuristic — not the
-        // lowest-variant force — pick the resume variant.
-        let isRecovery = resumingFromRestart && recoveryPeakCapBps > 0
-        let capBps = isRecovery ? recoveryPeakCapBps : preferredPeakBitRateBps
+    /// Item-build chokepoint, run on EVERY fresh item (cold start, restart/recovery,
+    /// segment switch, content swap, proxy toggle). Applies the PERSISTENT ceilings
+    /// (`apply4k`) AND the TEMPORARY startup caps (`applyStartupCaps`, released a few
+    /// seconds after first frame via `scheduleStartupCapsRelease`).
+    private func applyStartupPreference(to item: AVPlayerItem) {
+        apply4k(to: item)
+        applyStartupCaps(to: item)
+    }
+
+    /// Persistent: the max resolution the player may EVER render (4K vs 1080p, from
+    /// the allow4K Advanced toggle). Set once, NEVER released — a quality ceiling,
+    /// not a startup cap.
+    private func apply4k(to item: AVPlayerItem) {
+        guard #available(iOS 15.0, tvOS 15.0, *) else { return }
+        item.preferredMaximumResolution = allow4K
+            ? CGSize(width: 3840, height: 2160)
+            : CGSize(width: 1920, height: 1080)
+    }
+
+    /// Temporary startup caps — lifted ~3s after first frame
+    /// (`scheduleStartupCapsRelease`). Two members:
+    ///   • startupVariantCap — `preferredPeakBitRate`, pins the initial rung so we
+    ///     reach first frame on a low (fast) variant. Composed with the persistent
+    ///     bitrate ceiling (tighter wins); on a #814 recovery resume it's the captured
+    ///     pre-retry throughput instead of the cold-start floor.
+    ///   • startupForwardBufferCap — `preferredForwardBufferDuration`, applied ONLY
+    ///     when `is.flag.startup_forward_buffer_s` > 0 (opt-in). When set it stops
+    ///     AVPlayer banking (small, fast) audio ahead of the byte-heavy, first-frame-
+    ///     critical video under the tight startup throttle. Unset ⇒ no clamp; iOS
+    ///     uses its automatic forward buffering.
+    /// Plus `startsOnFirstEligibleVariant` (one-shot cold pick). Skipped on recovery.
+    private func applyStartupCaps(to item: AVPlayerItem) {
+        let isRecovery = resumingFromRestart && recoveryVariantCapBps > 0
+        let startupCapBps = isRecovery ? recoveryVariantCapBps : startupPeakBitrateBps
+        // startupVariantCap composed with the persistent bitrate ceiling: the tighter
+        // (smaller non-zero) wins. Released to the persistent floor, not 0.
+        let capBps = tighterCap(startupCapBps, persistentPeakBitrateBps)
         item.preferredPeakBitRate = capBps
-        appliedItemPeakCapBps = capBps
+        appliedStartupVariantCapBps = capBps
         if isRecovery {
-            log(String(format: "Recovery: capped resume at pre-retry throughput (%.1f Mbps), skipping cold-start clamp + first-variant force", capBps / 1_000_000))
-        } else if preferredPeakBitRateMbps > 0 {
-            log("Set startup peak-bitrate clamp (\(preferredPeakBitRateMbps) Mbps) on item")
+            log(String(format: "[STARTUPCAPS] variant cap %.2f Mbps (RECOVERY pre-retry, skipping cold floor) — release on this item's first frame", capBps / 1_000_000))
+        } else if capBps > 0 {
+            log(String(format: "[STARTUPCAPS] variant cap %.2f Mbps (startup=%.2f persistent=%.2f)", capBps / 1_000_000, startupCapBps / 1_000_000, persistentPeakBitrateBps / 1_000_000))
+        } else {
+            log("[STARTUPCAPS] variant cap: none (startup + persistent both 0)")
         }
-        peakCapReleaseTask?.cancel()
-        peakCapReleaseTask = nil
-        // Deterministic startup variant (#683) — forces the first-listed
-        // master entry instead of AVPlayer's throughput heuristic. iOS/tvOS
-        // 14+; on older OSes the toggle is simply inert. Skipped on a
-        // recovery resume (#814) — forcing the lowest variant mid-play is
-        // the same cold-start pin we're undoing.
+
+        // startupForwardBufferCap — applied ONLY when a real value is provided via
+        // is.flag.startup_forward_buffer_s (> 0). When unset/≤0 we DON'T touch
+        // preferredForwardBufferDuration at all — the fresh AVPlayerItem keeps its
+        // default (0 = AVPlayer's automatic forward buffering). No hardwired default
+        // clamp: iOS does its normal thing unless we deliberately override.
+        if startupForwardBufferOverrideS > 0 {
+            item.preferredForwardBufferDuration = startupForwardBufferOverrideS
+            appliedStartupForwardBufferS = startupForwardBufferOverrideS
+            log(String(format: "[STARTUPCAPS] forward-buffer cap %.0fs (override); release=%@", startupForwardBufferOverrideS, startupFwdReleaseTrigger.rawValue))
+        } else {
+            appliedStartupForwardBufferS = 0
+            log("[STARTUPCAPS] forward-buffer cap: none (unset → AVPlayer automatic)")
+        }
+
+        if startupCapsReleaseTask != nil {
+            log("[STARTUPCAPS] cancelling pending release (item rebuild) — re-arms on this item's first frame")
+        }
+        startupCapsReleaseTask?.cancel()
+        startupCapsReleaseTask = nil
+        keepUpFwdReleaseCancellable = nil
+
+        // Deterministic startup variant (#683) — force the first-listed rung instead
+        // of AVPlayer's throughput heuristic. Skipped on a recovery resume (#814).
         if #available(iOS 14.0, tvOS 14.0, *) {
             item.startsOnFirstEligibleVariant = isRecovery ? false : startsOnFirstEligibleVariant
         }
-        guard #available(iOS 15.0, tvOS 15.0, *) else { return }
-        if allow4K {
-            item.preferredMaximumResolution = CGSize(width: 3840, height: 2160)
-        } else {
-            item.preferredMaximumResolution = CGSize(width: 1920, height: 1080)
-        }
+    }
+
+    /// Tighter of two bitrate caps (bps): the smaller NON-ZERO value; 0 from a side
+    /// means "no cap from that source". Returns 0 only if both are 0.
+    private func tighterCap(_ a: Double, _ b: Double) -> Double {
+        if a <= 0 { return b }
+        if b <= 0 { return a }
+        return min(a, b)
     }
 
     private func seekToLiveEdge(item: AVPlayerItem) {
@@ -1493,6 +1680,7 @@ final class PlayerViewModel: ObservableObject {
                 guard let self else { return }
                 if let last = item.seekableTimeRanges.last?.timeRangeValue {
                     let edge = CMTimeAdd(last.start, last.duration)
+                    self.log(String(format: "[STARTUP_SEEK] seekToLiveEdge → %.1fs (live edge)", CMTimeGetSeconds(edge)))
                     await self.player.seek(to: edge)
                     return
                 }
@@ -1585,6 +1773,7 @@ final class PlayerViewModel: ObservableObject {
         // #814 — capture the pre-retry throughput NOW, before loadStream
         // swaps the item and the access-log refresh clears the bitrate.
         captureRecoveryThroughputCap()
+        log("[STARTUPCAPS] RESTART firing (live-resync) — resumingFromRestart=true; recovery cap will apply on the rebuilt item")
         resumingFromRestart = true
         loadStream(url: refreshed)
     }
@@ -1626,9 +1815,11 @@ final class PlayerViewModel: ObservableObject {
         seekToLiveEdge(item: item)
 
         // Verify-then-escalate: if the nudge restored progress, treat it as a
-        // natural recovery; otherwise fall through to the rebuild ladder.
+        // natural recovery; otherwise fall through to the rebuild ladder. #1 — a
+        // full restart is a LAST RESORT, so give the seek a long window (15s) to
+        // self-heal before going nuclear, rather than escalating after 5s.
         let scheduledAtTime = diagnostics.currentTime
-        Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+        Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.liveResyncInFlight = false
@@ -1904,12 +2095,23 @@ final class PlayerViewModel: ObservableObject {
         // start. First frame guarantees a video segment was downloaded +
         // decoded, so the player's own throughput estimate is representative
         // (not a playlist-fetch artefact) when the cap lifts. Gated on
-        // `appliedItemPeakCapBps > 0` so it fires for both the cold-start
-        // clamp (#683) and the #814 recovery cap. `peakCapReleaseTask == nil`
+        // `appliedStartupVariantCapBps > 0` so it fires for both the cold-start
+        // clamp (#683) and the #814 recovery cap. `startupCapsReleaseTask == nil`
         // dedups repeat first-frame deliveries within one item
-        // (apply4kPreference nils it per build).
-        if peakCapReleaseTask == nil, appliedItemPeakCapBps > 0, let item = player.currentItem {
-            scheduleStartupPeakCapRelease(for: item)
+        // (applyStartupPreference nils it per build).
+        // Trace the arm decision: a "never climbed after recovery" run should
+        // show this firing on the recovery item's first frame. If it DOESN'T
+        // (no log line per recovery), the i-frame signal isn't re-reaching us
+        // (e.g. PlayerView's per-layer first-frame latch not resetting on a
+        // same-layer replaceCurrentItem) and the recovery cap is stranded.
+        if startupCapsReleaseTask == nil, appliedStartupVariantCapBps > 0, let item = player.currentItem {
+            log(String(format: "[STARTUPCAPS] first frame — arming release (appliedCap=%.2f Mbps)", appliedStartupVariantCapBps / 1_000_000))
+            scheduleStartupCapsRelease(for: item)
+        } else {
+            log(String(format: "[STARTUPCAPS] first frame — NOT arming (releaseTaskNil=%@ appliedCap=%.2f Mbps hasItem=%@)",
+                       startupCapsReleaseTask == nil ? "true" : "false",
+                       appliedStartupVariantCapBps / 1_000_000,
+                       player.currentItem != nil ? "true" : "false"))
         }
         // Idempotent: PlayerView re-installs its KVO observer on player
         // swap and the layer's `isReadyForDisplay` flips back to false
@@ -2019,6 +2221,7 @@ final class PlayerViewModel: ObservableObject {
         // backoff sleep + item swap) so the codec-retry resume is capped at
         // the sustainable rung, not the cold-start floor.
         captureRecoveryThroughputCap()
+        log(String(format: "[STARTUPCAPS] RESTART firing (retry #%d) — resumingFromRestart=true; recovery cap will apply on the rebuilt item", retries))
         Task { @MainActor [weak self] in
             await self?.sendPlayerMetrics(payload: restartPayload)
             try? await Task.sleep(nanoseconds: UInt64(150_000_000 * retries))
@@ -2072,17 +2275,41 @@ final class PlayerViewModel: ObservableObject {
     private static let flagPlayIdRotation = "is.flag.play_id_rotation_s"
     private static let flagPreviewVideoSlots = "is.flag.preview_video_slots"
     private static let flagPeakBitrate = "is.flag.peak_bitrate_mbps"
+    private static let flagPersistentPeakBitrate = "is.flag.persistent_peak_bitrate_mbps"
     // #703a — characterization knobs to shorten the recovery thresholds so the
     // detectors trip inside a test window (defaults live on PlaybackDiagnostics).
     private static let flagLiveResyncStallS = "is.flag.live_resync_stall_s" // #778
     private static let flagWedgeConfirmS = "is.flag.wedge_confirm_s"
     private static let flagAutoRecoveryBaseDelayS = "is.flag.auto_recovery_base_delay_s"
     private static let flagStartsFirstVariant = "is.flag.starts_first_variant"
+    // Startup forward-buffer-cap experiment knobs (audio over-banking probe).
+    //   …forward_buffer_s — the cap VALUE (seconds), opt-in. 0/absent = NO clamp
+    //     (AVPlayer automatic forward buffering). The harness sweeps this.
+    //   …fwd_release      — when to LIFT the cap: "ttff" (immediately at first
+    //     frame), "keepup" (on isPlaybackLikelyToKeepUp), or "ttff_settle"
+    //     (default/legacy: with the variant cap, first frame + 3s).
+    private static let flagStartupForwardBufferS = "is.flag.startup_forward_buffer_s"
+    private static let flagStartupFwdRelease = "is.flag.startup_fwd_release"
     private static let lastPlayedKey = "is.lastPlayed"
     private static let viewCountsKey = "is.viewCounts"
     private static let codecKey = "is.codec"
     private static let segmentKey = "is.segment"
     private static let protocolKey = "is.protocol"
+    // Test-harness clean-slate sentinel. When the launch passes this, every
+    // advanced-flag key below is dropped from the persisted (standard) domain at
+    // load — so each setting falls to its launch-arg value if passed, else its
+    // code default. No carry-over from a prior run on this sim (`simctl install`
+    // preserves the container). Off for normal/manual launches, so real users keep
+    // their settings; the harness passes it ON by default (opt out per test).
+    private static let flagResetAdvanced = "is.flag.reset_advanced"
+    private static let advancedFlagKeys: [String] = [
+        flagDevMode, flag4K, flagLocalProxy, flagAutoRecovery, flagGoLive,
+        flagSkipHome, flagMuted, flagLiveOffset, flagPlayIdRotation,
+        flagPreviewVideoSlots, flagPeakBitrate, flagPersistentPeakBitrate, flagLiveResyncStallS,
+        flagWedgeConfirmS, flagAutoRecoveryBaseDelayS, flagStartsFirstVariant,
+        flagStartupForwardBufferS, flagStartupFwdRelease,
+        codecKey, segmentKey, protocolKey,
+    ]
     private static let contentCachePrefix = "is.contentCache."
 
     private func loadServers() {
@@ -2121,14 +2348,24 @@ final class PlayerViewModel: ObservableObject {
 
     private func loadAdvancedFlags() {
         let d = UserDefaults.standard
+        // Test clean-slate: drop persisted advanced flags so each reads its
+        // launch-arg value if passed, else its code default (see flagResetAdvanced).
+        if d.bool(forKey: Self.flagResetAdvanced) {
+            Self.advancedFlagKeys.forEach { d.removeObject(forKey: $0) }
+        }
         developerMode    = d.bool(forKey: Self.flagDevMode)
         allow4K          = d.object(forKey: Self.flag4K) as? Bool ?? true
-        localProxy       = d.object(forKey: Self.flagLocalProxy) as? Bool ?? true
-        // Default ON when unset; honor an explicit persisted bool OR an
-        // NSArgumentDomain launch-arg string (`-is.flag.auto_recovery false`).
-        // `object(forKey:)==nil` ⇒ absent in every domain ⇒ default true;
-        // otherwise d.bool parses both the NSNumber and the launch-arg string.
-        autoRecovery     = d.object(forKey: Self.flagAutoRecovery) == nil ? true : d.bool(forKey: Self.flagAutoRecovery)
+        // Present (launch-arg or persisted) → coerce: d.bool parses BOTH the
+        // NSArgumentDomain STRING ("false"/"true") and a persisted NSNumber.
+        // Absent → default ON. (Plain `as? Bool` silently ignored the launch-arg
+        // string and always fell back to true, so -is.flag.local_proxy false was inert.)
+        localProxy = d.object(forKey: Self.flagLocalProxy) != nil
+            ? d.bool(forKey: Self.flagLocalProxy)
+            : true
+        // Default OFF when unset (see autoRecovery decl). d.bool returns false when
+        // the key is absent in every domain, and parses both a persisted NSNumber
+        // and an NSArgumentDomain launch-arg string (`-is.flag.auto_recovery true`).
+        autoRecovery     = d.bool(forKey: Self.flagAutoRecovery)
         goLive           = d.bool(forKey: Self.flagGoLive)
         skipHomeOnLaunch = d.bool(forKey: Self.flagSkipHome)
         isMuted = d.bool(forKey: Self.flagMuted)
@@ -2146,7 +2383,11 @@ final class PlayerViewModel: ObservableObject {
         // and silently reads 0 (clamp off). integer(forKey:) coerces the string,
         // and still reads the UI-persisted NSNumber correctly. Was the reason
         // the cold-start clamp never engaged on fleet sims.
-        preferredPeakBitRateMbps = max(0, d.integer(forKey: Self.flagPeakBitrate))
+        startupPeakBitrateMbps = max(0, d.integer(forKey: Self.flagPeakBitrate))
+        // Persistent (never-released) bitrate ceiling — the floor the startup cap
+        // relaxes TO after first frame. integer(forKey:) coerces the launch-arg
+        // string. 0 = no permanent ceiling.
+        persistentPeakBitrateMbps = max(0, d.integer(forKey: Self.flagPersistentPeakBitrate))
         // #703a — recovery-threshold overrides. NSArgumentDomain delivers a
         // launch-arg value as a STRING, so coerce both the NSNumber (UI-set) and
         // the string (launch-arg) forms; only apply when > 0 so an absent flag
@@ -2161,6 +2402,14 @@ final class PlayerViewModel: ObservableObject {
             autoRecoveryBaseDelaySeconds = v
         }
         startsOnFirstEligibleVariant = d.bool(forKey: Self.flagStartsFirstVariant)
+        // Startup forward-buffer-cap experiment knobs. doubleFlag coerces the
+        // launch-arg STRING ("12") as well as a UI-persisted NSNumber; 0/absent
+        // ⇒ no clamp (AVPlayer automatic forward buffering; see applyStartupCaps).
+        startupForwardBufferOverrideS = max(0, Self.doubleFlag(d, Self.flagStartupForwardBufferS) ?? 0)
+        if let raw = d.string(forKey: Self.flagStartupFwdRelease),
+           let v = StartupFwdRelease(rawValue: raw) {
+            startupFwdReleaseTrigger = v
+        }
         // First launch: no key yet → use the device's hardware cap so
         // the user starts with the richest preview their hardware can
         // run. After that, persist whatever they've chosen.
@@ -2196,7 +2445,8 @@ final class PlayerViewModel: ObservableObject {
         d.set(liveOffsetSeconds, forKey: Self.flagLiveOffset)
         d.set(playIdRotationSeconds, forKey: Self.flagPlayIdRotation)
         d.set(previewVideoSlots, forKey: Self.flagPreviewVideoSlots)
-        d.set(preferredPeakBitRateMbps, forKey: Self.flagPeakBitrate)
+        d.set(startupPeakBitrateMbps, forKey: Self.flagPeakBitrate)
+        d.set(persistentPeakBitrateMbps, forKey: Self.flagPersistentPeakBitrate)
         d.set(startsOnFirstEligibleVariant, forKey: Self.flagStartsFirstVariant)
         d.set(codec.rawValue, forKey: Self.codecKey)
         d.set(segment.rawValue, forKey: Self.segmentKey)
@@ -2365,6 +2615,11 @@ extension PlayerViewModel {
                 if self.autoRecovery {
                     self.attemptLiveResyncSeek()
                 } else {
+                    // auto_recovery off: the diagnostics `[LIVE_RESYNC] arming`
+                    // detection still logs (it just reports the stall), but NO seek
+                    // or restart fires. Log the suppression so a trace can't be
+                    // misread as "recovery happened despite auto_recovery=false".
+                    self.log("LIVE_RESYNC: SUPPRESSED — auto_recovery off (no seek, no restart; HAR snapshot only)")
                     Task { await self.requestHARSnapshot(reason: "live_resync") }
                 }
             }

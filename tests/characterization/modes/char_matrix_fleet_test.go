@@ -41,13 +41,20 @@ func TestCharMatrixFleet(t *testing.T) {
 // are only what the probe needs to bind + cold-launch with the right client
 // knobs.
 type armProbeConfig struct {
-	playerID    string
-	platform    string
-	segment     string
-	liveOffsetS string
-	protocol    string
-	content     string
-	durationS   int
+	playerID           string
+	platform           string
+	segment            string
+	liveOffsetS        string
+	protocol           string
+	codec              string
+	peakBitrate        int
+	startsFirstVariant string
+	pattern            string
+	stepS              int
+	margin             int
+	patternMaster      bool
+	content            string
+	durationS          int
 }
 
 func readArmProbeConfig(fleetIndex int) armProbeConfig {
@@ -55,13 +62,20 @@ func readArmProbeConfig(fleetIndex int) armProbeConfig {
 		return strings.TrimSpace(os.Getenv(fmt.Sprintf("CHAR_ARM_%d_%s", fleetIndex, suffix)))
 	}
 	return armProbeConfig{
-		playerID:    p("PLAYER_ID"),
-		platform:    envOr(fmt.Sprintf("CHAR_ARM_%d_PLATFORM", fleetIndex), string(runner.PlatformIPadSim)),
-		segment:     p("SEGMENT"),
-		liveOffsetS: envOr(fmt.Sprintf("CHAR_ARM_%d_LIVE_OFFSET", fleetIndex), "0"),
-		protocol:    p("PROTOCOL"),
-		content:     envOr(fmt.Sprintf("CHAR_ARM_%d_CONTENT", fleetIndex), strings.TrimSpace(os.Getenv("CHAR_CONTENT"))),
-		durationS:   envInt("CHAR_SWEEP_DURATION_S", 60),
+		playerID:           p("PLAYER_ID"),
+		platform:           envOr(fmt.Sprintf("CHAR_ARM_%d_PLATFORM", fleetIndex), string(runner.PlatformIPadSim)),
+		segment:            p("SEGMENT"),
+		liveOffsetS:        envOr(fmt.Sprintf("CHAR_ARM_%d_LIVE_OFFSET", fleetIndex), "0"),
+		protocol:           p("PROTOCOL"),
+		codec:              p("CODEC"),
+		peakBitrate:        envInt(fmt.Sprintf("CHAR_ARM_%d_PEAK_BITRATE", fleetIndex), 0),
+		startsFirstVariant: p("FIRST_VARIANT"),
+		pattern:            p("PATTERN"),
+		stepS:              envInt(fmt.Sprintf("CHAR_ARM_%d_STEP_S", fleetIndex), 12),
+		margin:             envInt(fmt.Sprintf("CHAR_ARM_%d_MARGIN", fleetIndex), 5),
+		patternMaster:      p("PATTERN_MASTER") == "true",
+		content:            envOr(fmt.Sprintf("CHAR_ARM_%d_CONTENT", fleetIndex), strings.TrimSpace(os.Getenv("CHAR_CONTENT"))),
+		durationS:          envInt("CHAR_SWEEP_DURATION_S", 60),
 	}
 }
 
@@ -121,12 +135,44 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	// uses, plus this arm's client knobs (segment / app live_offset / protocol),
 	// all via the shared ProbeLaunchArgs projection.
 	args := runner.ProbeLaunchArgs(runner.ProbeConfig{
-		PlayerID:    cfg.playerID,
-		Content:     cfg.content,
-		Segment:     cfg.segment,
-		LiveOffsetS: cfg.liveOffsetS,
-		Protocol:    cfg.protocol,
+		PlayerID:           cfg.playerID,
+		Content:            cfg.content,
+		Segment:            cfg.segment,
+		LiveOffsetS:        cfg.liveOffsetS,
+		Protocol:           cfg.protocol,
+		Codec:              cfg.codec,
+		PeakBitrateMbps:    cfg.peakBitrate,
+		StartsFirstVariant: cfg.startsFirstVariant,
 	})
+	// Diagnostic toggle: CHAR_AUTO_RECOVERY=false feeds -is.flag.auto_recovery
+	// false to every arm, disabling the iOS restart/live-resync ladder so we can
+	// observe the player's NATURAL startup ABR behavior in isolation (does it
+	// climb to 4K and wedge without any recovery papering over it?). Unset →
+	// app default (auto-recovery ON).
+	if v := strings.TrimSpace(os.Getenv("CHAR_AUTO_RECOVERY")); v != "" {
+		args = append(args, "-is.flag.auto_recovery", v)
+	}
+	// Startup forward-buffer-cap experiment knobs (audio over-banking probe).
+	// CHAR_FWD_BUFFER_S overrides the cap value (seconds); CHAR_FWD_RELEASE picks
+	// when it's lifted (ttff | keepup | ttff_settle). Unset → app defaults
+	// (3× max segment duration, released at TTFF+3s settle).
+	if v := strings.TrimSpace(os.Getenv("CHAR_FWD_BUFFER_S")); v != "" {
+		args = append(args, "-is.flag.startup_forward_buffer_s", v)
+	}
+	if v := strings.TrimSpace(os.Getenv("CHAR_FWD_RELEASE")); v != "" {
+		args = append(args, "-is.flag.startup_fwd_release", v)
+	}
+	// Persistent (never-released) peak-bitrate ceiling, in Mbps — the floor the
+	// startup variant cap relaxes TO after first frame. Unset → no permanent cap.
+	if v := strings.TrimSpace(os.Getenv("CHAR_PERSIST_PEAK")); v != "" {
+		args = append(args, "-is.flag.persistent_peak_bitrate_mbps", v)
+	}
+	// On-device LocalHTTPProxy toggle. Unset → app default (ON). CHAR_LOCAL_PROXY=false
+	// takes the on-device proxy out of the path so AVPlayer fetches origin directly —
+	// used to isolate whether segment re-downloads are AVPlayer's or the proxy's.
+	if v := strings.TrimSpace(os.Getenv("CHAR_LOCAL_PROXY")); v != "" {
+		args = append(args, "-is.flag.local_proxy", v)
+	}
 	appium.SetLaunchArgs(args)
 
 	sess, lerr := appium.LaunchToHome(setupCtx, *picked)
@@ -141,6 +187,19 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		_ = sess.Release(cleanCtx)    // free the session slot
 		_ = launcher.Close()
 	})
+
+	// Clean proxy baseline (on by default): clear any shape/faults/content carried
+	// over from a prior run that reused this player_id, before the play + pattern.
+	// CHAR_NO_PROXY_RESET=1 skips it (preserve carry-over). Only this harness path
+	// resets; the proxy's reattach default is untouched, so manual sessions still
+	// carry over (see feedback_manual_proxy_carryover).
+	if strings.TrimSpace(os.Getenv("CHAR_NO_PROXY_RESET")) == "" {
+		if err := sess.ResetProxy(setupCtx); err != nil {
+			t.Logf("arm %d: ResetProxy (non-fatal): %v", dev.FleetIndex, err)
+		} else {
+			t.Logf("arm %d: proxy reset to clean baseline", dev.FleetIndex)
+		}
+	}
 
 	// Fleet HOME barrier: hold until every arm is at home, then all start
 	// playback together — so the arms stream simultaneously, not staggered.
@@ -162,6 +221,24 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	}
 	if herr := sess.WaitForHeartbeat(setupCtx, 90*time.Second); herr != nil {
 		t.Fatalf("WaitForHeartbeat: %v", herr)
+	}
+
+	// Arm the bandwidth pattern post-launch (it can't ride config-on-connect — the
+	// ladder is built from the live manifest variants, so the master playlist must
+	// be fetched first). ONLY the master arms it; the proxy propagates the master's
+	// pyramid to the group's slaves (NETSHAPE group pattern propagation), so all
+	// arms share ONE bandwidth timeline. A slave arming its own would create an
+	// independent, out-of-phase pyramid and confound the comparison.
+	if cfg.pattern != "" && cfg.patternMaster {
+		if err := sess.WaitForManifest(setupCtx, 45*time.Second); err != nil {
+			t.Fatalf("arm %d (master): waiting for manifest before pattern: %v", dev.FleetIndex, err)
+		}
+		if err := sess.ApplyPattern(setupCtx, cfg.pattern, cfg.stepS, cfg.margin); err != nil {
+			t.Fatalf("arm %d (master): ApplyPattern(%s): %v", dev.FleetIndex, cfg.pattern, err)
+		}
+		t.Logf("arm %d MASTER: armed %s pattern (step=%ds margin=%d%%) — proxy propagates to the group", dev.FleetIndex, cfg.pattern, cfg.stepS, cfg.margin)
+	} else if cfg.pattern != "" {
+		t.Logf("arm %d slave: pattern driven by the group master (no local ApplyPattern)", dev.FleetIndex)
 	}
 
 	// Let it play. The recipe (content/shape/live_offset/transfer) is already

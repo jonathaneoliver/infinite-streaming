@@ -1,0 +1,23 @@
+# Object-axis example (#811 namespaced-knob revision).
+#
+#     harness char matrix tests/characterization/matrix/shape-patterns.yaml --dry-run
+#
+# proxy.shape is an OBJECT-valued axis: each value is a whole shape block, not a
+# scalar. An optional `label:` gives each block a readable arm id (stripped before
+# the block decodes); without one, an obj-<hash> slug is used. Characterises the
+# ABR reaction per bandwidth profile — a sequential sweep, no control/variant.
+name: shape-patterns
+class: config
+duration_s: 150
+defaults:
+  platform: ipad-sim
+  content: insane_new_p200_h264
+  is.segment: s6
+axes:
+  proxy.shape:
+    # pyramid starts limited → needs an initial network cap (rate_mbps) applied at
+    # config-on-connect, before the pattern arms. ramp_down/square/shock start high.
+    - { label: pyramid,  pattern: pyramid,         step_seconds: 12, rate_mbps: 1.5 }
+    - { label: rampdown, pattern: ramp_down,       step_seconds: 12 }
+    - { label: square,   pattern: square_wave,     step_seconds: 12 }
+    - { label: shock,    pattern: transient_shock, step_seconds: 12 }

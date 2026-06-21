@@ -13,6 +13,5 @@ defaults:
   platform: ipad-sim
   content: insane_new_p200_h264
 axes:
-  segment: [s6]
-  live_offset: [24, 30]
-  lever: [proxy]
+  is.segment: [s6]
+  proxy.live_offset: [24, 30]   # two server hold-backs, run simultaneously

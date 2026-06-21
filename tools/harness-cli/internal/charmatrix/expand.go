@@ -1,8 +1,10 @@
 package charmatrix
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,39 +13,69 @@ import (
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/v2gen/proxy"
 )
 
-// leverProxy / leverApp are the two live_offset routing targets. Empty defaults
-// to proxy (the #793 manifest hold-back) when a live_offset is present.
-const (
-	leverProxy = "proxy"
-	leverApp   = "app"
-)
+// maxArmsPerGroup caps a comparison group: one control + ≤3 variants. A larger
+// group is almost always a mistake (an over-wide compare axis, or a pairing too
+// big to read), so Expand rejects it up front.
+const maxArmsPerGroup = 4
 
-// axisKeys is the set of scalar arm fields an `axes:` block may sweep. Object
-// fields (shape/fault/content_manipulation/transfer_timeouts) and the
-// Expand-assigned id are deliberately excluded — those are set on defaults or
-// the explicit-arm escape hatch, not cartesian-swept. Unknown axis names are a
-// validation error so a typo fails fast instead of silently expanding nothing.
-var axisKeys = map[string]bool{
-	"platform":          true,
-	"protocol":          true,
-	"content":           true,
-	"segment":           true,
-	"mode":              true,
-	"class":             true,
-	"lever":             true,
-	"live_offset":       true,
-	"peak_bitrate_mbps": true,
-	"duration_s":        true,
-	"reps":              true,
+// objectAxisKeys are the object-valued knobs an `axes:` block may sweep — each
+// value is a whole recipe block (a sweep.Shape / Fault / ContentManipulation /
+// TransferTimeouts), not a scalar. An object axis value replaces the defaults'
+// block wholesale (shallow overlay, same as an explicit arm) and gets a
+// `label`-or-hash id slug (see axisSlugAndValue) so a {pattern:…} block produces
+// a clean id, not a stringified map. The Expand-assigned id/group/role are never
+// axis-swept.
+var objectAxisKeys = map[string]bool{
+	"proxy.shape":                true,
+	"proxy.fault":                true,
+	"proxy.content_manipulation": true,
+	"proxy.transfer_timeouts":    true,
 }
 
-// Expand turns a spec into its ordered list of arms: the cartesian product of
-// the axes (an odometer over axis names in sorted order, so ids are
-// reproducible run-to-run) followed by any explicit arms. Each arm is the spec
-// defaults with the combination's values layered on top. Validation runs up
-// front (unknown axes, bad lever, out-of-window live_offset, …) so a malformed
-// matrix fails before any session is touched.
-func Expand(spec *Spec) ([]*Arm, error) {
+// axisKeys is the set of scalar arm fields an `axes:` block may sweep, keyed by
+// the dotted namespace the YAML uses. Unknown axis names (not in axisKeys or
+// objectAxisKeys) are a validation error so a typo fails fast instead of silently
+// expanding nothing.
+var axisKeys = map[string]bool{
+	"platform":                  true,
+	"content":                   true,
+	"mode":                      true,
+	"class":                     true,
+	"duration_s":                true,
+	"reps":                      true,
+	"is.segment":                true,
+	"is.protocol":               true,
+	"is.codec":                  true,
+	"is.live_offset":            true,
+	"is.peak_bitrate_mbps":      true,
+	"is.starts_first_variant":   true,
+	"proxy.live_offset":         true,
+	"proxy.strip_codecs":        true,
+	"proxy.strip_avg_bandwidth": true,
+	"proxy.strip_resolution":    true,
+	"proxy.allowed_variants":    true,
+	"proxy.variant_order":       true,
+	"proxy.overstate_bandwidth": true,
+}
+
+// Expand expands a spec with deterministic group ids (no run id). Used by tests
+// and dry-run previews where stable ids matter; real runs use ExpandWithRunID so
+// each run's groups are unique.
+func Expand(spec *Spec) ([]*Arm, error) { return ExpandWithRunID(spec, "") }
+
+// ExpandWithRunID turns a spec into its ordered list of arms: the cartesian
+// product of the axes (an odometer over axis names in sorted order, so ids are
+// reproducible run-to-run), then any explicit arms, then any comparison groups.
+// Each arm is the spec defaults with the combination's values layered on top.
+// Validation runs up front (unknown axes, bad compare, out-of-window live_offset,
+// over-large groups, …) so a malformed matrix fails before any session is touched.
+//
+// runID, when non-empty, is appended to every AUTO-generated group id (the
+// compare: and groups: paths) so two runs of the same spec never share a
+// group_id — the dashboard won't join a previous run's grouped sessions with the
+// current one. The test name stays in the id for readability; the run id makes it
+// unique. Explicit-arm hand-set groups are left untouched.
+func ExpandWithRunID(spec *Spec, runID string) ([]*Arm, error) {
 	if spec == nil {
 		return nil, fmt.Errorf("nil spec")
 	}
@@ -64,18 +96,28 @@ func Expand(spec *Spec) ([]*Arm, error) {
 	// --- cartesian product over the axes ---
 	names := sortedAxisNames(spec.Axes)
 	if len(names) > 0 {
+		// Precompute each axis value's id-slug + decode-value once: object axis
+		// values get a `label`-or-hash slug (so a {pattern:…} block yields a clean
+		// id, not a stringified map); scalars keep their plain slug.
+		axisVals := buildAxisVals(spec.Axes)
 		// Odometer: indices[i] selects the current value of axis names[i].
 		indices := make([]int, len(names))
 		for {
 			combo := cloneMap(baseMap)
 			for i, name := range names {
-				combo[name] = spec.Axes[name][indices[i]]
+				combo[name] = axisVals[name][indices[i]].val
 			}
 			arm, err := mapToArm(combo)
 			if err != nil {
 				return nil, err
 			}
-			arm.ID = comboID(spec.Name, names, indices, spec.Axes)
+			arm.ID = comboID(spec.Name, names, indices, axisVals)
+			// compare: groups arms that agree on every OTHER axis, with the
+			// first value of the compare axis as control and the rest variants.
+			if spec.Compare != "" {
+				arm.Group = comboGroupID(spec.Name, names, indices, axisVals, spec.Compare, arm.Platform, runID)
+				arm.Role = comboRole(spec.Compare, names, indices, spec.Axes)
+			}
 			if err := validateArm(arm); err != nil {
 				return nil, fmt.Errorf("arm %s: %w", arm.ID, err)
 			}
@@ -99,12 +141,7 @@ func Expand(spec *Spec) ([]*Arm, error) {
 
 	// --- explicit-arm escape hatch (layered over the same defaults) ---
 	for i, ex := range spec.Arms {
-		exMap, err := armToMap(ex)
-		if err != nil {
-			return nil, err
-		}
-		merged := mergeMaps(cloneMap(baseMap), exMap)
-		arm, err := mapToArm(merged)
+		arm, err := overlayArm(baseMap, ex)
 		if err != nil {
 			return nil, err
 		}
@@ -117,17 +154,56 @@ func Expand(spec *Spec) ([]*Arm, error) {
 		arms = append(arms, arm)
 	}
 
+	// --- groups block: control + variants, pre-paired ---
+	for gi, g := range spec.Groups {
+		gid := g.ID
+		if gid == "" {
+			gid = fmt.Sprintf("g%d", gi)
+		}
+		groupKey := fmt.Sprintf("%s/%s", spec.Name, gid)
+		if runID != "" {
+			groupKey += "-" + runID
+		}
+
+		ctrl, err := overlayArm(baseMap, g.Control)
+		if err != nil {
+			return nil, err
+		}
+		ctrl.Group = groupKey
+		ctrl.Role = string(sweep.ArmControl)
+		ctrl.ID = groupKey + "/control"
+		if err := validateArm(ctrl); err != nil {
+			return nil, fmt.Errorf("group %s control: %w", gid, err)
+		}
+		arms = append(arms, ctrl)
+
+		for vi, v := range g.Variants {
+			va, err := overlayArm(baseMap, v)
+			if err != nil {
+				return nil, err
+			}
+			va.Group = groupKey
+			va.Role = string(sweep.ArmVariant)
+			va.ID = fmt.Sprintf("%s/var%d", groupKey, vi)
+			if err := validateArm(va); err != nil {
+				return nil, fmt.Errorf("group %s var%d: %w", gid, vi, err)
+			}
+			arms = append(arms, va)
+		}
+	}
+
 	if len(arms) == 0 {
-		return nil, fmt.Errorf("spec %q expanded to zero arms: set `axes:` or `arms:`", spec.Name)
+		return nil, fmt.Errorf("spec %q expanded to zero arms: set `axes:`, `arms:`, or `groups:`", spec.Name)
 	}
 	return arms, nil
 }
 
 // ToExperiment compiles the arm into the server-side recipe of record. The
-// live_offset axis is routed to the manifest hold-back (ContentManipulation)
-// only when the lever is proxy; an app-lever offset stays a client launch arg
-// (see ClientLiveOffsetS) and never touches the server config. Segment /
-// protocol live on the Experiment itself.
+// server live offset (proxy.live_offset) routes to the manifest hold-back
+// (ContentManipulation); the client live offset (is.live_offset) stays a client
+// launch arg (see ClientLiveOffsetS) and never touches the server config — so the
+// both-set arm imposes both surfaces at once (the precedence cell). Segment /
+// protocol live on the Experiment itself; Group / Arm carry the pairing.
 func (a *Arm) ToExperiment() *sweep.Experiment {
 	e := &sweep.Experiment{
 		ID:                  a.ID,
@@ -141,57 +217,114 @@ func (a *Arm) ToExperiment() *sweep.Experiment {
 		DurationS:           a.DurationS,
 		Reps:                a.Reps,
 		Kind:                sweep.KindHypothesis, // a matrix is a planned A/B sweep, not a seed/isolation
+		Group:               a.Group,
+		Arm:                 sweep.Arm(a.Role),
 		Shape:               cloneShape(a.Shape),
 		Fault:               cloneFault(a.Fault),
-		ContentManipulation: cloneCM(a.ContentManipulation),
+		ContentManipulation: a.contentManipulation(),
 		TransferTimeouts:    cloneXfer(a.TransferTimeouts),
-	}
-	if a.LiveOffset != nil && a.serverLever() {
-		if e.ContentManipulation == nil {
-			e.ContentManipulation = &sweep.ContentManipulation{}
-		}
-		// An explicit content_manipulation.live_offset on the arm wins over the
-		// axis value (the escape hatch is intentional).
-		if e.ContentManipulation.LiveOffset == nil {
-			v := *a.LiveOffset
-			e.ContentManipulation.LiveOffset = &v
-		}
 	}
 	return e
 }
 
-// serverLever reports whether this arm's live_offset lands server-side. Empty
-// lever defaults to proxy (the #793 manifest hold-back).
-func (a *Arm) serverLever() bool {
-	return a.Lever == "" || a.Lever == leverProxy
+// contentManipulation folds the flat proxy.* conveniences (proxy.live_offset,
+// proxy.strip_*, proxy.allowed_variants, proxy.variant_order,
+// proxy.overstate_bandwidth) onto the nested proxy.content_manipulation block.
+// The nested block wins per-field (it is the explicit full form); a flat
+// convenience only fills a field the block left unset. Returns nil when nothing
+// manipulates the manifest.
+func (a *Arm) contentManipulation() *sweep.ContentManipulation {
+	cm := cloneCM(a.ContentManipulation) // nested block, or nil
+	ensure := func() {
+		if cm == nil {
+			cm = &sweep.ContentManipulation{}
+		}
+	}
+	if a.ProxyLiveOffset != nil && *a.ProxyLiveOffset > 0 {
+		ensure()
+		if cm.LiveOffset == nil {
+			v := *a.ProxyLiveOffset
+			cm.LiveOffset = &v
+		}
+	}
+	// Bool strips OR in (a nested-true stays true; a flat-true sets it).
+	if a.StripCodecs != nil && *a.StripCodecs {
+		ensure()
+		cm.StripCodecs = true
+	}
+	if a.StripAvgBandwidth != nil && *a.StripAvgBandwidth {
+		ensure()
+		cm.StripAvgBandwidth = true
+	}
+	if a.StripResolution != nil && *a.StripResolution {
+		ensure()
+		cm.StripResolution = true
+	}
+	if a.AllowedVariants != "" {
+		ensure()
+		if cm.AllowedVariants == "" {
+			cm.AllowedVariants = a.AllowedVariants
+		}
+	}
+	if a.VariantOrder != "" {
+		ensure()
+		if cm.VariantOrder == "" {
+			cm.VariantOrder = a.VariantOrder
+		}
+	}
+	if a.OverstateBandwidth != nil {
+		ensure()
+		if cm.OverstateBandwidth == nil {
+			v := *a.OverstateBandwidth
+			cm.OverstateBandwidth = &v
+		}
+	}
+	return cm
 }
 
 // ClientLiveOffsetS is the value for the client's -is.flag.live_offset_s launch
-// arg (CHAR_SWEEP_LIVE_OFFSET). It is the offset only when the lever is app;
-// otherwise "0" — the probe always pins the flag so a run never inherits the
-// app's persisted stepper value.
+// arg (CHAR_SWEEP_LIVE_OFFSET): the is.live_offset value, or "0" — the probe
+// always pins the flag so a run never inherits the app's persisted stepper value.
 func (a *Arm) ClientLiveOffsetS() string {
-	if a.LiveOffset != nil && a.Lever == leverApp {
-		return formatNum(*a.LiveOffset)
+	if a.AppLiveOffset != nil && *a.AppLiveOffset > 0 {
+		return formatNum(*a.AppLiveOffset)
 	}
 	return "0"
 }
 
-// IntendedLiveOffset is the offset the arm means to impose regardless of lever,
-// for the post-run manipulation check (AchievedOffsetFromEvents /
-// ManipulationLanded). ok is false when this arm has no live_offset.
-func (a *Arm) IntendedLiveOffset() (float64, bool) {
-	if a.LiveOffset == nil || *a.LiveOffset <= 0 {
-		return 0, false
+// StartsFirstVariantS is the value for the -is.flag.starts_first_variant launch
+// arg. Defaults to "false" when the arm doesn't set it: starts-on-first-variant
+// must be OFF unless a test explicitly opts in. It can't be omitted — `simctl
+// install` preserves the app container, so omitting the arg would silently
+// inherit a stale persisted "true" from an earlier test (pinning the join to the
+// bottom rung). Passing false explicitly resets it every run.
+func (a *Arm) StartsFirstVariantS() string {
+	if a.StartsFirstVariant == nil {
+		return "false"
 	}
-	return *a.LiveOffset, true
+	return strconv.FormatBool(*a.StartsFirstVariant)
+}
+
+// IntendedLiveOffset is the offset the arm means to impose, for the post-run
+// manipulation check (AchievedOffsetFromEvents / ManipulationLanded). The server
+// offset (proxy.live_offset) is the one that lands as a manifest change, so it
+// wins; an app-only arm reports its client override. ok is false when neither is
+// set.
+func (a *Arm) IntendedLiveOffset() (float64, bool) {
+	if a.ProxyLiveOffset != nil && *a.ProxyLiveOffset > 0 {
+		return *a.ProxyLiveOffset, true
+	}
+	if a.AppLiveOffset != nil && *a.AppLiveOffset > 0 {
+		return *a.AppLiveOffset, true
+	}
+	return 0, false
 }
 
 // --- validation ----------------------------------------------------------
 
 func validateSpec(spec *Spec) error {
 	for name, vals := range spec.Axes {
-		if !axisKeys[name] {
+		if !axisKeys[name] && !objectAxisKeys[name] {
 			return fmt.Errorf("unknown axis %q (known: %s)", name, knownAxisList())
 		}
 		if len(vals) == 0 {
@@ -201,6 +334,29 @@ func validateSpec(spec *Spec) error {
 	if spec.Class != "" {
 		if err := validateClass(spec.Class); err != nil {
 			return err
+		}
+	}
+	if spec.Compare != "" {
+		vals, ok := spec.Axes[spec.Compare]
+		if !ok {
+			return fmt.Errorf("compare axis %q is not one of the axes", spec.Compare)
+		}
+		if len(vals) < 2 {
+			return fmt.Errorf("compare axis %q needs ≥2 values to form a comparison (has %d)", spec.Compare, len(vals))
+		}
+		if len(vals) > maxArmsPerGroup {
+			return fmt.Errorf("compare axis %q has %d values; a group holds at most %d arms", spec.Compare, len(vals), maxArmsPerGroup)
+		}
+		if !spec.Parallel {
+			return fmt.Errorf("compare axis %q requires parallel: true — sequential arms defeat the pairing (temporal confounds won't cancel)", spec.Compare)
+		}
+	}
+	for gi, g := range spec.Groups {
+		if len(g.Variants) == 0 {
+			return fmt.Errorf("group %d (%q) needs at least one variant", gi, g.ID)
+		}
+		if n := 1 + len(g.Variants); n > maxArmsPerGroup {
+			return fmt.Errorf("group %d (%q) has %d arms; at most %d", gi, g.ID, n, maxArmsPerGroup)
 		}
 	}
 	return nil
@@ -216,21 +372,48 @@ func validateArm(a *Arm) error {
 	if a.Segment != "" && a.Segment != "s2" && a.Segment != "s6" && a.Segment != "ll" {
 		return fmt.Errorf("segment %q invalid (s2|s6|ll)", a.Segment)
 	}
-	if a.Lever != "" && a.Lever != leverProxy && a.Lever != leverApp {
-		return fmt.Errorf("lever %q invalid (proxy|app)", a.Lever)
+	if a.Role != "" && a.Role != string(sweep.ArmControl) && a.Role != string(sweep.ArmVariant) {
+		return fmt.Errorf("role %q invalid (control|variant)", a.Role)
+	}
+	switch a.VariantOrder {
+	case "", "default", "ascending", "descending":
+	default:
+		return fmt.Errorf("variant_order %q invalid (default|ascending|descending)", a.VariantOrder)
+	}
+	// Rate-control patterns that START limited (pyramid, ramp_up) must carry an
+	// initial network cap (proxy.shape.rate_mbps). The pattern is armed POST-launch
+	// (it needs the live manifest ladder), so without a config-on-connect cap the
+	// player streams unconstrained until the pattern kicks in and then cliff-dives.
+	// rate_mbps is applied at config-on-connect — the constraint the cold start needs.
+	if a.Shape != nil && (a.Shape.Pattern == "pyramid" || a.Shape.Pattern == "ramp_up") {
+		if a.Shape.RateMbps == nil || *a.Shape.RateMbps <= 0 {
+			return fmt.Errorf("shape pattern %q starts limited — set proxy.shape.rate_mbps as the initial network cap (applied at config-on-connect, before the pattern arms)", a.Shape.Pattern)
+		}
+	}
+	// step_seconds is constrained by the shaper's pattern engine — validate it at
+	// expand time so a bad value fails fast instead of post-launch at ApplyPattern.
+	if a.Shape != nil && a.Shape.StepSeconds != 0 {
+		switch a.Shape.StepSeconds {
+		case 6, 12, 18, 24, 60, 120:
+		default:
+			return fmt.Errorf("shape.step_seconds %d invalid (6|12|18|24|60|120)", a.Shape.StepSeconds)
+		}
 	}
 	if a.Class != "" {
 		if err := validateClass(a.Class); err != nil {
 			return err
 		}
 	}
-	// live_offset window: validate against the proxy's supported enum up front so
-	// an unsupported window fails before any session is configured. The app lever
-	// reads the same product window, so the check applies to both.
-	if a.LiveOffset != nil {
-		off := proxy.ContentManipulationLiveOffset(int(*a.LiveOffset))
-		if float64(int(*a.LiveOffset)) != *a.LiveOffset || !off.Valid() {
-			return fmt.Errorf("live_offset %g is not a supported window (0|2|4|6|12|18|24|30|36|42)", *a.LiveOffset)
+	// live_offset window: validate both surfaces against the proxy's supported
+	// enum up front so an unsupported window fails before any session is
+	// configured. The app surface reads the same product window.
+	for _, off := range []*float64{a.ProxyLiveOffset, a.AppLiveOffset} {
+		if off == nil {
+			continue
+		}
+		o := proxy.ContentManipulationLiveOffset(int(*off))
+		if float64(int(*off)) != *off || !o.Valid() {
+			return fmt.Errorf("live_offset %g is not a supported window (0|2|4|6|12|18|24|30|36|42)", *off)
 		}
 	}
 	return nil
@@ -264,13 +447,55 @@ func sortedAxisNames(axes map[string][]any) []string {
 
 // comboID builds a reproducible, label-safe id from the current odometer
 // position: name/axis-value pairs in sorted-axis order, joined by '.'. Uses '-'
-// and '.' (never '=' or ',', which the forwarder label vocab forbids).
-func comboID(specName string, names []string, indices []int, axes map[string][]any) string {
+// and '.' (never '=' or ',', which the forwarder label vocab forbids). The slug
+// is precomputed per axis value (scalar slug, or object label/hash).
+func comboID(specName string, names []string, indices []int, av map[string][]axisVal) string {
 	parts := make([]string, 0, len(names))
 	for i, name := range names {
-		parts = append(parts, name+"-"+slug(axes[name][indices[i]]))
+		parts = append(parts, name+"-"+av[name][indices[i]].slug)
 	}
 	return specName + "/" + strings.Join(parts, ".")
+}
+
+// comboGroupID is comboID with the compare axis (and platform) OMITTED, suffixed
+// by platform — so every arm differing only on the compare axis lands in one
+// group, and arms on different devices never cross-compare (mirrors seed.go's
+// grp-<slug>-<platform> convention).
+func comboGroupID(specName string, names []string, indices []int, av map[string][]axisVal, compare, platform, runID string) string {
+	parts := make([]string, 0, len(names))
+	for i, name := range names {
+		if name == compare || name == "platform" {
+			continue
+		}
+		parts = append(parts, name+"-"+av[name][indices[i]].slug)
+	}
+	base := specName
+	if len(parts) > 0 {
+		base += "/" + strings.Join(parts, ".")
+	}
+	id := "grp-" + base
+	if platform != "" {
+		id = fmt.Sprintf("grp-%s-%s", base, platform)
+	}
+	if runID != "" {
+		id += "-" + runID
+	}
+	return id
+}
+
+// comboRole tags the arm's side of the comparison: the FIRST value of the compare
+// axis is the control, every other value a variant (Experiment.Arm is a free
+// string, so a >2-way compare axis yields one control + N variants).
+func comboRole(compare string, names []string, indices []int, axes map[string][]any) string {
+	for i, name := range names {
+		if name == compare {
+			if indices[i] == 0 {
+				return string(sweep.ArmControl)
+			}
+			return string(sweep.ArmVariant)
+		}
+	}
+	return ""
 }
 
 func slug(v any) string {
@@ -304,12 +529,80 @@ func formatNum(f float64) string {
 }
 
 func knownAxisList() string {
-	names := make([]string, 0, len(axisKeys))
+	names := make([]string, 0, len(axisKeys)+len(objectAxisKeys))
 	for n := range axisKeys {
+		names = append(names, n)
+	}
+	for n := range objectAxisKeys {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 	return strings.Join(names, ", ")
+}
+
+// axisVal pairs an axis value's id-slug with the value to merge into the arm map.
+type axisVal struct {
+	slug string
+	val  any
+}
+
+// buildAxisVals precomputes the (slug, decode-value) for every axis value so the
+// combo build and comboID stay consistent.
+func buildAxisVals(axes map[string][]any) map[string][]axisVal {
+	out := make(map[string][]axisVal, len(axes))
+	for name, vals := range axes {
+		av := make([]axisVal, len(vals))
+		for i, v := range vals {
+			s, decoded := axisSlugAndValue(v)
+			av[i] = axisVal{slug: s, val: decoded}
+		}
+		out[name] = av
+	}
+	return out
+}
+
+// axisSlugAndValue derives an id-slug for one axis value and the value to merge.
+// Scalars keep their plain slug. An object value (a recipe block) uses an optional
+// reserved `label:` key for a readable id — stripped before the block is decoded
+// — or, absent a label, a short stable hash of the block's canonical JSON.
+func axisSlugAndValue(v any) (string, any) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return slug(v), v
+	}
+	if lbl, ok := m["label"].(string); ok && lbl != "" {
+		clean := make(map[string]any, len(m))
+		for k, vv := range m {
+			if k == "label" {
+				continue
+			}
+			clean[k] = vv
+		}
+		return slug(lbl), clean
+	}
+	return hashObject(m), m
+}
+
+// hashObject is a short, label-safe, stable id for an unlabelled object axis
+// value. json.Marshal sorts map keys, so the same block always hashes the same.
+func hashObject(m map[string]any) string {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return "obj"
+	}
+	h := fnv.New32a()
+	_, _ = h.Write(b)
+	return fmt.Sprintf("obj-%08x", h.Sum32())
+}
+
+// overlayArm layers an explicit/group arm over the defaults map (arm wins) and
+// returns the merged Arm. Shared by the explicit-arm and groups paths.
+func overlayArm(base map[string]any, a *Arm) (*Arm, error) {
+	am, err := armToMap(a)
+	if err != nil {
+		return nil, err
+	}
+	return mapToArm(mergeMaps(cloneMap(base), am))
 }
 
 // armToMap round-trips an arm through JSON to a generic map (nil → empty map),
@@ -329,13 +622,20 @@ func armToMap(a *Arm) (map[string]any, error) {
 	return m, nil
 }
 
+// mapToArm decodes a merged arm map strictly: DisallowUnknownFields applies
+// recursively, so a typo'd key inside an object axis value (e.g. proxy.shape:
+// {patern: pyramid}) is rejected rather than silently dropped. Combo keys are
+// always valid Arm fields (axis names are validated; defaults come from a valid
+// Arm), so the only thing strict mode adds is catching object-internal typos.
 func mapToArm(m map[string]any) (*Arm, error) {
 	b, err := json.Marshal(m)
 	if err != nil {
 		return nil, err
 	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
 	var a Arm
-	if err := json.Unmarshal(b, &a); err != nil {
+	if err := dec.Decode(&a); err != nil {
 		return nil, err
 	}
 	return &a, nil
@@ -350,8 +650,8 @@ func cloneMap(m map[string]any) map[string]any {
 }
 
 // mergeMaps overlays src onto dst (src wins) and returns dst. Shallow — arm maps
-// are one level of scalars plus whole object blocks, and an explicit arm
-// replaces a block wholesale rather than deep-merging into it.
+// are one level of scalars plus whole object blocks, and an explicit arm replaces
+// a block wholesale rather than deep-merging into it.
 func mergeMaps(dst, src map[string]any) map[string]any {
 	for k, v := range src {
 		dst[k] = v

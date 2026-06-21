@@ -1,6 +1,7 @@
 import AVFoundation
 import Combine
 import Foundation
+import os
 
 fileprivate let consoleTimestampFormatter: DateFormatter = {
     let f = DateFormatter()
@@ -347,6 +348,12 @@ final class PlaybackDiagnostics: ObservableObject {
     private(set) var playStartAt: Date?
     private var lastAdvancingTime: Double = 0
     private var lastAdvancingAt: Date?
+    /// #1 — trailing segment-buffer depth (loadedTimeRanges end ahead of the
+    /// playhead), so checkFrozenState can treat buffer growth as progress.
+    private var lastBufferDepth: Double = 0
+    /// os_log mirror (same subsystem as PlayerViewModel) so the [FROZEN] /
+    /// [LIVE_RESYNC] traces are greppable via `log show` on Appium-launched sims.
+    private static let log = Logger(subsystem: "com.jeoliver.InfiniteStreamPlayer", category: "diagnostics")
     private var frozenLoggedAt: Date?
     private var lastObservedSegmentSequence: Int?
     private var maxObservedSegmentSequence: Int?
@@ -1204,8 +1211,19 @@ final class PlaybackDiagnostics: ObservableObject {
     private func checkFrozenState() {
         let now = Date()
         let time = currentTime
-        if abs(time - lastAdvancingTime) > 0.01 {
-            lastAdvancingTime = time
+        // #1 — progress = playhead advance OR segment-buffer growth. Under a
+        // throttled / slow start the playhead sits still while the buffer fills;
+        // that's network progress, not a freeze. Counting buffer growth keeps the
+        // live-resync ladder (and the frozen/wedge watches) from misfiring on a
+        // bandwidth-limited start — a TRUE wedge has BOTH a stuck playhead AND a
+        // flat buffer. When the buffer later stops growing the clock resumes, so a
+        // genuine stall is still caught.
+        let bufferDepth = currentBufferDepth()
+        let bufferGrew = bufferDepth > lastBufferDepth + 0.05
+        lastBufferDepth = bufferDepth
+        let playheadAdvanced = abs(time - lastAdvancingTime) > 0.01
+        if playheadAdvanced || bufferGrew {
+            if playheadAdvanced { lastAdvancingTime = time }
             lastAdvancingAt = now
             if frozenDetected {
                 frozenDetected = false
@@ -1244,7 +1262,9 @@ final class PlaybackDiagnostics: ObservableObject {
             let reason = player?.reasonForWaitingToPlay?.rawValue ?? "none"
             let ranges = item?.loadedTimeRanges.map { $0.timeRangeValue }
             let rangeDesc = ranges?.map { String(format: "%.1f-%.1f", $0.start.seconds, $0.start.seconds + $0.duration.seconds) }.joined(separator: ", ") ?? "none"
-            print("[FROZEN] time=\(String(format: "%.2f", time)) stalled_for=\(String(format: "%.1fs", stalledFor)) state=\(state) rate=\(rate) timeControlStatus=\(status) waitingReason=\(reason) bufferEmpty=\(bufEmpty) likelyToKeepUp=\(keepUp) loadedRanges=[\(rangeDesc)]")
+            let frozenMsg = "[FROZEN] time=\(String(format: "%.2f", time)) stalled_for=\(String(format: "%.1fs", stalledFor)) state=\(state) rate=\(rate) timeControlStatus=\(status) waitingReason=\(reason) bufferEmpty=\(bufEmpty) likelyToKeepUp=\(keepUp) bufferDepth=\(String(format: "%.1fs", currentBufferDepth())) variant=\(currentVariantLabel() ?? "?") seg=\(lastObservedSegmentSequence.map(String.init) ?? "?") loadedRanges=[\(rangeDesc)]"
+            print(frozenMsg)
+            Self.log.notice("\(frozenMsg, privacy: .public)")
         }
         if stalledFor >= 3.0 && frozenDetected {
             // Log every 3 seconds while frozen
@@ -1259,7 +1279,9 @@ final class PlaybackDiagnostics: ObservableObject {
         // a restart is already pending, so this only acts on the silent-stall gap.
         if stalledFor >= liveResyncStallSeconds && !liveResyncDue {
             liveResyncDue = true
-            print("[LIVE_RESYNC] no progress for \(String(format: "%.0fs", stalledFor)) — live-resync restart (state=\(state) rate=\(player?.rate ?? 0))")
+            let lrMsg = "[LIVE_RESYNC] no progress for \(String(format: "%.0fs", stalledFor)) (playhead AND buffer flat) — arming live-resync restart (state=\(state) rate=\(player?.rate ?? 0) bufferDepth=\(String(format: "%.1fs", currentBufferDepth())) variant=\(currentVariantLabel() ?? "?") seg=\(lastObservedSegmentSequence.map(String.init) ?? "?"))"
+            print(lrMsg)
+            Self.log.notice("\(lrMsg, privacy: .public)")
         }
         // #703 — hard wedge: armed by a -12880 AND no progress for
         // wedgeConfirmSeconds. Distinct from frozenDetected (3s) — this is
@@ -1513,6 +1535,19 @@ final class PlaybackDiagnostics: ObservableObject {
             wedgeArmedAt = Date()
         }
 
+        // Capture the structured (domain, code) from the errorLog entry too.
+        // These are frequently TRANSIENT (segment-fetch timeout -12889/-16830,
+        // live-edge -12889 — AVPlayer abandons the segment and recovers) and never
+        // reach describeError(): player.error stays nil, so without this the
+        // structured fields only ever show FATAL errors and the transient timeouts
+        // that drive variant-shift/abandon are invisible in the archive. Record the
+        // latest errorLog (domain, code) so player_metrics_error_code/_error_domain
+        // surface transient failures too; player_metrics_terminal_* stays the fatal one.
+        if event.errorStatusCode != 0 {
+            lastErrorCode = event.errorStatusCode
+            lastErrorDomain = event.errorDomain
+        }
+
         let comment = event.errorComment ?? ""
         let uri = event.uri ?? ""
         let isPlaylist = uri.contains(".m3u8")
@@ -1648,6 +1683,17 @@ final class PlaybackDiagnostics: ObservableObject {
     // AVPlayer's access log URIs are per-variant playlists, not per-segment,
     // so segment-keyed info comes from RequestTracker (the proxy sees every
     // real segment fetch). Segment paths look like .../2160p/segment_00006.m4s.
+    /// #1 — trailing segment-buffer depth: the loaded range end ahead of the
+    /// playhead. >0 and growing means the network is delivering even while the
+    /// playhead is stalled (a throttled start), which checkFrozenState counts as
+    /// progress so the live-resync ladder doesn't misfire on bandwidth limits.
+    private func currentBufferDepth() -> Double {
+        guard let item = player?.currentItem,
+              let last = item.loadedTimeRanges.map({ $0.timeRangeValue }).last else { return 0 }
+        let end = last.start.seconds + last.duration.seconds
+        return max(0, end - item.currentTime().seconds)
+    }
+
     private func currentVariantLabel() -> String? {
         // Use the last *video* segment URI — audio interleaves and would
         // otherwise cause the reported variant to flip to "audio".

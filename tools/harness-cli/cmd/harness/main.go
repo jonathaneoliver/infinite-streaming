@@ -125,6 +125,8 @@ func main() {
 		exit(cmdFault(client, args[1:], g.asJSON))
 	case "shape":
 		exit(cmdShape(client, args[1:], g.asJSON))
+	case "reset":
+		exit(cmdReset(client, args[1:], g.asJSON))
 	case "tail":
 		exit(cmdTail(client, args[1:], g.asJSON))
 	case "ts":

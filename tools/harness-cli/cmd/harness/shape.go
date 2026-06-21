@@ -110,6 +110,35 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	return doSliderShape(client, ctx, pid, asJSON, *rate, *delay, *loss)
 }
 
+// cmdReset clears a player's shape + fault rules + content to a clean baseline
+// (the comprehensive ResetSession merge-patch). The harness calls this to give a
+// reused player_id a known-clean proxy state before a test; manual sessions never
+// invoke it, so their carry-over is untouched (see feedback_manual_proxy_carryover).
+func cmdReset(client *api.Client, args []string, asJSON bool) error {
+	if len(args) < 1 {
+		return errors.New("usage: reset <player_id|target> — clear shape + fault_rules + content to a clean baseline")
+	}
+	fs := flag.NewFlagSet("reset", flag.ContinueOnError)
+	action := fs.String("action", "harness reset session", "control-event action label")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	pid, err := client.Resolve(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	if _, err := client.ResetSession(ctx, pid, *action); err != nil {
+		return err
+	}
+	if asJSON {
+		fmt.Printf("{\"player_id\":%q,\"reset\":true}\n", pid)
+	} else {
+		fmt.Printf("reset %s → clean baseline (shape + fault_rules + content cleared)\n", pid)
+	}
+	return nil
+}
+
 func showShape(client *api.Client, ctx context.Context, pid string, asJSON bool) error {
 	rec, etag, err := client.Player(ctx, pid)
 	if err != nil {

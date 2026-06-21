@@ -76,10 +76,14 @@ func computeStartupCaps(bws map[string]runner.VariantBandwidth) []float64 {
 		}
 	}
 	sort.Sort(sort.Reverse(sort.Float64Slice(peaks)))
-	f := 1 + runner.LadderBumpPct()/100
+	// Initial startup limit per the selection rule: the link rate at which a
+	// player (measuring ~95% goodput, reserving ExoPlayer's 0.70 bandwidth
+	// fraction) will just admit this variant — peak / (0.70 × 0.95) ≈ peak×1.504.
+	// REPLACES the old peak × (1 + bump) framing margin on the startup path
+	// (CHAR_LADDER_BUMP_PCT no longer applies here; it governs the pattern ladder).
 	out := make([]float64, 0, len(peaks))
 	for _, pk := range peaks {
-		out = append(out, math.Round(pk*f*1000)/1000)
+		out = append(out, math.Round(runner.InitialRateMbps(pk)*1000)/1000)
 	}
 	return out
 }

@@ -1,0 +1,19 @@
+# Single sim, s6 — same recipe as pyramid-quad: pyramid @ 1 Mbps initial network
+# cap + 1 Mbps client startup cap, NO live_offset, NO alternating. parallel:true
+# → fleet backend (1 device), the working path (the sweep probe doesn't fetch for
+# a lone arm).
+name: pyramid-single-s6
+class: config
+parallel: true
+reps: 1
+duration_s: 150
+defaults:
+  platform: ipad-sim
+  content: insane_new_p200_h264
+  is.peak_bitrate_mbps: 1          # client startup cap
+  proxy.shape:
+    pattern: pyramid
+    step_seconds: 18
+    rate_mbps: 1                   # initial network cap
+axes:
+  is.segment: [s6]

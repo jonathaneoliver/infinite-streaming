@@ -21,21 +21,19 @@ type ArmResult struct {
 }
 
 // RenderTable formats every arm result as a fixed-width table. Per the project's
-// full-tables rule it reproduces every column; the lever/offset columns read as
-// "-" when the arm has no live_offset. The header line names the spec.
+// full-tables rule it reproduces every column; the src/offset columns read as "-"
+// when the arm has no live_offset, and group/role read "-" for ungrouped arms.
+// The header line names the spec.
 func RenderTable(specName string, results []ArmResult) string {
 	rows := make([][]string, 0, len(results)+1)
-	header := []string{"#", "id", "platform", "seg", "proto", "lever", "intended", "achieved", "landed", "verdict", "play_id", "note"}
+	header := []string{"#", "id", "platform", "seg", "proto", "src", "intended", "achieved", "landed", "group", "role", "verdict", "play_id", "note"}
 	rows = append(rows, header)
 
 	for i, r := range results {
 		a := r.Arm
-		lever, intended := "-", "-"
+		src, intended := "-", "-"
 		if off, ok := a.IntendedLiveOffset(); ok {
-			lever = a.Lever
-			if lever == "" {
-				lever = leverProxy
-			}
+			src = offsetSrc(a)
 			intended = formatNum(off)
 		}
 		achieved := "-"
@@ -59,10 +57,12 @@ func RenderTable(specName string, results []ArmResult) string {
 			dash(a.Platform),
 			dash(a.Segment),
 			dash(a.Protocol),
-			lever,
+			src,
 			intended,
 			achieved,
 			landed,
+			dash(a.Group),
+			dash(a.Role),
 			dash(r.Verdict),
 			shortID(r.PlayID),
 			note,
@@ -121,6 +121,23 @@ func dash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// offsetSrc reports which live-offset surface(s) the arm imposes: proxy (server
+// manifest hold-back), app (client override), both (the precedence cell), or "-".
+func offsetSrc(a *Arm) string {
+	p := a.ProxyLiveOffset != nil && *a.ProxyLiveOffset > 0
+	c := a.AppLiveOffset != nil && *a.AppLiveOffset > 0
+	switch {
+	case p && c:
+		return "both"
+	case p:
+		return "proxy"
+	case c:
+		return "app"
+	default:
+		return "-"
+	}
 }
 
 func boolMark(b bool) string {

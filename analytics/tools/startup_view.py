@@ -164,6 +164,34 @@ def marker_ms(base, insecure, play_id, until):
     return None
 
 
+def startup_marks(base, insecure, play_id):
+    """TTFF + videoWillKeepUp as (seconds_from_start, label) from player_metrics.
+
+      TTFF            — video_first_frame_time_ms (first frame rendered)
+      videoWillKeepUp — video_start_time_ms (playback start ≈ likely-to-keep-up)
+
+    Both fields are already relative to the play's start, so they drop straight
+    onto the segment timeline's t-axis (which is anchored at the first request).
+    """
+    rows = run_harness(base, insecure, ["query", "events", play_id, "--limit", "1000"])
+    pms = [r["player_metrics"] for r in rows if isinstance(r, dict) and r.get("player_metrics")]
+
+    def first_nonzero(field):
+        for m in pms:
+            if m.get(field):
+                return m[field]
+        return None
+
+    marks = []
+    ttff = first_nonzero("video_first_frame_time_ms")
+    keep = first_nonzero("video_start_time_ms")
+    if ttff:
+        marks.append((ttff / 1000.0, ">>> TTFF (first frame)"))
+    if keep:
+        marks.append((keep / 1000.0, ">>> videoWillKeepUp (video-start)"))
+    return marks
+
+
 def col(v, width, prec=None, dash="-"):
     """Right-justified fixed-width cell; `dash` when the value is missing."""
     if v is None:
@@ -181,6 +209,9 @@ def main():
                          "playing=first rate=1, time=use --window")
     ap.add_argument("--window", type=float, default=25.0,
                     help="seconds to show when --until=time, or fallback if the marker is absent (default 25)")
+    ap.add_argument("--vseg", type=int, default=None, metavar="N",
+                    help="stop after the Nth video segment completes (overrides --until); "
+                         "interleaves TTFF + videoWillKeepUp markers")
     ap.add_argument("--all", action="store_true", help="whole play, not just startup")
     ap.add_argument("--limit", type=int, default=600, help="max avmetric events to scan")
     ap.add_argument("--no-seq", action="store_true", help="skip the network join for segment numbers")
@@ -208,8 +239,27 @@ def main():
     for s in segs:
         s["t"] = (s["ts_ms"] - t0) / 1000.0
 
+    # TTFF + videoWillKeepUp markers, interleaved into the timeline below.
+    marks = startup_marks(args.base, args.insecure, play_id)
+
     cutoff, boundary = None, None
-    if not args.all:
+    if args.vseg:
+        # Boundary = the Nth *video* segment completing: keep every row (incl. the
+        # segment's partials) up to where the (N+1)th distinct video segment begins.
+        seen = []
+        for s in segs:
+            if s["stream"].startswith("v") and not s["is_map"] and s.get("seg") not in seen:
+                seen.append(s.get("seg"))
+                if len(seen) > args.vseg:
+                    cutoff = s["t"]
+                    break
+        if cutoff is None:
+            cutoff = segs[-1]["t"] + 0.001
+        segs = [s for s in segs if s["t"] < cutoff]
+        last_v = max((s["t"] for s in segs if s["stream"].startswith("v") and not s["is_map"]),
+                     default=cutoff)
+        boundary = f"video segment {args.vseg} complete @ {last_v:.2f}s"
+    elif not args.all:
         if args.until in ("keepup", "playing"):
             ms = marker_ms(args.base, args.insecure, play_id, args.until)
             if ms is not None:
@@ -232,15 +282,46 @@ def main():
     if args.verbose:
         hdr += f'  {"segdur":>7}  {"cache":>5}'
     print(hdr)
+    print("# each row = one segment-request completion at t (status col); "
+          "seg N.k = kth 2s sub-segment byte-ranged into 6s container N")
+    # The 2s playlist byte-ranges into 6s .m4s files, so consecutive 2s segments
+    # share a container number — sub-index them .1/.2/.3 so each completion is distinct.
+    total = {}
+    for s in segs:
+        if not s["is_map"] and s.get("seg") is not None:
+            total[(s["stream"], s["seg"])] = total.get((s["stream"], s["seg"]), 0) + 1
+    occ = {}
+    timeline = []
     for s in segs:
         stream = s["stream"] + (" init" if s["is_map"] else "")
+        if s["is_map"] or s.get("seg") is None:
+            seg_cell = "-"
+        else:
+            key = (s["stream"], s["seg"])
+            occ[key] = occ.get(key, 0) + 1
+            seg_cell = f'{s["seg"]}.{occ[key]}' if total[key] > 1 else str(s["seg"])
+        if s["is_map"]:
+            status = "init"
+        elif s["kb"] > 0:
+            status = "✓complete"
+        elif s["from_cache"]:
+            status = "✓cache"
+        else:
+            status = "·no-bytes"
         dur_s = s["dur_ms"] / 1000.0 if s["dur_ms"] is not None else None
         line = (
-            f'{s["t"]:>6.2f}  {stream:<9}  {col(s.get("seg"), 5)}  {col(s["kb"], 6, 0)}  '
+            f'{s["t"]:>6.2f}  {stream:<9}  {seg_cell:>5}  {col(s["kb"], 6, 0)}  '
             f'{col(dur_s, 7, 2)}  {col(s["mbps"], 6, 2)}  {col(s["ttfb_ms"], 8, 0)}'
         )
         if args.verbose:
             line += f'  {col(s["seg_dur"], 7, 2)}  {"yes" if s["from_cache"] else "no":>5}'
+        line += f"  {status}"
+        timeline.append((s["t"], line))
+    for mt, ml in marks:
+        if cutoff is None or mt <= cutoff + 0.5:
+            timeline.append((mt, f"{mt:>6.2f}  {ml}"))
+    timeline.sort(key=lambda x: x[0])
+    for _, line in timeline:
         print(line)
 
 
@@ -354,9 +435,26 @@ def render_chunks_from_log(args):
             f'{col(s["dur"], 7, 2)}  {col(s["rate"], 6, 2)}  {col(s["ttfb"], 8, 0)}  '
             f'{col(len(s["chunks"]), 4)}'
         )
-        if args.verbose:
+
+    # --verbose: interleaved per-chunk stream — every chunk across all segments in
+    # global wall-clock order, so the video and audio chunks are seen competing for
+    # the throttle chunk-by-chunk (not grouped per segment as the table above is).
+    if args.verbose:
+        flat = []
+        for s in segs:
+            stream, _, seg = s["seg"].partition("/")
+            segnum = seg.replace("segment_", "#").replace(".m4s", "")
             for c in s["chunks"]:
-                print(f'        └ t={c["t_ms"]:>7.0f}ms  +{c["delta"]:>6}B  cum={c["cum"]:>8}B')
+                if c["epoch"] is not None:
+                    flat.append((c["epoch"], stream, segnum, c["delta"]))
+        flat.sort(key=lambda x: x[0])
+        if flat:
+            ct0 = flat[0][0]
+            print()
+            print("# interleaved chunks (video ↔ audio, global wall-clock)")
+            print(f'{"t(s)":>7}  {"stream":<6}  {"seg":<8}  {"+KB":>6}')
+            for ep, stream, segnum, delta in flat:
+                print(f'{ep - ct0:>7.2f}  {stream:<6}  {segnum:<8}  {delta / 1024.0:>6.1f}')
 
 
 def render_chunks_from_network(args):

@@ -63,6 +63,7 @@ func resolveAllowedVariants(ctx context.Context, client *api.Client, content, sp
 // isLadderSpec reports whether a spec needs the master ladder to resolve.
 func isLadderSpec(spec string) bool {
 	return spec == "drop-top-rung" ||
+		spec == "alternating_variants" ||
 		strings.HasPrefix(spec, "drop-top-") ||
 		strings.HasPrefix(spec, "keep-bottom-")
 }
@@ -75,9 +76,12 @@ func ladderKeepSet(spec string, rungs []masterRung) ([]string, error) {
 		return nil, fmt.Errorf("resolve %q: no variants in master", spec)
 	}
 	drop, keepBottom := 0, 0
+	alternating := false
 	switch {
 	case spec == "drop-top-rung":
 		drop = 1
+	case spec == "alternating_variants":
+		alternating = true
 	case strings.HasPrefix(spec, "drop-top-"):
 		n, err := strconv.Atoi(strings.TrimPrefix(spec, "drop-top-"))
 		if err != nil || n < 1 {
@@ -98,13 +102,20 @@ func ladderKeepSet(spec string, rungs []masterRung) ([]string, error) {
 	sort.Slice(rungs, func(i, j int) bool { return rungs[i].bandwidth > rungs[j].bandwidth })
 
 	var kept []masterRung
-	if keepBottom > 0 {
+	switch {
+	case alternating:
+		// Keep every 2nd rung on the bandwidth-sorted ladder — the #820
+		// "keep every other (2x)" thinning (11 → 6). Keeps the top + bottom.
+		for i := 0; i < len(rungs); i += 2 {
+			kept = append(kept, rungs[i])
+		}
+	case keepBottom > 0:
 		if keepBottom >= len(rungs) {
 			kept = rungs
 		} else {
 			kept = rungs[len(rungs)-keepBottom:]
 		}
-	} else {
+	default:
 		if drop >= len(rungs) {
 			return nil, fmt.Errorf("resolve %q: would drop all %d rungs", spec, len(rungs))
 		}

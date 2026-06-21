@@ -1,0 +1,18 @@
+# Single-arm s6, CONSTANT 5 Mbps network cap (no pyramid). Isolates whether the
+# startup ABR 4K-climb still wedges WITH bandwidth headroom: a 2.5MB 4K segment is
+# ~4s at 5 Mbps vs ~24s at the pyramid's 1 Mbps start. If it reaches first frame,
+# the wedge is bandwidth-starvation of the 4K climb; if it still wedges, it's not.
+name: const5-single-s6
+class: config
+parallel: true                     # use the FLEET backend (1 device) — the sweep path doesn't fetch/play for a lone arm
+reps: 1
+duration_s: 120
+defaults:
+  platform: ipad-sim
+  content: insane_new_p200_h264
+  is.peak_bitrate_mbps: 1          # client startup cap unchanged (the cap that isn't holding)
+  proxy.live_offset: 18            # manifest hold-back (server-side)
+  proxy.shape:
+    rate_mbps: 5                   # CONSTANT 5 Mbps at config-on-connect, no pattern to arm
+axes:
+  is.segment: [s6]

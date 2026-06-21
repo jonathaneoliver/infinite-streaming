@@ -474,6 +474,27 @@ func (c *Client) ClearShape(ctx context.Context, playerID, action string) (strin
 		})
 }
 
+// ResetSession clears ALL server-side per-session settings to default in one
+// atomic merge-patch: shape (rate/delay/loss/pattern/transport_fault), HTTP fault
+// rules (error/hang/corrupt injection), and content (master-playlist) mutations.
+// Gives a player_id a known-clean proxy baseline before a test so nothing carries
+// over from a prior run that reused the same player_id — config-on-connect (#712)
+// drops proxy.* args on reattach, so it can't self-clear. Client-side per-play
+// config is reset separately by the app's reset_advanced sentinel.
+func (c *Client) ResetSession(ctx context.Context, playerID, action string) (string, error) {
+	const body = `{"shape": null, "fault_rules": [], "content": null}`
+	return c.patchWithETagRetry(ctx, playerID, action,
+		"PATCH /api/v2/players/"+playerID+" (reset session)",
+		map[string]any{"shape": nil, "fault_rules": []any{}, "content": nil},
+		func(etag string) (*http.Response, error) {
+			params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
+			return c.proxy.PatchApiV2PlayersPlayerIdWithBody(
+				ctx, proxy.PlayerId(playerID), params,
+				"application/merge-patch+json", bytes.NewReader([]byte(body)),
+			)
+		})
+}
+
 // PatchShapeMap PATCHes the player's shape with an arbitrary map body,
 // allowing explicit nulls (e.g. `{"pattern": null}`) that the typed
 // `*Pattern` struct field can't express because of `omitempty` JSON
