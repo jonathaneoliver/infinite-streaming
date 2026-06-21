@@ -56,7 +56,7 @@ const isAllAllowed = computed(() => allowed.value.size === 0);
  *  (`playlist_6s_360p.m3u8`) OR its resolution: full "640x360", bare height
  *  "360", or "360p". Mirrors the proxy's variantAllowed (go-proxy main.go) so a
  *  resolution-form keep-set — e.g. set by the characterization harness or the
- *  "Keep every other" → resolution path — is reflected here, not shown as
+ *  "Alternating" → resolution path — is reflected here, not shown as
  *  "none selected". */
 function variantMatches(v: { url?: string; resolution?: string }): boolean {
   if (v.url && allowed.value.has(v.url)) return true;
@@ -107,7 +107,7 @@ function onVariantToggle(url: string, checked: boolean) {
 }
 
 /** Adjacent BANDWIDTH ratios (ascending). A dense geometric ladder sits at
- *  ~1.41× (√2); the legacy 2× ladder is ~2.0×. Used to gate "Keep every other"
+ *  ~1.41× (√2); the legacy 2× ladder is ~2.0×. Used to gate "Alternating"
  *  so it only offers on this ladder or an equivalent (#762) — halving a 2×
  *  ladder would create ~4× gaps. */
 const isGeometricLadder = computed(() => {
@@ -122,12 +122,13 @@ const isGeometricLadder = computed(() => {
   return true;
 });
 
-/** Thin to the "skip every other" 2× subset: on the bandwidth-sorted ladder
- *  keep indices 0,2,4,… plus the last, so floor AND ceiling are retained. On
- *  this geometric ladder that yields exactly the original 2× rungs. Sets the
- *  existing allowed_variants whitelist — the proxy already filters the master
- *  to it, so no backend change (#762). */
-function keepEveryOther() {
+/** Alternating (2×) thinning: on the bandwidth-sorted ladder keep indices
+ *  0,2,4,… plus the last, so floor AND ceiling are retained. On this geometric
+ *  ladder that yields exactly the original 2× rungs. Matches the harness
+ *  `allowed_variants: alternating_variants` spec. Sets the existing
+ *  allowed_variants whitelist — the proxy already filters the master to it, so
+ *  no backend change (#762). */
+function alternatingVariants() {
   const asc = variants.value
     .slice()
     .sort((a, b) => (a.bandwidth ?? 0) - (b.bandwidth ?? 0));
@@ -251,14 +252,14 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
         <button
           type="button"
           class="thin-btn"
-          data-testid="content-keep-every-other"
+          data-testid="content-alternating"
           :disabled="!isGeometricLadder"
           :title="isGeometricLadder
-            ? 'Drop the ~1.41× fill rungs → keep the 2× subset (floor + ceiling retained)'
+            ? 'Drop the ~1.41× fill rungs → keep the alternating 2× subset (floor + ceiling retained)'
             : 'Only on a dense ~1.41× geometric ladder — this content isn’t one'"
-          @click="keepEveryOther"
+          @click="alternatingVariants"
         >
-          Keep every other (2×)
+          Alternating (2×)
         </button>
       </div>
       <div v-if="!variants.length" class="muted">Play content once to populate variant list.</div>

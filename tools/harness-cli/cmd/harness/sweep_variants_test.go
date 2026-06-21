@@ -51,6 +51,11 @@ func TestLadderKeepSetVariants(t *testing.T) {
 	if got, _ := ladderKeepSet("keep-bottom-1", rungs); len(got) != 1 || got[0] != "360" {
 		t.Fatalf("keep-bottom-1 = %v, want [360]", got)
 	}
+	// alternating_variants → keep every 2nd rung (#820 keep-every-other); 3 rungs
+	// (2160,1080,360 desc) → [2160, 360] (top + bottom kept, middle dropped).
+	if got, _ := ladderKeepSet("alternating_variants", rungs); len(got) != 2 || got[0] != "2160" || got[1] != "360" {
+		t.Fatalf("alternating_variants = %v, want [2160 360]", got)
+	}
 	// drop-all is an error, not an empty (which would break the player).
 	if _, err := ladderKeepSet("drop-top-9", rungs); err == nil {
 		t.Fatal("dropping all rungs should error")
