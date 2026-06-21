@@ -1681,6 +1681,7 @@ watch(
     () => lineVisibility.play_start,
     () => lineVisibility.play_end,
     () => lineVisibility.user_marked,
+    () => lineVisibility.server_loop,
   ],
   () => { void syncLifecycleLines(); },
   { immediate: true },
@@ -2002,6 +2003,11 @@ onBeforeUnmount(() => {
   z-index: 4;
 }
 .events-timeline :deep(.vis-custom-time[class*='lc-user_marked-']::before) { border-top-color: #db2777; }
+.events-timeline :deep(.vis-custom-time[class*='lc-server_loop-']) {
+  border-left: 1.5px solid #84cc16 !important;
+  z-index: 4;
+}
+.events-timeline :deep(.vis-custom-time[class*='lc-server_loop-']::before) { border-top-color: #84cc16; }
 
 /* vis-timeline label panel + labelset pinned to the SAME 60px width
  * as the Chart.js charts' left y-axis (see MetricsLineChart.Y_WIDTH)
