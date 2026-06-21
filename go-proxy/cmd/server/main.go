@@ -1694,12 +1694,13 @@ func (t *TcTrafficManager) ensureClassCore(port int, rateMbps float64) error {
 // whenever the band's netem is (re)placed, since replacing a qdisc drops its
 // children. Best-effort: logs on failure.
 func (t *TcTrafficManager) addFairLeaf(port, band int) {
-	// PROXY_DISABLE_SFQ=1 skips the sfq leaf so the prio band falls back to
-	// netem's internal FIFO — the pre-#404 "before SFQ" behaviour, where the
-	// byte-heavy video flow dominates the queue and audio backs up behind it
-	// (no per-flow round-robin). A/B knob for testing whether the SFQ-driven
-	// audio fairness feeds AVPlayer's bandwidth over-read / variant over-selection.
-	if os.Getenv("PROXY_DISABLE_SFQ") == "1" {
+	// SFQ is OFF by default: the prio band falls back to netem's internal FIFO,
+	// where the byte-heavy video flow dominates the queue and audio backs up
+	// behind it (no per-flow round-robin). The A/B test concluded the SFQ-driven
+	// audio fairness was feeding AVPlayer's bandwidth over-read / variant
+	// over-selection, so FIFO is the default. Opt back IN with PROXY_ENABLE_SFQ=1
+	// to restore the per-flow fair-queue leaf.
+	if os.Getenv("PROXY_ENABLE_SFQ") != "1" {
 		return
 	}
 	portSuffix := fmt.Sprintf("%03d", port%1000)
