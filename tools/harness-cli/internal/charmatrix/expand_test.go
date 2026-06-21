@@ -194,6 +194,44 @@ func TestExpand_CompareGroups(t *testing.T) {
 	}
 }
 
+func TestExpandWithRunID_UniquePerRun(t *testing.T) {
+	// Two runs of the same spec must NOT share a group_id (else the dashboard joins
+	// the prior run's sessions); within one run, paired arms DO share it.
+	mk := func() *Spec {
+		return &Spec{
+			Name: "m", Parallel: true, Defaults: &Arm{Platform: "ipad-sim"},
+			Compare: "is.protocol",
+			Axes:    map[string][]any{"is.protocol": {"hls", "dash"}},
+		}
+	}
+	a1, err := ExpandWithRunID(mk(), "20260617T143052Z")
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	a2, err := ExpandWithRunID(mk(), "20260617T150000Z")
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	// Run id is in the group, with the spec name kept for readability.
+	if !strings.Contains(a1[0].Group, "20260617T143052Z") || !strings.HasPrefix(a1[0].Group, "grp-m-") {
+		t.Errorf("run id / spec name missing from group %q", a1[0].Group)
+	}
+	// Within one run, the two arms pair (same group).
+	if a1[0].Group != a1[1].Group {
+		t.Errorf("arms in one run must share a group: %q vs %q", a1[0].Group, a1[1].Group)
+	}
+	// Across runs, groups differ.
+	if a1[0].Group == a2[0].Group {
+		t.Errorf("two runs must not share a group_id: both %q", a1[0].Group)
+	}
+	// groups: block also gets the run id.
+	gspec := &Spec{Name: "m", Groups: []*Group{{ID: "x", Control: &Arm{}, Variants: []*Arm{{Segment: "s6"}}}}}
+	ga, _ := ExpandWithRunID(gspec, "RID")
+	if ga[0].Group != "m/x-RID" {
+		t.Errorf("groups-block run id: got %q, want m/x-RID", ga[0].Group)
+	}
+}
+
 func TestExpand_GroupsBlock(t *testing.T) {
 	spec := &Spec{
 		Name:     "m",
@@ -320,7 +358,7 @@ name: m
 defaults: { platform: ipad-sim }
 axes:
   proxy.shape:
-    - { pattern: pyramid, step_seconds: 12 }
+    - { pattern: pyramid, step_seconds: 12, rate_mbps: 1.5 }
     - { pattern: ramp_down, step_seconds: 12 }
 `
 	spec, err := Load([]byte(yaml))
@@ -360,7 +398,7 @@ name: m
 defaults: { platform: ipad-sim }
 axes:
   proxy.shape:
-    - { label: gentle, pattern: pyramid, step_seconds: 12 }
+    - { label: gentle, pattern: pyramid, step_seconds: 12, rate_mbps: 1.5 }
 `
 	spec, err := Load([]byte(yaml))
 	if err != nil {
@@ -523,6 +561,9 @@ func TestExpand_Validation(t *testing.T) {
 		{"group no variants", &Spec{Name: "m", Groups: []*Group{{ID: "g", Control: &Arm{}}}}, "at least one variant"},
 		{"bad role on explicit arm", &Spec{Name: "m", Arms: []*Arm{{Role: "sideways"}}}, "role"},
 		{"bad variant_order", &Spec{Name: "m", Arms: []*Arm{{VariantOrder: "shuffle"}}}, "variant_order"},
+		{"pyramid needs initial cap", &Spec{Name: "m", Arms: []*Arm{{Shape: &sweep.Shape{Pattern: "pyramid"}}}}, "starts limited"},
+		{"ramp_up needs initial cap", &Spec{Name: "m", Arms: []*Arm{{Shape: &sweep.Shape{Pattern: "ramp_up"}}}}, "starts limited"},
+		{"bad step_seconds", &Spec{Name: "m", Arms: []*Arm{{Shape: &sweep.Shape{Pattern: "ramp_down", StepSeconds: 16}}}}, "step_seconds"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

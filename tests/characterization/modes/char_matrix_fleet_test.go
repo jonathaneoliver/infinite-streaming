@@ -49,6 +49,10 @@ type armProbeConfig struct {
 	codec              string
 	peakBitrate        int
 	startsFirstVariant string
+	pattern            string
+	stepS              int
+	margin             int
+	patternMaster      bool
 	content            string
 	durationS          int
 }
@@ -66,6 +70,10 @@ func readArmProbeConfig(fleetIndex int) armProbeConfig {
 		codec:              p("CODEC"),
 		peakBitrate:        envInt(fmt.Sprintf("CHAR_ARM_%d_PEAK_BITRATE", fleetIndex), 0),
 		startsFirstVariant: p("FIRST_VARIANT"),
+		pattern:            p("PATTERN"),
+		stepS:              envInt(fmt.Sprintf("CHAR_ARM_%d_STEP_S", fleetIndex), 12),
+		margin:             envInt(fmt.Sprintf("CHAR_ARM_%d_MARGIN", fleetIndex), 5),
+		patternMaster:      p("PATTERN_MASTER") == "true",
 		content:            envOr(fmt.Sprintf("CHAR_ARM_%d_CONTENT", fleetIndex), strings.TrimSpace(os.Getenv("CHAR_CONTENT"))),
 		durationS:          envInt("CHAR_SWEEP_DURATION_S", 60),
 	}
@@ -180,6 +188,19 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		_ = launcher.Close()
 	})
 
+	// Clean proxy baseline (on by default): clear any shape/faults/content carried
+	// over from a prior run that reused this player_id, before the play + pattern.
+	// CHAR_NO_PROXY_RESET=1 skips it (preserve carry-over). Only this harness path
+	// resets; the proxy's reattach default is untouched, so manual sessions still
+	// carry over (see feedback_manual_proxy_carryover).
+	if strings.TrimSpace(os.Getenv("CHAR_NO_PROXY_RESET")) == "" {
+		if err := sess.ResetProxy(setupCtx); err != nil {
+			t.Logf("arm %d: ResetProxy (non-fatal): %v", dev.FleetIndex, err)
+		} else {
+			t.Logf("arm %d: proxy reset to clean baseline", dev.FleetIndex)
+		}
+	}
+
 	// Fleet HOME barrier: hold until every arm is at home, then all start
 	// playback together — so the arms stream simultaneously, not staggered.
 	if bars != nil {
@@ -200,6 +221,24 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	}
 	if herr := sess.WaitForHeartbeat(setupCtx, 90*time.Second); herr != nil {
 		t.Fatalf("WaitForHeartbeat: %v", herr)
+	}
+
+	// Arm the bandwidth pattern post-launch (it can't ride config-on-connect — the
+	// ladder is built from the live manifest variants, so the master playlist must
+	// be fetched first). ONLY the master arms it; the proxy propagates the master's
+	// pyramid to the group's slaves (NETSHAPE group pattern propagation), so all
+	// arms share ONE bandwidth timeline. A slave arming its own would create an
+	// independent, out-of-phase pyramid and confound the comparison.
+	if cfg.pattern != "" && cfg.patternMaster {
+		if err := sess.WaitForManifest(setupCtx, 45*time.Second); err != nil {
+			t.Fatalf("arm %d (master): waiting for manifest before pattern: %v", dev.FleetIndex, err)
+		}
+		if err := sess.ApplyPattern(setupCtx, cfg.pattern, cfg.stepS, cfg.margin); err != nil {
+			t.Fatalf("arm %d (master): ApplyPattern(%s): %v", dev.FleetIndex, cfg.pattern, err)
+		}
+		t.Logf("arm %d MASTER: armed %s pattern (step=%ds margin=%d%%) — proxy propagates to the group", dev.FleetIndex, cfg.pattern, cfg.stepS, cfg.margin)
+	} else if cfg.pattern != "" {
+		t.Logf("arm %d slave: pattern driven by the group master (no local ApplyPattern)", dev.FleetIndex)
 	}
 
 	// Let it play. The recipe (content/shape/live_offset/transfer) is already
