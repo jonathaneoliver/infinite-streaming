@@ -229,6 +229,10 @@ function colorForResolution(res: string | null | undefined): string {
 
 const props = defineProps<{
   playerId: string;
+  /** Coordination scope key (per-player, stable across plays). Drives
+   *  useChartCoordination only; data still keys off playerId. Falls back to
+   *  playerId when absent. */
+  coordId?: string;
   /** Samples stream from SessionDisplay's useSessionTimeSeries model.
    *  Each row is a CH session_snapshots projection (lanes_v1 bundle).
    *  EventsTimeline derives swim-lane segments from successive rows. */
@@ -244,7 +248,7 @@ const props = defineProps<{
    *  has no points (control_revision alone only says "something changed"). */
   controlStream?: Stream<Record<string, unknown>>;
 }>();
-const coord = useChartCoordination(toRef(props, 'playerId'));
+const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
 
 /** Adapter — map a CH session_snapshots row (wire shape from the v3
  *  /api/v2/timeseries endpoint) to the small subset of fields ingest()

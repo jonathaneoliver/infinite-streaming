@@ -23,6 +23,10 @@ import type { Stream } from '@/composables/useSessionTimeSeries';
 
 const props = defineProps<{
   playerId: string;
+  /** Coordination scope key (per-player, stable across plays). Drives
+   *  useChartCoordination only; data still keys off playerId. Falls back to
+   *  playerId when absent. */
+  coordId?: string;
   /** Network stream from the parent SessionDisplay's
    *  useSessionTimeSeries model. Supplies every per-request row for
    *  this (player, play), server-filtered to the current play_id,
@@ -31,7 +35,7 @@ const props = defineProps<{
 }>();
 const playerIdRef = toRef(props, 'playerId');
 usePlayer(playerIdRef); // keep the SSE subscription warm; live state is read off `coord` below
-const coord = useChartCoordination(playerIdRef);
+const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
 
 /** Rows to highlight for the synchronized "selected event" cursor.
  *

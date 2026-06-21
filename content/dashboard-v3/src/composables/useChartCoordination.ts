@@ -82,11 +82,32 @@ function writeExpandedStored(v: boolean) {
   try { localStorage.setItem(EXPANDED_STORAGE_KEY, v ? 'true' : 'false'); } catch { /* ignore */ }
 }
 
-function freshState(): ChartCoordinationState {
+// Bitrate-chart Y-axis max, persisted PER SCOPE (the coordination key —
+// per-player, not per-play; see SessionDisplay's coordId). Survives both a new
+// play (state is re-seeded from here) and a browser reload. Auto = key absent.
+const YMAX_STORAGE_PREFIX = 'dashboard_v3_bandwidth_ymax:';
+function readYMaxStored(pid: string): number | undefined {
+  try {
+    const raw = localStorage.getItem(YMAX_STORAGE_PREFIX + pid);
+    if (!raw) return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  } catch { return undefined; }
+}
+function writeYMaxStored(pid: string, v: number | undefined) {
+  try {
+    if (v == null) localStorage.removeItem(YMAX_STORAGE_PREFIX + pid);
+    else localStorage.setItem(YMAX_STORAGE_PREFIX + pid, String(v));
+  } catch { /* ignore */ }
+}
+
+function freshState(pid: string): ChartCoordinationState {
   return reactive<ChartCoordinationState>({
     expanded: readExpandedStored(),
     lastSampleMs: 0,
-    bandwidthYMax: undefined,
+    // Seed from the per-scope store so the operator's chosen ceiling survives a
+    // new play (fresh state) and a browser reload, instead of resetting to Auto.
+    bandwidthYMax: readYMaxStored(pid),
     cursorMs: null,
     cursorLabel: null,
     range: null,
@@ -97,7 +118,7 @@ function freshState(): ChartCoordinationState {
 function ensureState(pid: string): ChartCoordinationState {
   let s = states.get(pid);
   if (!s) {
-    s = freshState();
+    s = freshState(pid);
     states.set(pid, s);
   }
   return s;
@@ -202,6 +223,22 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
 
   function setBandwidthYMax(v: number | undefined) {
     cur().bandwidthYMax = v;
+    // Persist per scope so it survives a new play + a browser reload.
+    writeYMaxStored(playerIdRef.value, v);
+  }
+
+  /** Reset only the position / data-edge fields for a fresh play, KEEPING the
+   *  scale + display prefs (bandwidthYMax, liveSpan, expanded). The coordination
+   *  state is now keyed per-player (stable across plays), so without this a
+   *  pinned absolute zoom window from the prior play would carry into the new
+   *  play (wrong time domain) instead of following live. Called from
+   *  SessionDisplay on a play_id change. */
+  function resetForNewPlay() {
+    const s = cur();
+    s.lastSampleMs = 0;
+    s.range = null;
+    s.cursorMs = null;
+    s.cursorLabel = null;
   }
 
   /** Move the synchronized "selected event" cursor. Pass null to
@@ -244,6 +281,7 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
     toggleLive,
     toggleExpanded,
     setBandwidthYMax,
+    resetForNewPlay,
     setCursorMs,
     setCursor,
   };

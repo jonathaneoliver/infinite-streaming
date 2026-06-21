@@ -14,11 +14,16 @@
  * redundant and confusing when one of three "Live" buttons fell out
  * of sync visually with the other two.
  */
-import { computed, toRef } from 'vue';
+import { computed } from 'vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 
-const props = defineProps<{ playerId: string }>();
-const coord = useChartCoordination(toRef(props, 'playerId'));
+const props = defineProps<{
+  playerId: string;
+  /** Coordination scope key (per-player, stable across plays). Falls back to
+   *  playerId when absent so standalone callers keep their old behavior. */
+  coordId?: string;
+}>();
+const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
 
 type YMaxMode = 'auto' | '5' | '10' | '20' | '30' | '40' | '50' | '100';
 const modes: YMaxMode[] = ['auto', '5', '10', '20', '30', '40', '50', '100'];
