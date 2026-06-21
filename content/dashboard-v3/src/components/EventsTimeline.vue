@@ -31,6 +31,7 @@ import { computed, onBeforeUnmount, ref, toRef, watch } from 'vue';
 import { ensureVisTimeline } from '@/composables/useChartJs';
 import { useChartCoordination, DEFAULT_FOCUS_MS } from '@/composables/useChartCoordination';
 import type { Stream } from '@/composables/useSessionTimeSeries';
+import { useLifecycleLineVisibility, type LifecycleMarker } from '@/composables/useLifecycleMarkers';
 import { nearestVariantByBitrate } from '@/composables/useManifestVariants';
 
 interface LaneCfg { label: string; color: string }
@@ -247,8 +248,15 @@ const props = defineProps<{
    *  drives the CONTROL lane markers. Optional; without it the CONTROL lane
    *  has no points (control_revision alone only says "something changed"). */
   controlStream?: Stream<Record<string, unknown>>;
+  /** Player-lifecycle vertical lines (restart / play_start / play_end),
+   *  computed once in SessionDisplay. Rendered as full-height vis-timeline
+   *  custom-times so they cross every lane (incl. Player State) and align
+   *  with the same lines on the value charts. Per-type visibility comes from
+   *  the shared toggle (useLifecycleLineVisibility). */
+  lifecycleMarkers?: LifecycleMarker[];
 }>();
 const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
+const { lineVisibility } = useLifecycleLineVisibility();
 
 /** Adapter — map a CH session_snapshots row (wire shape from the v3
  *  /api/v2/timeseries endpoint) to the small subset of fields ingest()
@@ -745,6 +753,10 @@ async function ensureTimeline(): Promise<void> {
       });
       installLiveWheelAnchor();
       installCursorHoverTooltip();
+      installLifecycleHoverTooltip();
+      // Draw any lifecycle lines that were ready before the timeline existed
+      // (the reactive watcher only re-fires on subsequent marker changes).
+      void syncLifecycleLines();
     } finally {
       // Hold the resolved promise around so subsequent calls short-circuit
       // via the `if (timeline) return` check at the top.
@@ -1569,7 +1581,10 @@ function installCursorHoverTooltip() {
       if (cursorTooltipVisible.value) cursorTooltipVisible.value = false;
       return;
     }
-    const lineEl = c.querySelector('.vis-custom-time') as HTMLElement | null;
+    // Target the nav-cursor line specifically — there are now several
+    // `.vis-custom-time` elements (the lifecycle lines share the class), and
+    // a bare querySelector would grab whichever renders first.
+    const lineEl = c.querySelector('.vis-custom-time.nav-cursor') as HTMLElement | null;
     if (!lineEl) {
       if (cursorTooltipVisible.value) cursorTooltipVisible.value = false;
       return;
@@ -1616,11 +1631,114 @@ watch(
   { immediate: true },
 );
 
+/*
+ * Player-lifecycle vertical lines (restart / play_start / play_end).
+ *
+ * Each visible marker is a vis-timeline custom-time keyed `lc-<kind>-<ms>`,
+ * so the rendered <div> carries that id as a CSS class — the per-kind colour
+ * comes from CSS that matches the class substring. The id encodes the
+ * position, so a marker never needs repositioning: we only add ids that
+ * appeared and remove ids that vanished (markers recomputed, or a kind
+ * toggled off). `lcLines` doubles as the id→detail lookup the hover uses.
+ */
+const lcLines = new Map<string, string>();
+
+function lcIdFor(m: LifecycleMarker): string {
+  return `lc-${m.kind}-${Math.round(m.ms)}`;
+}
+
+async function syncLifecycleLines(): Promise<void> {
+  await ensureTimeline();
+  if (!timeline) return;
+  const desired = new Map<string, { ms: number; detail: string }>();
+  for (const m of props.lifecycleMarkers ?? []) {
+    if (!lineVisibility[m.kind]) continue;
+    if (!Number.isFinite(m.ms)) continue;
+    desired.set(lcIdFor(m), { ms: m.ms, detail: m.detail });
+  }
+  // Remove lines no longer wanted.
+  for (const id of [...lcLines.keys()]) {
+    if (!desired.has(id)) {
+      try { timeline.removeCustomTime(id); } catch { /* ignore */ }
+      lcLines.delete(id);
+    }
+  }
+  // Add newly-wanted lines.
+  for (const [id, { ms, detail }] of desired) {
+    if (!lcLines.has(id)) {
+      try {
+        timeline.addCustomTime(new Date(ms), id);
+        lcLines.set(id, detail);
+      } catch { /* duplicate id / pre-mount — ignore */ }
+    }
+  }
+}
+
+watch(
+  [
+    () => props.lifecycleMarkers,
+    () => lineVisibility.restart,
+    () => lineVisibility.play_start,
+    () => lineVisibility.play_end,
+    () => lineVisibility.user_marked,
+  ],
+  () => { void syncLifecycleLines(); },
+  { immediate: true },
+);
+
+/* Lifecycle-line hover tooltip — same custom-DOM approach as the cursor
+ * tooltip, but hit-tests EVERY lifecycle custom-time element and shows the
+ * nearest one's detail (restart reason / play_id / terminal status). */
+const lcTooltipVisible = ref(false);
+const lcTooltipX = ref(0);
+const lcTooltipY = ref(0);
+const lcTooltipText = ref('');
+
+function installLifecycleHoverTooltip() {
+  const c = container.value;
+  if (!c) return;
+  c.addEventListener('mousemove', (e) => {
+    if (lcLines.size === 0) {
+      if (lcTooltipVisible.value) lcTooltipVisible.value = false;
+      return;
+    }
+    const cRect = c.getBoundingClientRect();
+    const mx = e.clientX - cRect.left;
+    const my = e.clientY - cRect.top;
+    let bestDist = 6; // px tolerance
+    let bestText = '';
+    const els = c.querySelectorAll('.vis-custom-time[class*="lc-"]');
+    els.forEach((el) => {
+      const lineX = el.getBoundingClientRect().left - cRect.left;
+      const d = Math.abs(mx - lineX);
+      if (d >= bestDist) return;
+      // Recover the id (and its detail) from the element's class list.
+      let detail = '';
+      el.classList.forEach((cls) => {
+        if (cls.startsWith('lc-') && lcLines.has(cls)) detail = lcLines.get(cls) as string;
+      });
+      if (detail) { bestDist = d; bestText = detail; }
+    });
+    if (!bestText) {
+      if (lcTooltipVisible.value) lcTooltipVisible.value = false;
+      return;
+    }
+    lcTooltipText.value = bestText;
+    lcTooltipX.value = Math.min(mx + 8, c.clientWidth - 220);
+    lcTooltipY.value = Math.max(4, my - 52);
+    lcTooltipVisible.value = true;
+  });
+  c.addEventListener('mouseleave', () => {
+    lcTooltipVisible.value = false;
+  });
+}
+
 onBeforeUnmount(() => {
   try { timeline?.destroy(); } catch { /* ignore */ }
   timeline = null;
   itemsDS = null;
   groupsDS = null;
+  lcLines.clear();
 });
 </script>
 
@@ -1659,6 +1777,13 @@ onBeforeUnmount(() => {
         class="cursor-tooltip"
         :style="{ left: cursorTooltipX + 'px', top: cursorTooltipY + 'px' }"
       >{{ coord.state.cursorLabel }}</div>
+      <!-- Lifecycle-line hover tooltip — restart reason / play_id /
+           terminal status for the nearest lifecycle line. Multi-line. -->
+      <div
+        v-if="lcTooltipVisible"
+        class="cursor-tooltip lc-tooltip"
+        :style="{ left: lcTooltipX + 'px', top: lcTooltipY + 'px' }"
+      >{{ lcTooltipText }}</div>
     </div>
 
     <!-- Colour key — placed BELOW the chart so the eye reads the
@@ -1816,6 +1941,16 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Lifecycle tooltip is multi-line (reason / play_id / status / time) and
+ * slate (matches the line charts' marker tooltip) rather than the cursor's
+ * blue, so the two never read as the same thing. */
+.lc-tooltip {
+  background: rgba(15, 23, 42, 0.94);
+  white-space: pre-line;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.4;
+}
 /* "Selected event" custom-time line — full visual parity with the
  * line-chart cursor: 1.5 px dashed blue line + a small filled
  * triangle at the top. vis-timeline renders <div class="vis-custom-time">
@@ -1841,6 +1976,32 @@ onBeforeUnmount(() => {
   border-right: 5px solid transparent;
   border-top: 6px solid #1d4ed8;
 }
+
+/* Per-kind lifecycle custom-time lines — restart (amber dashed),
+ * play_start (green solid), play_end (slate dashed). The id (`lc-<kind>-<ms>`)
+ * lands on the element as a CSS class, so a class-substring match recolours
+ * the shared `.vis-custom-time` line + its top arrow. z-index 4 keeps these
+ * just under the user-selected cursor (5). */
+.events-timeline :deep(.vis-custom-time[class*='lc-restart-']) {
+  border-left: 1.5px dashed #f59e0b !important;
+  z-index: 4;
+}
+.events-timeline :deep(.vis-custom-time[class*='lc-restart-']::before) { border-top-color: #f59e0b; }
+.events-timeline :deep(.vis-custom-time[class*='lc-play_start-']) {
+  border-left: 1.5px solid #15803d !important;
+  z-index: 4;
+}
+.events-timeline :deep(.vis-custom-time[class*='lc-play_start-']::before) { border-top-color: #15803d; }
+.events-timeline :deep(.vis-custom-time[class*='lc-play_end-']) {
+  border-left: 1.5px dashed #475569 !important;
+  z-index: 4;
+}
+.events-timeline :deep(.vis-custom-time[class*='lc-play_end-']::before) { border-top-color: #475569; }
+.events-timeline :deep(.vis-custom-time[class*='lc-user_marked-']) {
+  border-left: 1.5px solid #db2777 !important;
+  z-index: 4;
+}
+.events-timeline :deep(.vis-custom-time[class*='lc-user_marked-']::before) { border-top-color: #db2777; }
 
 /* vis-timeline label panel + labelset pinned to the SAME 60px width
  * as the Chart.js charts' left y-axis (see MetricsLineChart.Y_WIDTH)
