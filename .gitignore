@@ -98,3 +98,8 @@ content/dashboard-v3/node_modules/
 
 # fault-sweep local queue (#772) — ephemeral working state
 .sweep/
+
+# Xcode build output when -derivedDataPath ./build is used for CLI builds.
+# Large + regenerable; must never be rsynced to test-dev (a concurrent build
+# vanishing build.db-journal aborts the working-tree deploy — error 23).
+apple/InfiniteStreamPlayer/build/

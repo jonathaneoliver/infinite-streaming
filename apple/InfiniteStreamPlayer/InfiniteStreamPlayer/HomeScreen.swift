@@ -213,17 +213,22 @@ private struct ContinueWatchingHero: View {
     /// a clip in Settings → Stream now updates the hero immediately,
     /// without waiting for it to actually start playing.
     private var heroItem: ContentItem? {
-        let selectedClipId: String? = vm.selectedContent.isEmpty
-            ? nil
-            : ContentItem.deriveClipId(from: vm.selectedContent)
-        if let cid = selectedClipId,
-           let item = vm.previewContent.first(where: { $0.clipId == cid }) {
-            return item
+        // 1. Exact catalogue match for the selected or launch-pinned clip.
+        for clip in [vm.selectedContent, vm.lastPlayed] where !clip.isEmpty {
+            let cid = ContentItem.deriveClipId(from: clip)
+            if let item = vm.previewContent.first(where: { $0.clipId == cid }) {
+                return item
+            }
         }
-        if !vm.lastPlayed.isEmpty,
-           let item = vm.previewContent.first(where: { $0.clipId == ContentItem.deriveClipId(from: vm.lastPlayed) }) {
-            return item
+        // 2. A clip is pinned (-is.lastPlayed) or selected but NOT (yet) in the
+        // catalogue — the async fetchContentList hasn't landed, or it's a
+        // brand-new clip. Synthesize it from the name so the hero (and the
+        // harness's ResumePlayback, which taps it) deterministically drives that
+        // clip instead of racing to the catalogue's first entry (a different clip).
+        for clip in [vm.selectedContent, vm.lastPlayed] where !clip.isEmpty {
+            return ContentItem(name: clip)
         }
+        // 3. Cold start, nothing pinned: featured = first catalogue entry.
         return vm.previewContent.first
     }
 }
