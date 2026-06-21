@@ -9,6 +9,7 @@
 import { computed, toRef } from 'vue';
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import type { Stream } from '@/composables/useSessionTimeSeries';
+import type { LifecycleMarker } from '@/composables/useLifecycleMarkers';
 import type { PlayerRecord } from '@/repo/v2-repo';
 import { usePlayer } from '@/composables/usePlayer';
 import { useCompareOverlays, useCompareSelf } from '@/composables/useCompareContext';
@@ -19,6 +20,8 @@ const props = defineProps<{
   /** Coordination scope key forwarded to MetricsLineChart (per-player, stable
    *  across plays). Falls back to playerId there when absent. */
   coordId?: string;
+  /** Shared player-lifecycle vertical lines, forwarded to MetricsLineChart. */
+  lifecycleMarkers?: LifecycleMarker[];
   eventsStream: Stream<Record<string, unknown>>;
 }>();
 
@@ -91,6 +94,7 @@ const series = computed<SeriesSpec[]>(() => {
   <MetricsLineChart
     :player-id="playerId"
     :coord-id="coordId"
+    :lifecycle-markers="lifecycleMarkers"
     title="Round-trip time"
     unit="ms"
     :series="series"

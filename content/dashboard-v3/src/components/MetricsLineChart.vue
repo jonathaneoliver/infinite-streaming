@@ -22,6 +22,10 @@ import { CompareContextKey } from '@/composables/useCompareContext';
 import { useChartCoordination, fmtTickHMSms, DEFAULT_FOCUS_MS, type ChartViewport } from '@/composables/useChartCoordination';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import { tsOfRow, chRowToPlayerRecord } from '@/composables/chRowAdapter';
+import {
+  useLifecycleLineVisibility,
+  type LifecycleMarker,
+} from '@/composables/useLifecycleMarkers';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
 export type SeriesAccessor = (p: PlayerRecord) => number | null | undefined;
@@ -122,6 +126,14 @@ const props = defineProps({
   },
   /** Marker visibility (v-model). Default true. */
   markersVisible: { type: Boolean, default: true },
+  /** Player-lifecycle vertical lines (restart / play_start / play_end),
+   *  computed once in SessionDisplay and shared across every chart so the
+   *  lines align. Each kind's visibility is governed by the shared
+   *  per-type toggle (useLifecycleLineVisibility), not a prop. */
+  lifecycleMarkers: {
+    type: Array as PropType<LifecycleMarker[]>,
+    default: () => [],
+  },
   /** Grouped-sibling overlays (issue #579 compare mode). Each entry is
    *  one sibling's stream + tagged series; drained independently and
    *  rendered alongside the primary `series` on shared axes. Empty in
@@ -140,6 +152,16 @@ const canvas = ref<HTMLCanvasElement | null>(null);
 const wrap = ref<HTMLDivElement | null>(null);
 const canvasWrap = ref<HTMLDivElement | null>(null);
 const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
+const { lineVisibility } = useLifecycleLineVisibility();
+
+/** Lifecycle markers whose kind is currently toggled visible. Reads the
+ *  shared reactive `lineVisibility` so the draw plugin + hover hit-test
+ *  both react to a toggle without prop churn. */
+function visibleLifecycleMarkers(): LifecycleMarker[] {
+  const list = props.lifecycleMarkers;
+  if (!Array.isArray(list) || list.length === 0) return [];
+  return list.filter((m) => lineVisibility[m.kind]);
+}
 
 // Compare-mode session legend (issue #579). When mounted inside a
 // SessionDisplay that's in compare mode, the S1/S2 chips drive this
@@ -611,6 +633,44 @@ function createChartInstance(Chart: any): any {
         ctx.fill();
         ctx.restore();
       },
+    }, {
+      /*
+       * Inline plugin: player-lifecycle vertical lines.
+       * Draws one coloured vertical line per visible lifecycle marker
+       * (restart = amber, play_start = green, play_end = slate) so the
+       * operator can correlate restarts / play boundaries across every
+       * chart. Reason / play_id / status surface in the hover tooltip
+       * (installLifecycleHoverTooltip). Drawn below navCursorLine so the
+       * user-selected cursor still reads on top.
+       */
+      id: 'lifecycleLines',
+      afterDatasetsDraw(c: any) {
+        const list = visibleLifecycleMarkers();
+        if (list.length === 0) return;
+        const sx = c.scales?.x;
+        const sy = c.scales?.y;
+        if (!sx || !sy) return;
+        const ctx = c.ctx;
+        ctx.save();
+        for (const m of list) {
+          if (!Number.isFinite(m.ms) || m.ms < sx.min || m.ms > sx.max) continue;
+          const x = sx.getPixelForValue(m.ms);
+          ctx.beginPath();
+          ctx.moveTo(x, sy.top);
+          ctx.lineTo(x, sy.bottom);
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = m.color;
+          ctx.setLineDash(m.dash);
+          ctx.stroke();
+          // Solid cap at the top so the line is findable on a dense chart
+          // and its colour reads even where it overlaps a same-coloured
+          // series.
+          ctx.setLineDash([]);
+          ctx.fillStyle = m.color;
+          ctx.fillRect(x - 2, sy.top, 4, 4);
+        }
+        ctx.restore();
+      },
     }],
     options: {
       responsive: true,
@@ -947,6 +1007,7 @@ function createChartInstance(Chart: any): any {
   installLeftClickLiveToggle();
   installCursorHoverTooltip();
   installMarkerHoverTooltip();
+  installLifecycleHoverTooltip();
   // If compare overlays were already present at mount, compose + drain
   // them now (the overlays watcher's immediate run may have fired before
   // the chart existed). Issue #579.
@@ -1073,6 +1134,62 @@ function installCursorHoverTooltip() {
   });
   c.addEventListener('mouseleave', () => {
     cursorTooltipVisible.value = false;
+  });
+}
+
+/* Lifecycle-line hover tooltip.
+ *
+ * Mousemove hit-tests the horizontal distance to each visible lifecycle
+ * line (restart / play_start / play_end); within ~6 px of one, pop a
+ * multi-line tooltip with that marker's `detail` (reason / play_id /
+ * status). Mirrors the cursor tooltip, but hit-tests a SET of lines and
+ * picks the nearest. */
+const lcTooltipVisible = ref(false);
+const lcTooltipX = ref(0);
+const lcTooltipY = ref(0);
+const lcTooltipText = ref('');
+
+function installLifecycleHoverTooltip() {
+  const c = canvas.value;
+  if (!c) return;
+  c.addEventListener('mousemove', (e) => {
+    const list = visibleLifecycleMarkers();
+    if (list.length === 0 || !chart) {
+      if (lcTooltipVisible.value) lcTooltipVisible.value = false;
+      return;
+    }
+    const sx = chart.scales?.x;
+    const area = chart.chartArea;
+    if (!sx || !area) return;
+    const rect = c.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    if (my < area.top || my > area.bottom) {
+      if (lcTooltipVisible.value) lcTooltipVisible.value = false;
+      return;
+    }
+    let bestDist = 6; // px tolerance
+    let bestText = '';
+    for (const m of list) {
+      if (!Number.isFinite(m.ms) || m.ms < sx.min || m.ms > sx.max) continue;
+      const px = sx.getPixelForValue(m.ms);
+      const d = Math.abs(mx - px);
+      if (d < bestDist) {
+        bestDist = d;
+        bestText = m.detail;
+      }
+    }
+    if (!bestText) {
+      if (lcTooltipVisible.value) lcTooltipVisible.value = false;
+      return;
+    }
+    lcTooltipText.value = bestText;
+    lcTooltipX.value = Math.min(mx + 10, c.clientWidth - 220);
+    lcTooltipY.value = Math.max(4, my - 56);
+    lcTooltipVisible.value = true;
+  });
+  c.addEventListener('mouseleave', () => {
+    lcTooltipVisible.value = false;
   });
 }
 
@@ -1839,6 +1956,13 @@ onBeforeUnmount(() => {
         class="marker-tooltip"
         :style="{ left: markerTooltipX + 'px', top: markerTooltipY + 'px' }"
       >{{ markerTooltipText }}</div>
+      <!-- Lifecycle-line hover tooltip — restart reason / play_id /
+           terminal status, multi-line. -->
+      <div
+        v-if="lcTooltipVisible"
+        class="marker-tooltip"
+        :style="{ left: lcTooltipX + 'px', top: lcTooltipY + 'px' }"
+      >{{ lcTooltipText }}</div>
     </div>
   </div>
 </template>
