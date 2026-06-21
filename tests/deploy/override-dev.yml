@@ -22,10 +22,6 @@ services:
       # the issue describes don't recur. Prod-style deployments leave
       # this unset (= 0 = unlimited) to preserve today's behaviour.
       - INFINITE_STREAM_DEFAULT_RATE_MBPS=100
-      # TEMP A/B (revert after SFQ test): disable the sfq fair-queue leaf so
-      # bands fall back to netem FIFO — testing whether SFQ-driven audio
-      # over-banking feeds AVPlayer's bandwidth over-read / 4K over-selection.
-      - PROXY_DISABLE_SFQ=1
     ports:
       !override
       - "21000:30000"
