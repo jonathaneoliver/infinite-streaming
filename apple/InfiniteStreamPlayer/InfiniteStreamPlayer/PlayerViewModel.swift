@@ -1286,6 +1286,7 @@ final class PlayerViewModel: ObservableObject {
         let assetURL: URL
         if localProxy {
             LocalHTTPProxy.shared.startIfNeeded()
+            LocalHTTPProxy.shared.setIDs(playerId: playerId, playId: currentPlayID)
             assetURL = LocalHTTPProxy.shared.rewrite(originURL: url) ?? url
         } else {
             assetURL = url

@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import os
 
 /// A tiny HTTP/1.1 forward proxy running on 127.0.0.1:<ephemeral>. The app
 /// rewrites the master HLS URL from http://origin/path → http://127.0.0.1:port/proxy/http/origin/path
@@ -13,6 +14,9 @@ import Network
 /// Connection: close (one request per connection). Sufficient for our test
 /// environment where the origin is unencrypted HTTP on a LAN.
 final class LocalHTTPProxy: NSObject {
+    /// os_log mirror (same subsystem as the rest) so [NETBYTES] per-segment
+    /// byte/throughput lines are greppable via `log show` on Appium-launched sims.
+    static let netLog = Logger(subsystem: "com.jeoliver.InfiniteStreamPlayer", category: "localproxy")
     static let shared = LocalHTTPProxy()
 
     private let queue = DispatchQueue(label: "com.jeoliver.LocalHTTPProxy", qos: .userInitiated)
@@ -29,6 +33,21 @@ final class LocalHTTPProxy: NSObject {
     private var originHost: String = ""
     private var originPort: Int?
 
+    // player_id / play_id for the [NET*] log lines so they can be correlated to a
+    // specific harness play (the os_log alone has no play key — different sims /
+    // leftover plays are otherwise indistinguishable). Set from the main thread at
+    // item build; read on the proxy's delegate queue. Own lock (delegate runs on `queue`).
+    private let idLock = NSLock()
+    private var _playerId = ""
+    private var _playId = ""
+    func setIDs(playerId: String, playId: String) {
+        idLock.lock(); _playerId = playerId; _playId = playId; idLock.unlock()
+    }
+    var idsLog: String {
+        idLock.lock(); defer { idLock.unlock() }
+        return "player_id=\(_playerId) play_id=\(_playId)"
+    }
+
     // Map URLSession task id → the connection session that owns it. Serialized
     // on `queue`. URLSession delegate callbacks come in on the session's
     // operation queue (which we back with `queue`).
@@ -41,6 +60,11 @@ final class LocalHTTPProxy: NSObject {
         config.httpAdditionalHeaders = nil
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 300
+        // Allow many concurrent upstream connections so video/audio (and range
+        // fetches) aren't bottlenecked on a small per-host pool. For an HTTP/2
+        // origin URLSession still coalesces to one multiplexed connection, so
+        // this mainly matters if the origin falls back to HTTP/1.1.
+        config.httpMaximumConnectionsPerHost = 50
         let opQueue = OperationQueue()
         opQueue.underlyingQueue = queue
         self.session = URLSession(configuration: config, delegate: self, delegateQueue: opQueue)
@@ -181,6 +205,31 @@ extension LocalHTTPProxy: URLSessionDataDelegate {
                     didCompleteWithError error: Error?) {
         unregisterTask(task.taskIdentifier)?.onUpstreamComplete(error: error)
     }
+
+    /// System-measured per-stream wire timing — independent of our serial
+    /// delegate queue, so [NETWIRE] wireTTFB is the TRUE time-to-first-byte and
+    /// `proto` is the actual negotiated protocol (h2 / h3 / http/1.1). Compare
+    /// against [NETBYTES] ttfb: if they agree, the starvation is real on the wire
+    /// (server scheduler); if [NETWIRE] is early and [NETBYTES] late, it's our
+    /// serial queue. Media segments only.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didFinishCollecting metrics: URLSessionTaskMetrics) {
+        guard let tm = metrics.transactionMetrics.last,
+              let url = tm.request.url ?? task.originalRequest?.url,
+              !url.lastPathComponent.hasSuffix(".m3u8") else { return }
+        let parent = url.deletingLastPathComponent().lastPathComponent
+        let label = parent.isEmpty ? url.lastPathComponent : "\(parent)/\(url.lastPathComponent)"
+        let proto = tm.networkProtocolName ?? "?"
+        let ttfb: Double = {
+            guard let rs = tm.requestStartDate, let rsp = tm.responseStartDate else { return -1 }
+            return rsp.timeIntervalSince(rs) * 1000
+        }()
+        let total: Double = {
+            guard let fs = tm.fetchStartDate, let re = tm.responseEndDate else { return -1 }
+            return re.timeIntervalSince(fs) * 1000
+        }()
+        LocalHTTPProxy.netLog.notice("[NETWIRE] \(label, privacy: .public) proto=\(proto, privacy: .public) wireTTFB=\(String(format: "%.0fms", ttfb), privacy: .public) total=\(String(format: "%.0fms", total), privacy: .public) bytes=\(tm.countOfResponseBodyBytesReceived, privacy: .public) reusedConn=\(tm.isReusedConnection, privacy: .public) \(LocalHTTPProxy.shared.idsLog, privacy: .public)")
+    }
 }
 
 /// Handles a single inbound HTTP/1.1 connection: reads the request line and
@@ -198,6 +247,12 @@ final class ConnectionSession {
     private var headersSentToClient = false
     private var usingChunkedTE = false
     private var upstreamTask: URLSessionDataTask?
+    // Per-request byte accounting for the [NETBYTES] line — the exact wire view
+    // of one segment/manifest fetch as it streams through the proxy.
+    private var segURL: URL?
+    private var segStartAt: Date?
+    private var segFirstByteAt: Date?
+    private var segBytes: Int64 = 0
     // Queued writes back to the client — we process sequentially to avoid
     // overlapping sends on the same NWConnection.
     private var writeQueue: [Data] = []
@@ -314,8 +369,18 @@ final class ConnectionSession {
         for key in passThrough {
             if let v = clientHeaders[key] { req.setValue(v, forHTTPHeaderField: key.capitalized) }
         }
+        // [NETRANGE] proves the proxy honors ranges: logs the Range header AVPlayer
+        // sent (in=) vs what we forward to go-proxy (out=). They MUST match —
+        // match=false would mean we're rewriting/dropping the range (e.g. turning a
+        // byte-range into a whole-segment GET). `none` = no Range header on that side.
+        let inRange = clientHeaders["range"] ?? "none"
+        let outRange = req.value(forHTTPHeaderField: "Range") ?? "none"
+        let rangeLabel = originURL.pathComponents.suffix(2).joined(separator: "/")
+        LocalHTTPProxy.netLog.notice("[NETRANGE] \(rangeLabel, privacy: .public) in=\(inRange, privacy: .public) out=\(outRange, privacy: .public) match=\(inRange == outRange, privacy: .public) \(LocalHTTPProxy.shared.idsLog, privacy: .public)")
         let task = proxy.session.dataTask(with: req)
         upstreamTask = task
+        segURL = originURL
+        segStartAt = Date()
         proxy.registerTask(task.taskIdentifier, session: self)
         proxy.tracker.requestStarted()
         if let result = proxy.tracker.recordRequestURL(originURL), result.isWrap {
@@ -340,13 +405,43 @@ final class ConnectionSession {
         // If the client has gone away, drop the chunk — enqueueing would
         // produce one ECANCELED-failed send per chunk, flooding logs.
         if finished { return }
+        if segFirstByteAt == nil { segFirstByteAt = Date() }
+        segBytes += Int64(data.count)
+        // Per-chunk wire timeline — shows the byte-arrival pattern within a
+        // segment (steady / bursty / starved). Media segments only.
+        if let start = segStartAt, let url = segURL, !url.lastPathComponent.hasSuffix(".m3u8") {
+            let ms = Date().timeIntervalSince(start) * 1000
+            LocalHTTPProxy.netLog.notice("[NETCHUNK] \(self.segLabel, privacy: .public) +\(data.count, privacy: .public)B cum=\(self.segBytes, privacy: .public) t=\(String(format: "%.0fms", ms), privacy: .public) \(LocalHTTPProxy.shared.idsLog, privacy: .public)")
+        }
         proxy.tracker.chunkReceived(byteCount: data.count)
         if method != "HEAD" {
             enqueueWrite(data)
         }
     }
 
+    /// Parent dir + filename, so video / audio / variant fetches of the same
+    /// segment number are distinguishable (lastPathComponent alone collapses them).
+    private var segLabel: String {
+        guard let url = segURL else { return "?" }
+        let parent = url.deletingLastPathComponent().lastPathComponent
+        return parent.isEmpty ? url.lastPathComponent : "\(parent)/\(url.lastPathComponent)"
+    }
+
+    /// Emit the per-segment wire view: bytes received, wall-clock duration of the
+    /// fetch, the effective throughput, and time-to-first-byte. Manifests (.m3u8)
+    /// are skipped — we care about the media-segment cost that gates startup.
+    private func logNetBytes() {
+        guard let url = segURL, let start = segStartAt, segBytes > 0 else { return }
+        let name = url.lastPathComponent
+        guard !name.hasSuffix(".m3u8") else { return }
+        let dur = Date().timeIntervalSince(start)
+        let mbps = dur > 0 ? Double(segBytes) * 8 / dur / 1_000_000 : 0
+        let ttfbMs = segFirstByteAt.map { $0.timeIntervalSince(start) * 1000 } ?? -1
+        LocalHTTPProxy.netLog.notice("[NETBYTES] \(self.segLabel, privacy: .public) bytes=\(self.segBytes, privacy: .public) dur=\(String(format: "%.2fs", dur), privacy: .public) rate=\(String(format: "%.2fMbps", mbps), privacy: .public) ttfb=\(String(format: "%.0fms", ttfbMs), privacy: .public) \(LocalHTTPProxy.shared.idsLog, privacy: .public)")
+    }
+
     fileprivate func onUpstreamComplete(error: Error?) {
+        logNetBytes()
         if let error = error {
             if !headersSentToClient {
                 writeStatusLineAndClose(status: 502, reason: "Upstream Error")
