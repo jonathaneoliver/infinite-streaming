@@ -16,6 +16,9 @@ import { compareRttSeries } from '@/composables/compareSeries';
 
 const props = defineProps<{
   playerId: string;
+  /** Coordination scope key forwarded to MetricsLineChart (per-player, stable
+   *  across plays). Falls back to playerId there when absent. */
+  coordId?: string;
   eventsStream: Stream<Record<string, unknown>>;
 }>();
 
@@ -87,6 +90,7 @@ const series = computed<SeriesSpec[]>(() => {
 <template>
   <MetricsLineChart
     :player-id="playerId"
+    :coord-id="coordId"
     title="Round-trip time"
     unit="ms"
     :series="series"

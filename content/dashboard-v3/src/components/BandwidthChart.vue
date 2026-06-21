@@ -34,6 +34,10 @@ import type { PlayerRecord } from '@/repo/v2-repo';
 
 const props = defineProps<{
   playerId: string;
+  /** Coordination scope key (per-player, stable across plays). Drives
+   *  useChartCoordination only; data still keys off playerId. Falls back to
+   *  playerId when absent. */
+  coordId?: string;
   eventsStream: Stream<Record<string, unknown>>;
   /** AVMetrics stream — used to overlay per-segment throughput dots
    *  on the bandwidth chart (issue #486). Optional so existing
@@ -41,7 +45,8 @@ const props = defineProps<{
    *  pre-spike) can still mount the chart. */
   avmetricsStream?: Stream<Record<string, unknown>>;
 }>();
-const coord = useChartCoordination(toRef(props, 'playerId'));
+const coordId = computed(() => props.coordId ?? props.playerId);
+const coord = useChartCoordination(coordId);
 const yMax = computed(() => coord.state.bandwidthYMax);
 const { variants: usePlayerVariants } = useManifestVariants(toRef(props, 'playerId'));
 const { player } = usePlayer(toRef(props, 'playerId'));
@@ -480,6 +485,7 @@ const compareOverlays = useCompareOverlays((sib) => {
 <template>
   <MetricsLineChart
     :player-id="playerId"
+    :coord-id="coordId"
     title="Bandwidth"
     unit="Mbps"
     :series="series"
