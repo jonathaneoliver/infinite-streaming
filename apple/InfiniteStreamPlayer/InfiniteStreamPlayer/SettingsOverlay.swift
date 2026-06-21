@@ -344,7 +344,7 @@ private struct PickerList: View {
             }
             .focused($itemIdx, equals: 1)
             PreferredPeakBitRateRow(mbps: vm.persistentPeakBitrateMbps, compact: compact,
-                                    title: "Persistent peak cap",
+                                    title: "Persistent bitrate cap",
                                     axPrefix: "persistent-peak-bitrate") {
                 vm.setPersistentPeakBitrateMbps($0)
             }
@@ -560,7 +560,7 @@ private struct PlayIdRotationRow: View {
 private struct PreferredPeakBitRateRow: View {
     let mbps: Int
     let compact: Bool
-    var title: String = "Peak bitrate cap"
+    var title: String = "Startup bitrate cap"
     var axPrefix: String = "peak-bitrate"
     let onChange: (Int) -> Void
 
