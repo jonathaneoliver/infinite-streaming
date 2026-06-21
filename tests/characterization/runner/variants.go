@@ -49,6 +49,24 @@ func LadderTopHeadroomPct() float64 {
 	return envFloat("CHAR_LADDER_TOP_HEADROOM_PCT", ladder.DefaultTopHeadroomPct)
 }
 
+// Headroom for deriving an INITIAL limit rate from a variant bitrate. A player
+// measures goodput (~95% of the raw link after TCP/IP framing) and, like
+// ExoPlayer's AdaptiveTrackSelection (DEFAULT_BANDWIDTH_FRACTION = 0.7), only
+// ADMITS a variant when bitrate ≤ 0.70 × goodput. Invert it: the link rate that
+// just admits a variant of `bitrateMbps` is bitrateMbps / (0.70 × 0.95) ≈ ×1.504.
+// This is the canonical factor for any "initial limit rate from the ladder";
+// it REPLACES the old flat peak×(1+bump) framing margin on that path.
+const (
+	ExoBandwidthFraction = 0.70 // ExoPlayer AdaptiveTrackSelection.DEFAULT_BANDWIDTH_FRACTION
+	TCPGoodputEfficiency = 0.95 // ~5% TCP/IP overhead between link rate and goodput
+)
+
+// InitialRateMbps returns the link rate (Mbps) at which a player will just admit
+// a variant of the given bitrate, per the bandwidth-fraction × goodput rule.
+func InitialRateMbps(bitrateMbps float64) float64 {
+	return bitrateMbps / (ExoBandwidthFraction * TCPGoodputEfficiency)
+}
+
 func envFloat(key string, def float64) float64 {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {

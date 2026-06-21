@@ -61,6 +61,18 @@ func (s *Session) ClearShape(ctx context.Context) error {
 	return err
 }
 
+// ResetProxy clears shape + fault rules + content to a clean baseline (the
+// comprehensive `harness reset`). Called at test START to drop any carry-over from
+// a prior run that reused this player_id. Manual sessions never call this, so the
+// proxy's reattach carry-over default is untouched.
+func (s *Session) ResetProxy(ctx context.Context) error {
+	if s == nil || s.PlayerID == "" {
+		return fmt.Errorf("reset proxy: no player bound")
+	}
+	_, err := runHarness(ctx, "reset", s.PlayerID)
+	return err
+}
+
 // SetSegmentTimeout arms the proxy's server-side response timeout
 // on segment fetches for this player. Setting active=0 disables.
 // Used by the abort characterization test to force a server-driven

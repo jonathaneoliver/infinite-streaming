@@ -15,7 +15,9 @@ defaults:
   is.segment: s6
 axes:
   proxy.shape:
-    - { label: pyramid,  pattern: pyramid,         step_seconds: 12 }
+    # pyramid starts limited → needs an initial network cap (rate_mbps) applied at
+    # config-on-connect, before the pattern arms. ramp_down/square/shock start high.
+    - { label: pyramid,  pattern: pyramid,         step_seconds: 12, rate_mbps: 1.5 }
     - { label: rampdown, pattern: ramp_down,       step_seconds: 12 }
     - { label: square,   pattern: square_wave,     step_seconds: 12 }
     - { label: shock,    pattern: transient_shock, step_seconds: 12 }

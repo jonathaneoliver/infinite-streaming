@@ -19,7 +19,7 @@ type ProbeConfig struct {
 	LiveOffsetS        string // -is.flag.live_offset_s — app-side live-offset override; "" → "0" (always pinned)
 	Protocol           string // -is.protocol — hls|dash (optional; empty = app default)
 	Codec              string // -is.codec — h264|hevc|av1 (optional; empty = app default)
-	PeakBitrateMbps    int    // -is.flag.peak_bitrate_mbps — startup peak-bitrate clamp; 0 = omit (#683)
+	PeakBitrateMbps    int    // -is.flag.peak_bitrate_mbps — startup peak-bitrate clamp (Mbps, integer); 0 = omit (#683)
 	StartsFirstVariant string // -is.flag.starts_first_variant — true|false; "" = omit (false is meaningful)
 }
 
@@ -84,5 +84,11 @@ func ProbeLaunchArgs(c ProbeConfig) []string {
 	if c.StartsFirstVariant != "" {
 		args = append(args, "-is.flag.starts_first_variant", c.StartsFirstVariant)
 	}
+	// Test clean-slate: drop any persisted advanced flags so this run starts from
+	// code defaults overlaid only by the args above — no carry-over from a prior
+	// run on this sim (the app container survives `simctl install`). Same intent as
+	// pinning live_offset_s above, but covers EVERY advanced flag, including ones
+	// this run doesn't pass. On by default.
+	args = append(args, "-is.flag.reset_advanced", "true")
 	return args
 }

@@ -182,7 +182,9 @@ final class PlayerViewModel: ObservableObject {
             d.removeObject(forKey: "bossPlayerId")
             return legacy
         }
-        let fresh = UUID().uuidString
+        // Lowercase at source — same reason as currentPlayID: keep player_id
+        // matching the lowercase archive/harness/dashboard with no case-folding.
+        let fresh = UUID().uuidString.lowercased()
         d.set(fresh, forKey: "isPlayerId")
         return fresh
     }()
@@ -201,7 +203,11 @@ final class PlayerViewModel: ObservableObject {
     /// - `applyContentFilter` when the filter forces a content swap
     /// - `reload()` (user-pressed Reload — "start fresh")
     /// - Soak rotation Task firing
-    private var currentPlayID: String = UUID().uuidString
+    // Lowercased at the source: Swift's UUID().uuidString is UPPERCASE, but the
+    // forwarder/archive/dashboard all canonicalise play_id to lowercase. Emitting
+    // it lowercase here keeps the wire + LocalProxy logs matching everything
+    // downstream with no case-folding needed (see canonicalV2ID).
+    private var currentPlayID: String = UUID().uuidString.lowercased()
 
     /// #621 — the play_id whose `play_start` boundary has already been
     /// emitted. startPlayback's fresh branch compares against this so a
@@ -1216,7 +1222,7 @@ final class PlayerViewModel: ObservableObject {
     /// Mint a fresh `play_id` UUID. Called only at content-selection
     /// boundaries (see currentPlayID doc). NOT called on restart.
     private func regeneratePlayID() {
-        currentPlayID = UUID().uuidString
+        currentPlayID = UUID().uuidString.lowercased()  // lowercase at source — see currentPlayID decl
         // Rotate the play-scoped start with the play_id (#587).
         currentStartTime = PlayerViewModel.metricsTimestampFormatter.string(from: Date())
         // Fresh play boundary — reset the per-play counters so the new play's

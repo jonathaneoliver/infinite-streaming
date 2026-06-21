@@ -58,13 +58,24 @@ var axisKeys = map[string]bool{
 	"proxy.overstate_bandwidth": true,
 }
 
-// Expand turns a spec into its ordered list of arms: the cartesian product of
-// the axes (an odometer over axis names in sorted order, so ids are
+// Expand expands a spec with deterministic group ids (no run id). Used by tests
+// and dry-run previews where stable ids matter; real runs use ExpandWithRunID so
+// each run's groups are unique.
+func Expand(spec *Spec) ([]*Arm, error) { return ExpandWithRunID(spec, "") }
+
+// ExpandWithRunID turns a spec into its ordered list of arms: the cartesian
+// product of the axes (an odometer over axis names in sorted order, so ids are
 // reproducible run-to-run), then any explicit arms, then any comparison groups.
 // Each arm is the spec defaults with the combination's values layered on top.
 // Validation runs up front (unknown axes, bad compare, out-of-window live_offset,
 // over-large groups, …) so a malformed matrix fails before any session is touched.
-func Expand(spec *Spec) ([]*Arm, error) {
+//
+// runID, when non-empty, is appended to every AUTO-generated group id (the
+// compare: and groups: paths) so two runs of the same spec never share a
+// group_id — the dashboard won't join a previous run's grouped sessions with the
+// current one. The test name stays in the id for readability; the run id makes it
+// unique. Explicit-arm hand-set groups are left untouched.
+func ExpandWithRunID(spec *Spec, runID string) ([]*Arm, error) {
 	if spec == nil {
 		return nil, fmt.Errorf("nil spec")
 	}
@@ -104,7 +115,7 @@ func Expand(spec *Spec) ([]*Arm, error) {
 			// compare: groups arms that agree on every OTHER axis, with the
 			// first value of the compare axis as control and the rest variants.
 			if spec.Compare != "" {
-				arm.Group = comboGroupID(spec.Name, names, indices, axisVals, spec.Compare, arm.Platform)
+				arm.Group = comboGroupID(spec.Name, names, indices, axisVals, spec.Compare, arm.Platform, runID)
 				arm.Role = comboRole(spec.Compare, names, indices, spec.Axes)
 			}
 			if err := validateArm(arm); err != nil {
@@ -150,6 +161,9 @@ func Expand(spec *Spec) ([]*Arm, error) {
 			gid = fmt.Sprintf("g%d", gi)
 		}
 		groupKey := fmt.Sprintf("%s/%s", spec.Name, gid)
+		if runID != "" {
+			groupKey += "-" + runID
+		}
 
 		ctrl, err := overlayArm(baseMap, g.Control)
 		if err != nil {
@@ -279,11 +293,14 @@ func (a *Arm) ClientLiveOffsetS() string {
 }
 
 // StartsFirstVariantS is the value for the -is.flag.starts_first_variant launch
-// arg: "true"/"false" when the knob is set, or "" (omit) when unset — false is
-// meaningful (let ABR pick the join rung), so it can't collapse to the zero value.
+// arg. Defaults to "false" when the arm doesn't set it: starts-on-first-variant
+// must be OFF unless a test explicitly opts in. It can't be omitted — `simctl
+// install` preserves the app container, so omitting the arg would silently
+// inherit a stale persisted "true" from an earlier test (pinning the join to the
+// bottom rung). Passing false explicitly resets it every run.
 func (a *Arm) StartsFirstVariantS() string {
 	if a.StartsFirstVariant == nil {
-		return ""
+		return "false"
 	}
 	return strconv.FormatBool(*a.StartsFirstVariant)
 }
@@ -363,6 +380,25 @@ func validateArm(a *Arm) error {
 	default:
 		return fmt.Errorf("variant_order %q invalid (default|ascending|descending)", a.VariantOrder)
 	}
+	// Rate-control patterns that START limited (pyramid, ramp_up) must carry an
+	// initial network cap (proxy.shape.rate_mbps). The pattern is armed POST-launch
+	// (it needs the live manifest ladder), so without a config-on-connect cap the
+	// player streams unconstrained until the pattern kicks in and then cliff-dives.
+	// rate_mbps is applied at config-on-connect — the constraint the cold start needs.
+	if a.Shape != nil && (a.Shape.Pattern == "pyramid" || a.Shape.Pattern == "ramp_up") {
+		if a.Shape.RateMbps == nil || *a.Shape.RateMbps <= 0 {
+			return fmt.Errorf("shape pattern %q starts limited — set proxy.shape.rate_mbps as the initial network cap (applied at config-on-connect, before the pattern arms)", a.Shape.Pattern)
+		}
+	}
+	// step_seconds is constrained by the shaper's pattern engine — validate it at
+	// expand time so a bad value fails fast instead of post-launch at ApplyPattern.
+	if a.Shape != nil && a.Shape.StepSeconds != 0 {
+		switch a.Shape.StepSeconds {
+		case 6, 12, 18, 24, 60, 120:
+		default:
+			return fmt.Errorf("shape.step_seconds %d invalid (6|12|18|24|60|120)", a.Shape.StepSeconds)
+		}
+	}
 	if a.Class != "" {
 		if err := validateClass(a.Class); err != nil {
 			return err
@@ -425,7 +461,7 @@ func comboID(specName string, names []string, indices []int, av map[string][]axi
 // by platform — so every arm differing only on the compare axis lands in one
 // group, and arms on different devices never cross-compare (mirrors seed.go's
 // grp-<slug>-<platform> convention).
-func comboGroupID(specName string, names []string, indices []int, av map[string][]axisVal, compare, platform string) string {
+func comboGroupID(specName string, names []string, indices []int, av map[string][]axisVal, compare, platform, runID string) string {
 	parts := make([]string, 0, len(names))
 	for i, name := range names {
 		if name == compare || name == "platform" {
@@ -437,10 +473,14 @@ func comboGroupID(specName string, names []string, indices []int, av map[string]
 	if len(parts) > 0 {
 		base += "/" + strings.Join(parts, ".")
 	}
+	id := "grp-" + base
 	if platform != "" {
-		return fmt.Sprintf("grp-%s-%s", base, platform)
+		id = fmt.Sprintf("grp-%s-%s", base, platform)
 	}
-	return "grp-" + base
+	if runID != "" {
+		id += "-" + runID
+	}
+	return id
 }
 
 // comboRole tags the arm's side of the comparison: the FIRST value of the compare
