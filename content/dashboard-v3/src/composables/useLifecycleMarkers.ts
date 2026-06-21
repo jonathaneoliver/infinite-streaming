@@ -20,7 +20,7 @@
 import { computed, reactive, type ComputedRef } from 'vue';
 import type { Stream } from './useSessionTimeSeries';
 
-export type LifecycleKind = 'restart' | 'play_start' | 'play_end' | 'user_marked';
+export type LifecycleKind = 'restart' | 'play_start' | 'play_end' | 'user_marked' | 'server_loop';
 
 export interface LifecycleMarker {
   /** ms-since-epoch x-position of the line. */
@@ -45,9 +45,14 @@ export const LIFECYCLE_STYLE: Record<LifecycleKind, { color: string; dash: numbe
   // label critical=user_marked_911). Magenta solid so it stands out from the
   // amber/green/slate lifecycle lines and the blue user cursor.
   user_marked: { color: '#db2777', dash: [],     label: 'User mark (911)' },
+  // Server-side content loop (loop_count_server increment). Lime to match the
+  // existing LOOP dot in the events-timeline lane.
+  server_loop: { color: '#84cc16', dash: [],     label: 'Server loop' },
 };
 
-export const LIFECYCLE_KINDS: LifecycleKind[] = ['restart', 'play_start', 'play_end', 'user_marked'];
+export const LIFECYCLE_KINDS: LifecycleKind[] = [
+  'restart', 'play_start', 'play_end', 'user_marked', 'server_loop',
+];
 
 // ---- per-type visibility (module-level, persisted) -------------------------
 
@@ -55,7 +60,7 @@ const VIS_STORAGE_KEY = 'dashboard_v3_lifecycle_lines';
 
 function readVisStored(): Record<LifecycleKind, boolean> {
   const def: Record<LifecycleKind, boolean> = {
-    restart: true, play_start: true, play_end: true, user_marked: true,
+    restart: true, play_start: true, play_end: true, user_marked: true, server_loop: true,
   };
   try {
     const raw = localStorage.getItem(VIS_STORAGE_KEY);
@@ -68,6 +73,7 @@ function readVisStored(): Record<LifecycleKind, boolean> {
       play_start: o.play_start !== false,
       play_end: o.play_end !== false,
       user_marked: o.user_marked !== false,
+      server_loop: o.server_loop !== false,
     };
   } catch {
     return def;
@@ -158,9 +164,11 @@ export function useLifecycleMarkers(
     const seenPlay = new Set<string>();
     const playStartMs = new Map<string, number>();
     let prevPlayId: string | null = null;
-    // Restart count is cumulative per play; seed silently on the first row of
-    // each play so only mid-play increments mark (mirrors EventsTimeline).
+    // Restart + server-loop counts are cumulative per play; seed silently on
+    // the first row of each play so only mid-play increments mark (mirrors
+    // EventsTimeline).
     let prevRestarts: number | null = null;
+    let prevLoop: number | null = null;
 
     for (const r of rows) {
       const ms = tsOfRow(r);
@@ -169,9 +177,11 @@ export function useLifecycleMarkers(
       const playId = strOf(r, 'play_id');
       const lastEvent = strOf(r, 'last_event');
       const restarts = numOf(r.player_restarts);
+      const loops = numOf(r.loop_count_server);
 
       if (playId !== prevPlayId) {
         prevRestarts = null;
+        prevLoop = null;
         prevPlayId = playId;
       }
 
@@ -243,6 +253,21 @@ export function useLifecycleMarkers(
           dash: st.dash,
           detail: `User mark (911)${playId ? `\nplay_id ${playId.slice(0, 8)}…` : ''}\n${fmtClock(ms)}`,
         });
+      }
+
+      // SERVER LOOP — loop_count_server increment (content wrapped to start).
+      if (loops != null) {
+        if (prevLoop != null && loops > prevLoop) {
+          const st = LIFECYCLE_STYLE.server_loop;
+          out.push({
+            ms,
+            kind: 'server_loop',
+            color: st.color,
+            dash: st.dash,
+            detail: `Server loop\n+${loops - prevLoop} (total ${loops})\n${fmtClock(ms)}`,
+          });
+        }
+        prevLoop = loops;
       }
     }
 
