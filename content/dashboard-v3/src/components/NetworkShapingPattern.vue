@@ -62,8 +62,12 @@ type StepSeconds = (typeof STEP_SECONDS_CHOICES)[number];
 // than this ratio. Mirrors go-proxy/pkg/ladder + the harness CLI's
 // --max-step. Higher = coarser + shorter pattern (a pyramid over a dense
 // ladder can run ~13 min/cycle).
-const MAX_STEP_CHOICES = [1.1, 1.15, 1.2, 1.5, 2.0] as const;
-const DEFAULT_MAX_STEP = 1.15;
+// "None" (sentinel 1) inserts no fills — just each variant's peak + avg caps —
+// since FillLadder / standardLadder treat step <= 1 as a no-op. On the 1.5x ladder
+// the peak+avg gaps are ~1.25x, so 1.375 also yields peak+avg only; 1.25 / 1.125
+// add progressively denser geometric fills between the variant caps.
+const MAX_STEP_CHOICES = [1.125, 1.25, 1.375, 1] as const;
+const DEFAULT_MAX_STEP = 1.25;
 const maxStep = ref<number>(DEFAULT_MAX_STEP);
 
 // #551 — start the ladder this % over the top variant's peak (a headroom
@@ -87,10 +91,18 @@ const round3 = (v: number): number => Math.round(v * 1000) / 1000;
 function standardLadder(variants: LadderVariant[], bumpPct: number, step: number, topHeadroomPct: number): number[] {
   const f = 1 + bumpPct / 100;
   const anchors: number[] = [];
-  for (const v of variants) {
+  // Bottom variant (lowest positive peak): drop its AVG anchor so the ladder
+  // floors at the bottom variant's peak×(1+bump). At the very bottom there is no
+  // lower rung to drop to, so the avg→peak band is a pure wedge. Mirrors the
+  // go-proxy/pkg/ladder.AnchorCaps change.
+  let bottomIdx = -1;
+  variants.forEach((v, i) => {
+    if (v.peakBps > 0 && (bottomIdx < 0 || v.peakBps < variants[bottomIdx].peakBps)) bottomIdx = i;
+  });
+  variants.forEach((v, i) => {
     if (v.peakBps > 0) anchors.push(round3((v.peakBps * f) / 1e6));
-    if (v.avgBps > 0) anchors.push(round3((v.avgBps * f) / 1e6));
-  }
+    if (v.avgBps > 0 && i !== bottomIdx) anchors.push(round3((v.avgBps * f) / 1e6));
+  });
   if (topHeadroomPct > 0) {
     const maxPeak = variants.reduce((m, v) => Math.max(m, v.peakBps), 0);
     if (maxPeak > 0) anchors.push(round3((maxPeak * (1 + topHeadroomPct / 100)) / 1e6));
@@ -140,7 +152,9 @@ const defaultStepSeconds = computed<StepSeconds>(() => {
 });
 
 /** Manifest variants sorted ascending by bandwidth. */
-const { variants: rawVariants } = useManifestVariants(toRef(props, 'playerId'));
+// Full ladder — the shaping pattern is designed over every published rung, not
+// the allowed_variants-thinned subset the bandwidth chart shows (#815/#820).
+const { variantsAll: rawVariants } = useManifestVariants(toRef(props, 'playerId'));
 const sortedVariants = computed(() => {
   return [...rawVariants.value].sort((a, b) => (a.bandwidth ?? 0) - (b.bandwidth ?? 0));
 });
@@ -200,6 +214,32 @@ function ladderVariants(): LadderVariant[] {
   }));
 }
 
+/** Pyramid over-selection floor — midpoint of the bottom variant's peak cap and
+ *  the next variant's avg cap, both ×(1+margin) so the midpoint carries the same
+ *  bump. Mirrors ladder.pyramidFloor in go-proxy/pkg/ladder. Returns 0 when
+ *  either is absent. #811. */
+function pyramidFloor(variants: LadderVariant[], marginPct: number): number {
+  const f = 1 + marginPct / 100;
+  let bottomIdx = -1;
+  variants.forEach((v, i) => {
+    if (v.peakBps > 0 && (bottomIdx < 0 || v.peakBps < variants[bottomIdx].peakBps)) bottomIdx = i;
+  });
+  let bottomPeak = 0;
+  let nextAvg = 0; // the next variant's avg — the bottom variant's avg anchor is dropped
+  variants.forEach((v, i) => {
+    if (v.peakBps > 0) {
+      const p = round3((v.peakBps * f) / 1e6);
+      if (bottomPeak === 0 || p < bottomPeak) bottomPeak = p;
+    }
+    if (v.avgBps > 0 && i !== bottomIdx) {
+      const a = round3((v.avgBps * f) / 1e6);
+      if (nextAvg === 0 || a < nextAvg) nextAvg = a;
+    }
+  });
+  if (bottomPeak <= 0 || nextAvg <= 0) return 0;
+  return round3((bottomPeak + nextAvg) / 2);
+}
+
 /** Generate step rates from template + margin + variants. Uses the shared
  *  dual-rung + geometrically-filled limit ladder (#551), then orders it
  *  per template — mirrors ladder.BuildPattern in go-proxy/pkg/ladder. */
@@ -216,7 +256,11 @@ function buildSteps(t: Template, marginPct: number, stepSecs: number): Pattern['
   } else if (t === 'ramp_down') {
     seq = asc.slice().reverse();
   } else if (t === 'pyramid') {
-    seq = asc.concat(asc.slice(0, -1).reverse()); // up then down, no apex dupe
+    // Floor at the over-selection midpoint (#811): bottom out between the bottom
+    // variant's peak and the next variant's avg, dropping caps below that floor.
+    const fl = pyramidFloor(ladderVariants(), marginPct);
+    const base = fl > 0 ? [fl, ...asc.filter((v) => v > fl)] : asc.slice();
+    seq = base.concat(base.slice(0, -1).reverse()); // up then down, no apex dupe
   } else if (t === 'transient_shock') {
     // Deepening-dip staircase: hold top, dip to each lower rung
     // shallowest-first down to the bottom, recovering to top between dips.
@@ -515,7 +559,7 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
               :checked="maxStep === s"
               @change="onMaxStepChange(s)"
             />
-            {{ s.toFixed(2) }}×
+            {{ s <= 1 ? 'None' : (+s.toFixed(3)) + '×' }}
           </label>
           <span class="fill-count" v-if="displaySteps.length">
             → {{ displaySteps.length }} rung{{ displaySteps.length === 1 ? '' : 's' }}

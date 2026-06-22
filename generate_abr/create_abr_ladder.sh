@@ -486,28 +486,35 @@ NC='\033[0m' # No Color
 
 # All possible resolution tiers (filtered based on source resolution)
 # Format: name:width:height:bitrate_h265_kbps:bitrate_h264_kbps:bitrate_av1_kbps:preset:fontsize_tc:fontsize_label:x:y_tc:y_label
-# Geometric (~√2) ladder, ONE variant per unique height (#762). The original
-# 6 rungs are UNCHANGED (★) — they are the 2× "skip every other" subset the
-# proxy synthesises live (content.skip_alternate_variants), so they must stay
-# byte-for-byte. The 5 NEW rungs (432/648/900/1296/1800p) are the ~1.41× fills,
-# interleaved at the ODD indices, each bitrate = geometric mean √(a·b) of its
-# two existing neighbours per codec. Keep them in ascending height order — the
-# alternating fill/★ pattern is what makes the proxy's keep-even-index skip
-# yield exactly the original ladder (incl. floor + ceiling). Fill bitrates are
-# provisional (tune via crf_bandwidth_sweep / VMAF, --vmaf-lookup-mode sw).
+# 1.5x ladder (#811): adjacent rungs are ~1.55x apart on the COMBINED (video+audio)
+# bandwidth the PLAYER actually selects on — inside Apple's 1.5-2x adjacent-tier
+# guideline, with margin so real encodes clear 1.5x. Replaces the old ~1.4x
+# geometric-fill ladder (#762), which sat below 1.5x and let AVPlayer avg-key one
+# rung up then starve on that rung's peak under a tight cap (the over-selection
+# wedge). The geometric series is built on COMBINED avg (video target = combined -
+# ~200k audio) PER CODEC: the ~constant audio compresses low-end ratios, so
+# targeting video-only bitrate at 1.5x is NOT enough — it yields only ~1.4x
+# combined at the bottom (caught by generate_abr/ladder_audit.py). Floor anchored
+# at the prior 360p (h264 600 / h265 300); the 4K top floats up (~26 Mbps h264) to
+# hold >=1.5x across 9 rungs. 648p + 1800p dropped. Verify with ladder_audit.py
+# (expect no tight_spacing; all adjacent COMBINED ratios in [1.5, 2.0]).
+#
+# proxy `allowed_variants: alternating_variants` still works: it keeps every 2nd
+# rung of the bandwidth-sorted ladder (top + bottom retained) — now 9 -> 5 rungs
+# (360p/540p/900p/1296p/2160p, ~2.4x apart) instead of the old 11 -> 6. The skip
+# is generic (no fixed fill/star pattern), so it tracks whatever ladder is here;
+# the prior byte-for-byte "original 6" coupling is intentionally retired.
 # Format: name:width:height:h265_kbps:h264_kbps:av1_kbps:preset:fs_tc:fs_label:x:y_tc:y_label
 declare -a ALL_RESOLUTION_TIERS=(
     "360p:640:360:300:600:300:medium:20:16:10:10:30"
-    "432p:768:432:520:850:520:medium:22:18:10:10:32"
-    "540p:960:540:900:1200:900:medium:24:20:10:10:34"
-    "648p:1152:648:1162:1700:1162:medium:26:22:10:10:36"
-    "720p:1280:720:1500:2400:1500:medium:28:24:10:10:38"
-    "900p:1600:900:2600:3460:2600:medium:32:28:10:10:41"
-    "1080p:1920:1080:4500:5000:4500:medium:36:32:10:10:45"
-    "1296p:2304:1296:5810:7420:5810:medium:39:34:10:10:48"
-    "1440p:2560:1440:7500:11000:7500:medium:42:36:10:10:52"
-    "1800p:3200:1800:10610:15450:10610:medium:48:42:10:10:58"
-    "2160p:3840:2160:15000:21700:15000:medium:54:48:10:10:64"
+    "432p:768:432:575:1040:575:medium:22:18:10:10:32"
+    "540p:960:540:1001:1722:1001:medium:24:20:10:10:34"
+    "720p:1280:720:1662:2779:1662:medium:28:24:10:10:38"
+    "900p:1600:900:2686:4418:2686:medium:32:28:10:10:41"
+    "1080p:1920:1080:4273:6957:4273:medium:36:32:10:10:45"
+    "1296p:2304:1296:6734:10894:6734:medium:39:34:10:10:48"
+    "1440p:2560:1440:10547:16995:10547:medium:42:36:10:10:52"
+    "2160p:3840:2160:16458:26453:16458:medium:54:48:10:10:64"
 )
 
 # Will be populated after source detection
@@ -3561,6 +3568,42 @@ get_resolution_dimensions() {
 }
 
 ################################################################################
+# Ladder audit (#811)
+################################################################################
+
+# Audit an encode's ABR ladder (generate_abr/ladder_audit.py): structure +
+# Apple-spec checks, advertised-vs-measured segment bitrates, and per-rung VMAF.
+# VMAF is subsampled by default; set LADDER_AUDIT_VMAF=0 to skip it (fast,
+# structure-only) or LADDER_AUDIT_VMAF=full for every frame. Writes
+# ladder_audit.json into the dir and appends a section to ENCODING_REPORT.md.
+# Non-fatal: a failing check warns but never aborts the encode.
+run_ladder_audit() {
+    local dir="$1" codec="$2"
+    local audit="${SCRIPT_DIR}/ladder_audit.py"
+    [[ -f "$audit" ]] || { log_warn "ladder_audit.py not found; skipping ladder audit"; return 0; }
+    [[ -f "$dir/master.m3u8" ]] || { log_warn "no master.m3u8 in $dir; skipping ladder audit"; return 0; }
+
+    local vmaf_args=() vmode="${LADDER_AUDIT_VMAF:-1}"
+    if [[ "$vmode" == "0" ]]; then
+        vmaf_args=(--no-vmaf)
+    elif [[ -f "$MEZZANINE" ]]; then
+        vmaf_args=(--vmaf-ref "$MEZZANINE")
+        [[ "$vmode" == "full" ]] && vmaf_args+=(--vmaf-full)
+    else
+        log_warn "mezzanine unavailable; ladder audit will skip VMAF (use --keep-mezzanine or LADDER_AUDIT_VMAF=0)"
+        vmaf_args=(--no-vmaf)
+    fi
+
+    log "Ladder audit ($codec): $dir"
+    if python3 "$audit" --dir "$dir" --report-md "$dir/ENCODING_REPORT.md" "${vmaf_args[@]}" \
+        >>"$TEMP_DIR/encoding.log" 2>&1; then
+        log_success "Ladder audit ($codec): clean — see $dir/ladder_audit.json"
+    else
+        log_warn "Ladder audit ($codec): check failures — see $dir/ENCODING_REPORT.md / ladder_audit.json"
+    fi
+}
+
+################################################################################
 # Summary & Cleanup
 ################################################################################
 
@@ -3875,16 +3918,19 @@ main() {
         if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "hevc" ]]; then
             generate_thumbnail "$OUTPUT_DIR_HEVC"
             generate_encoding_report "$OUTPUT_DIR_HEVC" "hevc"
+            run_ladder_audit "$OUTPUT_DIR_HEVC" "hevc"
         fi
 
         if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "h264" ]]; then
             generate_thumbnail "$OUTPUT_DIR_H264"
             generate_encoding_report "$OUTPUT_DIR_H264" "h264"
+            run_ladder_audit "$OUTPUT_DIR_H264" "h264"
         fi
 
         if [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "av1" ]]; then
             generate_thumbnail "$OUTPUT_DIR_AV1"
             generate_encoding_report "$OUTPUT_DIR_AV1" "av1"
+            run_ladder_audit "$OUTPUT_DIR_AV1" "av1"
         fi
         print_summary
     else

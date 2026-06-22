@@ -14,7 +14,10 @@ const props = defineProps<{ playerId: string }>();
 const { player, setContent } = usePlayer(toRef(props, 'playerId'));
 
 const content = computed(() => player.value?.content);
-const { variants: rawVariants } = useManifestVariants(toRef(props, 'playerId'));
+// Full ladder (every published rung), not the allowed_variants-thinned set, so a
+// DESELECTED variant stays in the picker and can be re-checked (#815/#820 thinned
+// manifest_variants for the bandwidth chart; this picker needs the whole ladder).
+const { variantsAll: rawVariants } = useManifestVariants(toRef(props, 'playerId'));
 // Highest-bitrate-first, matching legacy `sortedPlaylists`.
 const variants = computed(() => {
   return rawVariants.value.slice().sort((a, b) => (b.bandwidth ?? 0) - (a.bandwidth ?? 0));

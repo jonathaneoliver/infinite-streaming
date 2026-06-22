@@ -42,13 +42,18 @@ func TestStandardLadderRatesDualRungFilled(t *testing.T) {
 	if got := rates[0].CapMbps; got < 16.12 || got > 16.14 {
 		t.Errorf("top cap %.3f Mbps, want ~16.132 (top peak × 1.05)", got)
 	}
-	// Bottom rung is attributed to the bottom variant; cap = bottom avg ×1.05.
+	// Bottom rung is the bottom variant's PEAK anchor ×1.05 — its avg anchor is
+	// dropped, so the ladder floors at the bottom variant's sustainable peak
+	// (no lower rung exists to drop to, so the avg→peak band would be a wedge).
 	last := rates[len(rates)-1]
 	if last.Resolution != "640x360" {
 		t.Errorf("bottom rung attributed to %s, want 640x360", last.Resolution)
 	}
-	if got := last.CapMbps; got < 0.755 || got > 0.766 {
-		t.Errorf("bottom cap %.3f Mbps, want ~0.761 (bottom avg × 1.05)", got)
+	if last.Source != "peak" {
+		t.Errorf("bottom rung source = %s, want peak (bottom avg dropped)", last.Source)
+	}
+	if got := last.CapMbps; got < 1.043 || got > 1.053 {
+		t.Errorf("bottom cap %.3f Mbps, want ~1.048 (bottom peak × 1.05)", got)
 	}
 	// Every rung is attributed to a real variant + carries its peak.
 	for _, r := range rates {

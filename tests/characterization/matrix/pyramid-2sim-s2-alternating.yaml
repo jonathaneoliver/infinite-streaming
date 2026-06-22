@@ -1,0 +1,25 @@
+# 2-sim group, s2 + ALTERNATING variants — sibling of pyramid-2sim-s2 with the
+# ladder thinned to every-other rung (#820 alternating_variants, resolved
+# server-side from the live ladder at config-on-connect; content-agnostic, no
+# hardcoded list). pyramid @ 1 Mbps initial cap + 1 Mbps client cap, NO live_offset.
+# control=master arms the pyramid; both arms thin the ladder via allowed_variants.
+name: pyramid-2sim-s2-alternating
+class: config
+parallel: true
+reps: 1
+duration_s: 300
+defaults:
+  platform: ipad-sim
+  content: insane_newer_p200_h264
+  is.segment: s2
+  is.peak_bitrate_mbps: 1
+  proxy.allowed_variants: alternating_variants
+  proxy.shape:
+    pattern: pyramid
+    step_seconds: 18
+    rate_mbps: 1                    # initial network cap (Mbps) at config-on-connect, before the pattern arms
+groups:
+  - id: pair
+    control: { id: master }
+    variants:
+      - { id: slave1 }
