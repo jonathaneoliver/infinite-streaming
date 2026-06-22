@@ -62,8 +62,12 @@ type StepSeconds = (typeof STEP_SECONDS_CHOICES)[number];
 // than this ratio. Mirrors go-proxy/pkg/ladder + the harness CLI's
 // --max-step. Higher = coarser + shorter pattern (a pyramid over a dense
 // ladder can run ~13 min/cycle).
-const MAX_STEP_CHOICES = [1.1, 1.15, 1.2, 1.5, 2.0] as const;
-const DEFAULT_MAX_STEP = 1.15;
+// "None" (sentinel 1) inserts no fills — just each variant's peak + avg caps —
+// since FillLadder / standardLadder treat step <= 1 as a no-op. On the 1.5x ladder
+// the peak+avg gaps are ~1.25x, so 1.375 also yields peak+avg only; 1.25 / 1.125
+// add progressively denser geometric fills between the variant caps.
+const MAX_STEP_CHOICES = [1.125, 1.25, 1.375, 1] as const;
+const DEFAULT_MAX_STEP = 1.25;
 const maxStep = ref<number>(DEFAULT_MAX_STEP);
 
 // #551 — start the ladder this % over the top variant's peak (a headroom
@@ -525,7 +529,7 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
               :checked="maxStep === s"
               @change="onMaxStepChange(s)"
             />
-            {{ s.toFixed(2) }}×
+            {{ s <= 1 ? 'None' : (+s.toFixed(3)) + '×' }}
           </label>
           <span class="fill-count" v-if="displaySteps.length">
             → {{ displaySteps.length }} rung{{ displaySteps.length === 1 ? '' : 's' }}
