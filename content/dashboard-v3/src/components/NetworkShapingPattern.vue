@@ -87,10 +87,18 @@ const round3 = (v: number): number => Math.round(v * 1000) / 1000;
 function standardLadder(variants: LadderVariant[], bumpPct: number, step: number, topHeadroomPct: number): number[] {
   const f = 1 + bumpPct / 100;
   const anchors: number[] = [];
-  for (const v of variants) {
+  // Bottom variant (lowest positive peak): drop its AVG anchor so the ladder
+  // floors at the bottom variant's peak×(1+bump). At the very bottom there is no
+  // lower rung to drop to, so the avg→peak band is a pure wedge. Mirrors the
+  // go-proxy/pkg/ladder.AnchorCaps change.
+  let bottomIdx = -1;
+  variants.forEach((v, i) => {
+    if (v.peakBps > 0 && (bottomIdx < 0 || v.peakBps < variants[bottomIdx].peakBps)) bottomIdx = i;
+  });
+  variants.forEach((v, i) => {
     if (v.peakBps > 0) anchors.push(round3((v.peakBps * f) / 1e6));
-    if (v.avgBps > 0) anchors.push(round3((v.avgBps * f) / 1e6));
-  }
+    if (v.avgBps > 0 && i !== bottomIdx) anchors.push(round3((v.avgBps * f) / 1e6));
+  });
   if (topHeadroomPct > 0) {
     const maxPeak = variants.reduce((m, v) => Math.max(m, v.peakBps), 0);
     if (maxPeak > 0) anchors.push(round3((maxPeak * (1 + topHeadroomPct / 100)) / 1e6));
@@ -140,7 +148,9 @@ const defaultStepSeconds = computed<StepSeconds>(() => {
 });
 
 /** Manifest variants sorted ascending by bandwidth. */
-const { variants: rawVariants } = useManifestVariants(toRef(props, 'playerId'));
+// Full ladder — the shaping pattern is designed over every published rung, not
+// the allowed_variants-thinned subset the bandwidth chart shows (#815/#820).
+const { variantsAll: rawVariants } = useManifestVariants(toRef(props, 'playerId'));
 const sortedVariants = computed(() => {
   return [...rawVariants.value].sort((a, b) => (a.bandwidth ?? 0) - (b.bandwidth ?? 0));
 });

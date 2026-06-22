@@ -6082,10 +6082,16 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	if playlistInfo != nil {
 		// getContentType parsed the UNMANIPULATED upstream master, so playlistInfo
-		// is the full ladder. Thin it to the session's allowed_variants so
-		// manifest_variants matches the MANIPULATED master the player receives —
-		// otherwise the bandwidth chart (#815) draws every rung for a thinned
-		// session and the per-session compare is meaningless (#820).
+		// is the full ladder. Keep the FULL set as manifest_variants_all: the
+		// config/control panels (fault injection, the content-manipulation variant
+		// picker, the shaping pattern) must enumerate EVERY available rung so a
+		// DESELECTED variant stays listed and can be re-selected — not just the
+		// allowed subset. Then thin manifest_variants to the session's
+		// allowed_variants so the bandwidth chart (#815) and the per-session compare
+		// (#820) keep reflecting the MANIPULATED master the player receives.
+		// filterPlaylistInfoByAllowed allocates a fresh slice, so the _all reference
+		// retains the full ladder.
+		sessionData["manifest_variants_all"] = playlistInfo
 		if allowed := getStringSlice(sessionData, "content_allowed_variants"); len(allowed) > 0 {
 			playlistInfo = filterPlaylistInfoByAllowed(playlistInfo, allowed)
 		}

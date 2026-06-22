@@ -438,6 +438,31 @@ const series = computed<SeriesSpec[]>(() => {
       displayedVariantPeakMbps(ladder, p.player_metrics?.video_resolution),
     stepped: true,
   });
+  // Variant Bands — a light shaded region between each variant's
+  // AVERAGE-BANDWIDTH and BANDWIDTH. Default OFF; one "Variant Bands" legend chip
+  // (sitting beside the avg / peak chips) toggles the whole set. Turn it on
+  // (alongside the peak + avg ladders) to SEE, at a glance, where adjacent
+  // variants' [avg,peak] bands OVERLAP — the over-selection trap, a rung's avg
+  // sitting at/below the rung-below's peak (#811) — or leave GAPS. Fill is
+  // semi-transparent, so overlapping bands compound into a darker tint. Built
+  // BEFORE the avg/peak ladder lines so the bands draw BEHIND those rung lines.
+  for (const v of ladder) {
+    const peakBw = Number(v.bandwidth);
+    const avgBw = Number((v as { average_bandwidth?: number }).average_bandwidth);
+    if (!Number.isFinite(peakBw) || peakBw <= 0) continue;
+    if (!Number.isFinite(avgBw) || avgBw <= 0 || avgBw >= peakBw) continue;
+    const peakMbps = peakBw / 1_000_000;
+    const avgMbps = avgBw / 1_000_000;
+    out.push({
+      label: `Variant band ${v.resolution ?? '?'} (${avgMbps.toFixed(2)}–${peakMbps.toFixed(2)} Mbps)`,
+      color: '#38bdf8',
+      accessor: () => peakMbps,
+      fillToValue: avgMbps,
+      stepped: false,
+      groupLegend: 'Variant Bands',
+      hidden: true,
+    });
+  }
   // Mute the variant-line color so it doesn't out-shout the live
   // traces. Slate-400 reads at a glance but stays in the background.
   const AVG_COLOR = '#94a3b8';

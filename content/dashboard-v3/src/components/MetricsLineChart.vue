@@ -20,6 +20,7 @@ import { computed, inject, onBeforeUnmount, ref, watch, type PropType } from 'vu
 import { ensureChartJs } from '@/composables/useChartJs';
 import { CompareContextKey } from '@/composables/useCompareContext';
 import { useChartCoordination, fmtTickHMSms, DEFAULT_FOCUS_MS, type ChartViewport } from '@/composables/useChartCoordination';
+import { useLegendVisibility } from '@/composables/useLegendVisibility';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import { tsOfRow, chRowToPlayerRecord } from '@/composables/chRowAdapter';
 import {
@@ -57,6 +58,12 @@ export interface SeriesSpec {
    *  `Sx` tag). Lets the session-legend highlight / show / hide every line
    *  for one session at once across all charts. */
   sessionTag?: string;
+  /** Render this series as a filled BAND instead of a line: shade the area
+   *  between the series' own value and this absolute y-axis value (Chart.js
+   *  `fill: { value }`). The border is dropped (fill only) and the fill uses a
+   *  semi-transparent tint of `color`, so overlapping bands compound to a
+   *  darker shade. Used for the bandwidth chart's per-variant avg↔peak bands. */
+  fillToValue?: number;
 }
 
 /**
@@ -152,6 +159,10 @@ const canvas = ref<HTMLCanvasElement | null>(null);
 const wrap = ref<HTMLDivElement | null>(null);
 const canvasWrap = ref<HTMLDivElement | null>(null);
 const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
+// Persist this chart's legend show/hide toggles so a new play_id doesn't reset
+// them (scoped per player+chart; see useLegendVisibility). Applied at dataset
+// build time, recorded on each legend click.
+const legendVis = useLegendVisibility(`${props.coordId ?? props.playerId}::${props.title}`);
 const { lineVisibility } = useLifecycleLineVisibility();
 
 /** Lifecycle markers whose kind is currently toggled visible. Reads the
@@ -327,16 +338,20 @@ function makeDsObj(
   data: Array<{ x: number; y: number | null }>,
   spanGaps: boolean,
 ): any {
+  // A `fillToValue` series renders as a filled band (no border) between its own
+  // value and that absolute y-value; otherwise it's a normal unfilled line.
+  const band = typeof s.fillToValue === 'number' && Number.isFinite(s.fillToValue);
   return {
     label: s.label,
-    borderColor: s.color,
-    backgroundColor: s.color + '22',
+    borderColor: band ? 'transparent' : s.color,
+    backgroundColor: s.color + (band ? '33' : '22'),
     data,
     tension: 0,
     stepped: !!s.stepped,
     pointRadius: 0,
-    borderWidth: 2,
+    borderWidth: band ? 0 : 2,
     borderDash: s.borderDash ?? [],
+    fill: band ? { value: s.fillToValue } : false,
     spanGaps,
     yAxisID: s.axis === 'y2' ? 'y2' : 'y',
     hidden: !!s.hidden,
@@ -375,12 +390,16 @@ function buildPrimaryDatasetObjs(): any[] {
     const dsKey = 'primary|' + s.label;
     const prev = byKey.get(dsKey);
     if (prev) {
-      prev.borderColor = s.color;
-      prev.backgroundColor = s.color + '22';
+      const band = typeof s.fillToValue === 'number' && Number.isFinite(s.fillToValue);
+      prev.borderColor = band ? 'transparent' : s.color;
+      prev.backgroundColor = s.color + (band ? '33' : '22');
+      prev.borderWidth = band ? 0 : 2;
+      prev.fill = band ? { value: s.fillToValue } : false;
       prev.stepped = !!s.stepped;
       prev.borderDash = s.borderDash ?? [];
       prev.yAxisID = s.axis === 'y2' ? 'y2' : 'y';
       prev.spanGaps = true;
+      prev.hidden = legendVis.resolveHidden(s); // persisted toggle survives a new play_id
       prev._groupLegend = s.groupLegend ?? null;
       prev._sessionTag = s.sessionTag ?? null;
       dataset[i] = prev.data;
@@ -388,7 +407,9 @@ function buildPrimaryDatasetObjs(): any[] {
     } else {
       const data: Array<{ x: number; y: number }> = [];
       dataset[i] = data;
-      out.push(makeDsObj(dsKey, s, data, true));
+      const obj = makeDsObj(dsKey, s, data, true);
+      obj.hidden = legendVis.resolveHidden(s); // persisted toggle survives a new play_id
+      out.push(obj);
     }
   }
   return out;
@@ -556,7 +577,11 @@ function createChartInstance(Chart: any): any {
       // `_dsKey` (primary|<label>) so later reconciles reuse these
       // objects — and their accumulated history — by identity, and
       // `_groupLegend` for the legend group-collapse logic (issue #486).
-      datasets: props.series.map((s, i) => makeDsObj('primary|' + s.label, s, dataset[i], true)),
+      datasets: props.series.map((s, i) => {
+        const o = makeDsObj('primary|' + s.label, s, dataset[i], true);
+        o.hidden = legendVis.resolveHidden(s); // persisted toggle survives a new play_id
+        return o;
+      }),
     },
     /**
      * Inline plugin: vertical "selected event" cursor.
@@ -773,7 +798,10 @@ function createChartInstance(Chart: any): any {
             const ds = ci.data.datasets[item.datasetIndex];
             const grp = ds?._groupLegend;
             if (!grp) {
-              ci.setDatasetVisibility(item.datasetIndex, !ci.isDatasetVisible(item.datasetIndex));
+              const nowVisible = !ci.isDatasetVisible(item.datasetIndex);
+              ci.setDatasetVisibility(item.datasetIndex, nowVisible);
+              // Persist so a new play_id doesn't reset this toggle.
+              legendVis.setHidden({ label: ds?.label ?? '', groupLegend: null }, !nowVisible);
               ci.update();
               return;
             }
@@ -784,6 +812,8 @@ function createChartInstance(Chart: any): any {
             ci.data.datasets.forEach((d: any, idx: number) => {
               if (d._groupLegend === grp) ci.setDatasetVisibility(idx, !anyVisible);
             });
+            // Persist the group's new hidden state (hidden when it was visible).
+            legendVis.setHidden({ groupLegend: grp, label: '' }, anyVisible);
             ci.update();
           },
           // Hover-highlight: when the cursor is over a legend label,

@@ -33,7 +33,22 @@ export function useManifestVariants(playerId: Ref<string> | string) {
     return [];
   });
 
-  return { variants };
+  // The FULL content ladder — every published rung, independent of the session's
+  // allowed_variants thinning. Config/control panels (fault injection, the
+  // content-manipulation variant picker, the shaping pattern) read this so a
+  // DESELECTED variant stays listed and can be re-selected — whereas `variants`
+  // above is the thinned what-the-player-sees set the bandwidth chart wants
+  // (#815/#820). The proxy publishes the full set on
+  // raw_session.manifest_variants_all (go-proxy main.go); fall back to the thinned
+  // `variants` for older proxies or all-allowed sessions, where the two match.
+  const variantsAll = computed<ManifestVariant[]>(() => {
+    const p = player.value;
+    const all = parseManifestVariants((p as any)?.raw_session?.manifest_variants_all);
+    if (all.length) return all as ManifestVariant[];
+    return variants.value;
+  });
+
+  return { variants, variantsAll };
 }
 
 /** Minimal manifest-variant shape the snap helper needs. */
