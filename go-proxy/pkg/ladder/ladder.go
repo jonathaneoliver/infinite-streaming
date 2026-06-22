@@ -84,14 +84,32 @@ func (r Rung) Label() string {
 // avg×(1+bump) — skipping the avg rung when AVERAGE-BANDWIDTH is absent
 // and any rung whose source bitrate is non-positive. The result is sorted
 // descending by Mbps. bumpPct is a percentage (5 => ×1.05).
+//
+// The BOTTOM variant (lowest peak) gets its AVG anchor dropped: at the very
+// bottom there is no lower rung to drop to, so a cap parked in that variant's
+// avg→peak band is a pure wedge with no diagnostic value (a peak-keyed player
+// can't switch down, an avg-keyed one just holds). The ladder therefore floors
+// at the bottom variant's peak×(1+bump) — the lowest cap that's actually
+// sustainable for the bottom rung.
 func AnchorCaps(vs []Variant, bumpPct float64) []Rung {
 	f := 1 + bumpPct/100
+	// Index of the bottom variant (lowest positive peak). -1 when no variant
+	// publishes a peak, in which case no avg anchor is dropped.
+	bottomIdx := -1
+	for i, v := range vs {
+		if v.PeakBps <= 0 {
+			continue
+		}
+		if bottomIdx < 0 || v.PeakBps < vs[bottomIdx].PeakBps {
+			bottomIdx = i
+		}
+	}
 	out := make([]Rung, 0, len(vs)*2)
-	for _, v := range vs {
+	for i, v := range vs {
 		if v.PeakBps > 0 {
 			out = append(out, Rung{Mbps: round3(float64(v.PeakBps) * f / 1e6), Variant: v.Resolution, Kind: "peak"})
 		}
-		if v.AvgBps > 0 {
+		if v.AvgBps > 0 && i != bottomIdx {
 			out = append(out, Rung{Mbps: round3(float64(v.AvgBps) * f / 1e6), Variant: v.Resolution, Kind: "avg"})
 		}
 	}

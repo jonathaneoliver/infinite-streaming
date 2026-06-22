@@ -19,15 +19,16 @@ var tearsH264 = []Variant{
 
 func TestAnchorCaps(t *testing.T) {
 	got := AnchorCaps(tearsH264, DefaultBumpPct)
-	if len(got) != 12 {
-		t.Fatalf("anchors: got %d want 12 (2 per variant)", len(got))
+	if len(got) != 11 {
+		t.Fatalf("anchors: got %d want 11 (2 per variant, minus the bottom variant's dropped avg)", len(got))
 	}
-	// Descending, top = 2160p peak, bottom = 360p avg, both ×1.05.
+	// Descending, top = 2160p peak, bottom = 360p PEAK (the bottom variant's avg
+	// anchor is dropped — it floors at peak×1.05), both ×1.05.
 	if got[0].Mbps != 31.064 || got[0].Kind != "peak" {
 		t.Errorf("top anchor = %.3f %s, want 31.064 peak", got[0].Mbps, got[0].Kind)
 	}
-	if last := got[len(got)-1]; last.Mbps != 0.833 || last.Kind != "avg" {
-		t.Errorf("bottom anchor = %.3f %s, want 0.833 avg", last.Mbps, last.Kind)
+	if last := got[len(got)-1]; last.Mbps != 1.085 || last.Kind != "peak" {
+		t.Errorf("bottom anchor = %.3f %s, want 1.085 peak", last.Mbps, last.Kind)
 	}
 	for i := 1; i < len(got); i++ {
 		if got[i].Mbps > got[i-1].Mbps {
@@ -46,11 +47,11 @@ func TestAnchorCapsNoAverage(t *testing.T) {
 
 func TestStandardLadderFilled(t *testing.T) {
 	got := StandardLadder(tearsH264, DefaultBumpPct, DefaultMaxStep, 0)
-	if len(got) != 34 {
-		t.Fatalf("filled ladder: got %d rungs want 34 (12 anchors + 22 fills)", len(got))
+	if len(got) != 32 {
+		t.Fatalf("filled ladder: got %d rungs want 32 (11 anchors + 21 fills)", len(got))
 	}
-	if got[0].Mbps != 31.064 || got[len(got)-1].Mbps != 0.833 {
-		t.Errorf("ladder bounds = %.3f..%.3f, want 31.064..0.833", got[0].Mbps, got[len(got)-1].Mbps)
+	if got[0].Mbps != 31.064 || got[len(got)-1].Mbps != 1.085 {
+		t.Errorf("ladder bounds = %.3f..%.3f, want 31.064..1.085", got[0].Mbps, got[len(got)-1].Mbps)
 	}
 	// Every consecutive step within the target ratio (tiny slack for the
 	// 3-dp rounding of each cap).
@@ -65,8 +66,8 @@ func TestStandardLadderFilled(t *testing.T) {
 	}
 	// No fill escapes the anchor envelope.
 	for _, r := range got {
-		if r.Mbps > 31.064 || r.Mbps < 0.833 {
-			t.Errorf("rung %.3f outside [0.833, 31.064]", r.Mbps)
+		if r.Mbps > 31.064 || r.Mbps < 1.085 {
+			t.Errorf("rung %.3f outside [1.085, 31.064]", r.Mbps)
 		}
 	}
 }
@@ -160,8 +161,8 @@ func TestBuildPattern(t *testing.T) {
 		t.Errorf("pyramid len %d, want %d (asc + desc without apex)", len(pyr), 2*n-1)
 	}
 	sq := BuildPattern(SquareWave, rungs, 12)
-	if len(sq) != 2 || sq[0].RateMbps != 0.833 || sq[1].RateMbps != 31.064 {
-		t.Errorf("square_wave = %v, want [0.833, 31.064]", sq)
+	if len(sq) != 2 || sq[0].RateMbps != 1.085 || sq[1].RateMbps != 31.064 {
+		t.Errorf("square_wave = %v, want [1.085, 31.064]", sq)
 	}
 	// transient_shock: top + (n-1) deepening dips, each recovering to top →
 	// length 2n-1. Even indices are the top baseline; odd indices are the
