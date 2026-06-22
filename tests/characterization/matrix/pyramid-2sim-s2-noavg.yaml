@@ -1,0 +1,27 @@
+# 2-sim group, s2, FULL ladder — but with AVERAGE-BANDWIDTH stripped from the
+# manifest (proxy.strip_avg_bandwidth). Hypothesis test: the full ladder
+# over-selects to 432p at the 1.04 floor because 432p's AVERAGE-BANDWIDTH (1.04)
+# == the floor, so an avg-keyed AVPlayer up-switches into it and then starves on
+# its 1.30 peak. Stripping avg forces peak-keyed selection; if it then HOLDS 360p
+# (432p peak 1.30 > 1.04 floor), avg-keying is confirmed as the over-selection
+# driver. NO alternating here — full ladder, so 432p is still present.
+name: pyramid-2sim-s2-noavg
+class: config
+parallel: true
+reps: 1
+duration_s: 300
+defaults:
+  platform: ipad-sim
+  content: insane_newer_p200_h264
+  is.segment: s2
+  is.peak_bitrate_mbps: 1
+  proxy.strip_avg_bandwidth: true
+  proxy.shape:
+    pattern: pyramid
+    step_seconds: 18
+    rate_mbps: 1                    # initial network cap (Mbps) at config-on-connect, before the pattern arms
+groups:
+  - id: pair
+    control: { id: master }
+    variants:
+      - { id: slave1 }

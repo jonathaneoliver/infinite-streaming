@@ -9,11 +9,13 @@ reps: 1
 duration_s: 300
 defaults:
   platform: ipad-sim
-  content: insane_new_p200_h264
+  content: insane_newer_p200_h264
   is.segment: s2
   is.peak_bitrate_mbps: 1
   proxy.shape:
-    rate_mbps: 1.5                  # CONSTANT 1.5 Mbps at config-on-connect, no pattern
+    pattern: pyramid                # climb the ladder then descend; master arms it, slave follows via group propagation
+    step_seconds: 18
+    rate_mbps: 1                    # initial network cap (Mbps) applied at config-on-connect, before the pattern arms
 groups:
   - id: pair
     control: { id: master }

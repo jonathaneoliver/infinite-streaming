@@ -167,12 +167,26 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	if v := strings.TrimSpace(os.Getenv("CHAR_PERSIST_PEAK")); v != "" {
 		args = append(args, "-is.flag.persistent_peak_bitrate_mbps", v)
 	}
-	// On-device LocalHTTPProxy toggle. Unset → app default (ON). CHAR_LOCAL_PROXY=false
-	// takes the on-device proxy out of the path so AVPlayer fetches origin directly —
-	// used to isolate whether segment re-downloads are AVPlayer's or the proxy's.
-	if v := strings.TrimSpace(os.Getenv("CHAR_LOCAL_PROXY")); v != "" {
-		args = append(args, "-is.flag.local_proxy", v)
+	// On-device LocalHTTPProxy — FORCED OFF for characterization by default. It
+	// proxies over localhost, which skews AVPlayer's initial bitrate estimate and
+	// drives cold-start over-selection wedges (see the STARTUP-FINDINGS). ALWAYS
+	// passed (not only when the env is set) so a persisted ON in the sim's saved
+	// UserDefaults can't leak in. Override with CHAR_LOCAL_PROXY=true.
+	localProxy := strings.TrimSpace(os.Getenv("CHAR_LOCAL_PROXY"))
+	if localProxy == "" {
+		localProxy = "false"
 	}
+	args = append(args, "-is.flag.local_proxy", localProxy)
+
+	// Auto-Recovery — FORCED OFF for characterization by default so a wedge is
+	// OBSERVED, not silently restarted out from under the measurement. ALWAYS
+	// passed so a persisted ON can't leak in. Override with CHAR_AUTO_RECOVERY=true.
+	autoRecovery := strings.TrimSpace(os.Getenv("CHAR_AUTO_RECOVERY"))
+	if autoRecovery == "" {
+		autoRecovery = "false"
+	}
+	args = append(args, "-is.flag.auto_recovery", autoRecovery)
+
 	appium.SetLaunchArgs(args)
 
 	sess, lerr := appium.LaunchToHome(setupCtx, *picked)
@@ -188,18 +202,18 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		_ = launcher.Close()
 	})
 
-	// Clean proxy baseline (on by default): clear any shape/faults/content carried
-	// over from a prior run that reused this player_id, before the play + pattern.
-	// CHAR_NO_PROXY_RESET=1 skips it (preserve carry-over). Only this harness path
-	// resets; the proxy's reattach default is untouched, so manual sessions still
-	// carry over (see feedback_manual_proxy_carryover).
-	if strings.TrimSpace(os.Getenv("CHAR_NO_PROXY_RESET")) == "" {
-		if err := sess.ResetProxy(setupCtx); err != nil {
-			t.Logf("arm %d: ResetProxy (non-fatal): %v", dev.FleetIndex, err)
-		} else {
-			t.Logf("arm %d: proxy reset to clean baseline", dev.FleetIndex)
-		}
-	}
+	// NO proxy reset here. The flow is reset → configure-on-connect → play, and
+	// config-on-connect IS the reset+configure step: each arm gets a fresh
+	// player_id whose session is created AND fully provisioned (shape+cap+faults+
+	// content) by the bootstrap GET in char.go before this test runs. A reset
+	// AFTER that bootstrap (what used to live here) reverted the session to the
+	// global INFINITE_STREAM_DEFAULT_RATE_MBPS baseline (100 Mbps) — wiping the
+	// config-on-connect rate cap — so the player streamed unthrottled for the ~2s
+	// until ApplyPattern armed, over-selected a high variant, and wedged. Dropping
+	// it lets the bootstrapped cap survive to the player's first byte; the pattern
+	// then arms post-launch and climbs from that floor. (A separate pre-bootstrap
+	// reset would be a no-op anyway — the player_id is freshly minted, so there is
+	// no prior session to clear.)
 
 	// Fleet HOME barrier: hold until every arm is at home, then all start
 	// playback together — so the arms stream simultaneously, not staggered.
