@@ -50,6 +50,13 @@ func BuildPattern(template string, rungs []Rung, stepSecs int) []Step {
 	case RampDown:
 		seq = reversedFloat(asc)
 	case Pyramid:
+		// Bottom out at the over-selection BOUNDARY — midway between the bottom
+		// variant's peak cap and the next variant's avg cap — instead of the bare
+		// bottom.peak cap. Both are already +bump network caps, so the midpoint
+		// carries the same bump. Caps below that floor are dropped. #811.
+		if fl := pyramidFloor(rungs); fl > 0 {
+			asc = floorAsc(asc, fl)
+		}
 		down := reversedFloat(asc[:len(asc)-1]) // drop the apex so it isn't held twice
 		seq = append(append([]float64{}, asc...), down...)
 	case SquareWave:
@@ -71,6 +78,44 @@ func BuildPattern(template string, rungs []Rung, stepSecs int) []Step {
 	out := make([]Step, 0, len(seq))
 	for _, r := range seq {
 		out = append(out, Step{RateMbps: r, DurationSeconds: stepSecs})
+	}
+	return out
+}
+
+// pyramidFloor returns the over-selection-boundary floor for a pyramid: the
+// midpoint of the lowest peak cap and the lowest avg cap. The lowest avg cap is
+// the NEXT variant's avg, since AnchorCaps drops the bottom variant's avg. Both
+// are already +bump network caps, so the midpoint carries the same bump. Fills /
+// headroom rungs are ignored (only "peak"/"avg" kinds count). Returns 0 when
+// either kind is absent (no boundary to floor at). #811.
+func pyramidFloor(rungs []Rung) float64 {
+	bottomPeak, nextAvg := 0.0, 0.0
+	for _, r := range rungs {
+		switch r.Kind {
+		case "peak":
+			if r.Mbps > 0 && (bottomPeak == 0 || r.Mbps < bottomPeak) {
+				bottomPeak = r.Mbps
+			}
+		case "avg":
+			if r.Mbps > 0 && (nextAvg == 0 || r.Mbps < nextAvg) {
+				nextAvg = r.Mbps
+			}
+		}
+	}
+	if bottomPeak <= 0 || nextAvg <= 0 {
+		return 0
+	}
+	return round3((bottomPeak + nextAvg) / 2)
+}
+
+// floorAsc drops ascending caps strictly below floor and makes floor the lowest
+// cap. `asc` must be sorted ascending; the result stays ascending.
+func floorAsc(asc []float64, floor float64) []float64 {
+	out := []float64{floor}
+	for _, v := range asc {
+		if v > floor {
+			out = append(out, v)
+		}
 	}
 	return out
 }

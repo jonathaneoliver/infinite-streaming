@@ -214,6 +214,32 @@ function ladderVariants(): LadderVariant[] {
   }));
 }
 
+/** Pyramid over-selection floor — midpoint of the bottom variant's peak cap and
+ *  the next variant's avg cap, both ×(1+margin) so the midpoint carries the same
+ *  bump. Mirrors ladder.pyramidFloor in go-proxy/pkg/ladder. Returns 0 when
+ *  either is absent. #811. */
+function pyramidFloor(variants: LadderVariant[], marginPct: number): number {
+  const f = 1 + marginPct / 100;
+  let bottomIdx = -1;
+  variants.forEach((v, i) => {
+    if (v.peakBps > 0 && (bottomIdx < 0 || v.peakBps < variants[bottomIdx].peakBps)) bottomIdx = i;
+  });
+  let bottomPeak = 0;
+  let nextAvg = 0; // the next variant's avg — the bottom variant's avg anchor is dropped
+  variants.forEach((v, i) => {
+    if (v.peakBps > 0) {
+      const p = round3((v.peakBps * f) / 1e6);
+      if (bottomPeak === 0 || p < bottomPeak) bottomPeak = p;
+    }
+    if (v.avgBps > 0 && i !== bottomIdx) {
+      const a = round3((v.avgBps * f) / 1e6);
+      if (nextAvg === 0 || a < nextAvg) nextAvg = a;
+    }
+  });
+  if (bottomPeak <= 0 || nextAvg <= 0) return 0;
+  return round3((bottomPeak + nextAvg) / 2);
+}
+
 /** Generate step rates from template + margin + variants. Uses the shared
  *  dual-rung + geometrically-filled limit ladder (#551), then orders it
  *  per template — mirrors ladder.BuildPattern in go-proxy/pkg/ladder. */
@@ -230,7 +256,11 @@ function buildSteps(t: Template, marginPct: number, stepSecs: number): Pattern['
   } else if (t === 'ramp_down') {
     seq = asc.slice().reverse();
   } else if (t === 'pyramid') {
-    seq = asc.concat(asc.slice(0, -1).reverse()); // up then down, no apex dupe
+    // Floor at the over-selection midpoint (#811): bottom out between the bottom
+    // variant's peak and the next variant's avg, dropping caps below that floor.
+    const fl = pyramidFloor(ladderVariants(), marginPct);
+    const base = fl > 0 ? [fl, ...asc.filter((v) => v > fl)] : asc.slice();
+    seq = base.concat(base.slice(0, -1).reverse()); // up then down, no apex dupe
   } else if (t === 'transient_shock') {
     // Deepening-dip staircase: hold top, dip to each lower rung
     // shallowest-first down to the bottom, recovering to top between dips.

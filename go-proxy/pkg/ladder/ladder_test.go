@@ -156,9 +156,33 @@ func TestBuildPattern(t *testing.T) {
 	if len(down) != n || down[0].RateMbps <= down[len(down)-1].RateMbps {
 		t.Errorf("ramp_down should descend, got %.3f..%.3f", down[0].RateMbps, down[len(down)-1].RateMbps)
 	}
+	// pyramid: floored at the over-selection midpoint (#811) — bottoms out at
+	// pyramidFloor(rungs) (caps below dropped), symmetric (asc + desc w/o apex).
 	pyr := BuildPattern(Pyramid, rungs, 12)
-	if len(pyr) != 2*n-1 {
-		t.Errorf("pyramid len %d, want %d (asc + desc without apex)", len(pyr), 2*n-1)
+	fl := pyramidFloor(rungs)
+	if fl != 1.271 { // midpoint(640x360 peak 1.085, 960x540 avg 1.457), both +5%
+		t.Errorf("pyramidFloor = %.3f, want 1.271", fl)
+	}
+	if pyr[0].RateMbps != fl || pyr[len(pyr)-1].RateMbps != fl {
+		t.Errorf("pyramid should bottom at floor %.3f, got ends %.3f..%.3f", fl, pyr[0].RateMbps, pyr[len(pyr)-1].RateMbps)
+	}
+	above := 0
+	for _, r := range rungs {
+		if r.Mbps > fl {
+			above++
+		}
+	}
+	wantLen := 2*(above+1) - 1 // floor + caps above it, symmetric without apex
+	if len(pyr) != wantLen {
+		t.Errorf("pyramid len %d, want %d (floor + %d caps above)", len(pyr), wantLen, above)
+	}
+	for i := range pyr {
+		if pyr[i].RateMbps < fl {
+			t.Errorf("pyramid cap %.3f below floor %.3f at %d", pyr[i].RateMbps, fl, i)
+		}
+		if pyr[i].RateMbps != pyr[len(pyr)-1-i].RateMbps {
+			t.Errorf("pyramid not symmetric at %d: %.3f vs %.3f", i, pyr[i].RateMbps, pyr[len(pyr)-1-i].RateMbps)
+		}
 	}
 	sq := BuildPattern(SquareWave, rungs, 12)
 	if len(sq) != 2 || sq[0].RateMbps != 1.085 || sq[1].RateMbps != 31.064 {
