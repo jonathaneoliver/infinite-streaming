@@ -8,7 +8,6 @@ reps: 1
 duration_s: 120
 defaults:
   platform: iphone
-  content: insane_newer_p200_h264
   is.peak_bitrate_mbps: 1
   proxy.shape:
     rate_mbps: 1.5

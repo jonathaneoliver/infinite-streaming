@@ -14,7 +14,6 @@ reps: 1
 duration_s: 240
 defaults:
   platform: ipad-sim
-  content: insane_new_p200_h264
   is.peak_bitrate_mbps: 1          # client startup cap → low start rung
   proxy.live_offset: 18            # 20 isn't a supported window (0|2|4|6|12|18|24|30|36|42); 18 is the nearest. Shallower hold-back than 30 → starts closer to the live edge
   proxy.shape:

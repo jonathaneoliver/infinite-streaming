@@ -18,7 +18,6 @@ reps: 2
 duration_s: 90
 defaults:
   platform: ipad-sim
-  content: insane_new_p200_h264
   is.segment: s6
 axes:
   proxy.live_offset: [0, 24]

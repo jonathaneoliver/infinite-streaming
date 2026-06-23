@@ -15,7 +15,6 @@ parallel: true
 duration_s: 30
 defaults:
   platform: ipad-sim
-  content: insane_newer_p200_h264
   is.muted: false
 axes:
   proxy.live_offset: [24, 30]

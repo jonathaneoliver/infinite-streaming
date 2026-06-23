@@ -10,7 +10,6 @@ reps: 1
 duration_s: 120
 defaults:
   platform: iphone
-  content: insane_newer_p200_h264
   is.starts_first_variant: true
   proxy.shape:
     rate_mbps: 1.5
