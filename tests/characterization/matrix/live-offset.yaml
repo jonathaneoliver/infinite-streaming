@@ -22,7 +22,6 @@ duration_s: 90
 # Shared across every arm; an axis or explicit arm overrides per-field.
 defaults:
   platform: ipad-sim
-  content: insane_new_p200_h264
 
 # Cartesian product → is.segment{s2,s6} × proxy.live_offset{24,30} = 4 arms.
 axes:

@@ -22,7 +22,6 @@ duration_s: 120
 compare: is.segment
 defaults:
   platform: ipad-sim
-  content: insane_new_p200_h264
   is.peak_bitrate_mbps: 2   # client startup cap → player joins on a LOW rung (app is integer Mbps; 1.5 truncates, so 2)
   proxy.shape:
     pattern: pyramid

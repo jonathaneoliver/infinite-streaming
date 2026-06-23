@@ -172,9 +172,9 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 	for i, a := range arms {
 		res := charmatrix.ArmResult{Arm: a, IntendedOff: intendedOf(a)}
 		e := a.ToExperiment()
-		clip := e.Content
+		clip := sweep.ContentOrDefault(e.Content) // spec content: → CHAR_CONTENT (.env) → built-in default
 		if clip == "" {
-			res.Err = "no content (set arm/defaults content)"
+			res.Err = "no content (set arm/defaults content or CHAR_CONTENT)"
 			results[i] = res
 			continue
 		}
@@ -274,9 +274,9 @@ func runArmSequential(client *api.Client, a *charmatrix.Arm, charDir string, dur
 	res := charmatrix.ArmResult{Arm: a, IntendedOff: intendedOf(a)}
 
 	e := a.ToExperiment()
-	clip := e.Content
+	clip := sweep.ContentOrDefault(e.Content) // spec content: → CHAR_CONTENT (.env) → built-in default
 	if clip == "" {
-		res.Err = "no content (set arm/defaults content)"
+		res.Err = "no content (set arm/defaults content or CHAR_CONTENT)"
 		return res
 	}
 

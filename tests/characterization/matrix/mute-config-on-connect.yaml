@@ -18,6 +18,5 @@ duration_s: 30
 compare: is.muted        # A/B: control = first value (true), variant = false
 defaults:
   platform: ipad-sim     # under CHAR_DEVICE_FARM, DF allocates any booted iOS sim
-  content: insane_newer_p200_h264
 axes:
   is.muted: [true, false]

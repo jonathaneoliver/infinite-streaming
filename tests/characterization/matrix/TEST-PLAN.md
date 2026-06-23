@@ -98,7 +98,7 @@ So "pyramid" alone underspecifies a test — `pyramid @ step_seconds:12, max_ste
 |---|---|---|
 | `platform` | enum | `ipad-sim` `iphone` `appletv` `androidtv` `web` |
 | `class` | enum | `config` (default) `fault` |
-| `content` | string | catalogue name (e.g. `insane_new_p200_h264`) |
+| `content` | string | catalogue name — **optional**; omit to inherit the default from `CHAR_CONTENT` (`.env`). Set it only to *pin* a specific clip. |
 | `mode` | enum | `steps` `rampup` `rampdown` `pyramid` `hysteresis_gap` `downshift_severity` `transient_shock` `emergency_downshift` `startup` `startup_caps` `abort` |
 | `duration_s` / `reps` | int | play window / confirmation reps |
 | `parallel` | bool | concurrent (fleet) vs sequential |
@@ -220,7 +220,7 @@ parallel: false
 duration_s: 90
 defaults:
   platform: ipad-sim
-  content: insane_new_p200_h264
+  content: insane_newer_p200_h264
   is.segment: s6
 axes:
   proxy.live_offset: [12, 18, 21, 24, 30, 36]
@@ -240,7 +240,7 @@ name: offset-floor-by-segment
 class: config
 parallel: false
 duration_s: 90
-defaults: { platform: ipad-sim, content: insane_new_p200_h264 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264 }
 axes:
   is.segment:        [s2, s6]
   proxy.live_offset: [12, 36]
@@ -264,7 +264,7 @@ class: config
 parallel: true          # the single-set cells are the controls for the both-set cell — run concurrently
 reps: 2
 duration_s: 90
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 axes:
   proxy.live_offset: [0, 24]
   is.live_offset:    [0, 18]
@@ -287,7 +287,7 @@ class: config
 parallel: true
 reps: 2
 duration_s: 120
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 groups:
   - id: at24
     control:  { proxy.live_offset: 24 }   # server hold-back
@@ -314,7 +314,7 @@ name: platform-offset-parity
 class: config
 parallel: true
 duration_s: 90
-defaults: { content: insane_new_p200_h264, is.segment: s6 }
+defaults: { content: insane_newer_p200_h264, is.segment: s6 }
 compare: platform          # overlay ipad-sim vs androidtv per group
 axes:
   proxy.live_offset: [12, 18, 24, 30]
@@ -336,7 +336,7 @@ class: config
 parallel: true
 reps: 2
 duration_s: 120
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6, proxy.live_offset: 24 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6, proxy.live_offset: 24 }
 compare: is.protocol
 axes:
   is.protocol: [hls, dash]
@@ -356,7 +356,7 @@ name: platform-abr-parity
 class: config
 parallel: true
 duration_s: 120
-defaults: { content: insane_new_p200_h264, is.segment: s6 }
+defaults: { content: insane_newer_p200_h264, is.segment: s6 }
 compare: platform
 axes:
   platform: [ipad-sim, androidtv]
@@ -382,7 +382,7 @@ name: shape-pattern-response
 class: config
 parallel: false
 duration_s: 150
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 axes:
   proxy.shape:
     - { pattern: pyramid,         step_seconds: 12 }
@@ -407,7 +407,7 @@ class: config
 parallel: true
 reps: 2
 duration_s: 120
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 groups:
   - id: clamp
     control:  {}                          # uncapped
@@ -428,7 +428,7 @@ name: segment-abr-responsiveness
 class: config
 parallel: false
 duration_s: 120
-defaults: { platform: ipad-sim, content: insane_new_p200_h264 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264 }
 axes:
   is.segment:  [s2, s6, ll]
   proxy.shape: [{ pattern: ramp_down, step_seconds: 12 }]
@@ -447,7 +447,7 @@ name: rate-step-sensitivity
 class: config
 parallel: false
 duration_s: 150
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 axes:
   proxy.shape:
     - { pattern: square_wave, step_seconds: 6 }
@@ -471,7 +471,7 @@ name: pyramid-timing
 class: config
 parallel: false
 duration_s: 180
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 axes:
   proxy.shape:
     - { pattern: pyramid, step_seconds: 12, max_step: 1, pyramid_floor: 1.5 }
@@ -495,7 +495,7 @@ class: config
 parallel: true
 reps: 2
 duration_s: 150
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 groups:
   - id: stepping
     control:  { proxy.shape: { pattern: ramp_down, step_seconds: 12 } }          # constant
@@ -522,7 +522,7 @@ class: config
 parallel: true
 reps: 2
 duration_s: 120
-defaults: { platform: ipad-sim, content: insane_new_p200_h264 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264 }
 groups:
   - id: s6
     control:  { is.segment: s6 }
@@ -547,7 +547,7 @@ class: config
 parallel: true
 reps: 2
 duration_s: 120
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6, proxy.shape: { pattern: ramp_down, step_seconds: 12 } }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6, proxy.shape: { pattern: ramp_down, step_seconds: 12 } }
 groups:
   - id: rung-set
     control:  {}                                       # full ladder
@@ -571,7 +571,7 @@ class: config
 parallel: true
 reps: 2
 duration_s: 120
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6, proxy.shape: { rate_mbps: 8 } }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6, proxy.shape: { rate_mbps: 8 } }
 groups:
   - id: overstate
     control:  {}
@@ -595,7 +595,7 @@ class: config
 parallel: true
 reps: 2
 duration_s: 90
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 groups:
   - id: codecs
     control:  {}
@@ -616,7 +616,7 @@ class: config
 parallel: true
 reps: 2
 duration_s: 90
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 groups:
   - id: resolution
     control:  {}
@@ -638,7 +638,7 @@ class: config
 parallel: true
 reps: 2
 duration_s: 90
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6, is.protocol: hls }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6, is.protocol: hls }
 groups:
   - id: order
     control:  {}
@@ -664,7 +664,7 @@ name: fault-by-request-kind
 class: fault
 parallel: false
 duration_s: 120
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 axes:
   proxy.fault:
     - { type: "500", request_kind: segment,         frequency: 1, mode: requests }
@@ -688,7 +688,7 @@ name: fault-by-type
 class: fault
 parallel: false
 duration_s: 120
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 axes:
   proxy.fault:
     - { type: "500",                request_kind: segment, frequency: 1, mode: requests }
@@ -710,7 +710,7 @@ name: fault-burst-tolerance
 class: fault
 parallel: false
 duration_s: 120
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 axes:
   proxy.fault:
     - { type: "500", request_kind: segment, consecutive: 1, mode: requests }
@@ -733,7 +733,7 @@ class: fault
 parallel: true
 reps: 2
 duration_s: 120
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 groups:
   - id: slowloris
     control:  {}
@@ -758,7 +758,7 @@ name: offset-under-throttle
 class: config
 parallel: false
 duration_s: 150
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6 }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6 }
 axes:
   proxy.live_offset: [18, 30]
   proxy.shape:       [{ pattern: ramp_down, step_seconds: 12 }, { rate_mbps: 3 }]
@@ -778,7 +778,7 @@ class: config
 parallel: true
 reps: 2
 duration_s: 120
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6, proxy.shape: { pattern: ramp_down, step_seconds: 12 } }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6, proxy.shape: { pattern: ramp_down, step_seconds: 12 } }
 groups:
   - id: floor
     control:  {}
@@ -797,7 +797,7 @@ name: platform-fault-parity
 class: fault
 parallel: true
 duration_s: 120
-defaults: { content: insane_new_p200_h264, is.segment: s6 }
+defaults: { content: insane_newer_p200_h264, is.segment: s6 }
 compare: platform
 axes:
   platform:    [ipad-sim, androidtv]
@@ -841,7 +841,7 @@ name: variant-acceptance-band
 class: config
 parallel: false              # sequential staircase; platform is the grid axis
 duration_s: 60               # per cap — settle + confirm sustain
-defaults: { content: insane_new_p200_h264, is.segment: s6 }
+defaults: { content: insane_newer_p200_h264, is.segment: s6 }
 axes:
   platform:              [ipad-sim, androidtv]
   proxy.shape.rate_mbps: [1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 20.0]   # ascending pass
@@ -863,7 +863,7 @@ name: variant-band-bisect
 class: config
 parallel: false
 duration_s: 60
-defaults: { content: insane_new_p200_h264, is.segment: s6, platform: ipad-sim }
+defaults: { content: insane_newer_p200_h264, is.segment: s6, platform: ipad-sim }
 # Driven as a bisection, not a static axis: the runner narrows rate_mbps between the
 # §7.1 bracket endpoints for each rung pair. Expressed here as the brackets to refine:
 bisect:
@@ -889,7 +889,7 @@ name: floor-rung-rebuffer-edge
 class: fault
 parallel: false
 duration_s: 60
-defaults: { content: insane_new_p200_h264, is.segment: s6 }
+defaults: { content: insane_newer_p200_h264, is.segment: s6 }
 axes:
   platform:              [ipad-sim, androidtv]
   proxy.shape.rate_mbps: [1.2, 1.0, 0.8, 0.6, 0.4]   # below the lowest sustainable rung, descending
@@ -945,7 +945,7 @@ class: config
 mode: startup
 parallel: false
 duration_s: 45
-defaults: { content: insane_new_p200_h264, is.segment: s6 }
+defaults: { content: insane_newer_p200_h264, is.segment: s6 }
 axes:
   platform:              [ipad-sim, androidtv]
   proxy.shape.rate_mbps: [2.0, 4.0, 8.0, 20.0]
@@ -967,7 +967,7 @@ mode: startup
 parallel: true
 reps: 2
 duration_s: 45
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6, proxy.shape: { rate_mbps: 6 } }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6, proxy.shape: { rate_mbps: 6 } }
 groups:
   - id: join
     control:  { is.starts_first_variant: false }   # ABR picks the join rung
@@ -990,7 +990,7 @@ mode: startup_caps
 parallel: true
 reps: 2
 duration_s: 60
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, is.segment: s6, proxy.shape: { rate_mbps: 12 } }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, is.segment: s6, proxy.shape: { rate_mbps: 12 } }
 groups:
   - id: cap
     control:  {}                              # uncapped
@@ -1013,7 +1013,7 @@ class: config
 mode: startup
 parallel: false
 duration_s: 45
-defaults: { platform: ipad-sim, content: insane_new_p200_h264, proxy.shape: { rate_mbps: 8 } }
+defaults: { platform: ipad-sim, content: insane_newer_p200_h264, proxy.shape: { rate_mbps: 8 } }
 axes:
   is.segment: [s2, s6, ll]
 ```
@@ -1074,7 +1074,7 @@ written" vs "not possible."
 | Gap | Why it matters | Mechanism status |
 |---|---|---|
 | **Latency / loss / jitter** | Every spec varies *bandwidth only*. `Shape` deliberately omits `delay_ms`/`loss_pct` ("steady degradation out of scope"). But real links are latency+loss+jitter, which dominate LL-HLS/DASH (TTFB, partial-segment delivery, blocking reload). So §7's bands are "acceptable bandwidth **on a clean link**" — not real-world. | `tc` delay/loss exists in the `shape` **skill**; **missing from the sweep `Shape` model** → needs `proxy.shape.delay_ms` / `loss_pct` / `jitter_ms`. |
-| **Content as a variable** | *Every* spec pins `insane_new_p200_h264` — one complexity, one ladder. Can't separate a content-specific finding from a general one. | exists (catalogue) — **just needs a `content:` axis**. |
+| **Content as a variable** | *Every* spec pins `insane_newer_p200_h264` — one complexity, one ladder. Can't separate a content-specific finding from a general one. | exists (catalogue) — **just needs a `content:` axis**. |
 | **Startup measurement plumbing** | §8 specs exist now, but their `WATCH` targets (time-to-first-frame, join rung, time-to-stable) must be confirmed plumbed as metrics/labels end-to-end before the CONCLUDEs are machine-checkable. | partial — verify the `player_metrics_*` fields land (the 8-layer plumbing checklist). |
 
 ## Tier 2 — whole behaviour classes uncovered

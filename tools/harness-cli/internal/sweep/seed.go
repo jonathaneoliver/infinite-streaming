@@ -1,12 +1,16 @@
 package sweep
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"strings"
+)
 
 // A seedRecipe is one starter experiment shape: a mode (the playback motion)
 // plus the class-appropriate overlay. config-class recipes set content/shape/
-// transfer knobs; fault-class recipes set a Fault. Content is fixed to
-// insane_new for now (§9). The characterization mode drives the bandwidth
-// motion itself (pyramid shapes a pyramid, etc.).
+// transfer knobs; fault-class recipes set a Fault. Content comes from the
+// centralized default (CHAR_CONTENT / .env, §9). The characterization mode
+// drives the bandwidth motion itself (pyramid shapes a pyramid, etc.).
 type seedRecipe struct {
 	family    string // recipe-family slug, for the id
 	mode      string
@@ -80,9 +84,27 @@ var (
 	seedProtocols = []string{"hls"}
 )
 
-// SeedContent is the single content item the sweep runs against for now: the
-// H264 build of the "insane new" clip (the catalogue `name`).
-const SeedContent = "insane_new_p200_h264"
+// DefaultContent is the built-in fallback clip, used when neither a spec's
+// content: nor the CHAR_CONTENT env var (the .env single source, exported by
+// the Makefile's `-include .env`) is set. It MUST be a valid catalogue name so
+// an unset default can never 404 into the app's silent first-catalogue fallback.
+const DefaultContent = "insane_newer_p200_h264"
+
+// ContentOrDefault resolves the clip for a run: an explicit spec content wins,
+// else CHAR_CONTENT (the .env single source), else DefaultContent. Never "".
+func ContentOrDefault(specContent string) string {
+	if c := strings.TrimSpace(specContent); c != "" {
+		return c
+	}
+	if c := strings.TrimSpace(os.Getenv("CHAR_CONTENT")); c != "" {
+		return c
+	}
+	return DefaultContent
+}
+
+// SeedContent is the clip the sweep seeds against — the centralized default
+// (CHAR_CONTENT / .env), resolved once at package init.
+var SeedContent = ContentOrDefault("")
 
 // recipesFor returns the recipe set for a class (config is the default). The
 // config set includes the live-offset matrix (#793).

@@ -11,7 +11,6 @@ parallel: true
 duration_s: 30
 defaults:
   platform: ipad-sim
-  content: insane_new_p200_h264
 axes:
   is.segment: [s6]
   proxy.live_offset: [24, 30]   # two server hold-backs, run simultaneously

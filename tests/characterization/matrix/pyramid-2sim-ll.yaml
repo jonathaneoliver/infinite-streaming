@@ -9,7 +9,6 @@ reps: 1
 duration_s: 300
 defaults:
   platform: ipad-sim
-  content: insane_new_p200_h264
   is.segment: ll
   is.peak_bitrate_mbps: 1
   proxy.shape:

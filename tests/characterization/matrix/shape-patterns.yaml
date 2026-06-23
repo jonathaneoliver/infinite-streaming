@@ -11,7 +11,6 @@ class: config
 duration_s: 150
 defaults:
   platform: ipad-sim
-  content: insane_new_p200_h264
   is.segment: s6
 axes:
   proxy.shape:
