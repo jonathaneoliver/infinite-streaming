@@ -505,6 +505,11 @@ test-deploy-frontend: _ff-guard
 	rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev/content/dashboard/v3/
 	@echo "✓ test-dev frontend updated; sessions untouched."
 
+# Short alias for the everyday workflow: deploy the local working tree to
+# test-dev (:21000). Sibling to deploy-release; distinct from bare `deploy`
+# (which targets the k3d dev cluster, not test-dev).
+deploy-dev: test-deploy-dev
+
 test-deploy-dev: _ff-guard
 	@echo "=== Dev: local working tree (port 21000) ==="
 	@# Build the Vue dashboard FIRST, before any rsync --delete touches the
