@@ -1,0 +1,20 @@
+# #838 — BOTH sims UNMUTED (audible) via config-on-connect. Mirror of
+# mute-both.yaml but is.muted: false, so both sessions store app_config.muted=false
+# and both players apply muted=false (overlay needs LocalProxy ON →
+# CHAR_LOCAL_PROXY=true). Two distinct arms via a benign server hold-back.
+#
+#   CHAR_DEVICE_FARM=1 CHAR_LOCAL_PROXY=true \
+#     harness char matrix tests/characterization/matrix/mute-both-off.yaml
+#
+# PASS signal (from data): GET /api/sessions shows app_config.muted=false for BOTH
+# player_ids, and BOTH sims' logs show `applied server overlay ... muted=false`.
+name: mute-both-off
+class: config
+parallel: true
+duration_s: 30
+defaults:
+  platform: ipad-sim
+  content: insane_newer_p200_h264
+  is.muted: false
+axes:
+  proxy.live_offset: [24, 30]
