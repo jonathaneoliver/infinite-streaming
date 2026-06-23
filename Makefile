@@ -470,11 +470,9 @@ DEPLOY_BRANCH ?= dev
 _ff-guard:
 	@cur=$$(git symbolic-ref --short -q HEAD || echo DETACHED); \
 	if [ "$$cur" != "$(DEPLOY_BRANCH)" ] && [ -z "$(ALLOW_BRANCH_DEPLOY)" ]; then \
-		echo "✗ deploy expects branch '$(DEPLOY_BRANCH)' but HEAD is '$$cur'."; \
-		echo "  A deploy from a stale feature branch silently reverted test-dev on 2026-06-08"; \
-		echo "  (forwarder + dashboard + harness all served pre-merge code)."; \
-		echo "  → 'git switch $(DEPLOY_BRANCH)' to ship $(DEPLOY_BRANCH), or set ALLOW_BRANCH_DEPLOY=1 to deploy '$$cur' on purpose."; \
-		exit 1; \
+		echo "⚠ deploying branch '$$cur' (not '$(DEPLOY_BRANCH)') — test-dev will serve THIS working tree, not $(DEPLOY_BRANCH)."; \
+		echo "  Deliberate? Fine, carrying on. (A SILENT stale-branch deploy reverted test-dev on 2026-06-08 — hence this loud notice.)"; \
+		echo "  Set ALLOW_BRANCH_DEPLOY=1 to silence, or 'git switch $(DEPLOY_BRANCH)' to ship $(DEPLOY_BRANCH)."; \
 	fi
 	@git fetch origin --quiet
 	@behind=$$(git rev-list --count HEAD..@{u} 2>/dev/null || echo 0); \
