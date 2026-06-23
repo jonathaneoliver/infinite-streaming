@@ -683,6 +683,12 @@ type EventPage struct {
 
 // EventRow defines model for EventRow.
 type EventRow struct {
+	// AppConfig Client-side config the player applies at its next play boundary
+	// (#800). Stored server-side; the player reads it from
+	// `GET /api/sessions` and overlays it on the next play.
+	// *Broadcasts to group on PATCH.*
+	AppConfig *externalRef0.AppConfig `json:"app_config,omitempty"`
+
 	// Content Master playlist mutations applied at manifest serve time:
 	// strip CODECS, strip AVERAGE-BANDWIDTH, overstate bandwidth,
 	// allowed-variants whitelist, live-offset window. Takes effect

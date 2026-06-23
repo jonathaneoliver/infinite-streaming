@@ -733,6 +733,9 @@ type AppConfig struct {
 	// LiveOffsetS Live-edge offset in seconds for the next play (maps to `is.flag.live_offset_s`). 0 = let the manifest HOLD-BACK / Go Live decide.
 	LiveOffsetS *float32 `json:"live_offset_s,omitempty"`
 
+	// Muted Mute audio for the next play (maps to `is.flag.muted`). Defaults muted; false = audible. Issue #838.
+	Muted *bool `json:"muted,omitempty"`
+
 	// PeakBitrateMbps ABR peak-bitrate ceiling in Mbps for the next play (maps to `is.flag.peak_bitrate_mbps`). 0 = no cap.
 	PeakBitrateMbps *int `json:"peak_bitrate_mbps,omitempty"`
 

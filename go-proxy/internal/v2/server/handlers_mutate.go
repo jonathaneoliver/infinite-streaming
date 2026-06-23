@@ -616,6 +616,16 @@ func applyAppConfigPatch(s map[string]any, c any) {
 			out["peak_bitrate_mbps"] = toIntZero(v)
 		}
 	}
+	// #838 mute. Stored as a real bool so the player reads it back as a JSON
+	// boolean (iOS `as? Bool`, Android `optBoolean`). Config-on-connect already
+	// coerces "true"/"false" → bool (coerceURLValue), same as the strip_* fields.
+	if v, present := m["muted"]; present {
+		if v == nil {
+			delete(out, "muted")
+		} else {
+			out["muted"] = toBool(v)
+		}
+	}
 	if len(out) == 0 {
 		delete(s, "app_config")
 		return

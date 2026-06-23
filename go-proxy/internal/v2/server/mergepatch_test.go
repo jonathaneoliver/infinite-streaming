@@ -186,6 +186,29 @@ func TestApplyAppConfigPatch(t *testing.T) {
 			t.Fatalf("bad-enum = %#v, want %#v", s["app_config"], want)
 		}
 	})
+
+	// #838 — muted must survive as a real bool (config-on-connect coerces the
+	// string "false" to a bool before this point, same as the strip_* fields).
+	t.Run("muted bool stored both ways", func(t *testing.T) {
+		s := map[string]any{}
+		applyAppConfigPatch(s, map[string]any{"muted": true})
+		if got := s["app_config"].(map[string]any)["muted"]; got != true {
+			t.Fatalf("muted=true stored as %#v, want true", got)
+		}
+		applyAppConfigPatch(s, map[string]any{"muted": false})
+		if got := s["app_config"].(map[string]any)["muted"]; got != false {
+			t.Fatalf("muted=false stored as %#v, want false", got)
+		}
+	})
+
+	t.Run("muted null drops just that field", func(t *testing.T) {
+		s := map[string]any{"app_config": map[string]any{"muted": true, "protocol": "hls"}}
+		applyAppConfigPatch(s, map[string]any{"muted": nil})
+		want := map[string]any{"protocol": "hls"}
+		if !reflect.DeepEqual(s["app_config"], want) {
+			t.Fatalf("muted-null = %#v, want %#v", s["app_config"], want)
+		}
+	})
 }
 
 // TestUnsupportedPaths_AppConfig — #800: app_config (and its sub-fields) must
@@ -199,6 +222,7 @@ func TestUnsupportedPaths_AppConfig(t *testing.T) {
 		"app_config.protocol",
 		"app_config.live_offset_s",
 		"app_config.peak_bitrate_mbps",
+		"app_config.muted",
 	}
 	if bad := unsupportedPaths(ok); len(bad) != 0 {
 		t.Fatalf("app_config paths wrongly rejected: %v", bad)

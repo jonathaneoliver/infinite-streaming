@@ -191,7 +191,7 @@ func TestConfigOnConnect_StripProxyArgs(t *testing.T) {
 // the same merge-patch tree as proxy.*, nested under `app_config`.
 func TestConfigOnConnect_ParseAppConfig(t *testing.T) {
 	patch, has, err := parseProxyArgs(mustQuery(t,
-		"player_id=abc&app.segment=s2&app.protocol=dash&app.live_offset_s=12&app.peak_bitrate_mbps=4"))
+		"player_id=abc&app.segment=s2&app.protocol=dash&app.live_offset_s=12&app.peak_bitrate_mbps=4&app.muted=true"))
 	if err != nil || !has {
 		t.Fatalf("parse: has=%v err=%v", has, err)
 	}
@@ -201,6 +201,7 @@ func TestConfigOnConnect_ParseAppConfig(t *testing.T) {
 			"protocol":          "dash",
 			"live_offset_s":     12.0,
 			"peak_bitrate_mbps": 4.0,
+			"muted":             true,
 		},
 	}
 	if !reflect.DeepEqual(patch, want) {
@@ -211,7 +212,7 @@ func TestConfigOnConnect_ParseAppConfig(t *testing.T) {
 // TestConfigOnConnect_AppConfigRoundTrip — parse → translate stores app_config
 // as a nested object on the session map (what GET /api/sessions exposes).
 func TestConfigOnConnect_AppConfigRoundTrip(t *testing.T) {
-	patch, _, err := parseProxyArgs(mustQuery(t, "app.segment=ll&app.peak_bitrate_mbps=8"))
+	patch, _, err := parseProxyArgs(mustQuery(t, "app.segment=ll&app.peak_bitrate_mbps=8&app.muted=false"))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -228,6 +229,10 @@ func TestConfigOnConnect_AppConfigRoundTrip(t *testing.T) {
 	}
 	if ac["peak_bitrate_mbps"] != 8 {
 		t.Errorf("app_config.peak_bitrate_mbps = %#v, want 8 (int)", ac["peak_bitrate_mbps"])
+	}
+	// #838 — app.muted=false survives translation as a real bool (config-on-start).
+	if ac["muted"] != false {
+		t.Errorf("app_config.muted = %#v, want false (bool)", ac["muted"])
 	}
 }
 
