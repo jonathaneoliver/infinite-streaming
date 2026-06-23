@@ -134,8 +134,8 @@ Global selection (content, URL, protocol, codec, segment) is kept in `localStora
 | Mode | How | UI | Notes |
 |---|---|---|---|
 | Docker Compose | `make run` or `docker compose up -d` | `localhost:30000` | Simplest, single-host |
-| k3d release | `make deploy-release` | `$K3S_HOST:30000` | Independent k3d cluster, api `:6544`, 30x port range |
-| k3d dev | `make deploy` | `$K3S_HOST:40000` | Independent k3d cluster, api `:6543`, 40x port range — coexists with release |
+| k3d release | `make deploy-k3d-release` | `$K3S_HOST:30000` | Independent k3d cluster, api `:6544`, 30x port range |
+| k3d dev | `make deploy-k3d-dev` | `$K3S_HOST:40000` | Independent k3d cluster, api `:6543`, 40x port range — coexists with release |
 | GHCR compose | Pull `ghcr.io/jonathaneoliver/infinite-streaming:<tag>` | `localhost:30000` | No local build |
 
 All modes mount the same content layout. See [`README.md`](../README.md#quick-start) for commands and [`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for common operational issues.

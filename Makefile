@@ -228,7 +228,7 @@ K3D_RELEASE_KUBECONFIG ?= ~/.config/k3d/smashing-release-kubeconfig.yaml
 # ~/.local/bin to PATH so the install location doesn't have to be
 # in the noninteractive shell's default PATH.
 # Writes per-cluster kubeconfigs to ~/.kube/smashing-{dev,release}.yaml
-# so subsequent `make deploy` / `make deploy-release` targets can pick
+# so subsequent `make deploy-k3d-dev` / `make deploy-k3d-release` targets can pick
 # the right context with KUBECONFIG=… without depending on whichever
 # kubeconfig happens to be active in the user's shell.
 
@@ -284,14 +284,14 @@ k3d-bootstrap:
 		--kubeconfig-update-default=false \
 		--kubeconfig-switch-context=false'
 	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); mkdir -p ~/.config/k3d && k3d kubeconfig get release > $(K3D_RELEASE_KUBECONFIG)'
-	@echo "Both clusters ready. Run \`make deploy\` for dev / \`make deploy-release\` for release."
+	@echo "Both clusters ready. Run \`make deploy-k3d-dev\` for dev / \`make deploy-k3d-release\` for release."
 
 status-k3s:
 	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); k3d cluster list; \
 		echo; echo "--- dev ---"; export KUBECONFIG=$(K3D_DEV_KUBECONFIG); kubectl get pods -A; \
 		echo; echo "--- release ---"; export KUBECONFIG=$(K3D_RELEASE_KUBECONFIG); kubectl get pods -A'
 
-# `make deploy` and `make deploy-release` are end-to-end — they build +
+# `make deploy-k3d-dev` and `make deploy-k3d-release` are end-to-end — they build +
 # push the main image, apply the consolidated `k8s-infinite-streaming.yaml.tmpl`
 # AND the analytics tier (ClickHouse + forwarder + Grafana) into the
 # stack's k3d cluster. Each cluster has exactly one set of resources —
@@ -299,12 +299,12 @@ status-k3s:
 
 # Each target binds its KUBECONFIG_FILE, SERVER_ID, ANNOUNCE_URL/LABEL,
 # and EXTERNAL_PORT_BASE so the same template renders cleanly per stack.
-deploy: KUBECONFIG_FILE=$(K3D_DEV_KUBECONFIG)
-deploy: SERVER_ID=infinite-streaming-dev
-deploy: ANNOUNCE_URL=$(INFINITE_STREAM_ANNOUNCE_URL_K3S_DEV)
-deploy: ANNOUNCE_LABEL=$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_DEV)
-deploy: EXTERNAL_PORT_BASE=40081
-deploy: analytics-deploy-k3s
+deploy-k3d-dev: KUBECONFIG_FILE=$(K3D_DEV_KUBECONFIG)
+deploy-k3d-dev: SERVER_ID=infinite-streaming-dev
+deploy-k3d-dev: ANNOUNCE_URL=$(INFINITE_STREAM_ANNOUNCE_URL_K3S_DEV)
+deploy-k3d-dev: ANNOUNCE_LABEL=$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_DEV)
+deploy-k3d-dev: EXTERNAL_PORT_BASE=40081
+deploy-k3d-dev: analytics-deploy-k3s
 	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev --push .
 	$(MAKE) deploy-k3d K3S_SERVER_IMAGE=$(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev \
 		KUBECONFIG_FILE=$(KUBECONFIG_FILE) \
@@ -313,12 +313,12 @@ deploy: analytics-deploy-k3s
 		ANNOUNCE_LABEL=$(ANNOUNCE_LABEL) \
 		EXTERNAL_PORT_BASE=$(EXTERNAL_PORT_BASE)
 
-deploy-release: KUBECONFIG_FILE=$(K3D_RELEASE_KUBECONFIG)
-deploy-release: SERVER_ID=infinite-streaming-release
-deploy-release: ANNOUNCE_URL=$(INFINITE_STREAM_ANNOUNCE_URL_K3S_RELEASE)
-deploy-release: ANNOUNCE_LABEL=$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_RELEASE)
-deploy-release: EXTERNAL_PORT_BASE=30081
-deploy-release: analytics-deploy-k3s
+deploy-k3d-release: KUBECONFIG_FILE=$(K3D_RELEASE_KUBECONFIG)
+deploy-k3d-release: SERVER_ID=infinite-streaming-release
+deploy-k3d-release: ANNOUNCE_URL=$(INFINITE_STREAM_ANNOUNCE_URL_K3S_RELEASE)
+deploy-k3d-release: ANNOUNCE_LABEL=$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_RELEASE)
+deploy-k3d-release: EXTERNAL_PORT_BASE=30081
+deploy-k3d-release: analytics-deploy-k3s
 	docker buildx build --platform linux/amd64 \
 		--build-arg VERSION=$(shell cat VERSION) \
 		-t $(K3S_SERVER_IMAGE) \
@@ -333,7 +333,7 @@ deploy-release: analytics-deploy-k3s
 
 # Inner worker — applies the consolidated main-app template against
 # whichever k3d cluster's kubeconfig was passed in. Used by both
-# `deploy` and `deploy-release`.
+# `deploy-k3d-dev` and `deploy-k3d-release`.
 deploy-k3d:
 	@if [ -z "$(KUBECONFIG_FILE)" ]; then echo "KUBECONFIG_FILE required"; exit 1; fi
 	@echo "=== Applying main app to k3d cluster ($(KUBECONFIG_FILE)) ==="
@@ -396,11 +396,11 @@ analytics-deploy-k3s: analytics-build-forwarder-k3s
 # so each can be exercised in isolation.
 teardown-dev:
 	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); k3d cluster delete dev'
-	@echo "Cluster `dev` deleted. Re-run \`make k3d-bootstrap\` then \`make deploy\` to bring it back."
+	@echo "Cluster `dev` deleted. Re-run \`make k3d-bootstrap\` then \`make deploy-k3d-dev\` to bring it back."
 
 teardown-release:
 	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); k3d cluster delete release'
-	@echo "Cluster `release` deleted. Re-run \`make k3d-bootstrap\` then \`make deploy-release\` to bring it back."
+	@echo "Cluster `release` deleted. Re-run \`make k3d-bootstrap\` then \`make deploy-k3d-release\` to bring it back."
 
 # ── Remote deployment testing ──────────────────────────────────────────
 # Deploy all 4 installation methods to a remote Docker host for parallel testing.
@@ -490,7 +490,7 @@ _ff-guard:
 	fi
 
 # Short alias: rebuild + hot-deploy only the dashboard bundle to test-dev
-# (:21000), no container recreate. Sibling to deploy-dev.
+# (:21000), no container recreate. Sibling to deploy.
 deploy-frontend: test-deploy-frontend
 
 test-deploy-frontend: _ff-guard
@@ -509,10 +509,10 @@ test-deploy-frontend: _ff-guard
 	rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev/content/dashboard/v3/
 	@echo "✓ test-dev frontend updated; sessions untouched."
 
-# Short alias for the everyday workflow: deploy the local working tree to
-# test-dev (:21000). Sibling to deploy-release; distinct from bare `deploy`
-# (which targets the k3d dev cluster, not test-dev).
-deploy-dev: test-deploy-dev
+# Everyday deploy: build + push the local working tree to test-dev (:21000).
+# This is the common case, so it gets the bare `deploy` name. The k3d
+# cluster deploys live under deploy-k3d-dev / deploy-k3d-release.
+deploy: test-deploy-dev
 
 test-deploy-dev: _ff-guard
 	@echo "=== Dev: local working tree (port 21000) ==="

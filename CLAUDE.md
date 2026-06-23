@@ -44,11 +44,14 @@ make shell
 # `dev` and `release` clusters with their host port mappings.
 make k3d-bootstrap
 
+# Everyday deploy: local working tree → test-dev (Docker Compose, :21000)
+make deploy            # alias for test-deploy-dev; frontend-only: make deploy-frontend
+
 # Deploy to k3d (dev cluster — host ports 40000/40081/40181-40881)
-make deploy
+make deploy-k3d-dev
 
 # Deploy to k3d (release cluster — host ports 30000/30081/30181-30881)
-make deploy-release
+make deploy-k3d-release
 
 # Wipe a single cluster (k3d cluster delete) for clean reinstall
 make teardown-dev
