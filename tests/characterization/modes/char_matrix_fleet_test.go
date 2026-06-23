@@ -49,6 +49,7 @@ type armProbeConfig struct {
 	codec              string
 	peakBitrate        int
 	startsFirstVariant string
+	muted              string
 	pattern            string
 	stepS              int
 	margin             int
@@ -70,6 +71,7 @@ func readArmProbeConfig(fleetIndex int) armProbeConfig {
 		codec:              p("CODEC"),
 		peakBitrate:        envInt(fmt.Sprintf("CHAR_ARM_%d_PEAK_BITRATE", fleetIndex), 0),
 		startsFirstVariant: p("FIRST_VARIANT"),
+		muted:              p("MUTED"),
 		pattern:            p("PATTERN"),
 		stepS:              envInt(fmt.Sprintf("CHAR_ARM_%d_STEP_S", fleetIndex), 12),
 		margin:             envInt(fmt.Sprintf("CHAR_ARM_%d_MARGIN", fleetIndex), 5),
@@ -143,6 +145,7 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		Codec:              cfg.codec,
 		PeakBitrateMbps:    cfg.peakBitrate,
 		StartsFirstVariant: cfg.startsFirstVariant,
+		Muted:              cfg.muted,
 	})
 	// Diagnostic toggle: CHAR_AUTO_RECOVERY=false feeds -is.flag.auto_recovery
 	// false to every arm, disabling the iOS restart/live-resync ladder so we can

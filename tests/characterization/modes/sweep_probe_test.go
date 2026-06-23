@@ -100,6 +100,7 @@ func TestSweepProbe(t *testing.T) {
 		Codec:              strings.TrimSpace(os.Getenv("CHAR_SWEEP_CODEC")),
 		PeakBitrateMbps:    envInt("CHAR_SWEEP_PEAK_BITRATE", 0),
 		StartsFirstVariant: strings.TrimSpace(os.Getenv("CHAR_SWEEP_FIRST_VARIANT")),
+		Muted:              strings.TrimSpace(os.Getenv("CHAR_SWEEP_MUTED")),
 	})
 	appium.SetLaunchArgs(args)
 

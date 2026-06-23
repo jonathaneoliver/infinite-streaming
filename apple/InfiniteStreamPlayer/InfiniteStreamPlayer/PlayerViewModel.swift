@@ -99,8 +99,9 @@ final class PlayerViewModel: ObservableObject {
     @Published var goLive: Bool = false
     /// Skip Home on cold launch when a saved server + lastPlayed both exist.
     @Published var skipHomeOnLaunch: Bool = false
-    /// Mute audio. Useful for HUD scrubbing / quick previewing.
-    @Published var isMuted: Bool = false
+    /// Mute audio. Defaults to muted — when testing streaming we rarely
+    /// want to hear the audio. Useful for HUD scrubbing / quick previewing.
+    @Published var isMuted: Bool = true
     /// Override for the port-40000 player_id strip — in k3s-dev the
     /// content port (40000) doesn't accept `?player_id=…` query strings
     /// so we strip it by default. Devs working that environment can set
@@ -1075,6 +1076,7 @@ final class PlayerViewModel: ObservableObject {
         var streamProtocol: StreamProtocol?
         var liveOffsetSeconds: Double?
         var peakBitrateMbps: Int?
+        var muted: Bool?
     }
 
     /// Overlay the latest server-pushed app_config onto the play-affecting
@@ -1092,10 +1094,14 @@ final class PlayerViewModel: ObservableObject {
         if let p = cfg.streamProtocol { streamProtocol = p }
         if let o = cfg.liveOffsetSeconds { liveOffsetSeconds = o }
         if let pk = cfg.peakBitrateMbps { startupPeakBitrateMbps = pk }
+        // Mute takes effect live — the player exists by the time an overlay
+        // arrives, so push it straight through alongside the next-play state.
+        if let m = cfg.muted { isMuted = m; player.isMuted = m }
         log("app_config: applied server overlay seg=\(cfg.segment?.rawValue ?? "-") "
             + "proto=\(cfg.streamProtocol?.rawValue ?? "-") "
             + "offset=\(cfg.liveOffsetSeconds.map { String($0) } ?? "-") "
-            + "peak=\(cfg.peakBitrateMbps.map(String.init) ?? "-")")
+            + "peak=\(cfg.peakBitrateMbps.map(String.init) ?? "-") "
+            + "muted=\(cfg.muted.map(String.init) ?? "-")")
     }
 
     /// GET the proxy's /api/sessions, find this player's entry, and parse the
@@ -1123,6 +1129,7 @@ final class PlayerViewModel: ObservableObject {
             else if let o = ac["live_offset_s"] as? Int { cfg.liveOffsetSeconds = Double(max(0, o)) }
             if let pk = ac["peak_bitrate_mbps"] as? Int { cfg.peakBitrateMbps = max(0, pk) }
             else if let pk = ac["peak_bitrate_mbps"] as? Double { cfg.peakBitrateMbps = max(0, Int(pk)) }
+            if let m = ac["muted"] as? Bool { cfg.muted = m }
             return cfg
         } catch {
             return nil
@@ -2369,7 +2376,11 @@ final class PlayerViewModel: ObservableObject {
         autoRecovery     = d.bool(forKey: Self.flagAutoRecovery)
         goLive           = d.bool(forKey: Self.flagGoLive)
         skipHomeOnLaunch = d.bool(forKey: Self.flagSkipHome)
-        isMuted = d.bool(forKey: Self.flagMuted)
+        // Default muted (#838). Present (launch-arg string or persisted NSNumber)
+        // → coerce via d.bool so `-is.flag.muted false` engages; absent → ON.
+        isMuted = d.object(forKey: Self.flagMuted) != nil
+            ? d.bool(forKey: Self.flagMuted)
+            : true
         // #793 — a launch-arg (`-is.flag.live_offset_s 12`, the test rack) lands
         // in NSArgumentDomain as the STRING "12"; `object(forKey:) as? Double`
         // fails that cast and silently reads 0 ("Off"), so the rack-set offset

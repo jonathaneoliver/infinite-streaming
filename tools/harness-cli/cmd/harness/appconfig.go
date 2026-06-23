@@ -29,6 +29,7 @@ Flags:
   --protocol PROTO     hls | dash
   --live-offset SEC    seconds behind live edge (>=0; 0 = manifest/Go-Live decides)
   --peak-bitrate MBPS  ABR ceiling in Mbps (>=0; 0 = no cap)
+  --muted BOOL         mute audio (true|false; default-muted, false = audible)
   --clear              send {"app_config": null} (wipe all client config)
 
 Only the flags you pass are written (JSON Merge Patch); omit a field to leave
@@ -44,6 +45,7 @@ func cmdAppConfig(client *api.Client, args []string, asJSON bool) error {
 	protocol := fs.String("protocol", "", "")
 	liveOffset := fs.Float64("live-offset", 0, "")
 	peakBitrate := fs.Int("peak-bitrate", 0, "")
+	muted := fs.Bool("muted", false, "")
 	clear := fs.Bool("clear", false, "")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -54,7 +56,7 @@ func cmdAppConfig(client *api.Client, args []string, asJSON bool) error {
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 
-	body, err := buildAppConfigBody(*segment, *protocol, *liveOffset, *peakBitrate, set, *clear)
+	body, err := buildAppConfigBody(*segment, *protocol, *liveOffset, *peakBitrate, *muted, set, *clear)
 	if err != nil {
 		return err
 	}
@@ -86,7 +88,7 @@ func cmdAppConfig(client *api.Client, args []string, asJSON bool) error {
 // actually passed (via flag.FlagSet.Visit) so an explicit 0 is written while an
 // omitted field stays absent. --clear wins and emits {"app_config": null}.
 // Enum values are validated here so a bad arg fails fast rather than 400ing.
-func buildAppConfigBody(segment, protocol string, liveOffset float64, peakBitrate int, set map[string]bool, clear bool) ([]byte, error) {
+func buildAppConfigBody(segment, protocol string, liveOffset float64, peakBitrate int, muted bool, set map[string]bool, clear bool) ([]byte, error) {
 	if clear {
 		return []byte(`{"app_config": null}`), nil
 	}
@@ -119,8 +121,11 @@ func buildAppConfigBody(segment, protocol string, liveOffset float64, peakBitrat
 		}
 		ac["peak_bitrate_mbps"] = peakBitrate
 	}
+	if set["muted"] {
+		ac["muted"] = muted
+	}
 	if len(ac) == 0 {
-		return nil, errors.New("nothing to do — pass --segment / --protocol / --live-offset / --peak-bitrate, or --clear")
+		return nil, errors.New("nothing to do — pass --segment / --protocol / --live-offset / --peak-bitrate / --muted, or --clear")
 	}
 	return json.Marshal(map[string]any{"app_config": ac})
 }

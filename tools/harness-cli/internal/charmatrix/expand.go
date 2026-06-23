@@ -49,6 +49,7 @@ var axisKeys = map[string]bool{
 	"is.live_offset":            true,
 	"is.peak_bitrate_mbps":      true,
 	"is.starts_first_variant":   true,
+	"is.muted":                  true,
 	"proxy.live_offset":         true,
 	"proxy.strip_codecs":        true,
 	"proxy.strip_avg_bandwidth": true,
@@ -213,6 +214,7 @@ func (a *Arm) ToExperiment() *sweep.Experiment {
 		Protocol:            a.Protocol,
 		Content:             a.Content,
 		Segment:             a.Segment,
+		Muted:               a.Muted,
 		Mode:                a.Mode,
 		DurationS:           a.DurationS,
 		Reps:                a.Reps,
@@ -303,6 +305,18 @@ func (a *Arm) StartsFirstVariantS() string {
 		return "false"
 	}
 	return strconv.FormatBool(*a.StartsFirstVariant)
+}
+
+// MutedS is the value for the -is.flag.muted launch arg (CHAR_SWEEP_MUTED).
+// Unlike StartsFirstVariantS it returns "" (omit) when the arm doesn't set it:
+// the app default-mutes (#838) and the probe's -is.flag.reset_advanced wipes any
+// stale persisted toggle, so an unset arm runs silent with no forced baseline.
+// An arm sets muted:false explicitly to force audible playback.
+func (a *Arm) MutedS() string {
+	if a.Muted == nil {
+		return ""
+	}
+	return strconv.FormatBool(*a.Muted)
 }
 
 // IntendedLiveOffset is the offset the arm means to impose, for the post-run

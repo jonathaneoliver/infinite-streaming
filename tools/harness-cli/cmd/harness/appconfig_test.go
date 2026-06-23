@@ -9,6 +9,7 @@ func TestBuildAppConfigBody(t *testing.T) {
 		proto   string
 		offset  float64
 		peak    int
+		muted   bool
 		set     map[string]bool
 		clear   bool
 		want    string
@@ -39,6 +40,18 @@ func TestBuildAppConfigBody(t *testing.T) {
 			want: `{"app_config":{"live_offset_s":0,"peak_bitrate_mbps":0}}`,
 		},
 		{
+			name:  "muted true only",
+			muted: true,
+			set:   map[string]bool{"muted": true},
+			want:  `{"app_config":{"muted":true}}`,
+		},
+		{
+			name:  "muted false written when set",
+			muted: false,
+			set:   map[string]bool{"muted": true},
+			want:  `{"app_config":{"muted":false}}`,
+		},
+		{
 			name:    "bad segment errors",
 			segment: "nope", set: map[string]bool{"segment": true}, wantErr: true,
 		},
@@ -60,7 +73,7 @@ func TestBuildAppConfigBody(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := buildAppConfigBody(tt.segment, tt.proto, tt.offset, tt.peak, tt.set, tt.clear)
+			got, err := buildAppConfigBody(tt.segment, tt.proto, tt.offset, tt.peak, tt.muted, tt.set, tt.clear)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got body %s", got)

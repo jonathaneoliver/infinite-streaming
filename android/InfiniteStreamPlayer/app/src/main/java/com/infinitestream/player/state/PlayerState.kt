@@ -130,6 +130,9 @@ data class UiState(
     val developerMode: Boolean = false,
     /** Allow renditions above 1080p. Off = cap at 1080p (saves decode cost). */
     val allow4K: Boolean = true,
+    /** Mute audio. Defaults muted — when testing streaming we rarely want to
+     *  hear the audio. Maps the player volume to 0f / 1f. #838. */
+    val muted: Boolean = true,
     /** Stream URL goes through the per-session go-proxy port (failure
      *  injection). Off = hit the API port directly. */
     val localProxy: Boolean = true,

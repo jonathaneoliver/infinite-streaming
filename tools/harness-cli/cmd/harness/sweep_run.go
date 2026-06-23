@@ -275,6 +275,15 @@ func experimentPlayerPatch(ctx context.Context, client *api.Client, content stri
 	patch.Labels = &pl
 	summary = append(summary, fmt.Sprintf("labels(%d)", len(labelMap)))
 
+	// #838 mute rides config-on-connect: stamp app_config.muted onto the
+	// bootstrap patch so the per-arm value is stored on the session and the
+	// player reads it back off GET /api/sessions (applyServerAppConfig, which
+	// needs LocalProxy ON — run with CHAR_LOCAL_PROXY=true).
+	if e.Muted != nil {
+		patch.AppConfig = &proxy.AppConfig{Muted: e.Muted}
+		summary = append(summary, fmt.Sprintf("muted=%t", *e.Muted))
+	}
+
 	if e.ContentManipulation != nil {
 		allowed, err := resolveAllowedVariants(ctx, client, content, e.ContentManipulation.AllowedVariants)
 		if err != nil {

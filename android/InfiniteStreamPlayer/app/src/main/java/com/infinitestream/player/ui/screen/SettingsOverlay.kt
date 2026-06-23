@@ -380,6 +380,13 @@ private fun PickerList(
                     }
                     item {
                         PickerItem(
+                            label = "Mute audio",
+                            selected = state.muted,
+                            onClick = { vm.setMuted(!state.muted) },
+                        )
+                    }
+                    item {
+                        PickerItem(
                             label = "Local Proxy (route through go-proxy port)",
                             selected = state.localProxy,
                             onClick = { vm.setLocalProxy(!state.localProxy) },

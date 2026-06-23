@@ -179,6 +179,7 @@ type Experiment struct {
 	Protocol            string               `json:"protocol"`              // hls | dash
 	Content             string               `json:"content"`               // fixed to insane_new for now
 	Segment             string               `json:"segment,omitempty"`     // master variant the probe requests via -is.segment: s2 | s6 | ll. Empty = app default (s6). Drives the segment×live-offset matrix (#793).
+	Muted               *bool                `json:"muted,omitempty"`       // #838 mute audio; nil = app default-mutes. Rides config-on-connect (bootstrap app_config.muted) so the per-arm value reaches the client off GET /api/sessions.
 	Mode                string               `json:"mode"`                  // steps | pyramid | downshift_severity | …
 	DurationS           int                  `json:"duration_s,omitempty"`
 	Fault               *Fault               `json:"fault,omitempty"` // fault-class only

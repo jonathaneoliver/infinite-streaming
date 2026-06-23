@@ -1591,6 +1591,10 @@ components:
           type: integer
           nullable: true
           description: 'ABR peak-bitrate ceiling in Mbps for the next play (maps to `is.flag.peak_bitrate_mbps`). 0 = no cap.'
+        muted:
+          type: boolean
+          nullable: true
+          description: 'Mute audio for the next play (maps to `is.flag.muted`). Defaults muted; false = audible. Issue #838.'
 
     # ----- Manifest / metrics --------------------------------------------
 
