@@ -489,6 +489,10 @@ _ff-guard:
 		echo "✓ up to date with origin"; \
 	fi
 
+# Short alias: rebuild + hot-deploy only the dashboard bundle to test-dev
+# (:21000), no container recreate. Sibling to deploy-dev.
+deploy-frontend: test-deploy-frontend
+
 test-deploy-frontend: _ff-guard
 	@echo "=== Frontend-only hot deploy (no container recreate) ==="
 	@if [ ! -f content/dashboard-v3/package.json ]; then \
