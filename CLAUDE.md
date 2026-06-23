@@ -6,6 +6,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Before making UI or product-behavior changes, read `PRD.md` and align implementation to it.
 
+## Knowledge layout
+
+Operational knowledge is split across stores — read and route by kind:
+
+| Store | What lives here | Tracked |
+|---|---|---|
+| `CLAUDE.md` (this file) | Durable architecture, build/run, repo-wide rules true for all contributors | public |
+| `.claude/standards/` | Platform/protocol cheat sheets that bit us once (AVPlayer quirks, ABR model, codec strings, data-field semantics). Read mid-investigation; the `forensics` subagent reads them before hypothesising. | public |
+| `.claude/findings/` | Per-investigation narratives — one observed behaviour: timeline, evidence, tagged hypothesis. | public |
+| `.claude/skills/CONVENTIONS.md` | Cross-skill operating rules (Bash discipline, no-guessing, local-vs-UTC). Read at skill invocation. | public |
+| `.claude/memory/` (symlink → private repo) | Cross-session prefs, working-style corrections, how this maintainer works. Greppable by skills/forensics; `MEMORY.md` is its always-loaded index. | private |
+
+**Routing a new learning:**
+- Durable product/architecture truth for all contributors → `CLAUDE.md`
+- Platform/protocol fact that cost >10 min to confirm → `.claude/standards/`
+- One investigation's cause + evidence → `.claude/findings/`
+- A cross-skill operating rule → `CONVENTIONS.md`
+- How the maintainer works/prefers, or an always-on rule that must survive into every session → `.claude/memory/`
+
+**One fact, one source of truth.** If a rule must also be always-on in memory, keep the memory copy terse and link the canonical store above — don't duplicate the detail.
+
 ## Build & Run Commands
 
 ```bash

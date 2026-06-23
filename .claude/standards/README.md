@@ -37,9 +37,12 @@ One-sentence framing.
 - Other standards / findings to read alongside.
 ```
 
-Length: one page rendered. If it grows past that, split.
+Length: one page rendered. If it grows past that, split — **unless**
+it's a reference catalogue (see below), which is exempt by design.
 
 ## Current entries
+
+**Cheat sheets** (the one-page bar applies):
 
 - `hls-taxonomy.md` — m3u8 tags, what each means, what the proxy
   emits/strips
@@ -57,6 +60,27 @@ Length: one page rendered. If it grows past that, split.
 - `invariants.md` — operating manual for the aberration-crawl rule
   catalogue (`tests/aberration_crawl/invariants.yaml`): validity
   windows, census-before-assert, documented NON-rules
+- `avmetrics-forensics.md` — reading AVMetrics events client-side
+  (exact-type subscription, byteRange gotchas, derived_* fields)
+- `harness-cli.md` — harness flag-name traps, `--json`
+  stdout-vs-stderr contract, label round-trip
+- `timestamp-display.md` — the local-AND-UTC display rule, edge
+  cases, macOS conversion command (shared with the dashboard bot)
+
+**Reference catalogues** (exempt from the one-page bar — intentionally
+long, dual-consumed by the dashboard bot via `read_standard()`):
+
+- `data-fields.md` — canonical field semantics for `session_events` /
+  `network_requests` + nested player/server metrics blobs
+- `server-behavior.md` — control-surface contract catalogue +
+  calibration baselines (the `tests/server_behavior/` companion)
+- `fault-injection-wire-contract.md` — per-fault-type wire shapes the
+  proxy emits; read before editing `applySocketFault`
+
+**Test-procedure docs** (how a characterization mode is run + read):
+
+- `characterization-principles.md`, `startup-characterization-test.md`,
+  `abort-characterization-test.md`
 
 ## When to add a new one
 

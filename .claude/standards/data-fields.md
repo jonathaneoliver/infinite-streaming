@@ -2,6 +2,8 @@
 
 What each field in the analytics tables (and the nested player-side blobs they carry) actually means, what units it's in, who populates it, and what gotchas to watch for when reasoning from it. Canonical for **both** the dashboard chat bot (via `read_standard("data-fields")`) and Claude Code.
 
+> **Reference catalogue — exempt from the standards library's "one page" bar.** This file is intentionally long and is consumed by lookup (grep / `read_standard`), not read end-to-end. Don't split it to satisfy the length rule; grep for the specific field you need.
+
 **Scope of this version (Phase 1, issue #512):** the two most-queried tables — `session_events` and `network_requests` — plus the nested `player_metrics` / `server_metrics` blobs you'll see in their JSON responses. Other sources are covered in Phase 2 (`control_events`, plays summary, label vocabulary) and Phase 3 (characterization report shapes); until those land, this doc has a stub pointer at the bottom for each so you know where the gap is.
 
 **How to use this doc:**
