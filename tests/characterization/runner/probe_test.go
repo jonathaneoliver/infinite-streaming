@@ -16,6 +16,7 @@ func TestProbeLaunchArgs_Defaults(t *testing.T) {
 		"-is.flag.skip_home", "false",
 		"-is.flag.dev_mode", "true",
 		"-is.flag.live_offset_s", "0",
+		"-is.flag.reset_advanced", "true",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("defaults:\n got %q\nwant %q", got, want)
@@ -32,6 +33,7 @@ func TestProbeLaunchArgs_AllKnobs(t *testing.T) {
 		Codec:              "hevc",
 		PeakBitrateMbps:    3,
 		StartsFirstVariant: "true",
+		Muted:              "false",
 	})
 	want := []string{
 		"-is.player_id", "pid",
@@ -45,6 +47,8 @@ func TestProbeLaunchArgs_AllKnobs(t *testing.T) {
 		"-is.codec", "hevc",
 		"-is.flag.peak_bitrate_mbps", "3",
 		"-is.flag.starts_first_variant", "true",
+		"-is.flag.muted", "false",
+		"-is.flag.reset_advanced", "true",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("all knobs:\n got %q\nwant %q", got, want)
@@ -73,4 +77,28 @@ func TestProbeLaunchArgs_OmitsPeakWhenZero(t *testing.T) {
 			t.Fatal("peak_bitrate_mbps must be omitted when 0")
 		}
 	}
+}
+
+func TestProbeLaunchArgs_OmitsMutedWhenEmpty(t *testing.T) {
+	// Empty Muted leaves the app's default-mute in force (#838) — no flag emitted.
+	got := ProbeLaunchArgs(ProbeConfig{PlayerID: "x", Muted: ""})
+	for _, a := range got {
+		if a == "-is.flag.muted" {
+			t.Fatal("muted must be omitted when empty (app default-mutes)")
+		}
+	}
+}
+
+func TestProbeLaunchArgs_EmitsMutedFalse(t *testing.T) {
+	// `false` is meaningful (force audible) and must reach the launch args.
+	got := ProbeLaunchArgs(ProbeConfig{PlayerID: "x", Muted: "false"})
+	for i := 0; i+1 < len(got); i++ {
+		if got[i] == "-is.flag.muted" {
+			if got[i+1] != "false" {
+				t.Fatalf("muted = %q, want false", got[i+1])
+			}
+			return
+		}
+	}
+	t.Fatal("muted=false must be emitted")
 }

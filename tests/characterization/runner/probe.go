@@ -21,6 +21,7 @@ type ProbeConfig struct {
 	Codec              string // -is.codec — h264|hevc|av1 (optional; empty = app default)
 	PeakBitrateMbps    int    // -is.flag.peak_bitrate_mbps — startup peak-bitrate clamp (Mbps, integer); 0 = omit (#683)
 	StartsFirstVariant string // -is.flag.starts_first_variant — true|false; "" = omit (false is meaningful)
+	Muted              string // -is.flag.muted — true|false; "" = omit (app default-muted, #838; false is meaningful)
 }
 
 // ProbeLaunchArgs builds the NSArgumentDomain launch-arg slice for an appium
@@ -83,6 +84,12 @@ func ProbeLaunchArgs(c ProbeConfig) []string {
 	// false is meaningful, so only the empty string omits the flag.
 	if c.StartsFirstVariant != "" {
 		args = append(args, "-is.flag.starts_first_variant", c.StartsFirstVariant)
+	}
+	// Mute (#838): the app default-mutes, so a run is silent unless an arm
+	// explicitly sets `false` to make it audible. false is meaningful, so only
+	// the empty string omits the flag.
+	if c.Muted != "" {
+		args = append(args, "-is.flag.muted", c.Muted)
 	}
 	// Test clean-slate: drop any persisted advanced flags so this run starts from
 	// code defaults overlaid only by the args above — no carry-over from a prior

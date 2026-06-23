@@ -84,6 +84,7 @@ type Arm struct {
 	AppLiveOffset      *float64 `json:"is.live_offset,omitempty"`          // app-side target-latency override
 	PeakBitrateMbps    int      `json:"is.peak_bitrate_mbps,omitempty"`    // startup peak-bitrate clamp (Mbps; app truncates to Int) → low start rung; 0 = off (#683)
 	StartsFirstVariant *bool    `json:"is.starts_first_variant,omitempty"` // join on first manifest rung vs let ABR pick
+	Muted              *bool    `json:"is.muted,omitempty"`                // mute audio (#838); nil = app default-mutes, set false to force audible
 
 	// --- server knobs (proxy.* — config-on-connect, no relaunch) ---
 	ProxyLiveOffset     *float64                   `json:"proxy.live_offset,omitempty"` // manifest hold-back (server live edge)

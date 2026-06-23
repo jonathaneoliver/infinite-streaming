@@ -228,6 +228,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         attachPlayerListeners()
         val tD = android.os.SystemClock.uptimeMillis()
         applyTrackSelectionParameters()
+        applyMuteState()
         val tE = android.os.SystemClock.uptimeMillis()
         android.util.Log.i("InfiniteStream",
             "vm:init steps loadServers=${tB - tA}ms loadAdvancedFlags=${tC - tB}ms attachPlayerListeners=${tD - tC}ms applyTrackSelection=${tE - tD}ms total=${tE - tA}ms")
@@ -327,6 +328,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // Re-push the (now-default) flags into the track selector so a cleared
         // peak-bitrate cap / 4K setting actually takes effect (#797).
         applyTrackSelectionParameters()
+        applyMuteState()
     }
 
     /** Returns the index of the (possibly newly-added) server, or -1. */
@@ -374,6 +376,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 // outrank the persisted value for this launch (not written back).
                 allow4K           = com.infinitestream.player.LaunchConfig.allow4K
                     ?: p.getBoolean(FLAG_4K, true),
+                // #838 mute — `is.flag.muted` launch override outranks the
+                // persisted toggle for this launch (not written back); absent
+                // one, default muted. Applied to the player in applyAdvancedFlags.
+                muted             = com.infinitestream.player.LaunchConfig.muted
+                    ?: p.getBoolean(FLAG_MUTED, true),
                 localProxy        = p.getBoolean(FLAG_LOCAL_PROXY, true),
                 autoRecovery      = p.getBoolean(FLAG_AUTO_RECOVERY, false),
                 goLive            = com.infinitestream.player.LaunchConfig.goLive
@@ -468,6 +475,15 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         applyTrackSelectionParameters()
     }
 
+    /** #838 mute. ExoPlayer volume is mutable mid-play, so the toggle takes
+     *  effect immediately (no reload) — the analog of iOS `AVPlayer.isMuted`.
+     *  Persisted alongside the other Advanced flags. */
+    fun setMuted(on: Boolean) {
+        _state.update { it.copy(muted = on) }
+        prefs().edit().putBoolean(FLAG_MUTED, on).apply()
+        applyMuteState()
+    }
+
     fun setLocalProxy(on: Boolean) {
         _state.update { it.copy(localProxy = on) }
         prefs().edit().putBoolean(FLAG_LOCAL_PROXY, on).apply()
@@ -557,6 +573,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             .setMaxVideoBitrate(peakBps)
             .setForceLowestBitrate(forceLowest)
             .build()
+    }
+
+    /** #838 push the current mute state onto the live player. ExoPlayer has no
+     *  boolean mute, so map it to volume 0f / 1f. Called at the same lifecycle
+     *  points as [applyTrackSelectionParameters] (init / state reset / player
+     *  recreate) plus the [setMuted] toggle and the server-config overlay. */
+    private fun applyMuteState() {
+        player.volume = if (_state.value.muted) 0f else 1f
     }
 
     // -- Selection setters ---------------------------------------------------
@@ -844,6 +868,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         val protocol: Protocol?,
         val liveOffsetSeconds: Int?,
         val peakBitrateMbps: Int?,
+        val muted: Boolean?,
     )
 
     /** Overlay the latest server-pushed app_config onto the play-affecting
@@ -859,14 +884,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 protocol          = cfg.protocol ?: st.protocol,
                 liveOffsetSeconds = cfg.liveOffsetSeconds ?: st.liveOffsetSeconds,
                 peakBitrateMbps   = cfg.peakBitrateMbps ?: st.peakBitrateMbps,
+                muted             = cfg.muted ?: st.muted,
             )
         }
         // segment/protocol/live_offset ride the manifest URL + loadStream seek
         // (read live in composeUrlAndLoad/loadStream); the peak cap is a track-
-        // selector parameter, so re-apply it now.
+        // selector parameter and mute is a live volume, so re-apply them now.
         if (cfg.peakBitrateMbps != null) applyTrackSelectionParameters()
+        if (cfg.muted != null) applyMuteState()
         tag("app_config: applied server overlay seg=${cfg.segment} proto=${cfg.protocol} " +
-            "offset=${cfg.liveOffsetSeconds} peak=${cfg.peakBitrateMbps}")
+            "offset=${cfg.liveOffsetSeconds} peak=${cfg.peakBitrateMbps} muted=${cfg.muted}")
     }
 
     /** GET the proxy's /api/sessions, find this player's entry, and parse the
@@ -901,6 +928,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                                 ac.optDouble("live_offset_s").toInt().coerceAtLeast(0) else null,
                             peakBitrateMbps = if (ac.has("peak_bitrate_mbps") && !ac.isNull("peak_bitrate_mbps"))
                                 ac.optInt("peak_bitrate_mbps").coerceAtLeast(0) else null,
+                            muted = if (ac.has("muted") && !ac.isNull("muted"))
+                                ac.optBoolean("muted") else null,
                         )
                     }
                     null
@@ -1145,6 +1174,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             .build()
         attachPlayerListeners()
         applyTrackSelectionParameters()
+        applyMuteState()
         _state.update { it.copy(currentUrl = "", playerEpoch = it.playerEpoch + 1) }
         buildUrlAndLoad(rotatePlayId = false)
     }
@@ -1392,6 +1422,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private const val SERVERS_ACTIVE_KEY = "active_index"
         private const val DEV_MODE_KEY = "developer_mode"
         private const val FLAG_4K = "advanced_4k"
+        private const val FLAG_MUTED = "advanced_muted"
         private const val FLAG_LOCAL_PROXY = "advanced_local_proxy"
         private const val FLAG_AUTO_RECOVERY = "advanced_auto_recovery"
         private const val FLAG_GO_LIVE = "advanced_go_live"

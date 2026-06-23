@@ -72,6 +72,8 @@ object LaunchConfig {
     @Volatile
     var allow4K: Boolean? = null
     @Volatile
+    var muted: Boolean? = null
+    @Volatile
     var goLive: Boolean? = null
     @Volatile
     var playIdRotationSeconds: Int? = null
@@ -163,6 +165,16 @@ class MainActivity : ComponentActivity() {
             boolArg(raw)?.let { on ->
                 LaunchConfig.allow4K = on
                 tag("launch-arg 4k=$on")
+            }
+        }
+        // #838 mute lever — `--es is.flag.muted true`. Defaults muted; a baseline
+        // flag the harness can set per launch, so honouring it stops a stale
+        // persisted mute toggle from leaking into a run (mirrors iOS
+        // NSArgumentDomain). `false` makes the run audible.
+        intent?.getStringExtra("is.flag.muted")?.let { raw ->
+            boolArg(raw)?.let { on ->
+                LaunchConfig.muted = on
+                tag("launch-arg muted=$on")
             }
         }
         // #797 P2 Go-Live lever — `--es is.flag.go_live true` (snap to live edge).
