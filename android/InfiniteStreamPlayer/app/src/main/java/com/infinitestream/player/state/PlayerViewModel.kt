@@ -873,10 +873,15 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Overlay the latest server-pushed app_config onto the play-affecting
      *  state, so the next play composed by [composeUrlAndLoad] honours it.
-     *  Best-effort and only while routing through the proxy (localProxy) — the
-     *  app_config lives on the proxy session. A fetch miss is a no-op. #800. */
+     *  Best-effort: a fetch miss is a no-op. #800.
+     *
+     *  NOT gated on localProxy (#843). localProxy toggles routing through the
+     *  per-session go-proxy PORT for media; it does NOT control whether the
+     *  session's app_config exists. fetchServerAppConfig reads /api/sessions off
+     *  activeServer.apiUrl (the API port), reachable regardless. Gating the
+     *  overlay on localProxy silently dropped config-on-connect on every
+     *  localProxy-off run (the characterization default). */
     private suspend fun applyServerAppConfig() {
-        if (!_state.value.localProxy) return
         val cfg = fetchServerAppConfig() ?: return
         _state.update { st ->
             st.copy(

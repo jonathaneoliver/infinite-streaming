@@ -1,10 +1,10 @@
 # #838 — verify mute reaches the client via CONFIG-ON-CONNECT across a 2-sim DF
 # fleet. Two arms differ ONLY on `is.muted`; the value rides the config-on-connect
 # bootstrap (PlayerPatch.app_config.muted), so the player reads it back off
-# GET /api/sessions (applyServerAppConfig). That overlay needs LocalProxy ON, so
-# run with CHAR_LOCAL_PROXY=true (overriding the char default of OFF):
+# GET /api/sessions (applyServerAppConfig). As of #843 the overlay is no longer
+# gated on LocalProxy, so it applies under the char default (LocalProxy OFF):
 #
-#   CHAR_DEVICE_FARM=1 CHAR_LOCAL_PROXY=true \
+#   CHAR_DEVICE_FARM=1 \
 #     harness char matrix tests/characterization/matrix/mute-config-on-connect.yaml
 #
 # Needs >=2 booted iOS sims (single-platform requirement); DF allocates them.

@@ -1,9 +1,10 @@
 # #838 — BOTH sims UNMUTED (audible) via config-on-connect. Mirror of
 # mute-both.yaml but is.muted: false, so both sessions store app_config.muted=false
-# and both players apply muted=false (overlay needs LocalProxy ON →
-# CHAR_LOCAL_PROXY=true). Two distinct arms via a benign server hold-back.
+# and both players apply muted=false. As of #843 the read-back is no longer gated
+# on LocalProxy (applies under the char default, LocalProxy OFF). Two distinct
+# arms via a benign server hold-back.
 #
-#   CHAR_DEVICE_FARM=1 CHAR_LOCAL_PROXY=true \
+#   CHAR_DEVICE_FARM=1 \
 #     harness char matrix tests/characterization/matrix/mute-both-off.yaml
 #
 # PASS signal (from data): GET /api/sessions shows app_config.muted=false for BOTH

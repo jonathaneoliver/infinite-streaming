@@ -1081,10 +1081,17 @@ final class PlayerViewModel: ObservableObject {
 
     /// Overlay the latest server-pushed app_config onto the play-affecting
     /// state so the next play composed by `composeURLAndLoad` honours it.
-    /// Best-effort and only while routing through the proxy (`localProxy`) —
-    /// the app_config lives on the proxy session. A fetch miss is a no-op. #800.
+    /// Best-effort: a fetch miss is a no-op. #800.
+    ///
+    /// NOT gated on `localProxy` (#843). `localProxy` toggles the ON-DEVICE
+    /// LocalHTTPProxy (127.0.0.1 rewrite) — it does NOT control whether we use
+    /// the go-proxy session. Session playback ALWAYS routes through the go-proxy
+    /// port (see `composeURLAndLoad`), so the session's app_config exists and is
+    /// readable from `/api/sessions` (via `metricsBaseURL` → playbackURL)
+    /// regardless of the LocalHTTPProxy. Gating the overlay on `localProxy`
+    /// silently dropped config-on-connect on every LocalProxy-off run (the
+    /// characterization default).
     private func applyServerAppConfig() async {
-        guard localProxy else { return }
         guard let cfg = await fetchServerAppConfig() else { return }
         // segment/protocol/live_offset ride the manifest URL + the live-offset
         // seek; the peak cap is read off this property when the next
