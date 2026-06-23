@@ -1,10 +1,11 @@
 # #838 — BOTH sims muted via config-on-connect. Two arms differ only on a benign
 # server hold-back (proxy.live_offset) so they're distinct fleet arms; both carry
 # is.muted: true from defaults, delivered over config-on-connect (bootstrap
-# app_config.muted) and read back by the player (applyServerAppConfig → needs
-# LocalProxy ON, so run with CHAR_LOCAL_PROXY=true).
+# app_config.muted) and read back by the player (applyServerAppConfig). As of
+# #843 that read-back is no longer gated on LocalProxy (applies under the char
+# default, LocalProxy OFF).
 #
-#   CHAR_DEVICE_FARM=1 CHAR_LOCAL_PROXY=true \
+#   CHAR_DEVICE_FARM=1 \
 #     harness char matrix tests/characterization/matrix/mute-both.yaml
 #
 # PASS signal (from data): GET /api/sessions shows app_config.muted=true for BOTH
