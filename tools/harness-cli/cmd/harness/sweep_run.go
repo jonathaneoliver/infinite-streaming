@@ -277,8 +277,8 @@ func experimentPlayerPatch(ctx context.Context, client *api.Client, content stri
 
 	// #838 mute rides config-on-connect: stamp app_config.muted onto the
 	// bootstrap patch so the per-arm value is stored on the session and the
-	// player reads it back off GET /api/sessions (applyServerAppConfig, which
-	// needs LocalProxy ON — run with CHAR_LOCAL_PROXY=true).
+	// player reads it back off GET /api/sessions (applyServerAppConfig). As of
+	// #843 that read-back is no longer gated on LocalProxy.
 	if e.Muted != nil {
 		patch.AppConfig = &proxy.AppConfig{Muted: e.Muted}
 		summary = append(summary, fmt.Sprintf("muted=%t", *e.Muted))
