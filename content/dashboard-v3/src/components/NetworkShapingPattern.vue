@@ -36,6 +36,7 @@ const TEMPLATE_LABELS: Record<Template, string> = {
   ramp_up:         '↗ Ramp up',
   ramp_down:       '↘ Ramp down',
   pyramid:         '⛰ Pyramid',
+  valley:          '🏞 Valley',
   transient_shock: '⤓ Transient shock',
 };
 
