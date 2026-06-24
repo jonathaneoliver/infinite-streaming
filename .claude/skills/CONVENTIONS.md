@@ -94,6 +94,6 @@ The harness CLI surface has been refreshed:
 - `harness checkpoint list|show` — pre-mutation state captures (formerly `harness snapshot`).
 - `harness undo` — rolls back the last checkpoint.
 - `harness ts <target> --streams events,network,control` — live SSE multiplex (replaces the old per-stream subcommands).
-- `harness shape <target> --pattern pyramid|ramp_up|ramp_down|square_wave|transient_shock|sliders [--step-seconds N]` — pattern shaping (newer than the `--rate / --delay / --loss` static form, which still works for one-shot caps).
+- `harness shape <target> --pattern pyramid|valley|ramp_up|ramp_down|square_wave|transient_shock|sliders [--step-seconds N]` — pattern shaping (newer than the `--rate / --delay / --loss` static form, which still works for one-shot caps).
 
 If a skill snippet still references `archive` or `snapshot`, it's stale.

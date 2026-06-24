@@ -126,7 +126,7 @@ type Fault struct {
 // degradation is out of scope for both classes. Nil means "no shaping".
 type Shape struct {
 	RateMbps    *float64 `json:"rate_mbps,omitempty"`
-	Pattern     string   `json:"pattern,omitempty"`      // pyramid | ramp_up | ramp_down | square_wave | transient_shock
+	Pattern     string   `json:"pattern,omitempty"`      // pyramid | valley | ramp_up | ramp_down | square_wave | transient_shock
 	StepSeconds int      `json:"step_seconds,omitempty"` // 6|12|18|24|60|120
 	MarginPct   int      `json:"margin_pct,omitempty"`   // 0|5|10|25|50
 }

@@ -33,7 +33,7 @@ Operationalises the **test contract** in [`.claude/standards/characterization-pr
 | **reps** | `3` | n=1 rule (principles §2). "smoke"/"quick"→1. |
 | **segment** | `is.segment: s6` | s2 / ll only if stated. |
 | **forced flags** | LocalProxy OFF, auto-recovery OFF | The fleet forces these (override via `CHAR_LOCAL_PROXY` / `CHAR_AUTO_RECOVERY`). |
-| **mode → shape** | — | `pyramid`→`proxy.shape: {pattern: pyramid, step_seconds: 12, rate_mbps: 1.5}`; `ramp_up`/`ramp_down`/`square_wave`/`transient_shock`→`{pattern: <m>, step_seconds: 12}`; "const N Mbps cap"→`{rate_mbps: N}`; "uncapped"→`{rate_mbps: 0}` (0 = no cap). |
+| **mode → shape** | — | `pyramid`→`proxy.shape: {pattern: pyramid, step_seconds: 12, rate_mbps: 1.5}`; `valley`→`{pattern: valley, step_seconds: 12}` (high→low→high, the inverse of pyramid — starts high so NO startup cap / initial rate is needed); `ramp_up`/`ramp_down`/`square_wave`/`transient_shock`→`{pattern: <m>, step_seconds: 12}`; "const N Mbps cap"→`{rate_mbps: N}`; "uncapped"→`{rate_mbps: 0}` (0 = no cap). |
 
 ## Procedure
 1. **Parse** the one-liner → mode/class, platform(s), duration, any named knob.
