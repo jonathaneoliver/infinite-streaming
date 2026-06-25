@@ -583,17 +583,6 @@ func (a *AppiumLauncher) ReleaseDevice(ctx context.Context, d Device) error {
 	}
 }
 
-// UnblockDeviceFarm clears the appium-device-farm "busy/blocked" flag for a
-// device. The farm blocks a device on session-create but does NOT reliably
-// clear it when we delete the session on a forced stop — verified: DELETE
-// /session returns 200, yet the device stays Blocked. Left blocked, the device
-// leaks; once every farm device is stuck the next run's create-session hangs to
-// its 180s timeout (#853). POST /device-farm/api/unblock is the farm's OWN
-// release API — the exact call its dashboard "Unblock" button makes — so this
-// is the documented way to release, not a hack. The payload needs the device's
-// REGISTERED host (the farm 500s on a mismatch), so read it back from the device
-// list. Best-effort: a no-op error if the farm plugin isn't present.
-
 // Screenshot saves a PNG of the device's current screen to path.
 // Returns the path on success. Intended to be called from a sweep
 // runner to attach visual context to interesting steps.
