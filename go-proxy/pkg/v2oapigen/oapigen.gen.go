@@ -331,6 +331,7 @@ const (
 	Square         PatternTemplate = "square"
 	SquareWave     PatternTemplate = "square_wave"
 	TransientShock PatternTemplate = "transient_shock"
+	Valley         PatternTemplate = "valley"
 )
 
 // Valid indicates whether the value is a known member of the PatternTemplate enum.
@@ -349,6 +350,8 @@ func (e PatternTemplate) Valid() bool {
 	case SquareWave:
 		return true
 	case TransientShock:
+		return true
+	case Valley:
 		return true
 	default:
 		return false

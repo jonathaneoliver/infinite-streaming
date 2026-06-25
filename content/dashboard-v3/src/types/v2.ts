@@ -1842,7 +1842,7 @@ export interface components {
              *     characterization mode.
              * @enum {string}
              */
-            template?: "sliders" | "square" | "square_wave" | "ramp_up" | "ramp_down" | "pyramid" | "transient_shock";
+            template?: "sliders" | "square" | "square_wave" | "ramp_up" | "ramp_down" | "pyramid" | "valley" | "transient_shock";
             steps: components["schemas"]["PatternStep"][];
             /**
              * @description Default per-step duration the dashboard chose when generating the step list. 60 / 120 give buffer-draining holds for transient_shock-style probes.
@@ -1960,6 +1960,8 @@ export interface components {
             live_offset_s?: number | null;
             /** @description ABR peak-bitrate ceiling in Mbps for the next play (maps to `is.flag.peak_bitrate_mbps`). 0 = no cap. */
             peak_bitrate_mbps?: number | null;
+            /** @description Mute audio for the next play (maps to `is.flag.muted`). Defaults muted; false = audible. Issue #838. */
+            muted?: boolean | null;
         };
         Manifest: {
             /** Format: uri */

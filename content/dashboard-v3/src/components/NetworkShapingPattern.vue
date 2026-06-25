@@ -27,7 +27,7 @@ import { usePlayer } from '@/composables/usePlayer';
 import { useManifestVariants } from '@/composables/useManifestVariants';
 import type { Pattern } from '@/repo/v2-repo';
 
-const TEMPLATES = ['sliders', 'square_wave', 'ramp_up', 'ramp_down', 'pyramid', 'transient_shock'] as const;
+const TEMPLATES = ['sliders', 'square_wave', 'ramp_up', 'ramp_down', 'pyramid', 'valley', 'transient_shock'] as const;
 type Template = (typeof TEMPLATES)[number];
 
 const TEMPLATE_LABELS: Record<Template, string> = {
@@ -36,6 +36,7 @@ const TEMPLATE_LABELS: Record<Template, string> = {
   ramp_up:         '↗ Ramp up',
   ramp_down:       '↘ Ramp down',
   pyramid:         '⛰ Pyramid',
+  valley:          '🏞 Valley',
   transient_shock: '⤓ Transient shock',
 };
 

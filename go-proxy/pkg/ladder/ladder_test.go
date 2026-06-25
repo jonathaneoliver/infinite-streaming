@@ -184,6 +184,28 @@ func TestBuildPattern(t *testing.T) {
 			t.Errorf("pyramid not symmetric at %d: %.3f vs %.3f", i, pyr[i].RateMbps, pyr[len(pyr)-1-i].RateMbps)
 		}
 	}
+	// valley: the inverse of pyramid — high → low → high, floored at the same
+	// over-selection midpoint. Same length + symmetry, but starts/ends at the TOP
+	// cap and bottoms out at the floor in the middle.
+	val := BuildPattern(Valley, rungs, 12)
+	valTop := pyr[(len(pyr)-1)/2].RateMbps // pyramid's apex = the top cap
+	if val[0].RateMbps != valTop || val[len(val)-1].RateMbps != valTop {
+		t.Errorf("valley should start+end at top %.3f, got ends %.3f..%.3f", valTop, val[0].RateMbps, val[len(val)-1].RateMbps)
+	}
+	if val[(len(val)-1)/2].RateMbps != fl {
+		t.Errorf("valley should bottom at floor %.3f in the middle, got %.3f", fl, val[(len(val)-1)/2].RateMbps)
+	}
+	if len(val) != wantLen {
+		t.Errorf("valley len %d, want %d (same as pyramid)", len(val), wantLen)
+	}
+	for i := range val {
+		if val[i].RateMbps < fl {
+			t.Errorf("valley cap %.3f below floor %.3f at %d", val[i].RateMbps, fl, i)
+		}
+		if val[i].RateMbps != val[len(val)-1-i].RateMbps {
+			t.Errorf("valley not symmetric at %d: %.3f vs %.3f", i, val[i].RateMbps, val[len(val)-1-i].RateMbps)
+		}
+	}
 	sq := BuildPattern(SquareWave, rungs, 12)
 	if len(sq) != 2 || sq[0].RateMbps != 1.085 || sq[1].RateMbps != 31.064 {
 		t.Errorf("square_wave = %v, want [1.085, 31.064]", sq)

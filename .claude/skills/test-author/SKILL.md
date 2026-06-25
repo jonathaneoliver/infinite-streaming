@@ -33,20 +33,21 @@ Operationalises the **test contract** in [`.claude/standards/characterization-pr
 | **reps** | `3` | n=1 rule (principles §2). "smoke"/"quick"→1. |
 | **segment** | `is.segment: s6` | s2 / ll only if stated. |
 | **forced flags** | LocalProxy OFF, auto-recovery OFF | The fleet forces these (override via `CHAR_LOCAL_PROXY` / `CHAR_AUTO_RECOVERY`). |
-| **mode → shape** | — | `pyramid`→`proxy.shape: {pattern: pyramid, step_seconds: 12, rate_mbps: 1.5}`; `ramp_up`/`ramp_down`/`square_wave`/`transient_shock`→`{pattern: <m>, step_seconds: 12}`; "const N Mbps cap"→`{rate_mbps: N}`; "uncapped"→`{rate_mbps: 0}` (0 = no cap). |
+| **mode → shape** | — | `pyramid`→`proxy.shape: {pattern: pyramid, step_seconds: 12, rate_mbps: 1.5}`; `valley`→`{pattern: valley, step_seconds: 12}` (high→low→high, the inverse of pyramid — starts high so NO startup cap / initial rate is needed); `ramp_up`/`ramp_down`/`square_wave`/`transient_shock`→`{pattern: <m>, step_seconds: 12}`; "const N Mbps cap"→`{rate_mbps: N}`; "uncapped"→`{rate_mbps: 0}` (0 = no cap). |
 
 ## Procedure
 1. **Parse** the one-liner → mode/class, platform(s), duration, any named knob.
 2. **Resolve** every blank from the registry; verify content against `/api/content`.
 3. **Echo the resolved spec** — a short table: behavior, class, platform(s), content (confirmed), held-constant, what-varies (namespaced knobs), pass signal, cost. Mark anything assumed.
 4. **Ask** only the consequential blank(s), if any (per the rule).
-5. **Verify** — write the YAML and `harness char matrix <file> --dry-run` (shows the expanded arms); for server-behavior, name the exact `go test … -run TestServer<X>`.
+5. **Verify** — write the YAML to `tests/characterization/matrix/scratch/<name>.yaml` (gitignored — throwaway by default, no `git status` noise) and `harness char matrix <file> --dry-run` (shows the expanded arms); for server-behavior, name the exact `go test … -run TestServer<X>`.
+6. **Promote on request** — specs default to `scratch/`; most are throwaway. After a run the user likes, OFFER to keep it: `git mv tests/characterization/matrix/scratch/<name>.yaml tests/characterization/matrix/ && git add` (now tracked + covered by the `matrix/*.yaml` validation glob). Never promote unasked.
 
 ## char-matrix knob reference (authoritative — `internal/charmatrix/spec.go`)
 Run-level: `name`, `class`, `platform`, `content`, `duration_s`, `reps`, `parallel`, `defaults:`, `axes:` (cartesian) | `groups:`/`compare:`/`control:` (A/B).
 Client `is.*` (launch arg, **cold relaunch**): `is.segment` · `is.protocol` (hls|dash) · `is.codec` (h264|hevc|av1) · `is.live_offset` · `is.peak_bitrate_mbps` (0=off) · `is.starts_first_variant`.
 Server `proxy.*` (config-on-connect, **no relaunch**): `proxy.live_offset` · `proxy.shape` (object-axis: a whole shape block, optional `label:`) · `proxy.fault` · `proxy.transfer_timeouts` · `proxy.allowed_variants` (drop-top-N|keep-bottom-N) · `proxy.variant_order` · `proxy.strip_*` · `proxy.overstate_bandwidth`. `0 = unset` for numeric knobs.
-**Living examples:** `matrix/precedence.yaml`, `matrix/shape-patterns.yaml`, `matrix/startup-cap.yaml` (copy structure, NOT their stale `content:`).
+**Living examples:** `matrix/precedence.yaml`, `matrix/shape-patterns.yaml`, `matrix/pyramid-1-s2-firstvar-cap.yaml` (copy structure, NOT their stale `content:`).
 
 ## server-behavior skeleton (`sb_common_test.go`)
 `TestServer<X>(t)`: `newProbe(t)`; sweep the control surface via `setShapeFull`/`patchSession`; measure baseline at the identity setting, report each setting's delta within a stated tolerance; `postServerReport`. Contract as a top comment ("RTT ≈ baseline + configured_delay within a few ms"). Mirror the closest `server_*_test.go`.

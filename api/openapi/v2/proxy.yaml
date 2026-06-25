@@ -1487,7 +1487,7 @@ components:
       properties:
         template:
           type: string
-          enum: [sliders, square, square_wave, ramp_up, ramp_down, pyramid, transient_shock]
+          enum: [sliders, square, square_wave, ramp_up, ramp_down, pyramid, valley, transient_shock]
           description: |
             Template that drove step-list generation. Stored verbatim
             so the dashboard can repaint the template radios. The kernel

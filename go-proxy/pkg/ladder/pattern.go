@@ -9,6 +9,7 @@ const (
 	RampUp         = "ramp_up"
 	RampDown       = "ramp_down"
 	Pyramid        = "pyramid"
+	Valley         = "valley"
 	SquareWave     = "square_wave"
 	TransientShock = "transient_shock"
 )
@@ -24,6 +25,10 @@ type Step struct {
 //   - ramp_up         ascending caps (lowest → highest)
 //   - ramp_down       descending caps (highest → lowest)
 //   - pyramid         ascending then descending, without duplicating the apex
+//   - valley          descending then ascending (high → low → high), the
+//     inverse of pyramid — starts at the top cap so the player cold-starts
+//     cleanly (no startup over-selection wedge → no startup cap needed); the
+//     floored trough is the rate-limiting stress, then it climbs back.
 //   - square_wave     just the lowest and highest cap, alternating
 //   - transient_shock hold the top cap, then dip to each lower rung in turn
 //     (deepening), returning to the top between dips so the buffer refills —
@@ -59,6 +64,16 @@ func BuildPattern(template string, rungs []Rung, stepSecs int) []Step {
 		}
 		down := reversedFloat(asc[:len(asc)-1]) // drop the apex so it isn't held twice
 		seq = append(append([]float64{}, asc...), down...)
+	case Valley:
+		// The inverse of Pyramid: high → low → high. Start at the top cap so the
+		// player cold-starts at full bandwidth (no over-selection wedge, so no
+		// startup cap is needed); dip to the floored bottom, then climb back. The
+		// trough drops the duplicate so it isn't held twice. Shares the pyramid
+		// over-selection floor so the trough stays sustainable, not starving.
+		if fl := pyramidFloor(rungs); fl > 0 {
+			asc = floorAsc(asc, fl)
+		}
+		seq = append(reversedFloat(asc), asc[1:]...) // high→low, then low+1→high
 	case SquareWave:
 		seq = []float64{asc[0], asc[len(asc)-1]}
 	case TransientShock:
