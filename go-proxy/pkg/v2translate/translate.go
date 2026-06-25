@@ -823,6 +823,17 @@ func shapeFromSession(s map[string]any) *oapigen.Shape {
 		f := float32(v)
 		out.PatternRateRuntimeMbps = &f
 	}
+	// Single-owner group shaping markers (issue: single-master group shaping).
+	// A driven slave has no pattern of its own; these tell the UI to show the
+	// "driven by master" badge + disabled slider and which template is running.
+	if by, ok := s["nftables_pattern_driven_by"].(string); ok && by != "" {
+		b := by
+		out.GroupDrivenBy = &b
+	}
+	if tmpl, ok := s["nftables_pattern_driven_template"].(string); ok && tmpl != "" {
+		t := tmpl
+		out.GroupDrivenTemplate = &t
+	}
 	return out
 }
 

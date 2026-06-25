@@ -64,6 +64,11 @@ export interface SeriesSpec {
    *  semi-transparent tint of `color`, so overlapping bands compound to a
    *  darker shade. Used for the bandwidth chart's per-variant avg↔peak bands. */
   fillToValue?: number;
+  /** Exclude this series from y-axis AUTO-scaling (when no explicit yMax is set):
+   *  the auto range is computed from the OTHER series only. For static reference
+   *  lines — the variant peak/avg ladder + the avg↔peak bands — which otherwise
+   *  blow the auto-axis up to the top (4K) rung and squash the live traces. */
+  excludeFromAutoScale?: boolean;
 }
 
 /**
@@ -357,6 +362,7 @@ function makeDsObj(
     hidden: !!s.hidden,
     _groupLegend: s.groupLegend ?? null,
     _sessionTag: s.sessionTag ?? null,
+    _excludeFromAutoScale: !!s.excludeFromAutoScale,
     _dsKey: dsKey,
   };
 }
@@ -402,6 +408,7 @@ function buildPrimaryDatasetObjs(): any[] {
       prev.hidden = legendVis.resolveHidden(s); // persisted toggle survives a new play_id
       prev._groupLegend = s.groupLegend ?? null;
       prev._sessionTag = s.sessionTag ?? null;
+      prev._excludeFromAutoScale = !!s.excludeFromAutoScale;
       dataset[i] = prev.data;
       out.push(prev);
     } else {
@@ -452,6 +459,7 @@ function buildOverlayDatasetObjs(): any[] {
         prev.spanGaps = false;
         prev._groupLegend = s.groupLegend ?? null;
         prev._sessionTag = s.sessionTag ?? null;
+        prev._excludeFromAutoScale = !!s.excludeFromAutoScale;
         rt.datasets[i] = prev.data;
         out.push(prev);
       } else {
@@ -1010,6 +1018,31 @@ function createChartInstance(Chart: any): any {
             ? { display: true, text: props.unit, font: { size: 10 } }
             : undefined,
           afterFit: pinYWidth,
+          // Auto-scale (no explicit yMax) ignores reference series flagged
+          // _excludeFromAutoScale — the variant peak/avg ladder + the avg↔peak
+          // bands — which otherwise pin the axis to the top (4K) rung and squash
+          // the live traces. Recompute max over the OTHER visible left-axis
+          // series within the current x-view. An explicit yMax (the Y-axis
+          // selector / persisted bandwidthYMax) is respected (early return).
+          afterDataLimits: (scale: any) => {
+            if (props.yMax != null) return;
+            const ch = scale.chart;
+            const xs = ch.scales?.x;
+            const xmin = xs?.min ?? -Infinity;
+            const xmax = xs?.max ?? Infinity;
+            let max = -Infinity;
+            (ch.data.datasets as any[]).forEach((ds: any, i: number) => {
+              if (ds._excludeFromAutoScale) return;
+              if ((ds.yAxisID ?? 'y') !== 'y') return;
+              if (!ch.isDatasetVisible(i)) return;
+              for (const pt of (ds.data as Array<{ x: number; y: number | null }>)) {
+                if (!pt || pt.y == null) continue;
+                if (pt.x < xmin || pt.x > xmax) continue;
+                if (pt.y > max) max = pt.y;
+              }
+            });
+            if (max > -Infinity && max > 0) scale.max = max * 1.1;
+          },
         },
         ...(usesY2 ? {
           y2: {

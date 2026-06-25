@@ -99,6 +99,40 @@ function appendPeakLadder(
       groupLegend,
       ...(opts.tag ? { sessionTag: opts.tag } : {}),
       hidden: opts.hidden,
+      excludeFromAutoScale: true, // reference ladder — don't let it drive the auto y-axis
+    });
+  }
+}
+
+/** Append the per-variant avg↔peak BAND series for a ladder — a light filled
+ *  region (fillToValue=avg) per variant, drawn behind the rung lines. Mirrors
+ *  appendPeakLadder; tagged in compare mode so the S1/S2 legend toggles each
+ *  session's bands in lockstep. Always excludeFromAutoScale (reference overlay).
+ *  Skips a variant lacking a usable avg < peak. */
+function appendBands(
+  out: SeriesSpec[],
+  ladder: ReadonlyArray<VariantLite>,
+  opts: { hidden: boolean; tag?: string },
+): void {
+  const groupLegend = opts.tag ? `Variant Bands (${opts.tag})` : 'Variant Bands';
+  for (const v of ladder) {
+    const peakBw = Number(v.bandwidth);
+    const avgBw = Number((v as { average_bandwidth?: number }).average_bandwidth);
+    if (!Number.isFinite(peakBw) || peakBw <= 0) continue;
+    if (!Number.isFinite(avgBw) || avgBw <= 0 || avgBw >= peakBw) continue;
+    const peakMbps = peakBw / 1_000_000;
+    const avgMbps = avgBw / 1_000_000;
+    const label = `Variant band ${v.resolution ?? '?'} (${avgMbps.toFixed(2)}–${peakMbps.toFixed(2)} Mbps)`;
+    out.push({
+      label: opts.tag ? `${label} (${opts.tag})` : label,
+      color: '#38bdf8',
+      accessor: () => peakMbps,
+      fillToValue: avgMbps,
+      stepped: false,
+      groupLegend,
+      ...(opts.tag ? { sessionTag: opts.tag } : {}),
+      hidden: opts.hidden,
+      excludeFromAutoScale: true,
     });
   }
 }
@@ -176,6 +210,13 @@ function extractSegmentMarkers(
         if (Number.isFinite(v)) mbps = v;
         const cached = String(parsed.derived_from_cache ?? '0');
         if (cached === '1') continue; // skip cache-served requests
+        // Skip the EXT-X-MAP init segment: AVPlayer reports it as a video
+        // HLSMediaSegmentRequestEvent too, but it's a ~900-byte init/codec header
+        // (no media frames) that transfers in sub-ms — so its derived_mbps is a
+        // meaningless spike at every variant switch. A real media segment (even a
+        // low-bitrate partial) is far larger than this floor. #811.
+        const segBytes = Number(parsed.derived_bytes);
+        if (Number.isFinite(segBytes) && segBytes > 0 && segBytes < 4096) continue;
         // Tooltip body — short event-type label, the path
         // (filename only — full URL is too long for the floating
         // tooltip), and the derived bandwidth / transfer details.
@@ -311,7 +352,13 @@ const baseSeries: SeriesSpec[] = [
       const sh = p.shape;
       if (!sh) return 0;
       const runtime = sh.pattern_rate_runtime_mbps;
-      if (sh.pattern && Number.isFinite(runtime as number) && (runtime as number) >= 0) {
+      // Use the kernel's enforced runtime rate whenever it's set — not only when
+      // THIS session owns a pattern. A group-driven slave (single-owner shaping)
+      // has no local pattern but its port is fanned the master's per-tick rate via
+      // `nftables_pattern_rate_runtime_mbps`, so this lets the slave's Limit line
+      // track the master's pyramid. Safe for normal no-pattern sessions: the proxy
+      // defaults runtime to `bandwidth_mbps` (== rate_mbps), so the line is unchanged.
+      if (Number.isFinite(runtime as number) && (runtime as number) >= 0) {
         return runtime as number;
       }
       const stepIdx = Number(sh.pattern_step_runtime ?? sh.pattern_step ?? 0);
@@ -397,6 +444,7 @@ const series = computed<SeriesSpec[]>(() => {
     // rungs. Each sibling builds its OWN ladder from its OWN manifest in the
     // useCompareOverlays closure below, so manifests that differ across the
     // compared sessions show distinct rung sets (issue #812).
+    appendBands(compareOut, variants.value, { hidden: true, tag: self.tag });
     appendPeakLadder(compareOut, variants.value, { hidden: true, tag: self.tag, dash: self.dash });
     return compareOut;
   }
@@ -446,23 +494,7 @@ const series = computed<SeriesSpec[]>(() => {
   // sitting at/below the rung-below's peak (#811) — or leave GAPS. Fill is
   // semi-transparent, so overlapping bands compound into a darker tint. Built
   // BEFORE the avg/peak ladder lines so the bands draw BEHIND those rung lines.
-  for (const v of ladder) {
-    const peakBw = Number(v.bandwidth);
-    const avgBw = Number((v as { average_bandwidth?: number }).average_bandwidth);
-    if (!Number.isFinite(peakBw) || peakBw <= 0) continue;
-    if (!Number.isFinite(avgBw) || avgBw <= 0 || avgBw >= peakBw) continue;
-    const peakMbps = peakBw / 1_000_000;
-    const avgMbps = avgBw / 1_000_000;
-    out.push({
-      label: `Variant band ${v.resolution ?? '?'} (${avgMbps.toFixed(2)}–${peakMbps.toFixed(2)} Mbps)`,
-      color: '#38bdf8',
-      accessor: () => peakMbps,
-      fillToValue: avgMbps,
-      stepped: false,
-      groupLegend: 'Variant Bands',
-      hidden: true,
-    });
-  }
+  appendBands(out, ladder, { hidden: true });
   // Mute the variant-line color so it doesn't out-shout the live
   // traces. Slate-400 reads at a glance but stays in the background.
   const AVG_COLOR = '#94a3b8';
@@ -479,6 +511,7 @@ const series = computed<SeriesSpec[]>(() => {
         borderDash: [2, 4],
         groupLegend: 'Variant avg bandwidth',
         hidden: true,
+        excludeFromAutoScale: true, // reference ladder — don't let it drive the auto y-axis
       });
     }
   }
@@ -501,6 +534,7 @@ const compareOverlays = useCompareOverlays((sib) => {
   // its events stream — so comparing two sessions whose manifests differ
   // shows each one's distinct rung set. Hidden by default, tagged + dashed
   // per session so the S1/S2 legend toggles it in lockstep (issue #812).
+  appendBands(specs, latestManifestVariants(sib.stream), { hidden: true, tag: sib.tag });
   appendPeakLadder(specs, latestManifestVariants(sib.stream), {
     hidden: true,
     tag: sib.tag,

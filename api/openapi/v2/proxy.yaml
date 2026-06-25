@@ -1469,6 +1469,16 @@ components:
           nullable: true
           readOnly: true
           description: 'Effective rate the kernel is enforcing right now from the active step. Distinct from `rate_mbps` (the static fallback when pattern is off).'
+        group_driven_by:
+          type: string
+          nullable: true
+          readOnly: true
+          description: 'Single-owner group shaping: when non-empty, this session has NO pattern of its own — its kernel cap is fanned per-tick from the group master named here (display label / short player_id). The slave UI shows a "driven by master" badge + a disabled rate slider; `pattern_rate_runtime_mbps` carries the live cap.'
+        group_driven_template:
+          type: string
+          nullable: true
+          readOnly: true
+          description: 'The pattern template (e.g. `pyramid`) the group master is running, surfaced on a driven slave for its "driven by master — <template>" label. Empty unless `group_driven_by` is set.'
 
     Pattern:
       type: object

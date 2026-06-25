@@ -1,0 +1,26 @@
+# 4-sim group, s2 (2s nominal) segments — 4× iPhone 15 sim version of
+# pyramid-2sim-s2 to exercise single-owner group shaping across MORE members:
+# control=master arms the pyramid, 3 slaves follow via the proxy's per-tick rate
+# fan-out (one engine, no per-member loops, lock-step). pyramid @ 1 Mbps initial
+# cap + 1 Mbps client cap, NO live_offset, NO alternating.
+name: pyramid-4sim-s2
+class: config
+parallel: true
+reps: 1
+duration_s: 300
+defaults:
+  platform: ipad-sim
+  content: insane_newer_p200_h264
+  is.segment: s2
+  is.peak_bitrate_mbps: 1
+  proxy.shape:
+    pattern: pyramid                # climb the ladder then descend; master arms it, slaves follow via the proxy rate fan-out
+    step_seconds: 12
+    rate_mbps: 1                    # initial network cap (Mbps) applied at config-on-connect, before the pattern arms
+groups:
+  - id: quad
+    control: { id: master }
+    variants:
+      - { id: slave1 }
+      - { id: slave2 }
+      - { id: slave3 }

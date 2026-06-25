@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/ladder"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/api"
@@ -37,6 +38,11 @@ Pattern mode (generates a step list from the player's current variants):
                      (default 50; adds a headroom start rung above the
                      top anchor so playback settles before constraining;
                      0 disables it)
+  --broadcast BOOL   group fan-out for the pattern arm (only valid with
+                     --pattern): false = arm the pattern on THIS player only
+                     (e.g. the group master) so other members don't each start
+                     their own pattern engine; true = force broadcast; unset =
+                     server default (a normal group broadcasts shape to all)
   --clear-pattern    stop any running pattern (back to slider rate)
   --show-pattern     print current pattern + active step
 
@@ -79,6 +85,7 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	margin := fs.Int("margin", 5, "headroom %% above variant rate: 0|5|10|25|50 (5 covers protocol overhead)")
 	maxStep := fs.Float64("max-step", ladder.DefaultMaxStep, "max ratio between consecutive caps before a geometric fill is inserted (default 1.15; raise to coarsen + shorten the pattern)")
 	topHeadroom := fs.Float64("top-headroom", ladder.DefaultTopHeadroomPct, "start the ladder this %% over the top variant's peak (default 50; 0 disables the headroom start rung)")
+	broadcast := fs.String("broadcast", "", "group broadcast for the --pattern arm: false|true (unset = server default)")
 	clearPattern := fs.Bool("clear-pattern", false, "stop any running pattern")
 	showPattern := fs.Bool("show-pattern", false, "print current pattern, don't modify")
 	clear := fs.Bool("clear", false, "send {shape:null}")
@@ -92,6 +99,13 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
+	broadcastPtr, berr := parseBroadcast(*broadcast)
+	if berr != nil {
+		return berr
+	}
+	if broadcastPtr != nil && *pattern == "" {
+		return errors.New("--broadcast is only valid with --pattern (it controls whether the pattern arm broadcasts to the group)")
+	}
 
 	switch {
 	case *show:
@@ -103,7 +117,7 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	case *clearPattern:
 		return doClearPattern(client, ctx, pid, asJSON)
 	case *pattern != "":
-		return doPattern(client, ctx, pid, asJSON, *pattern, *stepSeconds, *margin, *maxStep, *topHeadroom)
+		return doPattern(client, ctx, pid, asJSON, *pattern, *stepSeconds, *margin, *maxStep, *topHeadroom, broadcastPtr)
 	}
 
 	if *rate < 0 && *delay < 0 && *loss < 0 {
@@ -359,7 +373,7 @@ func doClearPattern(client *api.Client, ctx context.Context, pid string, asJSON 
 // anchor per variant, +marginPct flat, with geometric fills to maxStep
 // (#551). Snapshots pre-state for `harness undo` and PATCHes.
 func doPattern(client *api.Client, ctx context.Context, pid string, asJSON bool,
-	tplStr string, stepSecs, marginPct int, maxStep, topHeadroomPct float64) error {
+	tplStr string, stepSecs, marginPct int, maxStep, topHeadroomPct float64, broadcast *bool) error {
 
 	tpl, err := parseTemplate(tplStr)
 	if err != nil {
@@ -404,7 +418,7 @@ func doPattern(client *api.Client, ctx context.Context, pid string, asJSON bool,
 	}
 	action := fmt.Sprintf("shape pattern=%s steps=%d step_s=%d margin=%d%%",
 		tplStr, len(steps), stepSecs, marginPct)
-	newETag, err := client.PatchShape(ctx, pid, action, &shape)
+	newETag, err := client.PatchShapeBroadcast(ctx, pid, action, &shape, broadcast)
 	if err != nil {
 		return err
 	}
@@ -416,6 +430,23 @@ func doPattern(client *api.Client, ctx context.Context, pid string, asJSON bool,
 	fmt.Printf("applied %s pattern to %s — %d steps × %ds = %ds total cycle (etag %s)\n",
 		tplStr, pid, len(steps), stepSecs, len(steps)*stepSecs, shortRev(newETag))
 	return nil
+}
+
+// parseBroadcast turns the tri-state --broadcast flag into a *bool:
+// "" → nil (server default), true|1 → &true, false|0 → &false. Threaded into
+// the PATCH as the ?broadcast= query param (see client.PatchShapeBroadcast).
+func parseBroadcast(s string) (*bool, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "":
+		return nil, nil
+	case "true", "1":
+		v := true
+		return &v, nil
+	case "false", "0":
+		v := false
+		return &v, nil
+	}
+	return nil, fmt.Errorf("invalid --broadcast %q: true|false", s)
 }
 
 func parseTemplate(s string) (proxy.PatternTemplate, error) {

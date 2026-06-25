@@ -92,15 +92,10 @@ const chatScope = computed<ChatScope>(() => {
   };
 });
 
-/** "Show before/after" toggle. When ON, SessionDisplay drops the
- *  play_id filter on its SSE subscription and widens the time
- *  window to play_bounds ± 5 min, so rows from neighbouring plays
- *  for the same player become visible in the same panel layout.
- *  Default OFF — the page is locked to this play, matching the
- *  "click a session row, see that session" mental model from
- *  sessions.html. */
-const showContext = ref<boolean>(false);
-function toggleShowContext() { showContext.value = !showContext.value; }
+// Session-viewer is always scoped to this play — play_id is passed straight to
+// the SSE, the same play-scoped view testing.html uses. The old "showing context
+// / this play only" padlock toggle was removed for parity with testing.html (and
+// because it was confusing); the play_id filter is simply always on here.
 
 // Starred state — backed by TanStack so the optimistic flip, the
 // mutation rollback, and any future cache invalidations follow the
@@ -253,32 +248,9 @@ const backHref = '/dashboard/sessions.html';
               <span class="meta-label">player</span>
               <code class="id-pill" :title="playerId">{{ playerId || '(no player)' }}</code>
               <span class="meta-label">play</span>
-              <!-- play_id gets a "disabled" style when showContext is on:
-                   the SSE has dropped the play_id filter so the id shown
-                   here is no longer what's actually being filtered. The
-                   strike + muted colour signals "this label doesn't
-                   reflect what you're currently looking at". -->
-              <code
-                class="id-pill"
-                :class="{ 'id-pill-disabled': showContext }"
-                :title="showContext
-                  ? `${playId ?? '(all plays)'} — filter disabled while showing context`
-                  : (playId ?? '(all plays)')"
-              >{{ playId ?? '(all plays)' }}</code>
+              <code class="id-pill" :title="playId ?? '(all plays)'">{{ playId ?? '(all plays)' }}</code>
             </div>
             <div class="banner-actions">
-              <button
-                type="button"
-                class="banner-btn"
-                :class="{ active: showContext }"
-                @click="toggleShowContext"
-                :disabled="!playId"
-                :title="showContext
-                  ? 'Snap back to this play only'
-                  : 'Show rows from before and after this play (same player, ±5 min)'"
-              >
-                {{ showContext ? '🔓 Showing context' : '🔒 This play only' }}
-              </button>
               <button
                 type="button"
                 class="banner-btn"
@@ -297,7 +269,6 @@ const backHref = '/dashboard/sessions.html';
           <SessionDisplay
             :player-id="playerId"
             :play-id="playId"
-            :show-context="showContext"
             :start-ms="startMs"
             :end-ms="endMs"
             :compare-plays="comparePlays"

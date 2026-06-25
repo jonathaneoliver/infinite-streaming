@@ -3886,6 +3886,9 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 			break
 		}
 	}
+	// Resolve the owner labels once (master identity + template) for the slave
+	// "driven by master" markers fanned out each tick.
+	drivenBy, drivenTemplate := a.patternOwnerLabels(port)
 	stepIndex := 0
 	for {
 		select {
@@ -3950,7 +3953,11 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 			"nftables_pattern_step":              stepIndex + 1,
 			"nftables_pattern_step_runtime":      stepIndex + 1,
 			"nftables_pattern_rate_runtime_mbps": step.RateMbps,
+			"nftables_pattern_master":            true,
 		})
+		// Single-owner group shaping: mirror this step's cap onto the rest of the
+		// group so every member tracks the master in lock-step (no per-member loop).
+		a.fanPatternRateToGroup(port, step.RateMbps, delayMs, loss, drivenBy, drivenTemplate)
 		// Emit pattern_step as a control_event for every session on
 		// this port (issue #474 Milestone B). Info is a tiny JSON
 		// blob so downstream (graphs, harness archive) can read
@@ -3989,6 +3996,75 @@ func (a *App) disablePatternForPort(port int) {
 	// applySessionSettingsUpdate (e.g. switching to sliders mode,
 	// session release, group reset). Issue #474 follow-up.
 	a.emitControlEventForPort(port, "proxy", "pattern_disabled", "")
+}
+
+// fanPatternRateToGroup applies the master's current pattern rate to every OTHER
+// port in the master's group — the single-owner model. This pattern loop is the
+// only engine; each tick mirrors its cap onto the group's members so they track
+// in lock-step with zero drift. Members get the kernel cap via applyShapeIfChanged
+// (change-detected → an unchanged member is a no-op) plus display markers
+// (rate_runtime + driven_by + driven_template) so the dashboard shows "driven by
+// master" WITHOUT arming a per-member pattern (no steps, no step-clock). The group
+// is re-enumerated every call, so a member that connected/reattached after the
+// master armed is picked up on the next tick (no dependence on instantiation order).
+func (a *App) fanPatternRateToGroup(originPort int, rate float64, delay int, loss float64, drivenBy, drivenTemplate string) {
+	snap := a.sessionsView() // #740 read-only: group/port lookups only
+	gid := a.getGroupIdByPort(originPort, snap)
+	if gid == "" {
+		log.Printf("NETSHAPE group fan-out skipped port=%d reason=no_group_id sessions=%d", originPort, len(snap))
+		return
+	}
+	ports := a.getPortsForGroup(gid, snap)
+	fanned := 0
+	for _, gp := range ports {
+		if gp == originPort {
+			continue
+		}
+		if err := a.applyShapeIfChanged(gp, rate, delay, loss); err != nil {
+			log.Printf("NETSHAPE group pattern fan-out failed port=%d group=%s rate_mbps=%.3f: %v", gp, gid, rate, err)
+			continue
+		}
+		// Display only — the member's chart Limit line + slider track the master's
+		// cap. Deliberately NO setShapeRuntimeStep / nftables_pattern_steps: members
+		// stay template-less and step-clock-less (single owner = the master).
+		a.updateSessionsByPort(gp, map[string]interface{}{
+			"nftables_pattern_rate_runtime_mbps": rate,
+			"nftables_pattern_driven_by":         drivenBy,
+			"nftables_pattern_driven_template":   drivenTemplate,
+		})
+		fanned++
+	}
+	// #single-owner debug: surface what the fan-out resolved each tick so a
+	// non-firing group (slaves stuck at their connect cap) is diagnosable from
+	// the proxy log — origin port, resolved group, ALL member ports the group
+	// enumerated, and how many were actually fanned.
+	log.Printf("NETSHAPE group fan-out port=%d group=%s member_ports=%v fanned=%d rate_mbps=%.3f", originPort, gid, ports, fanned, rate)
+}
+
+// patternOwnerLabels reads the master (origin) session for the labels the slave
+// UI shows: the master's display label and the active template name. Best-effort —
+// empty strings just mean the slave badge omits that detail.
+func (a *App) patternOwnerLabels(originPort int) (drivenBy, drivenTemplate string) {
+	for _, s := range a.sessionsView() { // #740 read-only
+		if !a.sessionMatchesPort(s, originPort) {
+			continue
+		}
+		drivenBy = getString(s, "display_id")
+		if drivenBy == "" {
+			pid := getString(s, "player_id")
+			if len(pid) > 8 {
+				pid = pid[:8]
+			}
+			drivenBy = pid
+		}
+		if raw, ok := s["_v2_shape_pattern"]; ok {
+			if m, ok := raw.(map[string]interface{}); ok {
+				drivenTemplate = getString(m, "template")
+			}
+		}
+		break
+	}
+	return drivenBy, drivenTemplate
 }
 
 // emitControlEventsForDiff inspects a (before, after) session-state
@@ -4730,29 +4806,11 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		"nftables_pattern_margin_pct":               payload.TemplateMarginPct,
 	}, "")
 
-	// Propagate to group members
-	snap := a.sessionsView() // #740 read-only: group/port lookups only
-	groupID := a.getGroupIdByPort(port, snap)
-	if groupID != "" {
-		groupPorts := a.getPortsForGroup(groupID, snap)
-		for _, groupPort := range groupPorts {
-			if groupPort == port {
-				continue // Skip the original port
-			}
-			if err := a.applyShapePattern(groupPort, cleanSteps, payload.DelayMs, payload.LossPct); err != nil {
-				log.Printf("NETSHAPE group pattern propagation failed port=%d: %v", groupPort, err)
-				continue
-			}
-			a.updateSessionsByPortWithControl(groupPort, map[string]interface{}{
-				"nftables_pattern_segment_duration_seconds": payload.SegmentDurationSeconds,
-				"nftables_pattern_default_segments":         payload.DefaultSegments,
-				"nftables_pattern_default_step_seconds":     payload.DefaultStepSeconds,
-				"nftables_pattern_template_mode":            payload.TemplateMode,
-				"nftables_pattern_margin_pct":               payload.TemplateMarginPct,
-			}, "")
-			log.Printf("NETSHAPE group pattern propagation applied port=%d group=%s", groupPort, groupID)
-		}
-	}
+	// Single-owner group shaping: the origin port's pattern loop fans each tick's
+	// rate to the group's members (see fanPatternRateToGroup in runShapePatternLoop).
+	// We deliberately do NOT arm a second pattern loop on each member here — that was
+	// the double-arm: N independent per-member loops that drift apart and show the
+	// pattern template on every member instead of just the master.
 
 	writeJSON(w, map[string]interface{}{
 		"success":         true,

@@ -83,7 +83,14 @@ function limitAccessor(p: PlayerRecord): number | null {
   } | undefined;
   if (!sh) return 0;
   const runtime = sh.pattern_rate_runtime_mbps;
-  if (sh.pattern && Number.isFinite(runtime as number) && (runtime as number) >= 0) {
+  // Use the kernel's enforced runtime rate whenever it's set — not only when THIS
+  // session owns a pattern. A group-driven slave (single-owner shaping) has no
+  // local pattern but its port is fanned the master's per-tick rate via
+  // pattern_rate_runtime_mbps, so this lets the slave's Limit line track the
+  // master's pyramid. Safe for normal no-pattern sessions: the proxy defaults
+  // runtime to bandwidth_mbps (== rate_mbps), so the line is unchanged. Mirrors
+  // the same fix in BandwidthChart.vue's single-session accessor.
+  if (Number.isFinite(runtime as number) && (runtime as number) >= 0) {
     return runtime as number;
   }
   const stepIdx = Number(sh.pattern_step_runtime ?? sh.pattern_step ?? 0);
