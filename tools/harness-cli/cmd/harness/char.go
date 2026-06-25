@@ -249,8 +249,33 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 	// Fleet bring-up (N parallel WDA builds + the shared home barrier) is slower
 	// than a single launch, so budget more headroom than the sequential probe.
 	timeout := time.Duration(windowS+600) * time.Second
-	cmd := exec.Command("go", "test", "./modes", "-run", "TestCharMatrixFleet", "-count=1",
-		"-timeout", fmt.Sprintf("%ds", int(timeout.Seconds())), "-v")
+
+	// Pre-compile the fleet test to a standalone binary and run THAT directly,
+	// instead of `go test ./modes`. The process we Start() (and signal on a
+	// graceful stop) must BE the test binary: `go test` runs the binary as a
+	// grandchild in its own process group, so neither a direct signal to go test
+	// nor a group-signal reaches the binary where interruptContext lives — the
+	// binary (and its appium session) get orphaned on interrupt (#853, verified
+	// across a 5-cycle stress test). Running the compiled binary directly makes
+	// cmd.Process the test binary, so SIGTERM lands straight on it →
+	// interruptContext → t.Cleanup → appium session release.
+	binF, err := os.CreateTemp("", "char-fleet-*.test")
+	if err != nil {
+		return fmt.Errorf("fleet test tempfile: %w", err)
+	}
+	bin := binF.Name()
+	binF.Close()
+	defer os.Remove(bin)
+	build := exec.Command("go", "test", "-c", "-o", bin, "./modes")
+	build.Dir = charDir
+	build.Stdout = os.Stderr
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		return fmt.Errorf("compile TestCharMatrixFleet (dir=%s): %w", charDir, err)
+	}
+
+	cmd := exec.Command(bin, "-test.run=TestCharMatrixFleet", "-test.count=1",
+		fmt.Sprintf("-test.timeout=%ds", int(timeout.Seconds())), "-test.v=true")
 	cmd.Dir = charDir
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -263,21 +288,15 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 		"CHAR_SWEEP_DURATION_S="+strconv.Itoa(windowS),
 	)
 	cmd.Env = append(cmd.Env, armEnv...)
-	// Graceful interrupt (#853): on SIGINT/SIGTERM, signal the test and WAIT for
-	// it to drain rather than letting the Go runtime kill the CLI first. The
-	// fleet test cancels its play window and runs t.Cleanup (appium session
-	// release) on the same signal; if the CLI died first it would orphan those
-	// sessions and block the next run with create-session timeouts.
-	//
-	// Run `go test` in its OWN process group and signal the whole GROUP, not the
-	// `go test` toolchain process: go test does NOT forward signals to the test
-	// BINARY (a grandchild), so signalling go test alone leaves the binary — and
-	// its appium session — orphaned. Group-signalling reaches the binary
-	// directly, where interruptContext fires. SIGKILL is uncatchable, so a hard
-	// kill still needs the appium-restart / startup-sweep backstop.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Graceful interrupt (#853): forward SIGINT/SIGTERM straight to the test
+	// binary (now our direct child) and WAIT for it to drain rather than letting
+	// the Go runtime kill the CLI first. interruptContext cancels the play window
+	// and t.Cleanup releases the appium session; without this the CLI would die
+	// first and orphan the session, blocking the next run. SIGKILL is uncatchable,
+	// so a hard kill still needs the appium-restart / startup-sweep backstop.
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("go test TestCharMatrixFleet (dir=%s): start: %w", charDir, err)
+		return fmt.Errorf("run TestCharMatrixFleet (dir=%s): start: %w", charDir, err)
 	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -285,9 +304,7 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 	go func() {
 		for range sigCh {
 			if cmd.Process != nil {
-				// Negative pid → the child's process group (go test + the test
-				// binary), so the binary's interruptContext gets it and cleans up.
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+				_ = cmd.Process.Signal(syscall.SIGTERM) // straight to the test binary
 			}
 		}
 	}()
