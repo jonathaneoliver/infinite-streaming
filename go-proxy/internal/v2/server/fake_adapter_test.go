@@ -15,8 +15,8 @@ import (
 // store's sessionsMu single-mutex contract).
 type fakeAdapter struct {
 	defaultRateMbps int
-	mu       sync.Mutex
-	sessions []map[string]any
+	mu              sync.Mutex
+	sessions        []map[string]any
 
 	// Test-side observation hooks for kernel-apply calls. Real adapter
 	// drives v1's nftables / tc helpers; the fake just records.
@@ -89,10 +89,10 @@ func (a *fakeAdapter) NetworkLogForPlayer(playerID string, limit int) []map[stri
 	return nil
 }
 
-func (a *fakeAdapter) Version() string          { return "fake" }
-func (a *fakeAdapter) ContentDir() string       { return "/tmp/fake" }
-func (a *fakeAdapter) AuthEnabled() bool        { return false }
-func (a *fakeAdapter) AnalyticsEnabled() bool   { return false }
+func (a *fakeAdapter) Version() string        { return "fake" }
+func (a *fakeAdapter) ContentDir() string     { return "/tmp/fake" }
+func (a *fakeAdapter) AuthEnabled() bool      { return false }
+func (a *fakeAdapter) AnalyticsEnabled() bool { return false }
 
 // Mutations ------------------------------------------------------------
 
@@ -205,13 +205,14 @@ func (a *fakeAdapter) DefaultRateMbps() int {
 }
 
 // ApplyPatternToPlayer test stub — records the call for assertions.
-func (a *fakeAdapter) ApplyPatternToPlayer(playerID string, steps []ShapePatternStep, delayMs int, lossPct float64) error {
+func (a *fakeAdapter) ApplyPatternToPlayer(playerID string, steps []ShapePatternStep, imp LinkImpairment) error {
 	a.mu.Lock()
 	a.patternApplyCalls = append(a.patternApplyCalls, fakePatternCall{
 		PlayerID: playerID,
 		Steps:    steps,
-		DelayMs:  delayMs,
-		LossPct:  lossPct,
+		DelayMs:  imp.DelayMs,
+		LossPct:  imp.LossPct,
+		Imp:      imp,
 	})
 	a.mu.Unlock()
 	return nil
@@ -222,6 +223,7 @@ type fakePatternCall struct {
 	Steps    []ShapePatternStep
 	DelayMs  int
 	LossPct  float64
+	Imp      LinkImpairment
 }
 
 func (a *fakeAdapter) DeletePlayer(playerID string) bool {

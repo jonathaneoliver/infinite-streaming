@@ -1123,6 +1123,28 @@ type PlayPatch struct {
 	// `loss_pct` for steady background loss, `transport_fault` for
 	// one-shot or cadence-driven transport faults. See
 	// `DESIGN.md § shape.transport_fault × shape.loss_pct interaction`.
+	//
+	// **Link-impairment knobs (#826).** `delay_ms` / `jitter_ms` /
+	// `loss_pct` and their correlation terms model a realistic
+	// (latency + loss + jitter dominated) link rather than a clean one.
+	// Conventions:
+	//   - `delay_ms` is **one-way**: netem applies it on the single
+	//     egress qdisc the proxy controls, so the observed RTT increase
+	//     ≈ `delay_ms` (the return direction is unshaped). Named link
+	//     profiles state delays as one-way to match.
+	//   - `jitter_ms` is the delay standard deviation, applied as
+	//     `delay <delay_ms>ms <jitter_ms>ms <jitter_correlation_pct>%
+	//     distribution normal`. `jitter_correlation_pct` (~25% ≈ real
+	//     link) keeps successive delays correlated so netem does not
+	//     reorder packets into nonsense. When `jitter_ms` is 0 the
+	//     server falls back to a tight auto-jitter (5% of delay).
+	//   - `loss_correlation_pct` turns netem's independent-uniform loss
+	//     into correlated/bursty loss via `loss <loss_pct>%
+	//     <loss_correlation_pct>%`. Real loss is bursty; uniform loss at
+	//     the same percentage over-punishes TCP. 0 = uniform (legacy).
+	//   - Throughput under loss falls ~ `1/(RTT·√loss)` (Mathis), so an
+	//     impairment arm caps effective bandwidth below `rate_mbps` —
+	//     that coupling is the measurement target, not a bug.
 	Shape *Shape `json:"shape,omitempty"`
 }
 
@@ -1257,6 +1279,28 @@ type PlayerCreateRequest struct {
 	// `loss_pct` for steady background loss, `transport_fault` for
 	// one-shot or cadence-driven transport faults. See
 	// `DESIGN.md § shape.transport_fault × shape.loss_pct interaction`.
+	//
+	// **Link-impairment knobs (#826).** `delay_ms` / `jitter_ms` /
+	// `loss_pct` and their correlation terms model a realistic
+	// (latency + loss + jitter dominated) link rather than a clean one.
+	// Conventions:
+	//   - `delay_ms` is **one-way**: netem applies it on the single
+	//     egress qdisc the proxy controls, so the observed RTT increase
+	//     ≈ `delay_ms` (the return direction is unshaped). Named link
+	//     profiles state delays as one-way to match.
+	//   - `jitter_ms` is the delay standard deviation, applied as
+	//     `delay <delay_ms>ms <jitter_ms>ms <jitter_correlation_pct>%
+	//     distribution normal`. `jitter_correlation_pct` (~25% ≈ real
+	//     link) keeps successive delays correlated so netem does not
+	//     reorder packets into nonsense. When `jitter_ms` is 0 the
+	//     server falls back to a tight auto-jitter (5% of delay).
+	//   - `loss_correlation_pct` turns netem's independent-uniform loss
+	//     into correlated/bursty loss via `loss <loss_pct>%
+	//     <loss_correlation_pct>%`. Real loss is bursty; uniform loss at
+	//     the same percentage over-punishes TCP. 0 = uniform (legacy).
+	//   - Throughput under loss falls ~ `1/(RTT·√loss)` (Mathis), so an
+	//     impairment arm caps effective bandwidth below `rate_mbps` —
+	//     that coupling is the measurement target, not a bug.
 	Shape     *Shape `json:"shape,omitempty"`
 	Synthetic *bool  `json:"synthetic,omitempty"`
 }
@@ -1642,6 +1686,28 @@ type PlayerPatch struct {
 	// `loss_pct` for steady background loss, `transport_fault` for
 	// one-shot or cadence-driven transport faults. See
 	// `DESIGN.md § shape.transport_fault × shape.loss_pct interaction`.
+	//
+	// **Link-impairment knobs (#826).** `delay_ms` / `jitter_ms` /
+	// `loss_pct` and their correlation terms model a realistic
+	// (latency + loss + jitter dominated) link rather than a clean one.
+	// Conventions:
+	//   - `delay_ms` is **one-way**: netem applies it on the single
+	//     egress qdisc the proxy controls, so the observed RTT increase
+	//     ≈ `delay_ms` (the return direction is unshaped). Named link
+	//     profiles state delays as one-way to match.
+	//   - `jitter_ms` is the delay standard deviation, applied as
+	//     `delay <delay_ms>ms <jitter_ms>ms <jitter_correlation_pct>%
+	//     distribution normal`. `jitter_correlation_pct` (~25% ≈ real
+	//     link) keeps successive delays correlated so netem does not
+	//     reorder packets into nonsense. When `jitter_ms` is 0 the
+	//     server falls back to a tight auto-jitter (5% of delay).
+	//   - `loss_correlation_pct` turns netem's independent-uniform loss
+	//     into correlated/bursty loss via `loss <loss_pct>%
+	//     <loss_correlation_pct>%`. Real loss is bursty; uniform loss at
+	//     the same percentage over-punishes TCP. 0 = uniform (legacy).
+	//   - Throughput under loss falls ~ `1/(RTT·√loss)` (Mathis), so an
+	//     impairment arm caps effective bandwidth below `rate_mbps` —
+	//     that coupling is the measurement target, not a bug.
 	Shape *Shape `json:"shape,omitempty"`
 
 	// TransferTimeouts Server-side response transfer timeouts. `active_timeout_seconds`
@@ -1929,6 +1995,28 @@ type ServerMetrics struct {
 // `loss_pct` for steady background loss, `transport_fault` for
 // one-shot or cadence-driven transport faults. See
 // `DESIGN.md § shape.transport_fault × shape.loss_pct interaction`.
+//
+// **Link-impairment knobs (#826).** `delay_ms` / `jitter_ms` /
+// `loss_pct` and their correlation terms model a realistic
+// (latency + loss + jitter dominated) link rather than a clean one.
+// Conventions:
+//   - `delay_ms` is **one-way**: netem applies it on the single
+//     egress qdisc the proxy controls, so the observed RTT increase
+//     ≈ `delay_ms` (the return direction is unshaped). Named link
+//     profiles state delays as one-way to match.
+//   - `jitter_ms` is the delay standard deviation, applied as
+//     `delay <delay_ms>ms <jitter_ms>ms <jitter_correlation_pct>%
+//     distribution normal`. `jitter_correlation_pct` (~25% ≈ real
+//     link) keeps successive delays correlated so netem does not
+//     reorder packets into nonsense. When `jitter_ms` is 0 the
+//     server falls back to a tight auto-jitter (5% of delay).
+//   - `loss_correlation_pct` turns netem's independent-uniform loss
+//     into correlated/bursty loss via `loss <loss_pct>%
+//     <loss_correlation_pct>%`. Real loss is bursty; uniform loss at
+//     the same percentage over-punishes TCP. 0 = uniform (legacy).
+//   - Throughput under loss falls ~ `1/(RTT·√loss)` (Mathis), so an
+//     impairment arm caps effective bandwidth below `rate_mbps` —
+//     that coupling is the measurement target, not a bug.
 type Shape struct {
 	DelayMs *float32 `json:"delay_ms,omitempty"`
 
@@ -1936,9 +2024,18 @@ type Shape struct {
 	GroupDrivenBy *string `json:"group_driven_by,omitempty"`
 
 	// GroupDrivenTemplate The pattern template (e.g. `pyramid`) the group master is running, surfaced on a driven slave for its "driven by master — <template>" label. Empty unless `group_driven_by` is set.
-	GroupDrivenTemplate *string  `json:"group_driven_template,omitempty"`
-	LossPct             *float32 `json:"loss_pct,omitempty"`
-	Pattern             *Pattern `json:"pattern,omitempty"`
+	GroupDrivenTemplate *string `json:"group_driven_template,omitempty"`
+
+	// JitterCorrelationPct Correlation for the delay distribution (~25% ≈ real link). Only meaningful with `jitter_ms` > 0.
+	JitterCorrelationPct *float32 `json:"jitter_correlation_pct,omitempty"`
+
+	// JitterMs Delay standard deviation (ms). Applied with `distribution normal` + `jitter_correlation_pct`. 0 ⇒ server auto-jitter (5% of `delay_ms`).
+	JitterMs *float32 `json:"jitter_ms,omitempty"`
+
+	// LossCorrelationPct Burst correlation for `loss_pct` → netem `loss <pct>% <corr>%`. 0 ⇒ independent-uniform loss (legacy). Higher = burstier.
+	LossCorrelationPct *float32 `json:"loss_correlation_pct,omitempty"`
+	LossPct            *float32 `json:"loss_pct,omitempty"`
+	Pattern            *Pattern `json:"pattern,omitempty"`
 
 	// PatternRateRuntimeMbps Effective rate the kernel is enforcing right now from the active step. Distinct from `rate_mbps` (the static fallback when pattern is off).
 	PatternRateRuntimeMbps *float32 `json:"pattern_rate_runtime_mbps,omitempty"`

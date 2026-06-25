@@ -74,7 +74,7 @@ func TestFanPatternRateToGroup_StampsSlaveOnly(t *testing.T) {
 		map[int]ShapeApplyState{30281: {rate: 2.5, delay: 0, loss: 0}},
 	)
 
-	a.fanPatternRateToGroup(30181, 2.5, 0, 0, "M1", "pyramid")
+	a.fanPatternRateToGroup(30181, 2.5, NetemParams{}, "M1", "pyramid")
 
 	var ms, sv SessionData
 	for _, s := range a.sessionsView() {
@@ -112,7 +112,7 @@ func TestFanPatternRateToGroup_NoGroupIsNoop(t *testing.T) {
 		"x_forwarded_port": "30181",
 	}
 	a := newFanoutTestApp([]SessionData{solo}, map[int]ShapeApplyState{})
-	a.fanPatternRateToGroup(30181, 2.5, 0, 0, "M1", "pyramid")
+	a.fanPatternRateToGroup(30181, 2.5, NetemParams{}, "M1", "pyramid")
 	for _, s := range a.sessionsView() {
 		if got := getString(s, "nftables_pattern_driven_by"); got != "" {
 			t.Errorf("ungrouped session should not be stamped, got %q", got)

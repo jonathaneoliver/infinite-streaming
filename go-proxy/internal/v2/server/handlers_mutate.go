@@ -365,6 +365,10 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 //	endpoints have their own paths and don't run through here).
 //
 // Phase K: + shape.pattern (drives v1's pattern step-engine).
+// #826: + shape.{jitter_ms,loss_correlation_pct,jitter_correlation_pct}
+//
+//	(link-impairment knobs — netem jitter + bursty-loss correlations).
+//
 // #800: + app_config (client-side per-play config; applyAppConfigPatch stores
 //
 //	it nested on the session for the player to read back — no kernel side).
@@ -376,6 +380,9 @@ func unsupportedPaths(paths []string) []string {
 		case p == "shape.rate_mbps":
 		case p == "shape.delay_ms":
 		case p == "shape.loss_pct":
+		case p == "shape.jitter_ms": // #826
+		case p == "shape.loss_correlation_pct": // #826
+		case p == "shape.jitter_correlation_pct": // #826
 		case p == "shape.transport_fault", strings.HasPrefix(p, "shape.transport_fault."):
 		case p == "shape.pattern", strings.HasPrefix(p, "shape.pattern."):
 		case p == "shape":
@@ -396,7 +403,8 @@ func unsupportedPaths(paths []string) []string {
 func shapeFieldsTouched(paths []string) bool {
 	for _, p := range paths {
 		switch p {
-		case "shape", "shape.rate_mbps", "shape.delay_ms", "shape.loss_pct":
+		case "shape", "shape.rate_mbps", "shape.delay_ms", "shape.loss_pct",
+			"shape.jitter_ms", "shape.loss_correlation_pct", "shape.jitter_correlation_pct": // #826
 			return true
 		}
 	}
@@ -713,6 +721,9 @@ func applyShapePatch(srv *Server, s map[string]any, shape any) {
 		s["nftables_bandwidth_mbps"] = float64(0)
 		s["nftables_delay_ms"] = 0
 		s["nftables_packet_loss"] = float64(0)
+		s["nftables_jitter_ms"] = 0
+		s["nftables_loss_correlation_pct"] = float64(0)
+		s["nftables_jitter_correlation_pct"] = float64(0)
 		s["transport_failure_type"] = "none"
 		s["transport_fault_type"] = "none"
 		s["transport_failure_frequency"] = 0
@@ -743,6 +754,29 @@ func applyShapePatch(srv *Server, s map[string]any, shape any) {
 			s["nftables_packet_loss"] = float64(0)
 		} else if f, ok := numericFloat(v); ok {
 			s["nftables_packet_loss"] = f
+		}
+	}
+	// #826 link-impairment knobs. jitter_ms is int (ms); the two
+	// correlation percents are floats. nil clears to zero (no impairment).
+	if v, present := shapeMap["jitter_ms"]; present {
+		if v == nil {
+			s["nftables_jitter_ms"] = 0
+		} else if f, ok := numericFloat(v); ok {
+			s["nftables_jitter_ms"] = int(f)
+		}
+	}
+	if v, present := shapeMap["loss_correlation_pct"]; present {
+		if v == nil {
+			s["nftables_loss_correlation_pct"] = float64(0)
+		} else if f, ok := numericFloat(v); ok {
+			s["nftables_loss_correlation_pct"] = f
+		}
+	}
+	if v, present := shapeMap["jitter_correlation_pct"]; present {
+		if v == nil {
+			s["nftables_jitter_correlation_pct"] = float64(0)
+		} else if f, ok := numericFloat(v); ok {
+			s["nftables_jitter_correlation_pct"] = f
 		}
 	}
 	if tf, present := shapeMap["transport_fault"]; present {
@@ -867,15 +901,7 @@ func applyPatternFromSession(srv *Server, sess map[string]any, playerID string) 
 		return
 	}
 	steps := extractPatternSteps(sess)
-	delayMs := 0
-	if f, ok := numericFloat(sess["nftables_delay_ms"]); ok {
-		delayMs = int(f)
-	}
-	lossPct := 0.0
-	if f, ok := numericFloat(sess["nftables_packet_loss"]); ok {
-		lossPct = f
-	}
-	_ = srv.v1.ApplyPatternToPlayer(playerID, steps, delayMs, lossPct)
+	_ = srv.v1.ApplyPatternToPlayer(playerID, steps, LinkImpairmentFromSession(sess))
 }
 
 // applyTransportFaultFromSession reads the transport-fault state out

@@ -594,7 +594,7 @@ func (a *v2Adapter) ApplyShapeToPlayer(playerID string) error {
 
 // ApplyPatternToPlayer drives v1's pattern step-engine on the player's
 // bound port via applyShapePattern. Empty steps disarm the loop.
-func (a *v2Adapter) ApplyPatternToPlayer(playerID string, steps []server.ShapePatternStep, delayMs int, lossPct float64) error {
+func (a *v2Adapter) ApplyPatternToPlayer(playerID string, steps []server.ShapePatternStep, imp server.LinkImpairment) error {
 	if a == nil || a.app == nil {
 		return nil
 	}
@@ -618,7 +618,10 @@ func (a *v2Adapter) ApplyPatternToPlayer(playerID string, steps []server.ShapePa
 				Enabled:         st.Enabled,
 			})
 		}
-		return a.app.applyShapePattern(port, v1Steps, delayMs, lossPct)
+		return a.app.applyShapePattern(port, v1Steps, NetemParams{
+			DelayMs: imp.DelayMs, LossPct: imp.LossPct,
+			JitterMs: imp.JitterMs, LossCorrelationPct: imp.LossCorrelationPct, JitterCorrelationPct: imp.JitterCorrelationPct,
+		})
 	}
 	return nil
 }
