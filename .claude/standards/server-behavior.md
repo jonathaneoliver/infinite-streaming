@@ -137,7 +137,7 @@ expected for loss-driven congestion-window collapse.
 **Test:** `tests/server_behavior/server_pattern_test.go::TestServerPattern`
 
 **Methodology:** Install a built-in pattern **template** (square_wave /
-ramp_up / ramp_down / pyramid / transient_shock) via `POST /api/nftables/pattern/{port}`, sweep
+ramp_up / ramp_down / pyramid / valley / transient_shock) via `POST /api/nftables/pattern/{port}`, sweep
 the per-step duration (6s / 12s / 24s), pull segments continuously, and bucket
 each segment by the engine's **live** step (`nftables_pattern_step` /
 `nftables_pattern_rate_runtime_mbps`) — bucketing by the engine's own step

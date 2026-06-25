@@ -1430,6 +1430,13 @@ export interface components {
              */
             shape?: components["schemas"]["Shape"];
             /**
+             * @description Client-side config the player applies at its next play boundary
+             *     (#800). Stored server-side; the player reads it from
+             *     `GET /api/sessions` and overlays it on the next play.
+             *     *Broadcasts to group on PATCH.*
+             */
+            app_config?: components["schemas"]["AppConfig"];
+            /**
              * @description Per-device fault hit counters.
              *     *Per-device runtime state — does not broadcast to group.*
              */
@@ -1525,6 +1532,7 @@ export interface components {
             shape?: components["schemas"]["Shape"];
             transfer_timeouts?: components["schemas"]["TransferTimeouts"];
             content?: components["schemas"]["ContentManipulation"];
+            app_config?: components["schemas"]["AppConfig"];
         };
         /**
          * @description Live play state. The same `PlayRecord` schema is also used in the
@@ -1830,7 +1838,7 @@ export interface components {
              *     characterization mode.
              * @enum {string}
              */
-            template?: "sliders" | "square" | "square_wave" | "ramp_up" | "ramp_down" | "pyramid" | "transient_shock";
+            template?: "sliders" | "square" | "square_wave" | "ramp_up" | "ramp_down" | "pyramid" | "valley" | "transient_shock";
             steps: components["schemas"]["PatternStep"][];
             /**
              * @description Default per-step duration the dashboard chose when generating the step list. 60 / 120 give buffer-draining holds for transient_shock-style probes.
@@ -1914,6 +1922,42 @@ export interface components {
              * @enum {integer}
              */
             live_offset: 0 | 2 | 4 | 6 | 12 | 18 | 24 | 30 | 36 | 42;
+        };
+        /**
+         * @description Client-side ("app behaviour") config the player applies at its next
+         *     play boundary — the per-play, no-restart counterpart to the cold-start
+         *     launch args (`is.segment` etc., #797). The proxy stores these per
+         *     session and surfaces them on `GET /api/sessions`; the player overlays
+         *     any non-null field onto its own state when it opens the next play
+         *     (segment/protocol drive the manifest URL; live_offset_s and
+         *     peak_bitrate_mbps drive the ExoPlayer/AVPlayer track selector). A
+         *     null/omitted field leaves the player's own value untouched.
+         *
+         *     Server-side (`proxy.*` / ContentManipulation) config already
+         *     reconfigures per-play with no restart; this brings the client-side
+         *     half in line. Settable via `PATCH /api/session/{id}` or the
+         *     `app.<field>` config-on-connect URL args. Issue #800.
+         */
+        AppConfig: {
+            /**
+             * @description Segment ladder for the next play (maps to the client `is.segment` lever). ll / s2 / s6.
+             * @enum {string|null}
+             */
+            segment?: "ll" | "s2" | "s6" | null;
+            /**
+             * @description Streaming protocol for the next play (maps to `is.protocol`).
+             * @enum {string|null}
+             */
+            protocol?: "hls" | "dash" | null;
+            /**
+             * Format: float
+             * @description Live-edge offset in seconds for the next play (maps to `is.flag.live_offset_s`). 0 = let the manifest HOLD-BACK / Go Live decide.
+             */
+            live_offset_s?: number | null;
+            /** @description ABR peak-bitrate ceiling in Mbps for the next play (maps to `is.flag.peak_bitrate_mbps`). 0 = no cap. */
+            peak_bitrate_mbps?: number | null;
+            /** @description Mute audio for the next play (maps to `is.flag.muted`). Defaults muted; false = audible. Issue #838. */
+            muted?: boolean | null;
         };
         Manifest: {
             /** Format: uri */
