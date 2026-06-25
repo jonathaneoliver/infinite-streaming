@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -308,10 +310,82 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 			}
 		}
 	}()
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("go test TestCharMatrixFleet (dir=%s): %w", charDir, err)
+	werr := cmd.Wait()
+	// Release any device the appium device-farm still holds "busy" now that the
+	// test process has exited. On a forced stop the farm doesn't clear the device
+	// when we delete the session, AND it won't accept the release while the test
+	// is alive — so reap here, post-exit, where its unblock API takes effect.
+	// Without this, devices leak "busy" across runs until create-session hangs
+	// to its 180s timeout (#853).
+	reapDeviceFarm(deviceFarmBaseURL())
+	if werr != nil {
+		return fmt.Errorf("go test TestCharMatrixFleet (dir=%s): %w", charDir, werr)
 	}
 	return nil
+}
+
+// deviceFarmBaseURL is the appium server hosting the device-farm plugin.
+func deviceFarmBaseURL() string {
+	if v := strings.TrimSpace(os.Getenv("CHAR_APPIUM_URL")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return "http://localhost:4723"
+}
+
+type farmDevice struct {
+	UDID string `json:"udid"`
+	Host string `json:"host"`
+	Busy bool   `json:"busy"`
+}
+
+// reapDeviceFarm poll-unblocks every device the farm reports "busy" until none
+// remain or a bound elapses. Must be called AFTER the test process exits — the
+// farm only releases once the session's connection is gone. Best-effort: a no-op
+// if the farm plugin isn't present or nothing is busy.
+func reapDeviceFarm(base string) {
+	client := &http.Client{Timeout: 6 * time.Second}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		busy := busyFarmDevices(client, base)
+		if len(busy) == 0 {
+			return
+		}
+		for _, d := range busy {
+			body, _ := json.Marshal(map[string]string{"udid": d.UDID, "host": d.Host})
+			req, err := http.NewRequest(http.MethodPost, base+"/device-farm/api/unblock", bytes.NewReader(body))
+			if err != nil {
+				continue
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if resp, derr := client.Do(req); derr == nil {
+				resp.Body.Close()
+			}
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func busyFarmDevices(client *http.Client, base string) []farmDevice {
+	resp, err := client.Get(base + "/device-farm/api/device")
+	if err != nil {
+		return nil
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var all []farmDevice
+	if json.Unmarshal(raw, &all) != nil {
+		return nil
+	}
+	var busy []farmDevice
+	for _, d := range all {
+		if d.Busy {
+			busy = append(busy, d)
+		}
+	}
+	return busy
 }
 
 // runArmSequential bootstraps, drives, and measures one arm. Every failure is
