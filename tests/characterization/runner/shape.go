@@ -46,6 +46,15 @@ func (s *Session) ApplyPattern(ctx context.Context, pattern string, stepSeconds,
 		"--pattern", pattern,
 		"--step-seconds", strconv.Itoa(stepSeconds),
 		"--margin", strconv.Itoa(marginPct),
+		// Arm the pattern on THIS player only. In a group the master calls
+		// ApplyPattern; without broadcast=false the proxy copies the pattern
+		// onto every member's session, so each fleet arm starts its own
+		// independent pattern engine (the double-arm bug). broadcast=false
+		// keeps a single owner. NOTE (Part 1): a slave then has NO pattern and
+		// will sit at its config-on-connect rate cap unless the proxy fans the
+		// master's per-tick rate to group members — verify whether the slave
+		// still follows the pyramid.
+		"--broadcast", "false",
 	}
 	_, err := runHarness(ctx, args...)
 	return err

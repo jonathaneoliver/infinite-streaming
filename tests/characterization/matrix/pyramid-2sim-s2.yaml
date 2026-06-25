@@ -13,7 +13,7 @@ defaults:
   is.peak_bitrate_mbps: 1
   proxy.shape:
     pattern: pyramid                # climb the ladder then descend; master arms it, slave follows via group propagation
-    step_seconds: 18
+    step_seconds: 12
     rate_mbps: 1                    # initial network cap (Mbps) applied at config-on-connect, before the pattern arms
 groups:
   - id: pair

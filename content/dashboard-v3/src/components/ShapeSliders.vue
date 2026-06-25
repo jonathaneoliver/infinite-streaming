@@ -48,17 +48,26 @@ const patternRunning = computed(() => {
   return !!(p && Array.isArray(p.steps) && p.steps.length);
 });
 
+// Single-owner group shaping: a driven SLAVE has no pattern of its own but its
+// kernel cap is fanned per-tick from the group master (`group_driven_by`). Show
+// the same disabled-slider + runtime-rate treatment as a local pattern, with a
+// "driven by master" annotation. Guarded on `!patternRunning` so the MASTER
+// (which carries the pattern) never reads as driven — the proxy stamps the
+// marker on the master too, but its own pattern takes precedence here.
+const groupDrivenBy = computed<string | null>(() => {
+  const by = player.value?.shape?.group_driven_by;
+  return !patternRunning.value && by ? by : null;
+});
+
 // What the slider displays. Local wins during drag; model wins
-// otherwise. When a pattern is running we display the kernel-
-// enforced runtime rate (`pattern_rate_runtime_mbps`) instead of the
-// static `rate_mbps` so the slider tracks the pattern as it steps,
-// matching the legacy behaviour the operator expects. Slider is
-// disabled in that mode (see `patternRunning`) so the moving handle
-// is read-only.
+// otherwise. When a pattern is running — OR this is a group-driven slave — we
+// display the kernel-enforced runtime rate (`pattern_rate_runtime_mbps`) instead
+// of the static `rate_mbps` so the slider tracks the pattern as it steps. Slider
+// is disabled in those modes (see template) so the moving handle is read-only.
 const dispRate = computed(() => {
   if (localRate.value !== null) return localRate.value;
   const sh = player.value?.shape;
-  if (patternRunning.value) {
+  if (patternRunning.value || groupDrivenBy.value) {
     const rt = sh?.pattern_rate_runtime_mbps;
     if (rt != null && Number.isFinite(rt)) return rt;
   }
@@ -144,10 +153,11 @@ watch(
       <span class="val">{{ dispLoss.toFixed(1) }} %</span>
     </div>
 
-    <div class="row" :class="{ disabled: patternRunning }">
+    <div class="row" :class="{ disabled: patternRunning || !!groupDrivenBy }">
       <label for="ss-rate">
         Throughput
         <span v-if="patternRunning" class="hint">(pattern active)</span>
+        <span v-else-if="groupDrivenBy" class="hint">⛓ driven by group master {{ groupDrivenBy }}</span>
       </label>
       <input
         id="ss-rate"
@@ -156,7 +166,7 @@ watch(
         max="50"
         step="0.1"
         :value="dispRate"
-        :disabled="patternRunning"
+        :disabled="patternRunning || !!groupDrivenBy"
         @input="onRateInput"
       />
       <span class="val">

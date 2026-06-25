@@ -139,6 +139,20 @@ const activeTemplate = computed<Template>(() => {
   return 'sliders';
 });
 
+// Single-owner group shaping: a driven SLAVE has no pattern of its own — its
+// kernel cap is fanned per-tick from the group master (`group_driven_by`). When
+// driven we replace the editable template UI with a read-only "driven by master"
+// banner so the operator can't arm a competing pattern on the slave. Guarded on
+// `!pattern` so the MASTER (which carries the pattern) shows the normal editor —
+// the proxy stamps the marker on the master too, but its own pattern wins here.
+const groupDrivenBy = computed<string | null>(() => {
+  const by = player.value?.shape?.group_driven_by;
+  return !pattern.value && by ? by : null;
+});
+const groupDrivenTemplate = computed<string | null>(
+  () => player.value?.shape?.group_driven_template ?? null,
+);
+
 const margin = computed<Margin>(() => {
   const src = editMode.value ? draftPattern.value : pattern.value;
   const m = src?.margin_pct;
@@ -469,7 +483,15 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
 
 <template>
   <div v-if="player" class="shape-pattern">
-    <div class="row template-row">
+    <!-- Single-owner group shaping: a driven slave has no pattern of its own;
+         show a read-only "driven by master" banner instead of the editable
+         template UI so the operator can't arm a competing pattern on it. -->
+    <div v-if="groupDrivenBy" class="driven-banner">
+      ⛓ Shaping driven by group master <strong>{{ groupDrivenBy }}</strong>
+      <span v-if="groupDrivenTemplate"> — {{ groupDrivenTemplate }}</span>
+      <span v-if="runtimeMbps !== null" class="driven-rate"> · <strong>{{ runtimeMbps.toFixed(2) }} Mbps</strong></span>
+    </div>
+    <div v-if="!groupDrivenBy" class="row template-row">
       <span class="lbl">Template</span>
       <div class="radio-group">
         <label v-for="t in TEMPLATES" :key="t">
@@ -513,7 +535,7 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
            pattern is yet applied (first run from sliders → template).
            Hidden when a pattern is applied and the user has clicked
            Apply Pattern (collapses the definition panel back). -->
-      <template v-if="editMode || !pattern">
+      <template v-if="(editMode || !pattern) && !groupDrivenBy">
       <div class="row">
         <span class="lbl">Margin</span>
         <div class="radio-group">
@@ -567,7 +589,7 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
         </div>
       </div>
 
-      <div class="runtime" v-if="runtimeMbps !== null">
+      <div class="runtime" v-if="runtimeMbps !== null && !groupDrivenBy">
         Running step <strong>{{ runtimeStep ?? '?' }}</strong> at
         <strong>{{ runtimeMbps.toFixed(2) }} Mbps</strong>
       </div>
@@ -708,6 +730,25 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
   padding: 10px 14px;
   font-size: 13px;
   color: #065f46;
+}
+
+/* Single-owner group shaping — a driven slave's read-only banner. Slate/blue so
+ * it reads as "inherited from the group master", distinct from the green
+ * applied-summary (this session's own pattern). */
+.driven-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #1e40af;
+}
+.driven-rate {
+  color: #1d4ed8;
 }
 .applied-chip {
   font-weight: 700;

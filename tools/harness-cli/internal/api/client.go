@@ -457,6 +457,45 @@ func (c *Client) PatchShape(ctx context.Context, playerID, action string, shape 
 	return c.PatchPlayer(ctx, playerID, action, proxy.PlayerPatch{Shape: shape})
 }
 
+// PatchShapeBroadcast is PatchShape with explicit control over the group
+// broadcast query param (`?broadcast=true|false`, read raw by the proxy —
+// handlers_mutate.go:263-271). broadcast==nil keeps the server default (a
+// normal group broadcasts shape to all members). broadcast=false applies the
+// shape to the TARGET ONLY — used to arm a pattern on the group master without
+// the proxy copying the pattern engine onto every member's session (each member
+// would otherwise start its own per-port pattern loop).
+func (c *Client) PatchShapeBroadcast(ctx context.Context, playerID, action string, shape *proxy.Shape, broadcast *bool) (string, error) {
+	patch := proxy.PlayerPatch{Shape: shape}
+	editor := broadcastQueryEditor(broadcast)
+	return c.patchWithETagRetry(ctx, playerID, action,
+		"PATCH /api/v2/players/"+playerID, patch,
+		func(etag string) (*http.Response, error) {
+			params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
+			return c.proxy.PatchApiV2PlayersPlayerIdWithApplicationMergePatchPlusJSONBody(
+				ctx, proxy.PlayerId(playerID), params, patch, editor,
+			)
+		})
+}
+
+// broadcastQueryEditor returns a proxy RequestEditorFn that sets the
+// `?broadcast=true|false` query param on the outgoing PATCH. Returns a no-op
+// editor when b is nil so the call keeps the server's default behaviour.
+func broadcastQueryEditor(b *bool) proxy.RequestEditorFn {
+	if b == nil {
+		return func(context.Context, *http.Request) error { return nil }
+	}
+	val := "false"
+	if *b {
+		val = "true"
+	}
+	return func(_ context.Context, req *http.Request) error {
+		q := req.URL.Query()
+		q.Set("broadcast", val)
+		req.URL.RawQuery = q.Encode()
+		return nil
+	}
+}
+
 // ClearShape sends `{"shape": null}` — the merge-patch sentinel that
 // removes all kernel shaping in one PATCH. Can't be expressed through
 // the generated typed body (PlayerPatch.Shape is `*Shape`, so nil

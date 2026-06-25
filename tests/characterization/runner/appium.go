@@ -1104,6 +1104,20 @@ func appiumCapabilities(d Device, bundleID string, df bool, platformVersion stri
 		// step Appium does by default — WDA only needs (re)deploy on
 		// real devices.
 		caps["appium:useNewWDA"] = false
+		// Shared prebuilt WDA (CHAR_IOS_PREBUILT_WDA=1): every sim in the booted
+		// pool reuses ONE WDA build at a shared derivedDataPath instead of appium's
+		// per-UDID rebuild (which otherwise rebuilds WDA once per sim — the 4x-build
+		// pain on a 4-sim pool). Requires the shared path to be pre-populated by a
+		// one-time prebuild (boot-pool / `xcodebuild build-for-testing` into the
+		// path); appium ERRORS if usePrebuiltWDA is set with nothing built there, so
+		// it stays OFF by default (per-UDID build, always safe). Gating BOTH caps on
+		// the env means a non-prebuilt run never points concurrent first-builds at
+		// one path (which would race). Safe under DF: derivedDataPath is the build
+		// location, not a port (DF still owns port/session allocation).
+		if os.Getenv("CHAR_IOS_PREBUILT_WDA") == "1" {
+			caps["appium:derivedDataPath"] = sharedSimWDADerivedDataPath()
+			caps["appium:usePrebuiltWDA"] = true
+		}
 		if !df {
 			setXCUITestFleetPorts(caps, d.FleetIndex)
 		}
@@ -1154,4 +1168,22 @@ func iosWDADerivedDataPath(fleetIndex int) string {
 		base = filepath.Join(home, ".appium-wda-deriveddata")
 	}
 	return filepath.Join(base, fmt.Sprintf("wda-%d", fleetIndex))
+}
+
+// sharedSimWDADerivedDataPath is the ONE derivedDataPath every iOS simulator
+// session shares when CHAR_IOS_PREBUILT_WDA=1 — so WDA is built once (a prebuild
+// step / boot-pool) and reused across the whole booted pool instead of appium's
+// per-UDID rebuild (the "rebuild WDA N times" pain). Reuse is read-only, so
+// concurrent fleet sessions don't race on it. Distinct from the per-fleet-index
+// real-device path so a sim run never collides with a wired-device build.
+func sharedSimWDADerivedDataPath() string {
+	base := strings.TrimSpace(os.Getenv("CHAR_IOS_WDA_DERIVED_DATA"))
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			home = os.TempDir()
+		}
+		base = filepath.Join(home, ".appium-wda-deriveddata")
+	}
+	return filepath.Join(base, "wda-sim-shared")
 }

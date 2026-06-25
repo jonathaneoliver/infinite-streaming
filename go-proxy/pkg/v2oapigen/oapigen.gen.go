@@ -1928,8 +1928,14 @@ type ServerMetrics struct {
 // `DESIGN.md § shape.transport_fault × shape.loss_pct interaction`.
 type Shape struct {
 	DelayMs *float32 `json:"delay_ms,omitempty"`
-	LossPct *float32 `json:"loss_pct,omitempty"`
-	Pattern *Pattern `json:"pattern,omitempty"`
+
+	// GroupDrivenBy Single-owner group shaping: when non-empty, this session has NO pattern of its own — its kernel cap is fanned per-tick from the group master named here (display label / short player_id). The slave UI shows a "driven by master" badge + a disabled rate slider; `pattern_rate_runtime_mbps` carries the live cap.
+	GroupDrivenBy *string `json:"group_driven_by,omitempty"`
+
+	// GroupDrivenTemplate The pattern template (e.g. `pyramid`) the group master is running, surfaced on a driven slave for its "driven by master — <template>" label. Empty unless `group_driven_by` is set.
+	GroupDrivenTemplate *string  `json:"group_driven_template,omitempty"`
+	LossPct             *float32 `json:"loss_pct,omitempty"`
+	Pattern             *Pattern `json:"pattern,omitempty"`
 
 	// PatternRateRuntimeMbps Effective rate the kernel is enforcing right now from the active step. Distinct from `rate_mbps` (the static fallback when pattern is off).
 	PatternRateRuntimeMbps *float32 `json:"pattern_rate_runtime_mbps,omitempty"`
