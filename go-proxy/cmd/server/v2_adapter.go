@@ -208,6 +208,11 @@ func networkEntryToMap(e NetworkLogEntry) map[string]any {
 		"transfer_ms":    e.TransferMs,
 		"total_ms":       e.TotalMs,
 		"client_wait_ms": e.ClientWaitMs,
+		// Kernel-measured shaped delivery rate (Mbps). Honest
+		// cross-check for the bytes_out/transfer_ms Mbps, which
+		// over-reports on sub-buffer transfers. Linux only; 0/omitted
+		// on the dev build.
+		"delivery_rate_mbps": e.DeliveryRateMbps,
 		// Fault metadata — flagged on rows where the proxy injected one.
 		"faulted":        e.Faulted,
 		"fault_type":     e.FaultType,
