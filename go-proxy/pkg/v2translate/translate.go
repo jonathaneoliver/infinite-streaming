@@ -733,14 +733,23 @@ func faultRuleFromMap(rule map[string]any) oapigen.FaultRule {
 // fields + `_v2_shape_pattern` stash back into a v2 Shape. Returns nil
 // when no shape is configured (rate=0, delay=0, loss=0, no transport
 // fault, no pattern).
+//
+// A single-owner group SLAVE is the exception: it has no LOCAL rate/pattern
+// of its own — the master drives its kernel cap via the fan-out, identified
+// only by `nftables_pattern_driven_by`. Without treating that as a
+// shape-bearing condition, the slave's shape returns nil and the
+// "driven by master" badge + `pattern_rate_runtime_mbps` never reach the v2
+// record the shaping panel reads (#849 follow-up: the cap is applied, but the
+// UI showed an empty 0-Mbps panel).
 func shapeFromSession(s map[string]any) *oapigen.Shape {
 	rate, _ := numericFloatTranslate(s["nftables_bandwidth_mbps"])
 	delay, _ := numericFloatTranslate(s["nftables_delay_ms"])
 	loss, _ := numericFloatTranslate(s["nftables_packet_loss"])
 	tfType, _ := s["transport_failure_type"].(string)
 	pattern, _ := s["_v2_shape_pattern"].(map[string]any)
+	drivenBy, _ := s["nftables_pattern_driven_by"].(string)
 
-	if rate == 0 && delay == 0 && loss == 0 && (tfType == "" || tfType == "none") && pattern == nil {
+	if rate == 0 && delay == 0 && loss == 0 && (tfType == "" || tfType == "none") && pattern == nil && drivenBy == "" {
 		return nil
 	}
 	out := &oapigen.Shape{}
