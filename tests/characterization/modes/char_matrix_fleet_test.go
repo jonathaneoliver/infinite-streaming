@@ -4,12 +4,46 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/jonathaneoliver/infinite-streaming/tests/characterization/runner"
 )
+
+// interruptContext returns a process-wide context cancelled on SIGINT/SIGTERM.
+// A fleet arm's play window selects on it, so an operator stop (Ctrl-C, or a
+// SIGTERM forwarded by the `harness char matrix` CLI) ends the arm EARLY and its
+// deferred t.Cleanup runs — releasing the appium session instead of orphaning
+// it. Orphaned sessions leave the device-farm thinking the sims are busy and
+// block the next run with create-session timeouts (#853). Best-effort: SIGKILL
+// can't be caught, so a hard kill still needs the appium-restart backstop.
+var (
+	interruptOnce sync.Once
+	interruptC    context.Context
+)
+
+func interruptContext() context.Context {
+	interruptOnce.Do(func() {
+		var cancel context.CancelFunc
+		interruptC, cancel = context.WithCancel(context.Background())
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-ch
+			cancel()
+			// Keep draining so a repeated Ctrl-C (or a CLI-forwarded signal)
+			// doesn't hit the default handler and kill the binary before
+			// t.Cleanup finishes.
+			for range ch {
+			}
+		}()
+	})
+	return interruptC
+}
 
 // TestCharMatrixFleet is the parallel backend for `harness char matrix` on a
 // parallel:true spec (issue #811). The CLI bootstraps every arm's server-side
@@ -261,7 +295,16 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	// Let it play. The recipe (content/shape/live_offset/transfer) is already
 	// live, so this window is what the CLI's measurement step later reads.
 	t.Logf("arm %d playing for %ds…", dev.FleetIndex, cfg.durationS)
-	time.Sleep(time.Duration(cfg.durationS) * time.Second)
+	select {
+	case <-time.After(time.Duration(cfg.durationS) * time.Second):
+		// Normal: the full play window elapsed.
+	case <-interruptContext().Done():
+		// Operator stopped the run. Return EARLY so the deferred t.Cleanup
+		// releases this arm's appium session (CloseViaUI + Release) instead of
+		// orphaning it and blocking the next run (#853). Skip the RESULT capture.
+		t.Logf("arm %d: run interrupted — ending early so the appium session is released (#853)", dev.FleetIndex)
+		return
+	}
 
 	playID, perr := sess.CurrentPlayID(context.Background())
 	if perr != nil {

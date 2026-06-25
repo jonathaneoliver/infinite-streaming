@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -261,7 +263,26 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 		"CHAR_SWEEP_DURATION_S="+strconv.Itoa(windowS),
 	)
 	cmd.Env = append(cmd.Env, armEnv...)
-	if err := cmd.Run(); err != nil {
+	// Graceful interrupt (#853): on SIGINT/SIGTERM, forward to the `go test`
+	// child and WAIT for it to drain rather than letting the Go runtime kill
+	// the CLI first. The fleet test cancels its play window and runs t.Cleanup
+	// (appium session release) on the same signal; if the CLI died first it
+	// would orphan those sessions and block the next run with create-session
+	// timeouts. SIGKILL is uncatchable, so a hard kill still needs the backstop.
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("go test TestCharMatrixFleet (dir=%s): start: %w", charDir, err)
+	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		for s := range sigCh {
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(s) // child cancels + releases sessions
+			}
+		}
+	}()
+	if err := cmd.Wait(); err != nil {
 		return fmt.Errorf("go test TestCharMatrixFleet (dir=%s): %w", charDir, err)
 	}
 	return nil
