@@ -263,12 +263,19 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 		"CHAR_SWEEP_DURATION_S="+strconv.Itoa(windowS),
 	)
 	cmd.Env = append(cmd.Env, armEnv...)
-	// Graceful interrupt (#853): on SIGINT/SIGTERM, forward to the `go test`
-	// child and WAIT for it to drain rather than letting the Go runtime kill
-	// the CLI first. The fleet test cancels its play window and runs t.Cleanup
-	// (appium session release) on the same signal; if the CLI died first it
-	// would orphan those sessions and block the next run with create-session
-	// timeouts. SIGKILL is uncatchable, so a hard kill still needs the backstop.
+	// Graceful interrupt (#853): on SIGINT/SIGTERM, signal the test and WAIT for
+	// it to drain rather than letting the Go runtime kill the CLI first. The
+	// fleet test cancels its play window and runs t.Cleanup (appium session
+	// release) on the same signal; if the CLI died first it would orphan those
+	// sessions and block the next run with create-session timeouts.
+	//
+	// Run `go test` in its OWN process group and signal the whole GROUP, not the
+	// `go test` toolchain process: go test does NOT forward signals to the test
+	// BINARY (a grandchild), so signalling go test alone leaves the binary — and
+	// its appium session — orphaned. Group-signalling reaches the binary
+	// directly, where interruptContext fires. SIGKILL is uncatchable, so a hard
+	// kill still needs the appium-restart / startup-sweep backstop.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("go test TestCharMatrixFleet (dir=%s): start: %w", charDir, err)
 	}
@@ -276,9 +283,11 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 	go func() {
-		for s := range sigCh {
+		for range sigCh {
 			if cmd.Process != nil {
-				_ = cmd.Process.Signal(s) // child cancels + releases sessions
+				// Negative pid → the child's process group (go test + the test
+				// binary), so the binary's interruptContext gets it and cleans up.
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 			}
 		}
 	}()
