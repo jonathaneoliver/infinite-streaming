@@ -11,6 +11,7 @@ import (
 	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/ladder"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/api"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/format"
+	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/sweep"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/v2gen/proxy"
 )
 
@@ -18,8 +19,17 @@ const shapeUsage = `harness shape <target> [flags]
 
 Slider mode (any subset; omitted fields are not modified):
   --rate FLOAT       rate cap in Mbps (e.g. 1.5)
-  --delay FLOAT      one-way delay in ms (e.g. 200)
+  --delay FLOAT      one-way delay in ms (e.g. 200; observed RTT ≈ delay)
   --loss FLOAT       packet loss %% (e.g. 0.5, range 0–100)
+  --jitter FLOAT     delay variation in ms (stddev, normal distribution)
+  --loss-corr FLOAT  loss burst correlation %% (0 = uniform; higher = burstier)
+  --jitter-corr FLOAT delay-distribution correlation %% (~25 ≈ real link)
+
+Named link profiles (#826) — applies a whole impairment recipe at once:
+  --profile NAME     clean | home | mobile-good | mobile-poor |
+                     nlc-wifi | nlc-wifi-ac | nlc-lte | nlc-dsl | nlc-3g |
+                     nlc-edge | nlc-very-bad | nlc-100-loss
+                     (individual --delay/--loss/… flags override the profile)
 
 Pattern mode (generates a step list from the player's current variants):
   --pattern NAME     pyramid | valley | ramp_up | ramp_down | square_wave | transient_shock | sliders
@@ -80,6 +90,10 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	rate := fs.Float64("rate", -1, "rate cap Mbps")
 	delay := fs.Float64("delay", -1, "delay ms")
 	loss := fs.Float64("loss", -1, "loss %")
+	jitter := fs.Float64("jitter", -1, "delay variation (stddev) ms")
+	lossCorr := fs.Float64("loss-corr", -1, "loss burst correlation %")
+	jitterCorr := fs.Float64("jitter-corr", -1, "delay-distribution correlation %")
+	profile := fs.String("profile", "", "named link profile (clean|home|mobile-good|mobile-poor|nlc-*)")
 	pattern := fs.String("pattern", "", "pattern template (pyramid|valley|ramp_up|ramp_down|square_wave|transient_shock|sliders)")
 	stepSeconds := fs.Int("step-seconds", 12, "per-step duration: 6|12|18|24|60|120")
 	margin := fs.Int("margin", 5, "headroom %% above variant rate: 0|5|10|25|50 (5 covers protocol overhead)")
@@ -120,10 +134,25 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 		return doPattern(client, ctx, pid, asJSON, *pattern, *stepSeconds, *margin, *maxStep, *topHeadroom, broadcastPtr)
 	}
 
-	if *rate < 0 && *delay < 0 && *loss < 0 {
-		return errors.New("nothing to do — pass --rate/--delay/--loss, --pattern NAME, --clear-pattern, --clear, or --show")
+	imp := sliderImpairment{
+		rate: *rate, delay: *delay, loss: *loss,
+		jitter: *jitter, lossCorr: *lossCorr, jitterCorr: *jitterCorr,
+		profile: *profile,
 	}
-	return doSliderShape(client, ctx, pid, asJSON, *rate, *delay, *loss)
+	if imp.profile == "" && imp.rate < 0 && imp.delay < 0 && imp.loss < 0 &&
+		imp.jitter < 0 && imp.lossCorr < 0 && imp.jitterCorr < 0 {
+		return errors.New("nothing to do — pass --rate/--delay/--loss/--jitter/--loss-corr/--jitter-corr, --profile NAME, --pattern NAME, --clear-pattern, --clear, or --show")
+	}
+	return doSliderShape(client, ctx, pid, asJSON, imp)
+}
+
+// sliderImpairment bundles the static-shape flags. A flag left at -1 means
+// "unset — don't touch". `profile` (if set) seeds the shape from a named link
+// profile; explicitly-set axis flags then override on top.
+type sliderImpairment struct {
+	rate, delay, loss            float64
+	jitter, lossCorr, jitterCorr float64
+	profile                      string
 }
 
 // cmdReset clears a player's shape + fault rules + content to a clean baseline
@@ -280,56 +309,69 @@ func doClear(client *api.Client, ctx context.Context, pid string, asJSON bool,
 	return nil
 }
 
-func doSliderShape(client *api.Client, ctx context.Context, pid string, asJSON bool, rate, delay, loss float64) error {
-	action := fmt.Sprintf("shape rate=%v delay=%v loss=%v", rate, delay, loss)
+func doSliderShape(client *api.Client, ctx context.Context, pid string, asJSON bool, imp sliderImpairment) error {
+	action := fmt.Sprintf("shape rate=%v delay=%v loss=%v jitter=%v loss_corr=%v jitter_corr=%v profile=%q",
+		imp.rate, imp.delay, imp.loss, imp.jitter, imp.lossCorr, imp.jitterCorr, imp.profile)
+
+	// Build the merge-patch as a map: it's the only way to express the
+	// rate-clears-pattern sentinel (pattern:null), which the typed
+	// proxy.Shape can't carry because Pattern is `omitempty`. A profile
+	// seeds the block; explicitly-set axis flags then override on top.
+	shape := map[string]any{}
+	setsRate := false
+
+	if imp.profile != "" {
+		prof, ok := sweep.ResolveLinkProfile(imp.profile)
+		if !ok {
+			return fmt.Errorf("unknown link profile %q (known: %s)", imp.profile, strings.Join(sweep.LinkProfileNames(), ", "))
+		}
+		// Deterministic IMPAIRMENT: always set all five impairment axes (omitted
+		// ones → 0, so `clean` truly clears and no stale jitter/loss leaks).
+		// Throughput is the OVERLAY axis: only the NLC presets (which model a
+		// full link's bandwidth) pin rate_mbps; the four recipes leave the
+		// operator's throughput cap alone so impairment can be stamped on top.
+		shape["delay_ms"] = derefOr(prof.DelayMs, 0)
+		shape["loss_pct"] = derefOr(prof.LossPct, 0)
+		shape["jitter_ms"] = derefOr(prof.JitterMs, 0)
+		shape["loss_correlation_pct"] = derefOr(prof.LossCorrelationPct, 0)
+		shape["jitter_correlation_pct"] = derefOr(prof.JitterCorrelationPct, 0)
+		if prof.RateMbps != nil {
+			shape["rate_mbps"] = *prof.RateMbps
+			setsRate = true
+		}
+	}
+
+	// Explicit flags override the profile seed (and are the only source
+	// in the no-profile case). -1 means "unset — leave as-is".
+	if imp.rate >= 0 {
+		shape["rate_mbps"] = imp.rate
+		setsRate = true
+	}
+	if imp.delay >= 0 {
+		shape["delay_ms"] = imp.delay
+	}
+	if imp.loss >= 0 {
+		shape["loss_pct"] = imp.loss
+	}
+	if imp.jitter >= 0 {
+		shape["jitter_ms"] = imp.jitter
+	}
+	if imp.lossCorr >= 0 {
+		shape["loss_correlation_pct"] = imp.lossCorr
+	}
+	if imp.jitterCorr >= 0 {
+		shape["jitter_correlation_pct"] = imp.jitterCorr
+	}
 
 	// Setting a static rate disarms any active throughput pattern —
 	// they're mutually exclusive sources-of-truth for the kernel cap.
-	// Delay and loss are orthogonal axes that can coexist with a
-	// running pattern, so they don't need explicit pattern-null.
-	//
-	// We can't express the rate-clears-pattern semantic through the
-	// typed proxy.Shape struct because Pattern has `omitempty` and a
-	// nil pointer would just be dropped from the JSON, leaving the
-	// pattern running. So when --rate is set we build the body as a
-	// map and use PatchShapeMap (same trick ClearShape uses for the
-	// {"shape": null} merge-patch sentinel).
-	if rate >= 0 {
-		shape := map[string]any{
-			"rate_mbps": rate,
-			"pattern":   nil,
-		}
-		if delay >= 0 {
-			shape["delay_ms"] = delay
-		}
-		if loss >= 0 {
-			shape["loss_pct"] = loss
-		}
-		newETag, err := client.PatchShapeMap(ctx, pid, action, shape)
-		if err != nil {
-			return err
-		}
-		if asJSON {
-			return format.JSON(os.Stdout, map[string]any{
-				"player_id": pid, "shape": shape, "etag": newETag,
-			})
-		}
-		fmt.Printf("patched shape on %s (etag %s)\n", pid, shortRev(newETag))
-		return nil
+	// Delay/loss/jitter are orthogonal axes that coexist with a running
+	// pattern, so a delay-only edit leaves the pattern armed.
+	if setsRate {
+		shape["pattern"] = nil
 	}
 
-	// Rate not set — only delay / loss being adjusted. Pattern (if any)
-	// stays armed. Use the typed PatchShape path.
-	shape := proxy.Shape{}
-	if delay >= 0 {
-		v := float32(delay)
-		shape.DelayMs = &v
-	}
-	if loss >= 0 {
-		v := float32(loss)
-		shape.LossPct = &v
-	}
-	newETag, err := client.PatchShape(ctx, pid, action, &shape)
+	newETag, err := client.PatchShapeMap(ctx, pid, action, shape)
 	if err != nil {
 		return err
 	}
@@ -340,6 +382,14 @@ func doSliderShape(client *api.Client, ctx context.Context, pid string, asJSON b
 	}
 	fmt.Printf("patched shape on %s (etag %s)\n", pid, shortRev(newETag))
 	return nil
+}
+
+// derefOr returns *p, or fallback when p is nil.
+func derefOr(p *float64, fallback float64) float64 {
+	if p == nil {
+		return fallback
+	}
+	return *p
 }
 
 // doClearPattern disables any running pattern by sending an empty step list.

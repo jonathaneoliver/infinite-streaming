@@ -109,6 +109,12 @@ func snapshotV1FieldsForPaths(sess map[string]any, paths []string) map[string]an
 			record("nftables_delay_ms")
 		case p == "shape.loss_pct":
 			record("nftables_packet_loss")
+		case p == "shape.jitter_ms":
+			record("nftables_jitter_ms")
+		case p == "shape.loss_correlation_pct":
+			record("nftables_loss_correlation_pct")
+		case p == "shape.jitter_correlation_pct":
+			record("nftables_jitter_correlation_pct")
 		case p == "shape.transport_fault", strings.HasPrefix(p, "shape.transport_fault."):
 			for _, k := range []string{
 				"transport_failure_type", "transport_fault_type",
@@ -123,6 +129,7 @@ func snapshotV1FieldsForPaths(sess map[string]any, paths []string) map[string]an
 			for _, k := range []string{
 				"_v2_shape_pattern",
 				"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss",
+				"nftables_jitter_ms", "nftables_loss_correlation_pct", "nftables_jitter_correlation_pct",
 				"transport_failure_type", "transport_fault_type",
 				"transport_failure_frequency", "transport_consecutive_failures",
 				"transport_failure_mode",

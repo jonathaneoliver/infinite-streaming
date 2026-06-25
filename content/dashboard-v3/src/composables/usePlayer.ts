@@ -331,6 +331,17 @@ export function usePlayer(playerId: Ref<string>) {
     setRate: (rate_mbps: number) => patchShape.mutate({ rate_mbps, pattern: null as any }),
     setDelay: (delay_ms: number) => patchShape.mutate({ delay_ms }),
     setLoss: (loss_pct: number) => patchShape.mutate({ loss_pct }),
+    // #826 link-impairment knobs — orthogonal axes that coexist with a pattern,
+    // so (like delay/loss) they DON'T disarm it.
+    setJitter: (jitter_ms: number) => patchShape.mutate({ jitter_ms }),
+    setLossCorrelation: (loss_correlation_pct: number) =>
+      patchShape.mutate({ loss_correlation_pct }),
+    setJitterCorrelation: (jitter_correlation_pct: number) =>
+      patchShape.mutate({ jitter_correlation_pct }),
+    // applyProfile sets the whole impairment block at once from a named link
+    // profile (clean / home / mobile-poor / nlc-*). Profiles with no rate_mbps
+    // are pure overlays — they leave the throughput cap untouched.
+    applyProfile: (p: Partial<Shape>) => patchShape.mutate(p),
     setPattern: (pattern: Pattern | null) => patchShape.mutate({ pattern: pattern as any }),
     setTransportFault: (transport_fault: TransportFault) =>
       patchShape.mutate({ transport_fault }),

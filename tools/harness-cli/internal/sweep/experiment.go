@@ -118,17 +118,32 @@ type Fault struct {
 	Consecutive int    `json:"consecutive,omitempty"` // failure run length
 }
 
-// Shape is the realistic-bandwidth knob (§1). RateMbps is a static cap that
-// must never sit below the lowest variant's sustainable rate (the floor guard —
-// we test ABR decision quality, never forced starvation); Pattern is a
-// ladder-derived sweep (pyramid/ramp/…) which stays within sustainable rungs by
-// construction. delay_ms / loss_pct are deliberately ABSENT — steady network
-// degradation is out of scope for both classes. Nil means "no shaping".
+// Shape is the realistic-bandwidth + link-impairment knob (§1). RateMbps is a
+// static cap that must never sit below the lowest variant's sustainable rate
+// (the floor guard — we test ABR decision quality, never forced starvation);
+// Pattern is a ladder-derived sweep (pyramid/ramp/…) which stays within
+// sustainable rungs by construction.
+//
+// #826 added the link-impairment axes (delay/loss/jitter + correlations) so the
+// matrix can sweep over realistic — latency/loss/jitter dominated — links, not
+// just clean ones. All default nil/0 = "no impairment" so existing specs keep
+// their clean-link behaviour. Conventions (mirrored in the proxy.yaml Shape
+// doc): DelayMs is one-way (observed RTT ≈ DelayMs); LossCorrelationPct turns
+// uniform loss bursty (netem `loss <pct>% <corr>%`); JitterMs is the delay
+// stddev with JitterCorrelationPct on a normal distribution. Nil Shape means
+// "no shaping".
 type Shape struct {
 	RateMbps    *float64 `json:"rate_mbps,omitempty"`
 	Pattern     string   `json:"pattern,omitempty"`      // pyramid | valley | ramp_up | ramp_down | square_wave | transient_shock
 	StepSeconds int      `json:"step_seconds,omitempty"` // 6|12|18|24|60|120
 	MarginPct   int      `json:"margin_pct,omitempty"`   // 0|5|10|25|50
+
+	// Link impairment (#826). All one-way / percent; nil = unset (clean link).
+	DelayMs              *float64 `json:"delay_ms,omitempty"`               // one-way delay; RTT ≈ delay_ms
+	LossPct              *float64 `json:"loss_pct,omitempty"`               // packet loss %
+	JitterMs             *float64 `json:"jitter_ms,omitempty"`              // delay stddev (normal distribution)
+	LossCorrelationPct   *float64 `json:"loss_correlation_pct,omitempty"`   // burst correlation for loss (0 = uniform)
+	JitterCorrelationPct *float64 `json:"jitter_correlation_pct,omitempty"` // correlation for the delay distribution
 }
 
 // TransferTimeouts mirrors the proxy server-side transfer-timeout knob — a

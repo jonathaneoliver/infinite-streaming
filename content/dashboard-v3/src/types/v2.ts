@@ -1807,6 +1807,28 @@ export interface components {
          *     `loss_pct` for steady background loss, `transport_fault` for
          *     one-shot or cadence-driven transport faults. See
          *     `DESIGN.md § shape.transport_fault × shape.loss_pct interaction`.
+         *
+         *     **Link-impairment knobs (#826).** `delay_ms` / `jitter_ms` /
+         *     `loss_pct` and their correlation terms model a realistic
+         *     (latency + loss + jitter dominated) link rather than a clean one.
+         *     Conventions:
+         *       - `delay_ms` is **one-way**: netem applies it on the single
+         *         egress qdisc the proxy controls, so the observed RTT increase
+         *         ≈ `delay_ms` (the return direction is unshaped). Named link
+         *         profiles state delays as one-way to match.
+         *       - `jitter_ms` is the delay standard deviation, applied as
+         *         `delay <delay_ms>ms <jitter_ms>ms <jitter_correlation_pct>%
+         *         distribution normal`. `jitter_correlation_pct` (~25% ≈ real
+         *         link) keeps successive delays correlated so netem does not
+         *         reorder packets into nonsense. When `jitter_ms` is 0 the
+         *         server falls back to a tight auto-jitter (5% of delay).
+         *       - `loss_correlation_pct` turns netem's independent-uniform loss
+         *         into correlated/bursty loss via `loss <loss_pct>%
+         *         <loss_correlation_pct>%`. Real loss is bursty; uniform loss at
+         *         the same percentage over-punishes TCP. 0 = uniform (legacy).
+         *       - Throughput under loss falls ~ `1/(RTT·√loss)` (Mathis), so an
+         *         impairment arm caps effective bandwidth below `rate_mbps` —
+         *         that coupling is the measurement target, not a bug.
          */
         Shape: {
             /** Format: float */
@@ -1815,6 +1837,21 @@ export interface components {
             delay_ms?: number;
             /** Format: float */
             loss_pct?: number;
+            /**
+             * Format: float
+             * @description Delay standard deviation (ms). Applied with `distribution normal` + `jitter_correlation_pct`. 0 ⇒ server auto-jitter (5% of `delay_ms`).
+             */
+            jitter_ms?: number;
+            /**
+             * Format: float
+             * @description Burst correlation for `loss_pct` → netem `loss <pct>% <corr>%`. 0 ⇒ independent-uniform loss (legacy). Higher = burstier.
+             */
+            loss_correlation_pct?: number;
+            /**
+             * Format: float
+             * @description Correlation for the delay distribution (~25% ≈ real link). Only meaningful with `jitter_ms` > 0.
+             */
+            jitter_correlation_pct?: number;
             pattern?: components["schemas"]["Pattern"];
             transport_fault?: components["schemas"]["TransportFault"];
             /** @description 1-based index of the currently active step in `pattern.steps`. 0 when pattern is disabled or in an inter-step idle gap. */

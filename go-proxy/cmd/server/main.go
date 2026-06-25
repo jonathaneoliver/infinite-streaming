@@ -832,9 +832,12 @@ type TcTrafficManager struct {
 }
 
 type ShapeApplyState struct {
-	rate  float64
-	delay int
-	loss  float64
+	rate     float64
+	delay    int
+	loss     float64
+	jitter   int     // #826 explicit jitter (delay stddev)
+	lossCorr float64 // #826 loss burst correlation %
+	delCorr  float64 // #826 delay-distribution correlation %
 }
 
 func (a *App) getShapeApplyState(port int) (ShapeApplyState, bool) {
@@ -1332,7 +1335,7 @@ func (t *TcTrafficManager) updateRateLimitCore(port int, rateMbps float64) error
 			time.Now().UTC().Format(time.RFC3339Nano),
 			port,
 		)
-		_ = t.updateNetemCore(port, 0, 0)
+		_ = t.updateNetemCore(port, NetemParams{})
 		_ = t.RemoveFilter(port)
 		_ = t.RemoveClass(port)
 		t.logTcState("rate_clear", port)
@@ -1704,8 +1707,8 @@ func (t *TcTrafficManager) addFairLeaf(port, band int) {
 		return
 	}
 	portSuffix := fmt.Sprintf("%03d", port%1000)
-	netemHandle := fmt.Sprintf("%s%d:", portSuffix, band)    // e.g. 1811:
-	fairHandle := fmt.Sprintf("%s%d:", portSuffix, band+4)   // PPP5:/6:/7: — distinct from prio (PPP0:) + netem (PPP1-3:)
+	netemHandle := fmt.Sprintf("%s%d:", portSuffix, band)  // e.g. 1811:
+	fairHandle := fmt.Sprintf("%s%d:", portSuffix, band+4) // PPP5:/6:/7: — distinct from prio (PPP0:) + netem (PPP1-3:)
 	// delete-then-add, NOT replace: `tc qdisc replace` does an in-place CHANGE
 	// when a qdisc already exists at that parent, which tc rejects across a
 	// qdisc-TYPE switch (e.g. a leftover fq_codel from a prior build — host tc
@@ -1758,12 +1761,91 @@ func (t *TcTrafficManager) ensurePrioLeafForPort(port int) error {
 // installed (or confirmed present) before the netem replacements so
 // this works even when called on a class created by UpdateRateLimit
 // without netem ever previously being touched.
+// NetemParams bundles the link-impairment knobs applied to a port's netem
+// qdisc (#826). Zero values mean "unset": DelayMs/LossPct 0 ⇒ that axis off;
+// JitterMs 0 ⇒ server auto-jitter (a tight 5% of delay); LossCorrelationPct 0
+// ⇒ independent-uniform loss (legacy); JitterCorrelationPct 0 ⇒ no explicit
+// delay correlation. DelayMs is one-way (observed RTT ≈ DelayMs since only the
+// proxy's egress is shaped). See the proxy.yaml Shape doc + issue #826.
+type NetemParams struct {
+	DelayMs              int
+	LossPct              float64
+	JitterMs             int
+	LossCorrelationPct   float64
+	JitterCorrelationPct float64
+}
+
+// netemDelayLoss is the legacy two-axis constructor — the common
+// "delay + loss, default jitter/correlation" case. Kept so simple call
+// sites (clears, loss-only) stay readable.
+func netemDelayLoss(delayMs int, lossPct float64) NetemParams {
+	return NetemParams{DelayMs: delayMs, LossPct: lossPct}
+}
+
+// netemParamsFromSession reads the full #826 impairment knob set off a session
+// map's nftables_* keys, so the static-shape and pattern paths re-apply jitter +
+// correlations consistently with delay + loss. Missing keys read as zero (legacy
+// clean-link / uniform behaviour).
+func netemParamsFromSession(session map[string]interface{}) NetemParams {
+	return NetemParams{
+		DelayMs:              getInt(session, "nftables_delay_ms"),
+		LossPct:              getFloat(session, "nftables_packet_loss"),
+		JitterMs:             getInt(session, "nftables_jitter_ms"),
+		LossCorrelationPct:   getFloat(session, "nftables_loss_correlation_pct"),
+		JitterCorrelationPct: getFloat(session, "nftables_jitter_correlation_pct"),
+	}
+}
+
+// netemImpairmentArgs builds the netem delay/loss argument list (everything
+// after the literal `netem` token) for a NetemParams. Pure + side-effect-free
+// so the #826 correlated-loss / jitter-distribution wiring is unit-testable
+// without tc or Linux. Empty slice ⇒ a no-op netem (clean link).
+//
+// Delay: an explicit JitterMs wins (named link profiles set it directly);
+// otherwise fall back to the legacy auto-jitter of 5% of the mean (a tight
+// Gaussian — for delay=25 ms that's ~1 ms stddev, ~99.7% of per-packet delays
+// in [22, 28] ms). Integer-divide rounds delays ≤19 ms to zero auto-jitter,
+// which is fine: those low-RTT configs want jitter noise out of the signal.
+// Emits `delay TIME JITTER [CORRELATION] distribution normal`; correlation
+// (~25% ≈ real link) keeps successive delays correlated so netem doesn't
+// reorder packets into nonsense (#826 caveat 2).
+//
+// Loss: a correlation term turns netem's independent-uniform loss into
+// correlated/bursty loss (#826 caveat 1) — real loss clusters, and uniform
+// loss at the same percentage over-punishes TCP. 0 ⇒ legacy uniform loss.
+func netemImpairmentArgs(p NetemParams) []string {
+	var args []string
+	if p.DelayMs > 0 {
+		jitter := p.JitterMs
+		if jitter <= 0 {
+			jitter = p.DelayMs / 20
+		}
+		if jitter > 0 {
+			args = append(args, "delay", fmt.Sprintf("%dms", p.DelayMs), fmt.Sprintf("%dms", jitter))
+			if p.JitterCorrelationPct > 0 {
+				args = append(args, fmt.Sprintf("%.0f%%", p.JitterCorrelationPct))
+			}
+			args = append(args, "distribution", "normal")
+		} else {
+			args = append(args, "delay", fmt.Sprintf("%dms", p.DelayMs))
+		}
+	}
+	if p.LossPct > 0 {
+		if p.LossCorrelationPct > 0 {
+			args = append(args, "loss", fmt.Sprintf("%.2f%%", p.LossPct), fmt.Sprintf("%.0f%%", p.LossCorrelationPct))
+		} else {
+			args = append(args, "loss", fmt.Sprintf("%.2f%%", p.LossPct))
+		}
+	}
+	return args
+}
+
 // UpdateNetem is the public, lock-acquiring entrypoint. It holds t.tcMu for the
 // whole netem mutation (#746) and delegates to the lock-free core.
-func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) error {
+func (t *TcTrafficManager) UpdateNetem(port int, p NetemParams) error {
 	t.tcMu.Lock()
 	defer t.tcMu.Unlock()
-	return t.updateNetemCore(port, delayMs, lossPct)
+	return t.updateNetemCore(port, p)
 }
 
 // updateNetemCore is the lock-free core of UpdateNetem. The caller MUST hold
@@ -1771,7 +1853,9 @@ func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) e
 // ensureRootClassCore, ensureClassCore, ensurePrioLeafForPort) — never a public
 // locking method. (Also called directly from updateRateLimitCore's clear
 // branch, which already holds tcMu.)
-func (t *TcTrafficManager) updateNetemCore(port int, delayMs int, lossPct float64) error {
+func (t *TcTrafficManager) updateNetemCore(port int, p NetemParams) error {
+	delayMs := p.DelayMs
+	lossPct := p.LossPct
 	if err := t.ensureRootQdiscCore(); err != nil {
 		return err
 	}
@@ -1802,28 +1886,7 @@ func (t *TcTrafficManager) updateNetemCore(port int, delayMs int, lossPct float6
 		bandHandle := fmt.Sprintf("%s%d:", portSuffix, band)  // e.g. 1811:
 		args := []string{"qdisc", "replace", "dev", t.interfaceName,
 			"parent", bandParent, "handle", bandHandle, "netem"}
-		if delayMs > 0 {
-			// Tight Gaussian: stddev = 5% of mean. For delay=25 ms
-			// that's ~1 ms stddev, so ~99.7% of per-packet delays
-			// land in [22, 28] ms — variance for ABR/jitter-aware
-			// testing without dominating the configured value.
-			// Earlier `delay/2` was way too wide (a 25 ms config
-			// could draw [13, 37] ms with normal distribution and
-			// dip below netem's clamp-at-zero floor in the long
-			// tail), which violated the "I set 25 ms" mental model.
-			// Integer-divide rounds small delays (≤19 ms) to zero
-			// jitter — fine: those configs are testing low-RTT
-			// paths where jitter noise would be the dominant signal.
-			jitter := delayMs / 20
-			if jitter > 0 {
-				args = append(args, "delay", fmt.Sprintf("%dms", delayMs), fmt.Sprintf("%dms", jitter), "distribution", "normal")
-			} else {
-				args = append(args, "delay", fmt.Sprintf("%dms", delayMs))
-			}
-		}
-		if lossPct > 0 {
-			args = append(args, "loss", fmt.Sprintf("%.2f%%", lossPct))
-		}
+		args = append(args, netemImpairmentArgs(p)...)
 		if out, err := exec.Command("tc", args...).CombinedOutput(); err != nil {
 			return fmt.Errorf("tc netem band %d failed: %s", band, strings.TrimSpace(string(out)))
 		}
@@ -2893,7 +2956,7 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			break
 		}
 	}
-	shapeRateFields := []string{"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss"}
+	shapeRateFields := []string{"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss", "nftables_jitter_ms", "nftables_loss_correlation_pct", "nftables_jitter_correlation_pct"}
 	shapeRateUpdated := false
 	shapeFieldsPresent := make([]string, 0, len(shapeRateFields))
 	for _, key := range shapeRateFields {
@@ -3239,10 +3302,9 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			if patternEnabled {
 				steps := parseShapeStepsFromSession(target)
 				if len(steps) > 0 {
-					delayMs := getInt(target, "nftables_delay_ms")
-					loss := getFloat(target, "nftables_packet_loss")
+					np := netemParamsFromSession(target)
 					log.Printf("SESSION_PATTERN_START source=session_patch session_id=%s port=%d steps=%d", id, portNum, len(steps))
-					if err := a.applyShapePattern(portNum, steps, delayMs, loss); err != nil {
+					if err := a.applyShapePattern(portNum, steps, np); err != nil {
 						log.Printf("SESSION_PATTERN_START_FAILED session_id=%s port=%d: %v", id, portNum, err)
 					}
 				}
@@ -3336,9 +3398,9 @@ func (a *App) emitHarnessSettingsChange(sessionID string, payload map[string]int
 	if patternTouched {
 		emit("pattern_config_change", "")
 	}
-	// Shaper rate / delay / loss.
+	// Shaper rate / delay / loss + #826 jitter/correlation knobs.
 	shaperTouched := false
-	for _, k := range []string{"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss"} {
+	for _, k := range []string{"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss", "nftables_jitter_ms", "nftables_loss_correlation_pct", "nftables_jitter_correlation_pct"} {
 		if _, ok := payload[k]; ok {
 			shaperTouched = true
 			break
@@ -3439,7 +3501,7 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 			// clean — pairs with the ClearPortShaping at session-
 			// allocation time as belt-and-braces (issue #352).
 			if a.traffic != nil {
-				_ = a.traffic.UpdateNetem(port, 0, 0)
+				_ = a.traffic.UpdateNetem(port, NetemParams{})
 				a.traffic.ClearPortShaping(port)
 				a.clearShapeApplyState(port)
 			}
@@ -3786,10 +3848,11 @@ func (a *App) stopShapeLoop(port int) {
 	}
 }
 
-func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, loss float64) error {
+func (a *App) applyShapePattern(port int, steps []NftShapeStep, np NetemParams) error {
 	if a.traffic == nil {
 		return fmt.Errorf("traffic manager not initialized")
 	}
+	delayMs, loss := np.DelayMs, np.LossPct
 	cleanSteps := sanitizeShapeSteps(steps)
 	if len(cleanSteps) == 0 {
 		a.stopShapeLoop(port)
@@ -3821,7 +3884,7 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 		}
 		return nil
 	}
-	if err := a.traffic.UpdateNetem(port, delayMs, loss); err != nil {
+	if err := a.traffic.UpdateNetem(port, np); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -3840,10 +3903,13 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 		oldCancel()
 	}
 	a.updateSessionsByPortWithControl(port, map[string]interface{}{
-		"nftables_pattern_enabled": true,
-		"nftables_pattern_steps":   cleanSteps,
-		"nftables_delay_ms":        delayMs,
-		"nftables_packet_loss":     loss,
+		"nftables_pattern_enabled":        true,
+		"nftables_pattern_steps":          cleanSteps,
+		"nftables_delay_ms":               delayMs,
+		"nftables_packet_loss":            loss,
+		"nftables_jitter_ms":              np.JitterMs,
+		"nftables_loss_correlation_pct":   np.LossCorrelationPct,
+		"nftables_jitter_correlation_pct": np.JitterCorrelationPct,
 	}, "")
 	// Emit pattern_enabled (per session on this port) so the
 	// dashboard's PlayLog Control bucket surfaces operator toggles
@@ -3871,11 +3937,11 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 	info := fmt.Sprintf(`{"mode":%q,"steps":%d,"rate_mbps_first":%.3f,"delay_ms":%d,"packet_loss":%.3f}`,
 		mode, stepCount, firstRate, delayMs, loss)
 	a.emitControlEventForPort(port, "proxy", "pattern_enabled", info)
-	go a.runShapePatternLoop(ctx, port, cleanSteps, delayMs, loss)
+	go a.runShapePatternLoop(ctx, port, cleanSteps, np)
 	return nil
 }
 
-func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShapeStep, delayMs int, loss float64) {
+func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShapeStep, np NetemParams) {
 	if len(steps) == 0 {
 		return
 	}
@@ -3921,7 +3987,7 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 			stepIndex = (stepIndex + 1) % len(steps)
 			continue
 		}
-		if err := a.applyShapeIfChanged(port, step.RateMbps, delayMs, loss); err != nil {
+		if err := a.applyShapeIfChanged(port, step.RateMbps, np); err != nil {
 			log.Printf(
 				"NETSHAPE pattern_step ts=%s port=%d step=%d/%d rate_mbps=%.3f duration_s=%.1f enabled=%t status=rate_failed err=%v",
 				ts,
@@ -3957,7 +4023,7 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 		})
 		// Single-owner group shaping: mirror this step's cap onto the rest of the
 		// group so every member tracks the master in lock-step (no per-member loop).
-		a.fanPatternRateToGroup(port, step.RateMbps, delayMs, loss, drivenBy, drivenTemplate)
+		a.fanPatternRateToGroup(port, step.RateMbps, np, drivenBy, drivenTemplate)
 		// Emit pattern_step as a control_event for every session on
 		// this port (issue #474 Milestone B). Info is a tiny JSON
 		// blob so downstream (graphs, harness archive) can read
@@ -4007,7 +4073,7 @@ func (a *App) disablePatternForPort(port int) {
 // master" WITHOUT arming a per-member pattern (no steps, no step-clock). The group
 // is re-enumerated every call, so a member that connected/reattached after the
 // master armed is picked up on the next tick (no dependence on instantiation order).
-func (a *App) fanPatternRateToGroup(originPort int, rate float64, delay int, loss float64, drivenBy, drivenTemplate string) {
+func (a *App) fanPatternRateToGroup(originPort int, rate float64, np NetemParams, drivenBy, drivenTemplate string) {
 	snap := a.sessionsView() // #740 read-only: group/port lookups only
 	gid := a.getGroupIdByPort(originPort, snap)
 	if gid == "" {
@@ -4020,7 +4086,7 @@ func (a *App) fanPatternRateToGroup(originPort int, rate float64, delay int, los
 		if gp == originPort {
 			continue
 		}
-		if err := a.applyShapeIfChanged(gp, rate, delay, loss); err != nil {
+		if err := a.applyShapeIfChanged(gp, rate, np); err != nil {
 			log.Printf("NETSHAPE group pattern fan-out failed port=%d group=%s rate_mbps=%.3f: %v", gp, gid, rate, err)
 			continue
 		}
@@ -4153,11 +4219,13 @@ func (a *App) emitControlEventsForDiff(sessionID string, before, after map[strin
 			emit("fault_rule_config_change", surface+":"+cur)
 		}
 	}
-	// Shaper (rate / delay / loss) — sliders.
-	if changed("nftables_bandwidth_mbps") || changed("nftables_delay_ms") || changed("nftables_packet_loss") {
+	// Shaper (rate / delay / loss + #826 jitter / correlations) — sliders.
+	if changed("nftables_bandwidth_mbps") || changed("nftables_delay_ms") || changed("nftables_packet_loss") ||
+		changed("nftables_jitter_ms") || changed("nftables_loss_correlation_pct") || changed("nftables_jitter_correlation_pct") {
 		emit("shaper_config_change",
-			fmt.Sprintf(`{"rate_mbps":%v,"delay_ms":%v,"packet_loss":%v}`,
-				after["nftables_bandwidth_mbps"], after["nftables_delay_ms"], after["nftables_packet_loss"]))
+			fmt.Sprintf(`{"rate_mbps":%v,"delay_ms":%v,"packet_loss":%v,"jitter_ms":%v,"loss_correlation_pct":%v,"jitter_correlation_pct":%v}`,
+				after["nftables_bandwidth_mbps"], after["nftables_delay_ms"], after["nftables_packet_loss"],
+				after["nftables_jitter_ms"], after["nftables_loss_correlation_pct"], after["nftables_jitter_correlation_pct"]))
 	}
 	// Pattern enable/disable is emitted by applyShapePattern /
 	// disablePatternForPort directly — skip here. Config-only edits
@@ -4750,6 +4818,9 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		Steps                  []NftShapeStep `json:"steps"`
 		DelayMs                int            `json:"delay_ms"`
 		LossPct                float64        `json:"loss_pct"`
+		JitterMs               int            `json:"jitter_ms"`              // #826
+		LossCorrelationPct     float64        `json:"loss_correlation_pct"`   // #826
+		JitterCorrelationPct   float64        `json:"jitter_correlation_pct"` // #826
 		SegmentDurationSeconds float64        `json:"segment_duration_seconds"`
 		DefaultSegments        float64        `json:"default_segments"`
 		DefaultStepSeconds     float64        `json:"default_step_seconds"`
@@ -4792,7 +4863,11 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cleanSteps := sanitizeShapeSteps(payload.Steps)
-	if err := a.applyShapePattern(port, cleanSteps, payload.DelayMs, payload.LossPct); err != nil {
+	patternNetem := NetemParams{
+		DelayMs: payload.DelayMs, LossPct: payload.LossPct,
+		JitterMs: payload.JitterMs, LossCorrelationPct: payload.LossCorrelationPct, JitterCorrelationPct: payload.JitterCorrelationPct,
+	}
+	if err := a.applyShapePattern(port, cleanSteps, patternNetem); err != nil {
 		log.Printf("NETSHAPE pattern apply failed port=%d: %v", port, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": "Failed to apply pattern", "details": err.Error()})
@@ -4908,17 +4983,19 @@ func (a *App) handleNftLoss(w http.ResponseWriter, r *http.Request) {
 			loss = parsed
 		}
 	}
+	lossCorr := getFloat(payload, "loss_correlation_pct")
 	a.disablePatternForPort(port)
-	if err := a.traffic.UpdateNetem(port, 0, loss); err != nil {
-		log.Printf("NETSHAPE packet loss failed port=%d loss=%.2f: %v", port, loss, err)
+	if err := a.traffic.UpdateNetem(port, NetemParams{LossPct: loss, LossCorrelationPct: lossCorr}); err != nil {
+		log.Printf("NETSHAPE packet loss failed port=%d loss=%.2f corr=%.1f: %v", port, loss, lossCorr, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": "Failed to update packet loss", "details": err.Error()})
 		return
 	}
 	a.updateSessionsByPortWithControl(port, map[string]interface{}{
-		"nftables_packet_loss": loss,
+		"nftables_packet_loss":          loss,
+		"nftables_loss_correlation_pct": lossCorr,
 	}, "")
-	writeJSON(w, map[string]interface{}{"success": true, "port": port, "loss_pct": loss})
+	writeJSON(w, map[string]interface{}{"success": true, "port": port, "loss_pct": loss, "loss_correlation_pct": lossCorr})
 }
 
 func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
@@ -4983,6 +5060,15 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 			loss = parsed
 		}
 	}
+	// #826 link-impairment knobs: jitter (delay stddev) + burst correlations.
+	// All optional; absent ⇒ 0 ⇒ server auto-jitter / uniform loss (legacy).
+	jitterMs := getInt(payload, "jitter_ms")
+	lossCorr := getFloat(payload, "loss_correlation_pct")
+	jitterCorr := getFloat(payload, "jitter_correlation_pct")
+	np := NetemParams{
+		DelayMs: delayMs, LossPct: loss,
+		JitterMs: jitterMs, LossCorrelationPct: lossCorr, JitterCorrelationPct: jitterCorr,
+	}
 	a.disablePatternForPort(port)
 	effectiveMbps := a.effectiveRate(rateMbps)
 	if err := a.traffic.UpdateRateLimit(port, effectiveMbps); err != nil {
@@ -4991,16 +5077,19 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "Failed to update rate limit", "details": err.Error()})
 		return
 	}
-	if err := a.traffic.UpdateNetem(port, delayMs, loss); err != nil {
-		log.Printf("NETSHAPE netem failed port=%d delay=%d loss=%.2f: %v", port, delayMs, loss, err)
+	if err := a.traffic.UpdateNetem(port, np); err != nil {
+		log.Printf("NETSHAPE netem failed port=%d delay=%d loss=%.2f jitter=%d loss_corr=%.1f del_corr=%.1f: %v", port, delayMs, loss, jitterMs, lossCorr, jitterCorr, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": "Failed to update delay/loss", "details": err.Error()})
 		return
 	}
 	a.updateSessionsByPortWithControl(port, map[string]interface{}{
-		"nftables_bandwidth_mbps": rateMbps, // operator intent; 0 = no override
-		"nftables_delay_ms":       delayMs,
-		"nftables_packet_loss":    loss,
+		"nftables_bandwidth_mbps":         rateMbps, // operator intent; 0 = no override
+		"nftables_delay_ms":               delayMs,
+		"nftables_packet_loss":            loss,
+		"nftables_jitter_ms":              jitterMs,
+		"nftables_loss_correlation_pct":   lossCorr,
+		"nftables_jitter_correlation_pct": jitterCorr,
 	}, "")
 
 	// Propagate to group members
@@ -5017,14 +5106,17 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 				log.Printf("NETSHAPE group propagation rate limit failed port=%d rate=%g (effective=%g): %v", groupPort, rateMbps, effectiveMbps, err)
 				continue
 			}
-			if err := a.traffic.UpdateNetem(groupPort, delayMs, loss); err != nil {
+			if err := a.traffic.UpdateNetem(groupPort, np); err != nil {
 				log.Printf("NETSHAPE group propagation netem failed port=%d delay=%d loss=%.2f: %v", groupPort, delayMs, loss, err)
 				continue
 			}
 			a.updateSessionsByPortWithControl(groupPort, map[string]interface{}{
-				"nftables_bandwidth_mbps": rateMbps,
-				"nftables_delay_ms":       delayMs,
-				"nftables_packet_loss":    loss,
+				"nftables_bandwidth_mbps":         rateMbps,
+				"nftables_delay_ms":               delayMs,
+				"nftables_packet_loss":            loss,
+				"nftables_jitter_ms":              jitterMs,
+				"nftables_loss_correlation_pct":   lossCorr,
+				"nftables_jitter_correlation_pct": jitterCorr,
 			}, "")
 			log.Printf("NETSHAPE group propagation applied port=%d rate=%g delay=%d loss=%.2f group=%s", groupPort, rateMbps, delayMs, loss, groupID)
 		}
@@ -5932,9 +6024,8 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 							Enabled:         s.Enabled,
 						})
 					}
-					delayMs := getInt(sessionData, "nftables_delay_ms")
-					lossPct := getFloat(sessionData, "nftables_packet_loss")
-					if perr := a.applyShapePattern(port, v1steps, delayMs, lossPct); perr != nil {
+					np := netemParamsFromSession(sessionData)
+					if perr := a.applyShapePattern(port, v1steps, np); perr != nil {
 						log.Printf("config-on-connect pattern apply failed port=%d: %v", port, perr)
 					}
 				} else {
@@ -7091,13 +7182,12 @@ func (a *App) applySessionShaping(session SessionData, port int) {
 		return
 	}
 	rate := getFloat(session, "nftables_bandwidth_mbps")
-	delay := getInt(session, "nftables_delay_ms")
-	loss := getFloat(session, "nftables_packet_loss")
+	np := netemParamsFromSession(session)
 	// rate=0 in storage means "operator did not override." Resolve to
 	// the deployment baseline before pushing to the kernel. Issue #480.
 	effective := a.effectiveRate(rate)
-	if err := a.applyShapeIfChanged(port, effective, delay, loss); err != nil {
-		log.Printf("NETSHAPE apply failed port=%d rate=%g (effective=%g) delay=%d loss=%.2f: %v", port, rate, effective, delay, loss, err)
+	if err := a.applyShapeIfChanged(port, effective, np); err != nil {
+		log.Printf("NETSHAPE apply failed port=%d rate=%g (effective=%g) delay=%d loss=%.2f jitter=%d loss_corr=%.1f del_corr=%.1f: %v", port, rate, effective, np.DelayMs, np.LossPct, np.JitterMs, np.LossCorrelationPct, np.JitterCorrelationPct, err)
 		return
 	}
 }
@@ -7105,8 +7195,11 @@ func (a *App) applySessionShaping(session SessionData, port int) {
 func almostEqualShape(a ShapeApplyState, b ShapeApplyState) bool {
 	const eps = 0.0001
 	return a.delay == b.delay &&
+		a.jitter == b.jitter &&
 		math.Abs(a.rate-b.rate) <= eps &&
-		math.Abs(a.loss-b.loss) <= eps
+		math.Abs(a.loss-b.loss) <= eps &&
+		math.Abs(a.lossCorr-b.lossCorr) <= eps &&
+		math.Abs(a.delCorr-b.delCorr) <= eps
 }
 
 func copyUpstreamHeaders(w http.ResponseWriter, resp *http.Response) {
@@ -7131,9 +7224,13 @@ func copyUpstreamHeaders(w http.ResponseWriter, resp *http.Response) {
 	}
 }
 
-func (a *App) applyShapeIfChanged(port int, rate float64, delay int, loss float64) error {
+func (a *App) applyShapeIfChanged(port int, rate float64, np NetemParams) error {
 	const eps = 0.0001
-	desired := ShapeApplyState{rate: rate, delay: delay, loss: loss}
+	delay, loss := np.DelayMs, np.LossPct
+	desired := ShapeApplyState{
+		rate: rate, delay: delay, loss: loss,
+		jitter: np.JitterMs, lossCorr: np.LossCorrelationPct, delCorr: np.JitterCorrelationPct,
+	}
 	last, ok := a.getShapeApplyState(port)
 	if ok && almostEqualShape(last, desired) {
 		log.Printf("NETSHAPE apply skipped port=%d reason=unchanged rate_mbps=%.3f delay_ms=%d loss_pct=%.3f", port, rate, delay, loss)
@@ -7154,11 +7251,12 @@ func (a *App) applyShapeIfChanged(port int, rate float64, delay int, loss float6
 			return err
 		}
 	}
-	delayChanged := !ok || last.delay != delay
-	lossChanged := !ok || math.Abs(last.loss-loss) > eps
-	if delayChanged || lossChanged {
-		log.Printf("NETSHAPE apply netem_change port=%d from_delay_ms=%d to_delay_ms=%d from_loss_pct=%.3f to_loss_pct=%.3f", port, last.delay, delay, last.loss, loss)
-		if err := a.traffic.UpdateNetem(port, delay, loss); err != nil {
+	netemChanged := !ok || last.delay != delay || last.jitter != np.JitterMs ||
+		math.Abs(last.loss-loss) > eps || math.Abs(last.lossCorr-np.LossCorrelationPct) > eps ||
+		math.Abs(last.delCorr-np.JitterCorrelationPct) > eps
+	if netemChanged {
+		log.Printf("NETSHAPE apply netem_change port=%d from_delay_ms=%d to_delay_ms=%d from_loss_pct=%.3f to_loss_pct=%.3f jitter_ms=%d loss_corr_pct=%.1f del_corr_pct=%.1f", port, last.delay, delay, last.loss, loss, np.JitterMs, np.LossCorrelationPct, np.JitterCorrelationPct)
+		if err := a.traffic.UpdateNetem(port, np); err != nil {
 			return err
 		}
 	}
@@ -7559,6 +7657,9 @@ func copySessionControlState(target SessionData, source SessionData) {
 		"nftables_bandwidth_mbps",
 		"nftables_delay_ms",
 		"nftables_packet_loss",
+		"nftables_jitter_ms",
+		"nftables_loss_correlation_pct",
+		"nftables_jitter_correlation_pct",
 		"nftables_pattern_enabled",
 		"nftables_pattern_steps",
 		"nftables_pattern_step",
@@ -8966,6 +9067,9 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		session["effective_rate_limit_mbps"] = a.effectiveRateForSession(session)
 		setDefault("nftables_delay_ms", 0)
 		setDefault("nftables_packet_loss", 0)
+		setDefault("nftables_jitter_ms", 0)
+		setDefault("nftables_loss_correlation_pct", 0)
+		setDefault("nftables_jitter_correlation_pct", 0)
 		setDefault("nftables_pattern_enabled", false)
 		setDefault("nftables_pattern_steps", []NftShapeStep{})
 		setDefault("nftables_pattern_step", 0)

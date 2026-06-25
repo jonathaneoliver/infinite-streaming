@@ -745,11 +745,16 @@ func shapeFromSession(s map[string]any) *oapigen.Shape {
 	rate, _ := numericFloatTranslate(s["nftables_bandwidth_mbps"])
 	delay, _ := numericFloatTranslate(s["nftables_delay_ms"])
 	loss, _ := numericFloatTranslate(s["nftables_packet_loss"])
+	// #826 link-impairment knobs.
+	jitter, _ := numericFloatTranslate(s["nftables_jitter_ms"])
+	lossCorr, _ := numericFloatTranslate(s["nftables_loss_correlation_pct"])
+	jitterCorr, _ := numericFloatTranslate(s["nftables_jitter_correlation_pct"])
 	tfType, _ := s["transport_failure_type"].(string)
 	pattern, _ := s["_v2_shape_pattern"].(map[string]any)
 	drivenBy, _ := s["nftables_pattern_driven_by"].(string)
 
-	if rate == 0 && delay == 0 && loss == 0 && (tfType == "" || tfType == "none") && pattern == nil && drivenBy == "" {
+	if rate == 0 && delay == 0 && loss == 0 && jitter == 0 && lossCorr == 0 && jitterCorr == 0 &&
+		(tfType == "" || tfType == "none") && pattern == nil && drivenBy == "" {
 		return nil
 	}
 	out := &oapigen.Shape{}
@@ -764,6 +769,18 @@ func shapeFromSession(s map[string]any) *oapigen.Shape {
 	if loss > 0 {
 		l := float32(loss)
 		out.LossPct = &l
+	}
+	if jitter > 0 {
+		j := float32(jitter)
+		out.JitterMs = &j
+	}
+	if lossCorr > 0 {
+		lc := float32(lossCorr)
+		out.LossCorrelationPct = &lc
+	}
+	if jitterCorr > 0 {
+		jc := float32(jitterCorr)
+		out.JitterCorrelationPct = &jc
 	}
 	if tfType != "" && tfType != "none" {
 		tf := oapigen.TransportFault{Type: oapigen.TransportFaultType(tfType)}

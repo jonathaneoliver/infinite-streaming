@@ -276,6 +276,14 @@ function buildSteps(t: Template, marginPct: number, stepSecs: number): Pattern['
     const fl = pyramidFloor(ladderVariants(), marginPct);
     const base = fl > 0 ? [fl, ...asc.filter((v) => v > fl)] : asc.slice();
     seq = base.concat(base.slice(0, -1).reverse()); // up then down, no apex dupe
+  } else if (t === 'valley') {
+    // Inverse of pyramid: high → low → high. Shares the pyramid over-selection
+    // floor so the trough stays sustainable; the nadir isn't duplicated. Starts
+    // at the top cap so the player cold-starts at full bandwidth. Mirrors
+    // ladder.BuildPattern's Valley case in go-proxy/pkg/ladder.
+    const fl = pyramidFloor(ladderVariants(), marginPct);
+    const base = fl > 0 ? [fl, ...asc.filter((v) => v > fl)] : asc.slice();
+    seq = base.slice().reverse().concat(base.slice(1)); // high→low→high, no nadir dupe
   } else if (t === 'transient_shock') {
     // Deepening-dip staircase: hold top, dip to each lower rung
     // shallowest-first down to the bottom, recovering to top between dips.
@@ -595,6 +603,23 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
         <strong>{{ runtimeMbps.toFixed(2) }} Mbps</strong>
       </div>
 
+      <!-- Commit actions on their own line directly above the step table, so
+           they're reachable without scrolling past a long (50+) step list. -->
+      <div class="step-actions above-steps">
+        <button class="clear" type="button" @click="commit(null)" title="Stop the pattern and return to slider mode">
+          Clear
+        </button>
+        <div class="apply-flow">
+          <template v-if="editMode">
+            <button class="apply" type="button" @click="applyDraft">Apply Pattern</button>
+            <button class="cancel" type="button" @click="cancelEdit">Cancel</button>
+          </template>
+          <button v-else-if="pattern" class="edit" type="button" @click="startEdit">
+            Edit Pattern
+          </button>
+        </div>
+      </div>
+
       <div class="steps">
         <div class="step-header">
           <span class="col-idx">#</span>
@@ -650,18 +675,6 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
         </div>
         <div class="step-actions">
           <button class="add" type="button" @click="addStep">+ Add step</button>
-          <button class="clear" type="button" @click="commit(null)" title="Stop the pattern and return to slider mode">
-            Clear
-          </button>
-          <div class="apply-flow">
-            <template v-if="editMode">
-              <button class="apply" type="button" @click="applyDraft">Apply Pattern</button>
-              <button class="cancel" type="button" @click="cancelEdit">Cancel</button>
-            </template>
-            <button v-else-if="pattern" class="edit" type="button" @click="startEdit">
-              Edit Pattern
-            </button>
-          </div>
         </div>
       </div>
 
@@ -853,6 +866,13 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
   display: flex;
   gap: 8px;
   margin-top: 8px;
+}
+/* Commit bar on its own line directly above the step table — reachable
+   without scrolling past a long step list. */
+.step-actions.above-steps {
+  margin-top: 0;
+  margin-bottom: 6px;
+  align-items: center;
 }
 .add {
   background: #f1f3f4;

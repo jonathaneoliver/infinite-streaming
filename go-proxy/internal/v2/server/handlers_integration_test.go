@@ -733,6 +733,58 @@ func TestPatch_ShapeRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPatch_ImpairmentKnobsRoundTrip is the regression guard for the #826
+// flash-then-reset-to-0 bug: jitter_ms / loss_correlation_pct /
+// jitter_correlation_pct were missing from unsupportedPaths, so a PATCH
+// touching them 501'd and the dashboard rolled the optimistic update back to 0.
+// They must be ADMITTED (200, not 501), STORED on the session, and trigger the
+// kernel apply.
+func TestPatch_ImpairmentKnobsRoundTrip(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	body := `{"shape":{"delay_ms":150,"loss_pct":3,"jitter_ms":80,"loss_correlation_pct":50,"jitter_correlation_pct":25}}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s (impairment knobs must be supported paths, not 501)", status, respBody)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	if stored["nftables_jitter_ms"] != 80 {
+		t.Errorf("nftables_jitter_ms = %v, want 80", stored["nftables_jitter_ms"])
+	}
+	if stored["nftables_loss_correlation_pct"] != float64(50) {
+		t.Errorf("nftables_loss_correlation_pct = %v, want 50", stored["nftables_loss_correlation_pct"])
+	}
+	if stored["nftables_jitter_correlation_pct"] != float64(25) {
+		t.Errorf("nftables_jitter_correlation_pct = %v, want 25", stored["nftables_jitter_correlation_pct"])
+	}
+	// The PATCH response shape must round-trip the knobs back so the dashboard
+	// slider reads the real value instead of resetting to 0.
+	rb := string(respBody)
+	if !strings.Contains(rb, `"jitter_ms":80`) ||
+		!strings.Contains(rb, `"loss_correlation_pct":50`) ||
+		!strings.Contains(rb, `"jitter_correlation_pct":25`) {
+		t.Errorf("PATCH response shape did not round-trip impairment knobs; body=%s", rb)
+	}
+	// A jitter-only edit must also fire the kernel apply (shapeFieldsTouched).
+	a.mu.Lock()
+	calls := append([]string{}, a.shapeApplyCalls...)
+	a.mu.Unlock()
+	found := false
+	for _, p := range calls {
+		if p == pid {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ApplyShapeToPlayer not called for %s; calls=%v", pid, calls)
+	}
+}
+
 func TestPatch_TransportFault_ArmsKernel(t *testing.T) {
 	a, _, ts := newTestServer(t)
 	pid := uuid.New().String()

@@ -596,14 +596,33 @@ func cmdSweepReap(client *api.Client, args []string, asJSON bool) error {
 // --- translators (sweep recipe → proxy types) -----------------------------
 
 func toProxySliderShape(sh *sweep.Shape) *proxy.Shape {
-	// Rate only — delay/loss are out of scope for the sweep (steady network
-	// degradation isn't a realistic stream config nor an explicit error).
-	// Pattern shapes are applied post-launch via `harness shape --pattern`.
-	if sh.RateMbps == nil {
+	// Static (non-pattern) shaping: rate + the #826 link-impairment axes
+	// (delay/loss/jitter + correlations). Pattern shapes are applied
+	// post-launch via `harness shape --pattern`. Emit a patch when ANY of
+	// these axes is set; nil only when every axis is unset (no shaping).
+	out := &proxy.Shape{
+		RateMbps:             f64ptrToF32(sh.RateMbps),
+		DelayMs:              f64ptrToF32(sh.DelayMs),
+		LossPct:              f64ptrToF32(sh.LossPct),
+		JitterMs:             f64ptrToF32(sh.JitterMs),
+		LossCorrelationPct:   f64ptrToF32(sh.LossCorrelationPct),
+		JitterCorrelationPct: f64ptrToF32(sh.JitterCorrelationPct),
+	}
+	if out.RateMbps == nil && out.DelayMs == nil && out.LossPct == nil &&
+		out.JitterMs == nil && out.LossCorrelationPct == nil && out.JitterCorrelationPct == nil {
 		return nil
 	}
-	v := float32(*sh.RateMbps)
-	return &proxy.Shape{RateMbps: &v}
+	return out
+}
+
+// f64ptrToF32 narrows an optional float64 to the *float32 the generated proxy
+// Shape uses, preserving "unset" (nil in → nil out).
+func f64ptrToF32(v *float64) *float32 {
+	if v == nil {
+		return nil
+	}
+	f := float32(*v)
+	return &f
 }
 
 func toProxyTransferTimeouts(t *sweep.TransferTimeouts) *proxy.TransferTimeouts {
