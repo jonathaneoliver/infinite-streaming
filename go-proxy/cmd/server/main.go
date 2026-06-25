@@ -162,6 +162,16 @@ type NetworkLogEntry struct {
 	TransferMs float64 `json:"transfer_ms"` // Downstream write+flush time to client (= client-perceived `receive`)
 	TotalMs    float64 `json:"total_ms"`
 
+	// DeliveryRateMbps is the kernel's own throughput estimate
+	// (tcpi_delivery_rate) sampled at end of transfer, in decimal Mbps.
+	// The derived bytes_out/transfer_ms Mbps only times the memcpy into
+	// the socket send buffer, so it over-reports 1000× when a sub-buffer
+	// segment is absorbed before tc drains the qdisc onto the wire. This
+	// field is the honest shaped-rate cross-check. Connection-level (not
+	// per-stream), so under HTTP/2 it reflects the whole socket. Linux
+	// only; unset on the macOS dev build.
+	DeliveryRateMbps float64 `json:"delivery_rate_mbps,omitempty"`
+
 	// ClientWaitMs is the time from when the proxy received the request
 	// to when it sent the first response byte back to the client. It IS
 	// what the player perceived as `wait` (HAR's TTFB), modulo the
@@ -6543,6 +6553,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		_, writeErr := writer.Write(modifiedBody)
 		flushErr := writer.Flush()
 		netEntry.TransferMs = elapsedMs(transferStart)
+		stampDeliveryRate(tcpConnFromContext(r.Context()), netEntry)
 		if idleW != nil {
 			idleW.Stop()
 		}
@@ -6597,6 +6608,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		bytesOut, copyErr = io.Copy(writer, resp.Body)
 		flushErr := writer.Flush()
 		netEntry.TransferMs = elapsedMs(transferStart)
+		stampDeliveryRate(tcpConnFromContext(r.Context()), netEntry)
 		if idleW != nil {
 			idleW.Stop()
 		}
