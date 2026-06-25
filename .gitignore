@@ -70,6 +70,11 @@ tests/integration/test_run.log
 tests/characterization/artifacts/
 tests/characterization/modes/artifacts/
 
+# Throwaway char-matrix specs — generate here by default; promote a keeper up
+# to tests/characterization/matrix/ (git add) when it's worth keeping. Subdir,
+# so the matrix/*.yaml validation glob in examples_test.go never sees these.
+tests/characterization/matrix/scratch/
+
 # Xcode user state
 apple/InfiniteStreamPlayer/InfiniteStreamPlayer.xcodeproj/project.xcworkspace/xcuserdata/
 
