@@ -439,12 +439,12 @@ const series = computed<SeriesSpec[]>(() => {
   if (compareSelf.value) {
     const self = compareSelf.value;
     const compareOut = compareBandwidthSeries(self);
-    // Active session's own variant-peak ladder — hidden by default, tagged
-    // `(Sx)` and styled with the session dash so it reads as this session's
-    // rungs. Each sibling builds its OWN ladder from its OWN manifest in the
-    // useCompareOverlays closure below, so manifests that differ across the
-    // compared sessions show distinct rung sets (issue #812).
-    appendBands(compareOut, variants.value, { hidden: true, tag: self.tag });
+    // Active session's own variant bands (on by default) + variant-peak ladder
+    // (hidden by default), tagged `(Sx)` and styled with the session dash so it
+    // reads as this session's rungs. Each sibling builds its OWN ladder from its
+    // OWN manifest in the useCompareOverlays closure below, so manifests that
+    // differ across the compared sessions show distinct rung sets (issue #812).
+    appendBands(compareOut, variants.value, { hidden: false, tag: self.tag });
     appendPeakLadder(compareOut, variants.value, { hidden: true, tag: self.tag, dash: self.dash });
     return compareOut;
   }
@@ -487,14 +487,14 @@ const series = computed<SeriesSpec[]>(() => {
     stepped: true,
   });
   // Variant Bands — a light shaded region between each variant's
-  // AVERAGE-BANDWIDTH and BANDWIDTH. Default OFF; one "Variant Bands" legend chip
-  // (sitting beside the avg / peak chips) toggles the whole set. Turn it on
-  // (alongside the peak + avg ladders) to SEE, at a glance, where adjacent
-  // variants' [avg,peak] bands OVERLAP — the over-selection trap, a rung's avg
-  // sitting at/below the rung-below's peak (#811) — or leave GAPS. Fill is
-  // semi-transparent, so overlapping bands compound into a darker tint. Built
-  // BEFORE the avg/peak ladder lines so the bands draw BEHIND those rung lines.
-  appendBands(out, ladder, { hidden: true });
+  // AVERAGE-BANDWIDTH and BANDWIDTH. Default ON; one "Variant Bands" legend chip
+  // (sitting beside the avg / peak chips) toggles the whole set. On by default so
+  // the operator SEES, at a glance, where adjacent variants' [avg,peak] bands
+  // OVERLAP — the over-selection trap, a rung's avg sitting at/below the
+  // rung-below's peak (#811) — or leave GAPS. Fill is semi-transparent, so
+  // overlapping bands compound into a darker tint. Built BEFORE the avg/peak
+  // ladder lines so the bands draw BEHIND those rung lines.
+  appendBands(out, ladder, { hidden: false });
   // Mute the variant-line color so it doesn't out-shout the live
   // traces. Slate-400 reads at a glance but stays in the background.
   const AVG_COLOR = '#94a3b8';
@@ -530,11 +530,12 @@ const series = computed<SeriesSpec[]>(() => {
  *  session (the #165 union-sizing fix). */
 const compareOverlays = useCompareOverlays((sib) => {
   const specs = compareBandwidthSeries(sib);
-  // Each sibling's own variant-peak ladder, read from its OWN manifest via
-  // its events stream — so comparing two sessions whose manifests differ
-  // shows each one's distinct rung set. Hidden by default, tagged + dashed
-  // per session so the S1/S2 legend toggles it in lockstep (issue #812).
-  appendBands(specs, latestManifestVariants(sib.stream), { hidden: true, tag: sib.tag });
+  // Each sibling's own variant bands (on by default) + variant-peak ladder
+  // (hidden by default), read from its OWN manifest via its events stream — so
+  // comparing two sessions whose manifests differ shows each one's distinct rung
+  // set. Tagged + dashed per session so the S1/S2 legend toggles it in lockstep
+  // (issue #812).
+  appendBands(specs, latestManifestVariants(sib.stream), { hidden: false, tag: sib.tag });
   appendPeakLadder(specs, latestManifestVariants(sib.stream), {
     hidden: true,
     tag: sib.tag,
