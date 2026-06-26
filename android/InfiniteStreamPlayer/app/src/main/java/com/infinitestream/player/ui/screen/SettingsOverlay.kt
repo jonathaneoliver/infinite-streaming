@@ -387,7 +387,7 @@ private fun PickerList(
                     }
                     item {
                         PickerItem(
-                            label = "Local Proxy (route through go-proxy port)",
+                            label = "Local Proxy (on-device hop; iOS only — Android always routes via go-proxy)",
                             selected = state.localProxy,
                             onClick = { vm.setLocalProxy(!state.localProxy) },
                         )

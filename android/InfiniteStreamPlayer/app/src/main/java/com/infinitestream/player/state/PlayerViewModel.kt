@@ -834,10 +834,17 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         if (s.selectedContent.isEmpty()) return
         val manifest = if (s.protocol == Protocol.HLS) "master${s.segment.suffix}.m3u8"
                        else "manifest${s.segment.suffix}.mpd"
-        // Local Proxy ON → playback port (per-session go-proxy with failure
-        // injection). OFF → API/main nginx port (no proxy in front of the
-        // stream). Same /go-live route in both cases.
-        val port = if (s.localProxy) server.port else server.apiPort
+        // Session playback ALWAYS routes through the per-session go-proxy port
+        // (failure injection + traffic shaping live there). The `localProxy`
+        // flag only toggles the ON-DEVICE proxy hop — and Android has no
+        // on-device proxy (the iOS-only LocalHTTPProxy), so the flag is inert
+        // for routing here. It must NOT switch to the API/nginx port: doing so
+        // bypassed go-proxy entirely, so a `local_proxy=false` run (the
+        // characterization default) was silently UNSHAPED and the proxy never
+        // parsed the master playlist — leaving manifest_variants (and the whole
+        // bandwidth-chart variant ladder) empty for Android sessions (#862).
+        // Mirrors the iOS fix in PlayerViewModel.swift (playbackURL localProxy:true).
+        val port = server.port
         // Fresh play_id at every loadStream boundary (issue #280) so
         // go-proxy can scope its network log per play. reload() rotates the
         // id itself (so play_start carries the new id) and passes false here
