@@ -231,6 +231,15 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		t.Fatalf("LaunchToHome: %v", lerr)
 	}
 	sess.PlayerID = cfg.playerID
+	// Record the device-farm UDID this arm acquired so the harness can release
+	// EXACTLY this run's devices after the process exits (#853) — concurrent-run
+	// safe. O_APPEND keeps parallel arms' lines from interleaving.
+	if mf := strings.TrimSpace(os.Getenv("CHAR_DEVICE_MANIFEST")); mf != "" && sess.Device.UDID != "" {
+		if f, ferr := os.OpenFile(mf, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); ferr == nil {
+			fmt.Fprintln(f, sess.Device.UDID)
+			f.Close()
+		}
+	}
 	t.Cleanup(func() {
 		cleanCtx, c := context.WithTimeout(context.Background(), 30*time.Second)
 		defer c()
