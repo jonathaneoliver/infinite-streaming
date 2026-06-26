@@ -213,16 +213,19 @@ fun HomeScreen(
             Spacer(Modifier.height(Space.s7))
 
             val activeServer = state.activeServer
-            // LIVE row — flat thumbnail row over the whole pool (minus
-            // the featured clip, which is already showing as the hero
-            // band above). Tiles render with `active=false` so they
-            // skip the ExoPlayer build entirely and stay as static
-            // posters. The hero is the only video decoder in use on
-            // Home; the MTK shared-decoder flicker we saw with two
-            // concurrent decoders on the same URL goes away.
-            val tilePool = if (heroVideoActive) {
-                previewPool.filter { it.clipId != featured?.clipId }
-            } else previewPool
+            // LIVE row — flat thumbnail row over the whole pool. Tiles render
+            // with `active=false` so they skip the ExoPlayer build entirely and
+            // stay as static posters. The hero is the only video decoder in use
+            // on Home; the MTK shared-decoder flicker we saw with two concurrent
+            // decoders on the same URL goes away.
+            //
+            // We deliberately KEEP the featured (hero) clip in the tile row too
+            // (matches iOS), so the harness's deterministic home-tile-<clipId>
+            // lookup finds the pinned content even when it IS the hero — the
+            // common case, since the harness pins lastPlayed. Excluding it made
+            // the harness dead-poll 30s and fall back to continue-watching. The
+            // duplicate is decode-free (tiles are active=false static posters).
+            val tilePool = previewPool
             if (tilePool.isNotEmpty() && activeServer != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     StatusDot(color = Tokens.live)

@@ -25,6 +25,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
@@ -91,6 +93,13 @@ fun LivePreviewTile(
             .tvFocus(cornerRadius = Radius.card)
             .clip(RoundedCornerShape(Radius.card))
             .background(Tokens.bgSoft)
+            // Appium accessibility id on Android (content-desc): the harness's
+            // ResumePlaybackClip finds + clicks `home-tile-<clipId>` to start a
+            // DETERMINISTIC play of a specific clip. iOS exposes the same id
+            // (home-tile-\(item.clipId)); without it the harness dead-polls 30s
+            // and falls back to continue-watching. clipId is stable across the
+            // h264/hevc/av1 encodings of one clip.
+            .semantics { contentDescription = "home-tile-${content.clipId}" }
             .clickable { onClick(content) },
     ) {
         // Poster thumbnail underneath everything else. Renders for both
