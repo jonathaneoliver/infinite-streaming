@@ -126,6 +126,9 @@ export function compareBandwidthSeries(id: CompareSeriesIdentity): SeriesSpec[] 
       accessor: (p: PlayerRecord) => p.player_metrics?.video_bitrate_mbps ?? null,
       stepped: true,
       borderDash: dash,
+      // Drawn under "Displayed Variant" (next); the wider under-line shows as a
+      // halo when the two coincide. Mirrors the single-session BandwidthChart.
+      borderWidth: 4,
     },
     {
       // Decoded rung's published peak bitrate, matched by frame height —

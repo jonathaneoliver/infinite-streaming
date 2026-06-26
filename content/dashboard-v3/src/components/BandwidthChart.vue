@@ -69,7 +69,7 @@ interface ManifestVariantLite {
 /** Append one horizontal reference line per ladder rung at its published PEAK
  *  bandwidth (EXT-X-STREAM-INF BANDWIDTH), all collapsed under a single
  *  "Variant peak bandwidth" legend chip. `opts.hidden` starts the whole group
- *  off (compare mode) or on (single-session, the rate ABR keys on).
+ *  off by default (toggle on for the rung rate the ABR keys on).
  *
  *  When `opts.tag` is set (compare mode) the chip and each rung label carry
  *  the session's `(Sx)` so each session gets its OWN ladder built from its OWN
@@ -430,8 +430,10 @@ const baseSeries: SeriesSpec[] = [
  *  whole X range; sharing a `groupLegend` collapses them all to a
  *  single legend chip that toggles every line at once.
  *
- *  Defaults: peak ON (the rate ABR actually keys on — see abr-ladder
- *  standard), avg OFF (toggle on for the typical-body-bitrate reference). */
+ *  Defaults: bands ON (the avg↔peak shaded region — see appendBands), peak OFF
+ *  and avg OFF (toggle either on for the rung / typical-body-bitrate reference).
+ *  All three families are hoisted to the front of the dataset list by
+ *  MetricsLineChart so they lead the legend and draw behind the live traces. */
 const series = computed<SeriesSpec[]>(() => {
   // Compare mode: the active session shows the SAME canonical tagged set
   // (solid, `S<id>`) the siblings overlay — not its full single-session
@@ -439,12 +441,12 @@ const series = computed<SeriesSpec[]>(() => {
   if (compareSelf.value) {
     const self = compareSelf.value;
     const compareOut = compareBandwidthSeries(self);
-    // Active session's own variant-peak ladder — hidden by default, tagged
-    // `(Sx)` and styled with the session dash so it reads as this session's
-    // rungs. Each sibling builds its OWN ladder from its OWN manifest in the
-    // useCompareOverlays closure below, so manifests that differ across the
-    // compared sessions show distinct rung sets (issue #812).
-    appendBands(compareOut, variants.value, { hidden: true, tag: self.tag });
+    // Active session's own variant bands (ON by default) + peak ladder (OFF),
+    // tagged `(Sx)` and styled with the session dash so they read as this
+    // session's rungs. Each sibling builds its OWN ladder from its OWN manifest
+    // in the useCompareOverlays closure below, so manifests that differ across
+    // the compared sessions show distinct rung sets (issue #812).
+    appendBands(compareOut, variants.value, { hidden: false, tag: self.tag });
     appendPeakLadder(compareOut, variants.value, { hidden: true, tag: self.tag, dash: self.dash });
     return compareOut;
   }
@@ -464,6 +466,10 @@ const series = computed<SeriesSpec[]>(() => {
       return nearestVariantByBitrate(ladder, vb)?.peakMbps ?? vb;
     },
     stepped: true,
+    // Drawn BEFORE (under) "Displayed Variant"; the two coincide whenever ABR is
+    // steady. The wider under-line peeks out as a red halo around the purple
+    // Displayed line so the operator sees both. See SeriesSpec.borderWidth.
+    borderWidth: 4,
   });
   // "Displayed Variant": the same value that drives the player-state
   // "Video Res" line (player_metrics.video_resolution = the DECODED frame
@@ -487,14 +493,16 @@ const series = computed<SeriesSpec[]>(() => {
     stepped: true,
   });
   // Variant Bands — a light shaded region between each variant's
-  // AVERAGE-BANDWIDTH and BANDWIDTH. Default OFF; one "Variant Bands" legend chip
-  // (sitting beside the avg / peak chips) toggles the whole set. Turn it on
-  // (alongside the peak + avg ladders) to SEE, at a glance, where adjacent
-  // variants' [avg,peak] bands OVERLAP — the over-selection trap, a rung's avg
-  // sitting at/below the rung-below's peak (#811) — or leave GAPS. Fill is
-  // semi-transparent, so overlapping bands compound into a darker tint. Built
-  // BEFORE the avg/peak ladder lines so the bands draw BEHIND those rung lines.
-  appendBands(out, ladder, { hidden: true });
+  // AVERAGE-BANDWIDTH and BANDWIDTH. Default ON; one "Variant Bands" legend chip
+  // (sitting beside the avg / peak chips) toggles the whole set. It shows, at a
+  // glance, where adjacent variants' [avg,peak] bands OVERLAP — the
+  // over-selection trap, a rung's avg sitting at/below the rung-below's peak
+  // (#811) — or leave GAPS. Fill is semi-transparent, so overlapping bands
+  // compound into a darker tint. Built BEFORE the avg/peak ladder lines so the
+  // bands draw BEHIND those rung lines; MetricsLineChart hoists the whole
+  // variant family to the front of the dataset list so it also draws behind the
+  // live traces and leads the legend.
+  appendBands(out, ladder, { hidden: false });
   // Mute the variant-line color so it doesn't out-shout the live
   // traces. Slate-400 reads at a glance but stays in the background.
   const AVG_COLOR = '#94a3b8';
@@ -515,9 +523,9 @@ const series = computed<SeriesSpec[]>(() => {
       });
     }
   }
-  // Variant peak ladder — default ON in single-session (the rung rate ABR
-  // keys on). Same builder feeds the default-OFF compare-mode ladders above.
-  appendPeakLadder(out, ladder, { hidden: false });
+  // Variant peak ladder — default OFF (toggle on for the rung rate ABR keys
+  // on). Same builder feeds the compare-mode ladders above.
+  appendPeakLadder(out, ladder, { hidden: true });
   return out;
 });
 
@@ -530,11 +538,11 @@ const series = computed<SeriesSpec[]>(() => {
  *  session (the #165 union-sizing fix). */
 const compareOverlays = useCompareOverlays((sib) => {
   const specs = compareBandwidthSeries(sib);
-  // Each sibling's own variant-peak ladder, read from its OWN manifest via
-  // its events stream — so comparing two sessions whose manifests differ
-  // shows each one's distinct rung set. Hidden by default, tagged + dashed
+  // Each sibling's own variant bands (ON by default) + peak ladder (OFF), read
+  // from its OWN manifest via its events stream — so comparing two sessions
+  // whose manifests differ shows each one's distinct rung set. Tagged + dashed
   // per session so the S1/S2 legend toggles it in lockstep (issue #812).
-  appendBands(specs, latestManifestVariants(sib.stream), { hidden: true, tag: sib.tag });
+  appendBands(specs, latestManifestVariants(sib.stream), { hidden: false, tag: sib.tag });
   appendPeakLadder(specs, latestManifestVariants(sib.stream), {
     hidden: true,
     tag: sib.tag,
