@@ -1069,6 +1069,12 @@ func appiumCapabilities(d Device, bundleID string, df bool, platformVersion stri
 		if d.Label != "" {
 			caps["appium:deviceName"] = d.Label
 		}
+	} else if d.UDID != "" && (d.Platform == PlatformIPhone || d.Platform == PlatformIPad) {
+		// Real iOS hardware in a (mixed) DF fleet: platformVersion is left
+		// unconstrained for real devices, so without a UDID the farm could hand
+		// this arm a free sim. Pin the UDID so it allocates THIS iphone. Sims
+		// stay unpinned so the farm picks freely from the pool.
+		caps["appium:udid"] = d.UDID
 	}
 	if df && platformVersion != "" {
 		caps["appium:platformVersion"] = platformVersion

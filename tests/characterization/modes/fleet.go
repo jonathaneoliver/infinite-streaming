@@ -104,7 +104,22 @@ func resolveFleetDeviceFarm(t *testing.T, p runner.Platform) []runner.Device {
 	}
 	fleet := make([]runner.Device, n)
 	for i := range fleet {
-		fleet[i] = runner.Device{Platform: p, FleetIndex: i}
+		// Per-arm platform (mixed-platform fleets): each arm's device is
+		// allocated from the farm by ITS own platform capability, falling back to
+		// the fleet primary p. So an isim master + a real-iphone slave can share
+		// one group/pattern.
+		ap := runner.Platform(envOr(fmt.Sprintf("CHAR_ARM_%d_PLATFORM", i), string(p)))
+		dev := runner.Device{Platform: ap, FleetIndex: i}
+		// A real iOS device isn't matchable by platformVersion (the farm leaves
+		// it unconstrained), so it could be handed a free sim. Pin its hardware
+		// UDID — supplied by the operator via CHARACTERIZATION_DEVICE_UDID — so
+		// the iphone arm gets THE iphone. Sims stay unpinned (farm picks freely).
+		if ap == runner.PlatformIPhone || ap == runner.PlatformIPad {
+			if u := strings.TrimSpace(os.Getenv("CHARACTERIZATION_DEVICE_UDID")); u != "" {
+				dev.UDID = u
+			}
+		}
+		fleet[i] = dev
 	}
 	return fleet
 }
