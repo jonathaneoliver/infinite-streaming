@@ -47,6 +47,13 @@ export interface SeriesSpec {
   hidden?: boolean;
   /** Chart.js `borderDash` — e.g. `[4, 4]` for a dashed line. */
   borderDash?: number[];
+  /** Line thickness in px (default 2). Set wider on a series that tends to be
+   *  COVERED by another line drawn on top of it (e.g. Fetching Variant sitting
+   *  exactly under Displayed Variant when ABR is steady): the wider under-line
+   *  peeks out as a coloured halo on both sides of the narrower top line, so the
+   *  operator can see both are present. Ignored for band (`fillToValue`) series,
+   *  which are borderless fills. */
+  borderWidth?: number;
   /** Collapse this series into a group-shared legend entry. All series
    *  sharing the same `groupLegend` string appear under a single
    *  legend item whose label is the group name; clicking it toggles
@@ -354,12 +361,23 @@ function makeDsObj(
     tension: 0,
     stepped: !!s.stepped,
     pointRadius: 0,
-    borderWidth: band ? 0 : 2,
+    borderWidth: band ? 0 : (s.borderWidth ?? 2),
     borderDash: s.borderDash ?? [],
     fill: band ? { value: s.fillToValue } : false,
     spanGaps,
     yAxisID: s.axis === 'y2' ? 'y2' : 'y',
     hidden: !!s.hidden,
+    // Chart.js draws + legends + tooltips in ASCENDING `order` (NOT raw array
+    // order — the legend reads `_getSortedDatasetMetas()`, which sorts by this).
+    // Grouped "variant ladder" series (Bands / avg / peak — the only grouped
+    // series in the app) get order 0 so they lead the legend AND draw BEHIND the
+    // live traces (order 1), regardless of which session contributed them. #486.
+    order: variantOrder(s),
+    // The series' OWN intended hidden state — overwritten by the resolve-aware
+    // build paths with the persisted-toggle-or-default value. applySessionVisibility
+    // reads it so a VISIBLE compare-mode session no longer force-shows a
+    // hidden-by-default tagged series (e.g. each session's Variant peak ladder). #579.
+    _ownHidden: !!s.hidden,
     _groupLegend: s.groupLegend ?? null,
     _sessionTag: s.sessionTag ?? null,
     _excludeFromAutoScale: !!s.excludeFromAutoScale,
@@ -399,13 +417,18 @@ function buildPrimaryDatasetObjs(): any[] {
       const band = typeof s.fillToValue === 'number' && Number.isFinite(s.fillToValue);
       prev.borderColor = band ? 'transparent' : s.color;
       prev.backgroundColor = s.color + (band ? '33' : '22');
-      prev.borderWidth = band ? 0 : 2;
+      prev.borderWidth = band ? 0 : (s.borderWidth ?? 2);
+      // The hover-highlight base is re-derived from this width on the next
+      // hover; drop the stale stash so a width change here takes effect.
+      prev._origBorderWidth = null;
       prev.fill = band ? { value: s.fillToValue } : false;
       prev.stepped = !!s.stepped;
       prev.borderDash = s.borderDash ?? [];
       prev.yAxisID = s.axis === 'y2' ? 'y2' : 'y';
       prev.spanGaps = true;
+      prev.order = variantOrder(s); // variant ladder behind + first in legend
       prev.hidden = legendVis.resolveHidden(s); // persisted toggle survives a new play_id
+      prev._ownHidden = prev.hidden;
       prev._groupLegend = s.groupLegend ?? null;
       prev._sessionTag = s.sessionTag ?? null;
       prev._excludeFromAutoScale = !!s.excludeFromAutoScale;
@@ -416,6 +439,7 @@ function buildPrimaryDatasetObjs(): any[] {
       dataset[i] = data;
       const obj = makeDsObj(dsKey, s, data, true);
       obj.hidden = legendVis.resolveHidden(s); // persisted toggle survives a new play_id
+      obj._ownHidden = obj.hidden;
       out.push(obj);
     }
   }
@@ -453,10 +477,18 @@ function buildOverlayDatasetObjs(): any[] {
       if (prev) {
         prev.borderColor = s.color;
         prev.backgroundColor = s.color + '22';
+        prev.borderWidth = typeof s.fillToValue === 'number' ? 0 : (s.borderWidth ?? 2);
+        prev._origBorderWidth = null;
         prev.stepped = !!s.stepped;
         prev.borderDash = s.borderDash ?? [];
         prev.yAxisID = s.axis === 'y2' ? 'y2' : 'y';
+        prev.order = variantOrder(s); // variant ladder behind + first in legend
         prev.spanGaps = false;
+        // Sibling series respect their own hidden default (+ persisted toggle) so
+        // e.g. a sibling's Variant peak ladder starts OFF even though its session
+        // is visible. applySessionVisibility reads _ownHidden, not just the tag.
+        prev.hidden = legendVis.resolveHidden(s);
+        prev._ownHidden = prev.hidden;
         prev._groupLegend = s.groupLegend ?? null;
         prev._sessionTag = s.sessionTag ?? null;
         prev._excludeFromAutoScale = !!s.excludeFromAutoScale;
@@ -465,7 +497,10 @@ function buildOverlayDatasetObjs(): any[] {
       } else {
         const data = rt.datasets[i] ?? [];
         rt.datasets[i] = data;
-        out.push(makeDsObj(dsKey, s, data, false));
+        const obj = makeDsObj(dsKey, s, data, false);
+        obj.hidden = legendVis.resolveHidden(s);
+        obj._ownHidden = obj.hidden;
+        out.push(obj);
         if (rtExisted) addedSeries = true;
       }
     }
@@ -486,10 +521,21 @@ function buildOverlayDatasetObjs(): any[] {
   return out;
 }
 
-/** Recompose `chart.data.datasets` = [primary…, overlay…] from the
- *  current `series` + `overlays` props. The single owner of the dataset
- *  list; both the series-prop watcher and the overlays watcher route
- *  through here so the two halves never clobber each other. */
+/** Chart.js draw / legend / tooltip order: grouped "variant ladder" series
+ *  (Bands / avg / peak — the only grouped series in the app) sort to order 0 so
+ *  they lead the legend and draw BEHIND the live traces (order 1), no matter
+ *  which session contributed them. The legend's stock `generateLabels` reads
+ *  `_getSortedDatasetMetas()` (sorted by `order`), so the raw datasets[] array
+ *  order is irrelevant — this property is the only reliable lever. */
+function variantOrder(s: SeriesSpec): number {
+  return s.groupLegend ? 0 : 1;
+}
+
+/** Recompose `chart.data.datasets` = [primary…, overlay…] from the current
+ *  `series` + `overlays` props. The single owner of the dataset list; both the
+ *  series-prop watcher and the overlays watcher route through here so the two
+ *  halves never clobber each other. Draw/legend order is driven by each
+ *  dataset's `order` (variantOrder), not array position. */
 function rebuildAllDatasets() {
   if (!chart || !chart.data) return;
   const primary = buildPrimaryDatasetObjs();
@@ -512,7 +558,10 @@ function applySessionVisibility(doUpdate = true) {
   let changed = false;
   chart.data.datasets.forEach((ds: any, idx: number) => {
     if (!ds._sessionTag) return;
-    const shouldShow = !hidden.has(ds._sessionTag);
+    // Visible iff the session is shown AND the series isn't hidden by its own
+    // default / persisted toggle — so a shown session no longer force-reveals a
+    // hidden-by-default tagged series (the per-session Variant peak ladder).
+    const shouldShow = !hidden.has(ds._sessionTag) && !ds._ownHidden;
     if (chart.isDatasetVisible(idx) !== shouldShow) {
       chart.setDatasetVisibility(idx, shouldShow);
       changed = true;
@@ -808,6 +857,7 @@ function createChartInstance(Chart: any): any {
             if (!grp) {
               const nowVisible = !ci.isDatasetVisible(item.datasetIndex);
               ci.setDatasetVisibility(item.datasetIndex, nowVisible);
+              if (ds) ds._ownHidden = !nowVisible; // keep applySessionVisibility in sync
               // Persist so a new play_id doesn't reset this toggle.
               legendVis.setHidden({ label: ds?.label ?? '', groupLegend: null }, !nowVisible);
               ci.update();
@@ -818,7 +868,10 @@ function createChartInstance(Chart: any): any {
                 d._groupLegend === grp && ci.isDatasetVisible(idx),
             );
             ci.data.datasets.forEach((d: any, idx: number) => {
-              if (d._groupLegend === grp) ci.setDatasetVisibility(idx, !anyVisible);
+              if (d._groupLegend === grp) {
+                ci.setDatasetVisibility(idx, !anyVisible);
+                d._ownHidden = anyVisible; // keep applySessionVisibility in sync
+              }
             });
             // Persist the group's new hidden state (hidden when it was visible).
             legendVis.setHidden({ groupLegend: grp, label: '' }, anyVisible);
@@ -931,6 +984,19 @@ function createChartInstance(Chart: any): any {
           },
         },
         tooltip: {
+          // 'x' (not the interaction-wide 'nearest'): list EVERY visible
+          // series' value at the hovered time, so two lines that sit exactly on
+          // top of each other both appear — equal values reveal the overlap the
+          // eye can't see (e.g. Fetching Variant == Displayed Variant when ABR
+          // is steady). Datasets are heterogeneous in length (variant rungs are
+          // 2-point spans, live traces are thousands), so 'x' — nearest point
+          // per dataset — is correct where 'index' would misalign.
+          mode: 'x',
+          intersect: false,
+          // Drop the band FILL series (borderless avg↔peak shaded regions):
+          // their value is just the band's peak edge, meaningless as a readout
+          // and pure clutter in a now-longer multi-series tooltip.
+          filter: (item: any) => !(item?.dataset && item.dataset.fill),
           callbacks: {
             title: (items: any[]) => fmtTickHMSms(items[0]?.parsed?.x ?? 0),
             label: (ctx: any) => {
