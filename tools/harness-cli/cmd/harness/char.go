@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -11,7 +12,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -247,8 +251,43 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 	// Fleet bring-up (N parallel WDA builds + the shared home barrier) is slower
 	// than a single launch, so budget more headroom than the sequential probe.
 	timeout := time.Duration(windowS+600) * time.Second
-	cmd := exec.Command("go", "test", "./modes", "-run", "TestCharMatrixFleet", "-count=1",
-		"-timeout", fmt.Sprintf("%ds", int(timeout.Seconds())), "-v")
+
+	// Pre-compile the fleet test to a standalone binary and run THAT directly,
+	// instead of `go test ./modes`. The process we Start() (and signal on a
+	// graceful stop) must BE the test binary: `go test` runs the binary as a
+	// grandchild in its own process group, so neither a direct signal to go test
+	// nor a group-signal reaches the binary where interruptContext lives — the
+	// binary (and its appium session) get orphaned on interrupt (#853, verified
+	// across a 5-cycle stress test). Running the compiled binary directly makes
+	// cmd.Process the test binary, so SIGTERM lands straight on it →
+	// interruptContext → t.Cleanup → appium session release.
+	binF, err := os.CreateTemp("", "char-fleet-*.test")
+	if err != nil {
+		return fmt.Errorf("fleet test tempfile: %w", err)
+	}
+	bin := binF.Name()
+	binF.Close()
+	defer os.Remove(bin)
+	build := exec.Command("go", "test", "-c", "-o", bin, "./modes")
+	build.Dir = charDir
+	build.Stdout = os.Stderr
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		return fmt.Errorf("compile TestCharMatrixFleet (dir=%s): %w", charDir, err)
+	}
+
+	// Each arm appends the device-farm UDID it acquired to this manifest, so the
+	// post-run reap releases EXACTLY the devices THIS run used — concurrent-run
+	// safe, never another run's. The farm has no release-by-session/tag API
+	// (unblock is per-UDID), and the test is what knows its own UDIDs.
+	manifest := ""
+	if mf, err := os.CreateTemp("", "char-fleet-devices-*.txt"); err == nil {
+		manifest = mf.Name()
+		mf.Close()
+		defer os.Remove(manifest)
+	}
+	cmd := exec.Command(bin, "-test.run=TestCharMatrixFleet", "-test.count=1",
+		fmt.Sprintf("-test.timeout=%ds", int(timeout.Seconds())), "-test.v=true")
 	cmd.Dir = charDir
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -259,12 +298,137 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 		"CHAR_SWEEP_PLATFORM="+platform,
 		"CHAR_FLEET_COUNT="+strconv.Itoa(n),
 		"CHAR_SWEEP_DURATION_S="+strconv.Itoa(windowS),
+		"CHAR_DEVICE_MANIFEST="+manifest,
 	)
 	cmd.Env = append(cmd.Env, armEnv...)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("go test TestCharMatrixFleet (dir=%s): %w", charDir, err)
+
+	// Graceful interrupt (#853): forward SIGINT/SIGTERM straight to the test
+	// binary (now our direct child) and WAIT for it to drain rather than letting
+	// the Go runtime kill the CLI first. interruptContext cancels the play window
+	// and t.Cleanup releases the appium session; without this the CLI would die
+	// first and orphan the session, blocking the next run. SIGKILL is uncatchable,
+	// so a hard kill still needs the appium-restart / startup-sweep backstop.
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("run TestCharMatrixFleet (dir=%s): start: %w", charDir, err)
+	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		for range sigCh {
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(syscall.SIGTERM) // straight to the test binary
+			}
+		}
+	}()
+	werr := cmd.Wait()
+	// Release any device the appium device-farm still holds "busy" now that the
+	// test process has exited. On a forced stop the farm doesn't clear the device
+	// when we delete the session, AND it won't accept the release while the test
+	// is alive — so reap here, post-exit, where its unblock API takes effect.
+	// Without this, devices leak "busy" across runs until create-session hangs
+	// to its 180s timeout (#853). Scoped to THIS run's devices via the manifest.
+	reapDeviceFarm(deviceFarmBaseURL(), manifestUDIDs(manifest))
+	if werr != nil {
+		return fmt.Errorf("go test TestCharMatrixFleet (dir=%s): %w", charDir, werr)
 	}
 	return nil
+}
+
+// deviceFarmBaseURL is the appium server hosting the device-farm plugin.
+func deviceFarmBaseURL() string {
+	if v := strings.TrimSpace(os.Getenv("CHAR_APPIUM_URL")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return "http://localhost:4723"
+}
+
+type farmDevice struct {
+	UDID string `json:"udid"`
+	Host string `json:"host"`
+	Busy bool   `json:"busy"`
+}
+
+// reapDeviceFarm poll-unblocks the device-farm devices THIS run acquired (udids,
+// from the per-run manifest the test wrote) until they read free or a bound
+// elapses. Must be called AFTER the test process exits: the farm only releases
+// once the session's connection is gone. Scoped to the run's own devices, so
+// concurrent runs never release each other's. Best-effort.
+func reapDeviceFarm(base string, udids []string) {
+	if len(udids) == 0 {
+		return
+	}
+	want := make(map[string]bool, len(udids))
+	for _, u := range udids {
+		want[strings.ToUpper(strings.TrimSpace(u))] = true
+	}
+	client := &http.Client{Timeout: 6 * time.Second}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var mine []farmDevice
+		for _, d := range busyFarmDevices(client, base) {
+			if want[strings.ToUpper(d.UDID)] {
+				mine = append(mine, d)
+			}
+		}
+		if len(mine) == 0 {
+			return
+		}
+		for _, d := range mine {
+			body, _ := json.Marshal(map[string]string{"udid": d.UDID, "host": d.Host})
+			req, err := http.NewRequest(http.MethodPost, base+"/device-farm/api/unblock", bytes.NewReader(body))
+			if err != nil {
+				continue
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if resp, derr := client.Do(req); derr == nil {
+				resp.Body.Close()
+			}
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// manifestUDIDs reads the device-farm UDIDs the test recorded for this run (one
+// per line). Empty/missing → nil, so the reap is a no-op.
+func manifestUDIDs(path string) []string {
+	if path == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if u := strings.TrimSpace(line); u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+func busyFarmDevices(client *http.Client, base string) []farmDevice {
+	resp, err := client.Get(base + "/device-farm/api/device")
+	if err != nil {
+		return nil
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var all []farmDevice
+	if json.Unmarshal(raw, &all) != nil {
+		return nil
+	}
+	var busy []farmDevice
+	for _, d := range all {
+		if d.Busy {
+			busy = append(busy, d)
+		}
+	}
+	return busy
 }
 
 // runArmSequential bootstraps, drives, and measures one arm. Every failure is
