@@ -164,6 +164,15 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	if bars != nil {
 		setupTimeout = 12 * time.Minute
 	}
+	// A real iOS device cold-builds WDA via xcodebuild (~190s observed) BEFORE the
+	// app launches — over the 3-min single-device window. Give it room so the
+	// first (cold) run doesn't fail the create; later runs reuse the build and are
+	// fast. Aligns with the launcher's 300s HTTP ceiling + 240s wdaLaunchTimeout.
+	if dev.Platform == runner.PlatformIPhone || dev.Platform == runner.PlatformIPad {
+		if setupTimeout < 8*time.Minute {
+			setupTimeout = 8 * time.Minute
+		}
+	}
 	setupCtx, cancel := context.WithTimeout(context.Background(), setupTimeout)
 	defer cancel()
 
