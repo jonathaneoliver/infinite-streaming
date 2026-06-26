@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -63,7 +64,13 @@ type AppiumLauncher struct {
 	// that receive a UDID-less Device resolve the session through this. Empty in
 	// the non-DF path (the caller's Device already carries its UDID).
 	allocatedUDID string
-	hc            *http.Client
+	// farmLockUDID/Host: a real iOS device on the hybrid path is driven OFF the
+	// farm, so nothing serializes the one physical phone across parallel runs. We
+	// /block it in the farm as a cross-run mutex and release on Close/discardSession.
+	// Empty when no lock is held. See farmlock.go.
+	farmLockUDID string
+	farmLockHost string
+	hc           *http.Client
 }
 
 // NewAppiumLauncher returns a launcher pointing at the configured server.
@@ -78,11 +85,15 @@ func NewAppiumLauncher() *AppiumLauncher {
 		closeBeat:        800 * time.Millisecond,
 		BundleIDs:        cloneBundleIDs(),
 		sessions:         map[string]string{},
-		// 180s, not 60s: a session-create cold-builds WDA on the sim, and an
-		// N-sim fleet queues N of those on one Appium server — the later ones
-		// blow past 60s. doRequest passes the caller's ctx (NewRequestWithContext)
-		// so per-call deadlines still apply; this is just the backstop ceiling.
-		hc: &http.Client{Timeout: 180 * time.Second},
+		// 300s, not 60s: a session-create cold-builds WDA, and an N-sim fleet
+		// queues N of those on one Appium server — the later ones blow past 60s.
+		// A REAL iOS device cold-builds WDA via xcodebuild (~190s observed) then
+		// polls /status up to wdaLaunchTimeout (240s), so the ceiling must exceed
+		// that or the create is killed client-side mid-build (the real-iphone
+		// hybrid path hit exactly this at 180s). doRequest passes the caller's ctx
+		// (NewRequestWithContext) so per-call deadlines still apply; this is just
+		// the backstop ceiling.
+		hc: &http.Client{Timeout: 300 * time.Second},
 	}
 }
 
@@ -273,10 +284,49 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 	if bundleID == "" {
 		return nil, fmt.Errorf("appium launcher: no bundle id for platform %s", d.Platform)
 	}
+	// Hybrid real-iOS routing. The device-farm plugin can't bring WDA up on a
+	// real iOS 17+/26 device — its preinstalled-WDA launch needs a go-ios /
+	// RemoteXPC tunnel the farm never provisions (the runwda arm passes a dynamic
+	// --tunnel-info-port it doesn't serve). So drive real hardware through a PLAIN
+	// Appium (no device-farm plugin) on the xcodebuild WDA path instead, even
+	// while the farm stays on for the sims in the same fleet. The arm still binds
+	// to the same proxy group/master — grouping is by player_id/group_id AT THE
+	// PROXY, independent of which Appium server puppeteers the app — so a mixed
+	// isim-master + real-iphone-slave run shares one pattern. Set the URL before
+	// healthCheck so we probe the server we'll actually drive.
+	realIOS := isRealIOSHardware(d.Platform)
+	if realIOS {
+		if u := directIOSAppiumURL(a.URL); u != a.URL {
+			a.URL = u
+		}
+		// Cross-run mutex on the physical phone: it's driven off-farm, so two
+		// parallel runs would otherwise grab it at once. Borrow the farm's block
+		// flag — wait until it's free, then /block it (released on teardown). Only
+		// when the farm is up (the lock server); acquireFarmLock no-ops if the farm
+		// is unreachable or doesn't list the device, so a lone run never wedges.
+		if DeviceFarmEnabled() {
+			host, lerr := acquireFarmLock(ctx, d.UDID)
+			if lerr != nil {
+				return nil, fmt.Errorf("acquire %s via device farm: %w", d.UDID, lerr)
+			}
+			a.mu.Lock()
+			a.farmLockUDID, a.farmLockHost = d.UDID, host
+			a.mu.Unlock()
+		}
+	}
+	// Release the farm lock if we bail out before returning a live Session — the
+	// happy path keeps it (Close releases it at test end). Post-launch failures go
+	// through discardSession, which also releases. Idempotent either way.
+	launched := false
+	defer func() {
+		if !launched {
+			a.releaseFarmLockIfHeld()
+		}
+	}()
 	if err := a.healthCheck(ctx); err != nil {
 		return nil, fmt.Errorf("appium server not reachable at %s: %w (start with `appium`, or unset LAUNCH_MODE=appium)", a.URL, err)
 	}
-	df := DeviceFarmEnabled()
+	df := DeviceFarmEnabled() && !realIOS
 	var platformVersion string
 	if df {
 		platformVersion = dfPlatformVersion(ctx, d.Platform)
@@ -337,6 +387,7 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 		_ = a.tapByAccessibilityID(ctx, sessID, "playback-back-button")
 		time.Sleep(800 * time.Millisecond)
 	}
+	launched = true // keep the farm lock; Close releases it at test end
 	return &Session{Device: d, Launcher: a}, nil
 }
 
@@ -614,8 +665,20 @@ func (a *AppiumLauncher) Screenshot(ctx context.Context, d Device, path string) 
 	return path, nil
 }
 
+// releaseFarmLockIfHeld clears the farm block this launcher set for a real iOS
+// device (no-op when none is held). Idempotent — every teardown path (Close,
+// discardSession, the launch-failure defer) can call it safely.
+func (a *AppiumLauncher) releaseFarmLockIfHeld() {
+	a.mu.Lock()
+	udid, host := a.farmLockUDID, a.farmLockHost
+	a.farmLockUDID, a.farmLockHost = "", ""
+	a.mu.Unlock()
+	releaseFarmLock(udid, host)
+}
+
 // Close tears down every Appium session this launcher opened.
 func (a *AppiumLauncher) Close() error {
+	a.releaseFarmLockIfHeld()
 	a.mu.Lock()
 	sessions := make(map[string]string, len(a.sessions))
 	for k, v := range a.sessions {
@@ -965,6 +1028,7 @@ func (a *AppiumLauncher) sessionID(d Device) string {
 // context: the common trigger is a heartbeat timeout, where the caller's ctx is
 // already expired and would make the DELETE fail instantly.
 func (a *AppiumLauncher) discardSession(d Device) {
+	a.releaseFarmLockIfHeld()
 	a.mu.Lock()
 	sessID := a.sessions[d.UDID]
 	if sessID == "" && a.allocatedUDID != "" {
@@ -1096,6 +1160,23 @@ func appiumCapabilities(d Device, bundleID string, df bool, platformVersion stri
 			if os.Getenv("CHAR_IOS_PREBUILT_WDA") == "1" {
 				caps["appium:usePrebuiltWDA"] = true
 			}
+			// Sign WDA for a team that provisions THIS device. Appium's default
+			// WDA (com.facebook.*) + automatic signing has no team and fails to
+			// install/run on a real device; supplying the team + a WDA bundle id
+			// in our own namespace lets xcodebuild auto-provision (mint/refresh the
+			// dev cert, register the device) and run WDA as a TEST so its HTTP
+			// server comes up — the hybrid path that's proven to work on iOS 26.
+			// Gated on CHAR_IOS_XCODE_ORG_ID: unset ⇒ Appium's defaults (prior
+			// behavior). Values from the env or the nearest .env.
+			applyIOSSigningCaps(caps)
+			// Real-device WDA cold-builds via xcodebuild on a first/changed run;
+			// Appium's default 60s /status poll times out before a fresh build +
+			// launch finishes (~50-150s observed). Give it headroom so the cold
+			// path doesn't fail the launch. Overridable via
+			// CHAR_IOS_WDA_LAUNCH_TIMEOUT_MS; default 240000 (4 min).
+			to := iosWDALaunchTimeoutMs()
+			caps["appium:wdaLaunchTimeout"] = to
+			caps["appium:wdaConnectionTimeout"] = to
 		}
 	case PlatformIPadSim:
 		caps["platformName"] = "iOS"
@@ -1186,4 +1267,74 @@ func sharedSimWDADerivedDataPath() string {
 		base = filepath.Join(home, ".appium-wda-deriveddata")
 	}
 	return filepath.Join(base, "wda-sim-shared")
+}
+
+// isRealIOSHardware reports whether p is a wired/real iOS device (iPhone/iPad)
+// rather than a simulator. Real hardware takes the hybrid direct-Appium +
+// xcodebuild-WDA path; sims go through the device farm. PlatformIPadSim is the
+// simulator platform and is deliberately excluded.
+func isRealIOSHardware(p Platform) bool {
+	return p == PlatformIPhone || p == PlatformIPad
+}
+
+// directIOSAppiumURL returns the Appium base URL to drive a REAL iOS device on
+// the hybrid path. Resolution: CHAR_IOS_DIRECT_APPIUM_URL wins; else, when the
+// device farm is on (so the default :4723 is the farm-plugin server, which can't
+// drive a real device), fall back to the conventional plain-Appium port :4799;
+// else (farm off) keep the launcher's current URL — the operator has already
+// pointed APPIUM_URL at a plain Appium.
+func directIOSAppiumURL(current string) string {
+	if u := strings.TrimSpace(os.Getenv("CHAR_IOS_DIRECT_APPIUM_URL")); u != "" {
+		return u
+	}
+	if DeviceFarmEnabled() {
+		return "http://localhost:4799"
+	}
+	return current
+}
+
+// applyIOSSigningCaps adds the real-device WDA signing capabilities to caps when
+// CHAR_IOS_XCODE_ORG_ID is set (process env or nearest .env). xcodeOrgId +
+// xcodeSigningId drive xcodebuild's automatic signing (auto-provisioning the dev
+// cert + registering the device); updatedWDABundleId puts WDA in a bundle-id
+// namespace the team's wildcard profile covers; allowProvisioningDeviceRegistration
+// lets a not-yet-registered device be added. Unset org ⇒ no-op (Appium defaults).
+func applyIOSSigningCaps(caps map[string]any) {
+	org := envOrDotenv("CHAR_IOS_XCODE_ORG_ID")
+	if org == "" {
+		return
+	}
+	caps["appium:xcodeOrgId"] = org
+	signing := envOrDotenv("CHAR_IOS_XCODE_SIGNING_ID")
+	if signing == "" {
+		signing = "Apple Development"
+	}
+	caps["appium:xcodeSigningId"] = signing
+	if wb := envOrDotenv("CHAR_IOS_WDA_BUNDLE_ID"); wb != "" {
+		caps["appium:updatedWDABundleId"] = wb
+	}
+	caps["appium:allowProvisioningDeviceRegistration"] = true
+}
+
+// envOrDotenv reads KEY from the process environment, falling back to the
+// nearest .env file — the same resolution defaultContentClip uses for config
+// that lives in .env rather than the source.
+func envOrDotenv(key string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return strings.TrimSpace(dotenvValue(key))
+}
+
+// iosWDALaunchTimeoutMs is the wdaLaunchTimeout/wdaConnectionTimeout (ms) for a
+// real iOS device. Default 240000 (4 min) — a cold xcodebuild WDA build + launch
+// overruns Appium's 60s default. Overridable via CHAR_IOS_WDA_LAUNCH_TIMEOUT_MS;
+// a non-numeric/empty/non-positive value falls back to the default.
+func iosWDALaunchTimeoutMs() int {
+	if v := strings.TrimSpace(os.Getenv("CHAR_IOS_WDA_LAUNCH_TIMEOUT_MS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 240000
 }

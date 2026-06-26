@@ -132,15 +132,12 @@ func cmdCharMatrix(client *api.Client, args []string, asJSON bool) error {
 // recorded with its error and left out of the fleet env (that fleet index then
 // skips), so one bad arm doesn't sink the run.
 func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir string, durationOverride int, group string) ([]charmatrix.ArmResult, error) {
-	// The fleet draws from a single platform's device pool (one arm per device),
-	// so a parallel matrix must be single-platform. Split by platform or run
-	// sequential otherwise.
+	// The fleet allocates one device PER ARM from the device-farm by that arm's
+	// platform capability, so a parallel matrix MAY mix platforms — e.g. an
+	// ipad-sim master + a real iPhone slave sharing one group/pattern. Each arm's
+	// platform rides in CHAR_ARM_<i>_PLATFORM (emitted below); arms[0]'s is the
+	// primary (CHAR_SWEEP_PLATFORM) the fleet resolver falls back to.
 	platform := arms[0].Platform
-	for _, a := range arms {
-		if a.Platform != platform {
-			return nil, fmt.Errorf("parallel matrices require one platform across arms (got %q and %q) — split by platform or use parallel:false", platform, a.Platform)
-		}
-	}
 
 	// For a grouped pattern run, ONE master arms the pattern; the proxy propagates
 	// it to the group's slaves (NETSHAPE group pattern propagation), so every arm

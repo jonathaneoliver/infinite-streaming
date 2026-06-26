@@ -164,6 +164,15 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	if bars != nil {
 		setupTimeout = 12 * time.Minute
 	}
+	// A real iOS device cold-builds WDA via xcodebuild (~190s observed) BEFORE the
+	// app launches — over the 3-min single-device window. Give it room so the
+	// first (cold) run doesn't fail the create; later runs reuse the build and are
+	// fast. Aligns with the launcher's 300s HTTP ceiling + 240s wdaLaunchTimeout.
+	if dev.Platform == runner.PlatformIPhone || dev.Platform == runner.PlatformIPad {
+		if setupTimeout < 8*time.Minute {
+			setupTimeout = 8 * time.Minute
+		}
+	}
 	setupCtx, cancel := context.WithTimeout(context.Background(), setupTimeout)
 	defer cancel()
 
@@ -283,6 +292,22 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		t.Fatalf("WaitForHeartbeat: %v", herr)
 	}
 
+	// Capture the play_id NOW, while the player is confirmed connected. Reading it
+	// only at the END of the window (below) is fragile: a slow-starting arm — the
+	// Android TV cold-starts ~50s and stops heartbeating a few seconds before its
+	// window elapses — makes the end-read 404 and the play look unregistered even
+	// though it streamed the whole time. The play_id is stable for a play, so the
+	// earliest reliable read is the trustworthy source; the end-read only refreshes
+	// it. Brief poll because the play registers just after the first heartbeat.
+	var earlyPlayID string
+	for i := 0; i < 10; i++ {
+		if pid, e := sess.CurrentPlayID(setupCtx); e == nil && pid != "" {
+			earlyPlayID = pid
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
 	// Arm the bandwidth pattern post-launch (it can't ride config-on-connect — the
 	// ladder is built from the live manifest variants, so the master playlist must
 	// be fetched first). ONLY the master arms it; the proxy propagates the master's
@@ -316,8 +341,15 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	}
 
 	playID, perr := sess.CurrentPlayID(context.Background())
-	if perr != nil {
-		t.Logf("arm %d: could not read play_id: %v", dev.FleetIndex, perr)
+	if playID == "" {
+		// End-of-window read failed/empty — e.g. the arm disconnected a few seconds
+		// before the window elapsed (the Android-TV teardown race). Fall back to the
+		// play_id captured at launch, which is the same play.
+		if earlyPlayID != "" {
+			playID = earlyPlayID
+		} else if perr != nil {
+			t.Logf("arm %d: could not read play_id: %v", dev.FleetIndex, perr)
+		}
 	}
 	base := strings.TrimRight(envOr("HARNESS_BASE_URL", "https://dev.jeoliver.com:21000"), "/")
 	viewer := fmt.Sprintf("%s/dashboard/session-viewer.html?player_id=%s", base, cfg.playerID)
