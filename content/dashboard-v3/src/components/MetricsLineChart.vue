@@ -984,19 +984,9 @@ function createChartInstance(Chart: any): any {
           },
         },
         tooltip: {
-          // 'x' (not the interaction-wide 'nearest'): list EVERY visible
-          // series' value at the hovered time, so two lines that sit exactly on
-          // top of each other both appear — equal values reveal the overlap the
-          // eye can't see (e.g. Fetching Variant == Displayed Variant when ABR
-          // is steady). Datasets are heterogeneous in length (variant rungs are
-          // 2-point spans, live traces are thousands), so 'x' — nearest point
-          // per dataset — is correct where 'index' would misalign.
-          mode: 'x',
-          intersect: false,
-          // Drop the band FILL series (borderless avg↔peak shaded regions):
-          // their value is just the band's peak edge, meaningless as a readout
-          // and pure clutter in a now-longer multi-series tooltip.
-          filter: (item: any) => !(item?.dataset && item.dataset.fill),
+          // Single hovered line only — the tooltip inherits the chart's
+          // interaction `mode: 'nearest'` (above), so hovering reads out just the
+          // series under the cursor, not every visible line at that x.
           callbacks: {
             title: (items: any[]) => fmtTickHMSms(items[0]?.parsed?.x ?? 0),
             label: (ctx: any) => {
