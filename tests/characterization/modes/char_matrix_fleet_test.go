@@ -190,14 +190,6 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		StartsFirstVariant: cfg.startsFirstVariant,
 		Muted:              cfg.muted,
 	})
-	// Diagnostic toggle: CHAR_AUTO_RECOVERY=false feeds -is.flag.auto_recovery
-	// false to every arm, disabling the iOS restart/live-resync ladder so we can
-	// observe the player's NATURAL startup ABR behavior in isolation (does it
-	// climb to 4K and wedge without any recovery papering over it?). Unset →
-	// app default (auto-recovery ON).
-	if v := strings.TrimSpace(os.Getenv("CHAR_AUTO_RECOVERY")); v != "" {
-		args = append(args, "-is.flag.auto_recovery", v)
-	}
 	// Startup forward-buffer-cap experiment knobs (audio over-banking probe).
 	// CHAR_FWD_BUFFER_S overrides the cap value (seconds); CHAR_FWD_RELEASE picks
 	// when it's lifted (ttff | keepup | ttff_settle). Unset → app defaults
@@ -224,12 +216,15 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	}
 	args = append(args, "-is.flag.local_proxy", localProxy)
 
-	// Auto-Recovery — FORCED OFF for characterization by default so a wedge is
-	// OBSERVED, not silently restarted out from under the measurement. ALWAYS
-	// passed so a persisted ON can't leak in. Override with CHAR_AUTO_RECOVERY=true.
+	// Auto-Recovery — ON by default (production-representative: the iOS
+	// restart/live-resync ladder heals transient stalls instead of leaving them on
+	// screen). ALWAYS passed so a persisted value can't leak in. Override with
+	// CHAR_AUTO_RECOVERY=false to observe a RAW wedge without recovery papering
+	// over it — the older characterization posture, still the right call for
+	// startup-wedge / ABR-isolation runs.
 	autoRecovery := strings.TrimSpace(os.Getenv("CHAR_AUTO_RECOVERY"))
 	if autoRecovery == "" {
-		autoRecovery = "false"
+		autoRecovery = "true"
 	}
 	args = append(args, "-is.flag.auto_recovery", autoRecovery)
 
