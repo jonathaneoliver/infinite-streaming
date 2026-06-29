@@ -70,12 +70,12 @@ func main() {
 	// Master playlist: /go-live/{content}/master.m3u8
 	router.HandleFunc("/go-live/{content}/master.m3u8", h.OnDemandMasterPlaylist).Methods(http.MethodGet, http.MethodHead)
 	// Master playlist with virtual durations
-	router.HandleFunc("/go-live/{content}/master_{duration:(?:2s|6s)}.m3u8", h.OnDemandMasterPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
-	router.HandleFunc("/go-live/{content}/{duration:(?:2s|6s)}/master.m3u8", h.OnDemandMasterPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
+	router.HandleFunc("/go-live/{content}/master_{duration:(?:1s|2s|6s)}.m3u8", h.OnDemandMasterPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
+	router.HandleFunc("/go-live/{content}/{duration:(?:1s|2s|6s)}/master.m3u8", h.OnDemandMasterPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
 
 	// Variant playlists with virtual durations
-	router.HandleFunc("/go-live/{content}/playlist_{duration:(?:2s|6s)}_{variant:.*}\\.m3u8", h.OnDemandVariantPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
-	router.HandleFunc("/go-live/{content}/{duration:(?:2s|6s)}/{variant:.*\\.m3u8}", h.OnDemandVariantPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
+	router.HandleFunc("/go-live/{content}/playlist_{duration:(?:1s|2s|6s)}_{variant:.*}\\.m3u8", h.OnDemandVariantPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
+	router.HandleFunc("/go-live/{content}/{duration:(?:1s|2s|6s)}/{variant:.*\\.m3u8}", h.OnDemandVariantPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
 	// Variant playlists: /go-live/{content}/{variant}.m3u8
 	// This catches paths like /go-live/content/1080p/index.m3u8
 	router.HandleFunc("/go-live/{content}/{variant:.*\\.m3u8}", h.OnDemandVariantPlaylist).Methods(http.MethodGet, http.MethodHead)
