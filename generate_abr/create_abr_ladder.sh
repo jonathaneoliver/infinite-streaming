@@ -42,7 +42,8 @@ Required Arguments:
 
 Optional Arguments:
   --output <name>         Base name for output files (default: derived from input filename)
-  --output-dir <path>     Base output directory (default: current working directory)
+  --output-dir <path>     Base output directory. Default: \$ENCODE_STAGING_DIR if
+                          set in the environment, else the current working directory.
                           Relative paths are resolved from where you run the script
   --resume-package-from <path> Resume from existing temp dir with encoded files
                          (expects files like h264_360p.mp4/hevc_360p.mp4 and optional audio.mp4)
@@ -1266,8 +1267,15 @@ derive_output_directories() {
     
     # Determine output directory
     if [[ -z "$OUTPUT_BASE_DIR" ]]; then
-        # Default to current working directory (where script was run from)
-        OUTPUT_BASE_DIR="$PWD/$base_name"
+        if [[ -n "$ENCODE_STAGING_DIR" ]]; then
+            # Default to the configured staging dir (#868) so encodes don't
+            # scatter across whatever CWD they were launched from. Export
+            # ENCODE_STAGING_DIR (e.g. in ~/.zshrc) to set it.
+            OUTPUT_BASE_DIR="${ENCODE_STAGING_DIR%/}/$base_name"
+        else
+            # No staging dir configured: current working directory.
+            OUTPUT_BASE_DIR="$PWD/$base_name"
+        fi
     else
         # User specified directory - make it absolute if relative
         if [[ "$OUTPUT_BASE_DIR" != /* ]]; then
