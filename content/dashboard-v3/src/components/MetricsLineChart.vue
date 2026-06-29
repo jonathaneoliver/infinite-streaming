@@ -758,7 +758,11 @@ function createChartInstance(Chart: any): any {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
-      interaction: { mode: 'nearest', intersect: false },
+      // 'singleNearest' = crash-safe 'nearest' (registered in useChartJs): built
+      // on 'x' so it tolerates the band-fill/spanGaps overlay datasets that make
+      // raw 'nearest' throw, and returns only the ONE non-fill line nearest the
+      // cursor — single-line hover + highlight.
+      interaction: { mode: 'singleNearest', intersect: false },
       layout: {
         padding: {
           // Reserve room on the right edge for the y2 axis. When no y2
@@ -984,9 +988,12 @@ function createChartInstance(Chart: any): any {
           },
         },
         tooltip: {
-          // Single hovered line only — the tooltip inherits the chart's
-          // interaction `mode: 'nearest'` (above), so hovering reads out just the
-          // series under the cursor, not every visible line at that x.
+          // Single hovered line only, via the crash-safe 'singleNearest' mode
+          // (same one the interaction uses) — reads out just the line under the
+          // cursor, not every visible series at that x, and without the
+          // 'nearest'-on-band-fill crash.
+          mode: 'singleNearest',
+          intersect: false,
           callbacks: {
             title: (items: any[]) => fmtTickHMSms(items[0]?.parsed?.x ?? 0),
             label: (ctx: any) => {
