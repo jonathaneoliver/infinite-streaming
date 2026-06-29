@@ -71,10 +71,11 @@ Optional Arguments:
   --segment-duration <s> Segment duration in seconds (default: 6)
   --partial-duration <s> Partial/GOP duration in seconds (default: 0.2)
   --gop-duration <s>     GOP/keyframe duration in seconds (default: 1.0)
-  --byteranges           Emit .byteranges sidecar files (Phase 6). Default OFF —
-                         LL-HLS embeds #EXT-X-PART inline and DASH uses the MPD,
-                         so the sidecars go unread unless a consumer needs the
-                         fallback.
+  --byteranges           KEEP the .byteranges sidecar files. They are ALWAYS
+                         generated (the HLS manifests inject the inline
+                         #EXT-X-PART partials by reading them); default prunes the
+                         files after injection. Pass this to retain them as the
+                         documented fallback for consumers that read sidecars.
   --bitrate-override-hevc <map> Override HEVC ladder kbps by resolution (e.g. 360p=1367,540p=2617)
   --bitrate-override-h264 <map> Override H264 ladder kbps by resolution (e.g. 360p=1421,540p=2762)
   --vmaf-lookup-csv <p>  CSV from crf_bandwidth_sweep.py for estimated VMAF burn-in
@@ -195,10 +196,15 @@ DEFAULT_VMAF_LOOKUP_CSV="${SCRIPT_DIR}/crf_bandwidth_sweep_newer.csv"
 RESUME_PACKAGE_FROM=""    # Optional path to existing abr_ladder temp dir
 RESUME_MODE=false
 FRAGMENT_PARSER_SCRIPT="" # Auto-detected path to parse_fmp4_fragments.py
-# Phase 6 .byteranges sidecars — default OFF (#762). LL-HLS embeds the partial
-# byte ranges inline as #EXT-X-PART (go-live's authoritative source; the sidecar
-# is only a fallback) and DASH addresses via the MPD's SegmentList — so nothing
-# reads these by default. Re-enable with --byteranges for the fallback path.
+# .byteranges sidecars. Phase 6 ALWAYS generates them: Phase 7's HLS manifests
+# inject the inline #EXT-X-PART partials by READING these sidecars
+# (create_hls_manifests.py:load_byteranges), so the partials only exist if the
+# sidecars were generated first. (#762/#765 gated Phase 6 off by default on the
+# mistaken premise that the sidecars "go unread" — silently dropping EVERY
+# partial from new content. Fixed.) This flag now only controls whether the
+# sidecar FILES are KEPT afterward: default false prunes them once Phase 7 has
+# consumed them (go-live serves the inline #EXT-X-PART, its authoritative
+# source); --byteranges retains them as the fallback for direct-sidecar readers.
 EMIT_BYTERANGES=false
 
 while [[ $# -gt 0 ]]; do
@@ -1471,14 +1477,13 @@ check_prerequisites() {
     fi
     log_success "Font available"
 
-    # Check fMP4 fragment parser helper (used in Phase 6 — only when --byteranges).
-    if [[ "$EMIT_BYTERANGES" == true ]]; then
-        if detect_fragment_parser_script; then
-            log_success "Fragment parser: $FRAGMENT_PARSER_SCRIPT"
-        else
-            log_warn "Fragment parser script not found (parse_fmp4_fragments.py)"
-            log_warn "Phase 6 (.byteranges generation) will be skipped"
-        fi
+    # Check fMP4 fragment parser helper (Phase 6 — ALWAYS runs; the inline
+    # #EXT-X-PART partials depend on its .byteranges output).
+    if detect_fragment_parser_script; then
+        log_success "Fragment parser: $FRAGMENT_PARSER_SCRIPT"
+    else
+        log_warn "Fragment parser script not found (parse_fmp4_fragments.py)"
+        log_warn "Phase 6 will be skipped — LL-HLS #EXT-X-PART partials will be MISSING"
     fi
     
     echo ""
@@ -3884,18 +3889,25 @@ main() {
         export_mezzanine_files "av1" "$OUTPUT_DIR_AV1"
     fi
     
-    # Generate fragment metadata (.byteranges files) for LL-HLS support — default
-    # OFF (#762): LL-HLS embeds #EXT-X-PART inline (go-live's authoritative source)
-    # and DASH uses the MPD's SegmentList, so the sidecars go unread. --byteranges
-    # re-enables them for any consumer that needs the fallback.
-    if [[ "$EMIT_BYTERANGES" == true ]]; then
-        parse_fmp4_fragments
-    else
-        log "Skipping .byteranges sidecars (default; pass --byteranges to emit)"
-    fi
-    
-    # Generate HLS manifests
+    # Phase 6 — ALWAYS run. Phase 7 (generate_hls_manifests) injects the inline
+    # #EXT-X-PART partials by READING the .byteranges this produces, so the
+    # partials exist ONLY if this ran. (#762/#765 gated it off by default and
+    # silently dropped every partial from new content — the bug this fixes.)
+    parse_fmp4_fragments
+
+    # Generate HLS manifests (injects #EXT-X-PART from the .byteranges above)
     generate_hls_manifests
+
+    # Prune the now-consumed .byteranges sidecars unless --byteranges asked to keep
+    # them: Phase 7 already folded their data into the inline #EXT-X-PART (go-live's
+    # authoritative source), so the files are redundant on disk — dropping them is
+    # #762's disk goal, now WITHOUT breaking LL.
+    if [[ "$EMIT_BYTERANGES" != true ]]; then
+        for _brd in "$OUTPUT_DIR_HEVC" "$OUTPUT_DIR_H264" "$OUTPUT_DIR_AV1"; do
+            [[ -n "$_brd" && -d "$_brd" ]] && find "$_brd" -name "*.byteranges" -type f -delete 2>/dev/null
+        done
+        log "Pruned .byteranges sidecars (inline #EXT-X-PART retained; --byteranges keeps the files)"
+    fi
     
     # Generate HLS Transport Stream segments (if requested)
     if [ "$HLS_FORMAT" = "ts" ] || [ "$HLS_FORMAT" = "both" ]; then
