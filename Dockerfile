@@ -2,7 +2,7 @@
 # Vue 3 dashboard build stage. Outputs /out/v3 with the static bundle
 # that gets copied into the final image's /content/dashboard/v3/.
 # Cached by docker if package.json + lock haven't changed.
-FROM node:20-alpine AS dashboard-v3-builder
+FROM node:26-alpine AS dashboard-v3-builder
 WORKDIR /build
 COPY content/dashboard-v3/package.json content/dashboard-v3/package-lock.json* ./
 RUN npm install --no-audit --no-fund

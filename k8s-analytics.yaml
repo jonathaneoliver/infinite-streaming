@@ -395,7 +395,7 @@ spec:
     spec:
       containers:
       - name: clickhouse
-        image: clickhouse/clickhouse-server:24.8-alpine
+        image: clickhouse/clickhouse-server:26.5-alpine
         ports:
         - containerPort: 8123
         - containerPort: 9000
@@ -671,7 +671,7 @@ spec:
     spec:
       containers:
       - name: grafana
-        image: grafana/grafana-oss:11.3.0
+        image: grafana/grafana-oss:13.0.2
         ports:
         - containerPort: 3000
         env:
