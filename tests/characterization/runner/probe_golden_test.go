@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/charplan"
 )
 
 // updateGolden regenerates testdata/probe_golden.txt instead of asserting
@@ -25,32 +27,29 @@ var updateGolden = flag.Bool("update-golden", false, "rewrite the probe launch-a
 // golden line changes; every other scenario must stay byte-identical, and that
 // one-line diff IS the proof the fix is surgical.
 func TestProbeLaunchArgsGolden(t *testing.T) {
-	// Replicates today's two-step build: ProbeLaunchArgs (the "domain" knobs)
-	// then the five knobs char_matrix_fleet_test.go appends inline from env, in
-	// the same order, then the baseline fill. local_proxy/auto_recovery default
-	// the way the fleet path does ("false"/"true", always appended).
-	currentArgs := func(s scenario) []string {
-		args := ProbeLaunchArgs(s.cfg)
-		if s.fwdBuffer != "" {
-			args = append(args, "-is.flag.startup_forward_buffer_s", s.fwdBuffer)
+	// Builds args the NEW way: the five formerly-inline knobs flow through
+	// ProbeConfig (so ProbeLaunchArgs owns them), then the baseline fill. The
+	// fleet defaults — local_proxy false, auto_recovery true, always present — are
+	// applied here via charplan.ParseBool, which ALSO fixes the bug: the input
+	// "off" now resolves to "false" instead of leaking through literally.
+	buildArgs := func(s scenario) []string {
+		cfg := s.cfg
+		cfg.StartupFwdBufferS = s.fwdBuffer
+		cfg.StartupFwdRelease = s.fwdRelease
+		cfg.PersistentPeakMbps = s.persistPeak
+		lp := charplan.ParseBool(s.localProxy)
+		if lp == nil {
+			f := false
+			lp = &f
 		}
-		if s.fwdRelease != "" {
-			args = append(args, "-is.flag.startup_fwd_release", s.fwdRelease)
+		cfg.LocalProxy = lp
+		ar := charplan.ParseBool(s.autoRecovery)
+		if ar == nil {
+			t := true
+			ar = &t
 		}
-		if s.persistPeak != "" {
-			args = append(args, "-is.flag.persistent_peak_bitrate_mbps", s.persistPeak)
-		}
-		lp := s.localProxy
-		if lp == "" {
-			lp = "false"
-		}
-		args = append(args, "-is.flag.local_proxy", lp)
-		ar := s.autoRecovery
-		if ar == "" {
-			ar = "true"
-		}
-		args = append(args, "-is.flag.auto_recovery", ar)
-		return withBaselineTestFlags(args)
+		cfg.AutoRecovery = ar
+		return withBaselineTestFlags(ProbeLaunchArgs(cfg))
 	}
 
 	var got strings.Builder
@@ -63,7 +62,7 @@ func TestProbeLaunchArgsGolden(t *testing.T) {
 			t.Setenv("CHAR_AUTO_RECOVERY", "")
 			t.Setenv("CHAR_CONTENT", s.charContent)
 			got.WriteString("### " + s.name + "\n")
-			got.WriteString(strings.Join(currentArgs(s), "\n"))
+			got.WriteString(strings.Join(buildArgs(s), "\n"))
 			got.WriteString("\n\n")
 		}()
 	}

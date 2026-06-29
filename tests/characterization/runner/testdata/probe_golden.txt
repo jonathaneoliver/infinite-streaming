@@ -156,7 +156,7 @@ true
 -is.flag.local_proxy
 false
 -is.flag.auto_recovery
-off
+false
 -is.flag.4k
 true
 -is.flag.peak_bitrate_mbps

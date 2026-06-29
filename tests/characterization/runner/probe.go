@@ -1,6 +1,10 @@
 package runner
 
-import "strconv"
+import (
+	"strconv"
+
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/charplan"
+)
 
 // ProbeConfig is the client-side knob set an appium probe pins as launch args at
 // cold launch. It is the single source of truth for the launch-arg domain shared
@@ -22,6 +26,49 @@ type ProbeConfig struct {
 	PeakBitrateMbps    int    // -is.flag.peak_bitrate_mbps — startup peak-bitrate clamp (Mbps, integer); 0 = omit (#683)
 	StartsFirstVariant string // -is.flag.starts_first_variant — true|false; "" = omit (false is meaningful)
 	Muted              string // -is.flag.muted — true|false; "" = omit (app default-muted, #838; false is meaningful)
+
+	// Startup / recovery knobs. The matrix runner formerly appended these inline
+	// from CHAR_* env after ProbeLaunchArgs returned; they now flow through here
+	// so ProbeLaunchArgs owns the whole launch-arg domain. Each is omitted when
+	// unset (empty string / nil), so a caller that leaves them zero (e.g. the
+	// sweep probe) produces exactly the args it always did.
+	StartupFwdBufferS  string // -is.flag.startup_forward_buffer_s — startup fwd-buffer cap (s)
+	StartupFwdRelease  string // -is.flag.startup_fwd_release — when the cap lifts (ttff|keepup|ttff_settle)
+	PersistentPeakMbps string // -is.flag.persistent_peak_bitrate_mbps — never-released peak ceiling (Mbps)
+	LocalProxy         *bool  // -is.flag.local_proxy — on-device LocalHTTPProxy; nil = omit
+	AutoRecovery       *bool  // -is.flag.auto_recovery — restart/live-resync ladder; nil = omit
+}
+
+// ProbeConfigFromArm projects a charplan.ArmConfig (the wire contract crossing
+// the go-test boundary) onto the launch-arg ProbeConfig. The tri-state *bool
+// muted / starts_first_variant collapse to the "" = omit / "true" / "false"
+// strings ProbeLaunchArgs expects; local_proxy / auto_recovery stay *bool.
+func ProbeConfigFromArm(a charplan.ArmConfig) ProbeConfig {
+	return ProbeConfig{
+		PlayerID:           a.PlayerID,
+		Content:            a.Content,
+		Segment:            a.Segment,
+		LiveOffsetS:        a.LiveOffsetS,
+		Protocol:           a.Protocol,
+		Codec:              a.Codec,
+		PeakBitrateMbps:    a.PeakBitrateMbps,
+		StartsFirstVariant: boolPtrStr(a.StartsFirstVariant),
+		Muted:              boolPtrStr(a.Muted),
+		StartupFwdBufferS:  a.StartupFwdBufferS,
+		StartupFwdRelease:  a.StartupFwdRelease,
+		PersistentPeakMbps: a.PersistentPeakMbps,
+		LocalProxy:         a.LocalProxy,
+		AutoRecovery:       a.AutoRecovery,
+	}
+}
+
+// boolPtrStr renders a tri-state *bool as the "" = omit / "true" / "false"
+// string the older ProbeConfig string fields use.
+func boolPtrStr(p *bool) string {
+	if p == nil {
+		return ""
+	}
+	return strconv.FormatBool(*p)
 }
 
 // ProbeLaunchArgs builds the NSArgumentDomain launch-arg slice for an appium
@@ -97,5 +144,23 @@ func ProbeLaunchArgs(c ProbeConfig) []string {
 	// pinning live_offset_s above, but covers EVERY advanced flag, including ones
 	// this run doesn't pass. On by default.
 	args = append(args, "-is.flag.reset_advanced", "true")
+	// Startup / recovery knobs, appended AFTER reset_advanced — matching the byte
+	// order the matrix runner produced when it appended these inline (so the
+	// typed-config migration is byte-for-byte identical). Each omitted when unset.
+	if c.StartupFwdBufferS != "" {
+		args = append(args, "-is.flag.startup_forward_buffer_s", c.StartupFwdBufferS)
+	}
+	if c.StartupFwdRelease != "" {
+		args = append(args, "-is.flag.startup_fwd_release", c.StartupFwdRelease)
+	}
+	if c.PersistentPeakMbps != "" {
+		args = append(args, "-is.flag.persistent_peak_bitrate_mbps", c.PersistentPeakMbps)
+	}
+	if c.LocalProxy != nil {
+		args = append(args, "-is.flag.local_proxy", strconv.FormatBool(*c.LocalProxy))
+	}
+	if c.AutoRecovery != nil {
+		args = append(args, "-is.flag.auto_recovery", strconv.FormatBool(*c.AutoRecovery))
+	}
 	return args
 }
