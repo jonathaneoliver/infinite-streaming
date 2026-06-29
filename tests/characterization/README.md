@@ -156,9 +156,11 @@ Each arm reuses the sweep's bootstrap path (`experimentPlayerPatch` →
 **Sequential vs parallel.** `parallel: false` (default) runs arms one at a time
 on a single device. `parallel: true` fans every arm out **simultaneously** on the
 fleet backend — the CLI bootstraps each arm's server recipe up front, then runs
-`TestCharMatrixFleet` once with `CHAR_FLEET_COUNT=N` and the per-arm knobs in
-`CHAR_ARM_<i>_*` env (one arm per device, gated to a common start by the fleet
-HOME barrier), then measures all. A parallel matrix must be **single-platform**
+`TestCharMatrixFleet` once with `CHAR_FLEET_COUNT=N` and the per-arm knobs in a
+typed `RunPlan` it writes to a temp file (path in `CHAR_RUN_PLAN_FILE`; `cat` it
+to see exactly what each arm got — see `go-proxy/pkg/charplan`). One arm per
+device, gated to a common start by the fleet HOME barrier, then measures all.
+A parallel matrix must be **single-platform**
 (the fleet draws from one device pool) and needs at least N booted devices of
 that platform — boot more sims or split the matrix by platform otherwise.
 

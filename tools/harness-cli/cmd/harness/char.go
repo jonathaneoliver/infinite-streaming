@@ -226,25 +226,13 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 		}
 		results[i] = res
 		fmt.Fprintf(os.Stderr, "bootstrapped arm %d/%d: %s (player_id=%s)\n", i+1, len(arms), a.ID, playerID)
-		armEnv = append(armEnv,
-			fmt.Sprintf("CHAR_ARM_%d_PLAYER_ID=%s", i, playerID),
-			fmt.Sprintf("CHAR_ARM_%d_PLATFORM=%s", i, a.Platform),
-			fmt.Sprintf("CHAR_ARM_%d_SEGMENT=%s", i, a.Segment),
-			fmt.Sprintf("CHAR_ARM_%d_LIVE_OFFSET=%s", i, a.ClientLiveOffsetS()),
-			fmt.Sprintf("CHAR_ARM_%d_PROTOCOL=%s", i, a.Protocol),
-			fmt.Sprintf("CHAR_ARM_%d_CODEC=%s", i, a.Codec),
-			fmt.Sprintf("CHAR_ARM_%d_PEAK_BITRATE=%d", i, a.PeakBitrateMbps),
-			fmt.Sprintf("CHAR_ARM_%d_FIRST_VARIANT=%s", i, a.StartsFirstVariantS()),
-			fmt.Sprintf("CHAR_ARM_%d_MUTED=%s", i, a.MutedS()),
-			fmt.Sprintf("CHAR_ARM_%d_PATTERN=%s", i, shapePattern(a)),
-			fmt.Sprintf("CHAR_ARM_%d_STEP_S=%d", i, shapeStepS(a)),
-			fmt.Sprintf("CHAR_ARM_%d_MARGIN=%d", i, shapeMargin(a)),
-			fmt.Sprintf("CHAR_ARM_%d_PATTERN_MASTER=%t", i, i == patternMaster),
-			fmt.Sprintf("CHAR_ARM_%d_CONTENT=%s", i, clip),
-		)
-		// Same knobs, typed, into the run plan (the channel that supersedes the
-		// per-arm env above). ParseBool round-trips StartsFirstVariantS/MutedS
-		// byte-for-byte ("" → omit, "true"/"false" → same).
+		// CHAR_ARM_<i>_PLATFORM is the ONLY per-arm env still emitted — fleet.go's
+		// generic resolver reads it to assign a device of the right platform to each
+		// fleet index (mixed-platform fleets, #860), and it's shared by every fleet
+		// mode, not just this one. Every other per-arm knob now rides in the typed
+		// RunPlan below (the probe reads CHAR_RUN_PLAN_FILE), so the old flat
+		// CHAR_ARM_<i>_{SEGMENT,CODEC,MUTED,…} surface is gone.
+		armEnv = append(armEnv, fmt.Sprintf("CHAR_ARM_%d_PLATFORM=%s", i, a.Platform))
 		arm := charplan.ArmConfig{
 			PlayerID:           playerID,
 			Platform:           a.Platform,
