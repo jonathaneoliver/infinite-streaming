@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/charplan"
 	"github.com/jonathaneoliver/infinite-streaming/tests/characterization/runner"
 )
 
@@ -70,49 +71,25 @@ func TestCharMatrixFleet(t *testing.T) {
 	runFleet(t, platform, runCharMatrixArmOnDevice)
 }
 
-// armProbeConfig is one arm's reattach knobs, read from CHAR_ARM_<idx>_* env the
-// CLI emitted. The server recipe is already bootstrapped onto playerID; these
-// are only what the probe needs to bind + cold-launch with the right client
-// knobs.
-type armProbeConfig struct {
-	playerID           string
-	platform           string
-	segment            string
-	liveOffsetS        string
-	protocol           string
-	codec              string
-	peakBitrate        int
-	startsFirstVariant string
-	muted              string
-	pattern            string
-	stepS              int
-	margin             int
-	patternMaster      bool
-	content            string
-	durationS          int
-}
+// The per-arm reattach knobs (segment / live_offset / protocol / codec / peak /
+// first_variant / muted / startup-buffer / local_proxy / auto_recovery / pattern
+// / content) now arrive as one typed charplan.RunPlan the CLI wrote to
+// CHAR_RUN_PLAN_FILE — replacing the flat CHAR_ARM_<idx>_* env the probe used to
+// re-parse field by field. The server recipe is already bootstrapped onto each
+// arm's PlayerID; the plan is only what the probe needs to bind + cold-launch.
+// (CHAR_ARM_<i>_PLATFORM + CHAR_FLEET_COUNT stay — they're the generic fleet
+// resolver's interface in fleet.go, shared by every fleet mode, not just this one.)
+var (
+	runPlanOnce sync.Once
+	runPlanVal  *charplan.RunPlan
+	runPlanErr  error
+)
 
-func readArmProbeConfig(fleetIndex int) armProbeConfig {
-	p := func(suffix string) string {
-		return strings.TrimSpace(os.Getenv(fmt.Sprintf("CHAR_ARM_%d_%s", fleetIndex, suffix)))
-	}
-	return armProbeConfig{
-		playerID:           p("PLAYER_ID"),
-		platform:           envOr(fmt.Sprintf("CHAR_ARM_%d_PLATFORM", fleetIndex), string(runner.PlatformIPadSim)),
-		segment:            p("SEGMENT"),
-		liveOffsetS:        envOr(fmt.Sprintf("CHAR_ARM_%d_LIVE_OFFSET", fleetIndex), "0"),
-		protocol:           p("PROTOCOL"),
-		codec:              p("CODEC"),
-		peakBitrate:        envInt(fmt.Sprintf("CHAR_ARM_%d_PEAK_BITRATE", fleetIndex), 0),
-		startsFirstVariant: p("FIRST_VARIANT"),
-		muted:              p("MUTED"),
-		pattern:            p("PATTERN"),
-		stepS:              envInt(fmt.Sprintf("CHAR_ARM_%d_STEP_S", fleetIndex), 12),
-		margin:             envInt(fmt.Sprintf("CHAR_ARM_%d_MARGIN", fleetIndex), 5),
-		patternMaster:      p("PATTERN_MASTER") == "true",
-		content:            envOr(fmt.Sprintf("CHAR_ARM_%d_CONTENT", fleetIndex), strings.TrimSpace(os.Getenv("CHAR_CONTENT"))),
-		durationS:          envInt("CHAR_SWEEP_DURATION_S", 60),
-	}
+func loadRunPlan() (*charplan.RunPlan, error) {
+	runPlanOnce.Do(func() {
+		runPlanVal, runPlanErr = charplan.Load(os.Getenv("CHAR_RUN_PLAN_FILE"))
+	})
+	return runPlanVal, runPlanErr
 }
 
 // runCharMatrixArmOnDevice reattaches one device to its arm's pre-configured
@@ -121,13 +98,11 @@ func readArmProbeConfig(fleetIndex int) armProbeConfig {
 // for a synchronized start, immediate slot release on cleanup) but skips all
 // shaping — the recipe is already live from the CLI's bootstrap.
 func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars *fleetBarriers) {
-	cfg := readArmProbeConfig(dev.FleetIndex)
-
-	// Register the barrier give-ups FIRST, before any Skip/Fatal: if this arm
-	// bails early (no player_id, PickMode fails, …) it must drop itself from the
-	// HOME barrier or the survivors wait it out to their deadline. We only use the
-	// HOME barrier (synchronized playback start); the sweep barrier is unused (no
-	// shaping), so give it up up front.
+	// Register the barrier give-ups FIRST, before any Skip/Fatal (incl. the plan
+	// load below): if this arm bails early (no player_id, PickMode fails, …) it
+	// must drop itself from the HOME barrier or the survivors wait it out to their
+	// deadline. We only use the HOME barrier (synchronized playback start); the
+	// sweep barrier is unused (no shaping), so give it up up front.
 	homeArrived := false
 	if bars != nil {
 		bars.sweep.giveUp()
@@ -138,11 +113,20 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		}()
 	}
 
-	if cfg.playerID == "" {
-		t.Skipf("arm %d has no CHAR_ARM_%d_PLAYER_ID (bootstrap failed or fewer arms than devices)", dev.FleetIndex, dev.FleetIndex)
+	plan, perr := loadRunPlan()
+	if perr != nil {
+		t.Fatalf("load run plan (CHAR_RUN_PLAN_FILE): %v", perr) // loud on a stale binary / missing plan
 	}
-	if cfg.durationS <= 0 {
-		cfg.durationS = 60
+	if dev.FleetIndex >= len(plan.Arms) {
+		t.Skipf("arm %d beyond the run plan (%d arms)", dev.FleetIndex, len(plan.Arms))
+	}
+	cfg := plan.Arms[dev.FleetIndex]
+	if cfg.PlayerID == "" {
+		t.Skipf("arm %d has no player_id in the run plan (bootstrap failed or fewer arms than devices)", dev.FleetIndex)
+	}
+	durationS := plan.DurationS
+	if durationS <= 0 {
+		durationS = 60
 	}
 
 	mode, launcher, err := runner.PickMode()
@@ -154,7 +138,7 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		t.Skipf("char matrix fleet requires -launch-mode=appium (got %s)", mode)
 	}
 	picked := &dev
-	t.Logf("arm %d: reattaching player_id=%s on %s for %ds", dev.FleetIndex, cfg.playerID, picked, cfg.durationS)
+	t.Logf("arm %d: reattaching player_id=%s on %s for %ds", dev.FleetIndex, cfg.PlayerID, picked, durationS)
 
 	staggerFleetLaunch(t, dev.FleetIndex)
 
@@ -176,65 +160,19 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	setupCtx, cancel := context.WithTimeout(context.Background(), setupTimeout)
 	defer cancel()
 
-	// Bind to the pre-configured session: same launch-state pins TestSweepProbe
-	// uses, plus this arm's client knobs (segment / app live_offset / protocol),
-	// all via the shared ProbeLaunchArgs projection.
-	args := runner.ProbeLaunchArgs(runner.ProbeConfig{
-		PlayerID:           cfg.playerID,
-		Content:            cfg.content,
-		Segment:            cfg.segment,
-		LiveOffsetS:        cfg.liveOffsetS,
-		Protocol:           cfg.protocol,
-		Codec:              cfg.codec,
-		PeakBitrateMbps:    cfg.peakBitrate,
-		StartsFirstVariant: cfg.startsFirstVariant,
-		Muted:              cfg.muted,
-	})
-	// Startup forward-buffer-cap experiment knobs (audio over-banking probe).
-	// CHAR_FWD_BUFFER_S overrides the cap value (seconds); CHAR_FWD_RELEASE picks
-	// when it's lifted (ttff | keepup | ttff_settle). Unset → app defaults
-	// (3× max segment duration, released at TTFF+3s settle).
-	if v := strings.TrimSpace(os.Getenv("CHAR_FWD_BUFFER_S")); v != "" {
-		args = append(args, "-is.flag.startup_forward_buffer_s", v)
-	}
-	if v := strings.TrimSpace(os.Getenv("CHAR_FWD_RELEASE")); v != "" {
-		args = append(args, "-is.flag.startup_fwd_release", v)
-	}
-	// Persistent (never-released) peak-bitrate ceiling, in Mbps — the floor the
-	// startup variant cap relaxes TO after first frame. Unset → no permanent cap.
-	if v := strings.TrimSpace(os.Getenv("CHAR_PERSIST_PEAK")); v != "" {
-		args = append(args, "-is.flag.persistent_peak_bitrate_mbps", v)
-	}
-	// On-device LocalHTTPProxy — FORCED OFF for characterization by default. It
-	// proxies over localhost, which skews AVPlayer's initial bitrate estimate and
-	// drives cold-start over-selection wedges (see the STARTUP-FINDINGS). ALWAYS
-	// passed (not only when the env is set) so a persisted ON in the sim's saved
-	// UserDefaults can't leak in. Override with CHAR_LOCAL_PROXY=true.
-	localProxy := strings.TrimSpace(os.Getenv("CHAR_LOCAL_PROXY"))
-	if localProxy == "" {
-		localProxy = "false"
-	}
-	args = append(args, "-is.flag.local_proxy", localProxy)
-
-	// Auto-Recovery — ON by default (production-representative: the iOS
-	// restart/live-resync ladder heals transient stalls instead of leaving them on
-	// screen). ALWAYS passed so a persisted value can't leak in. Override with
-	// CHAR_AUTO_RECOVERY=false to observe a RAW wedge without recovery papering
-	// over it — the older characterization posture, still the right call for
-	// startup-wedge / ABR-isolation runs.
-	autoRecovery := strings.TrimSpace(os.Getenv("CHAR_AUTO_RECOVERY"))
-	if autoRecovery == "" {
-		autoRecovery = "true"
-	}
-	args = append(args, "-is.flag.auto_recovery", autoRecovery)
-
-	appium.SetLaunchArgs(args)
+	// Bind to the pre-configured session: the same launch-state pins, the client
+	// knobs (segment / app live_offset / protocol / …), AND the startup/recovery
+	// knobs (forward-buffer cap, local_proxy, auto_recovery) — all resolved by the
+	// CLI into this arm's ArmConfig and projected through the one ProbeLaunchArgs.
+	// local_proxy/auto_recovery defaults (false/true) were already applied by the
+	// producer's WithDefaults, so they ride in here non-nil and always emit.
+	appium.SetLaunchArgs(runner.ProbeLaunchArgs(runner.ProbeConfigFromArm(cfg)))
 
 	sess, lerr := appium.LaunchToHome(setupCtx, *picked)
 	if lerr != nil {
 		t.Fatalf("LaunchToHome: %v", lerr)
 	}
-	sess.PlayerID = cfg.playerID
+	sess.PlayerID = cfg.PlayerID
 	// Record the device-farm UDID this arm acquired so the harness can release
 	// EXACTLY this run's devices after the process exits (#853) — concurrent-run
 	// safe. O_APPEND keeps parallel arms' lines from interleaving.
@@ -275,8 +213,8 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	}
 
 	var rerr error
-	if cfg.content != "" {
-		rerr = appium.ResumePlaybackClip(setupCtx, *picked, clipIDFromContent(cfg.content))
+	if cfg.Content != "" {
+		rerr = appium.ResumePlaybackClip(setupCtx, *picked, clipIDFromContent(cfg.Content))
 	} else {
 		rerr = appium.ResumePlayback(setupCtx, *picked)
 	}
@@ -309,23 +247,23 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	// pyramid to the group's slaves (NETSHAPE group pattern propagation), so all
 	// arms share ONE bandwidth timeline. A slave arming its own would create an
 	// independent, out-of-phase pyramid and confound the comparison.
-	if cfg.pattern != "" && cfg.patternMaster {
+	if cfg.Pattern != "" && cfg.PatternMaster {
 		if err := sess.WaitForManifest(setupCtx, 45*time.Second); err != nil {
 			t.Fatalf("arm %d (master): waiting for manifest before pattern: %v", dev.FleetIndex, err)
 		}
-		if err := sess.ApplyPattern(setupCtx, cfg.pattern, cfg.stepS, cfg.margin); err != nil {
-			t.Fatalf("arm %d (master): ApplyPattern(%s): %v", dev.FleetIndex, cfg.pattern, err)
+		if err := sess.ApplyPattern(setupCtx, cfg.Pattern, cfg.StepS, cfg.MarginPct); err != nil {
+			t.Fatalf("arm %d (master): ApplyPattern(%s): %v", dev.FleetIndex, cfg.Pattern, err)
 		}
-		t.Logf("arm %d MASTER: armed %s pattern (step=%ds margin=%d%%) — proxy propagates to the group", dev.FleetIndex, cfg.pattern, cfg.stepS, cfg.margin)
-	} else if cfg.pattern != "" {
+		t.Logf("arm %d MASTER: armed %s pattern (step=%ds margin=%d%%) — proxy propagates to the group", dev.FleetIndex, cfg.Pattern, cfg.StepS, cfg.MarginPct)
+	} else if cfg.Pattern != "" {
 		t.Logf("arm %d slave: pattern driven by the group master (no local ApplyPattern)", dev.FleetIndex)
 	}
 
 	// Let it play. The recipe (content/shape/live_offset/transfer) is already
 	// live, so this window is what the CLI's measurement step later reads.
-	t.Logf("arm %d playing for %ds…", dev.FleetIndex, cfg.durationS)
+	t.Logf("arm %d playing for %ds…", dev.FleetIndex, durationS)
 	select {
-	case <-time.After(time.Duration(cfg.durationS) * time.Second):
+	case <-time.After(time.Duration(durationS) * time.Second):
 		// Normal: the full play window elapsed.
 	case <-interruptContext().Done():
 		// Operator stopped the run. Return EARLY so the deferred t.Cleanup
@@ -347,11 +285,11 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		}
 	}
 	base := strings.TrimRight(envOr("HARNESS_BASE_URL", "https://dev.jeoliver.com:21000"), "/")
-	viewer := fmt.Sprintf("%s/dashboard/session-viewer.html?player_id=%s", base, cfg.playerID)
+	viewer := fmt.Sprintf("%s/dashboard/session-viewer.html?player_id=%s", base, cfg.PlayerID)
 	if playID != "" {
 		viewer += "&play_id=" + playID
 	}
-	t.Logf("ARM %d RESULT player_id=%s play_id=%s viewer=%s", dev.FleetIndex, cfg.playerID, playID, viewer)
+	t.Logf("ARM %d RESULT player_id=%s play_id=%s viewer=%s", dev.FleetIndex, cfg.PlayerID, playID, viewer)
 	if playID == "" {
 		t.Errorf("arm %d: no play_id captured — playback never registered a play", dev.FleetIndex)
 	}
