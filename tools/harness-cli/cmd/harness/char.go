@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/charplan"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/api"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/charmatrix"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/sweep"
@@ -49,7 +50,7 @@ func cmdChar(client *api.Client, args []string, asJSON bool) error {
 // spec delegates to the existing fleet go-test backend.
 func cmdCharMatrix(client *api.Client, args []string, asJSON bool) error {
 	if len(args) < 1 || args[0] == "" {
-		return errors.New("usage: harness char matrix <spec.yaml> [--dry-run] [--char-dir DIR] [--duration-s N]")
+		return errors.New("usage: harness char matrix <spec.yaml|-> [--dry-run] [--char-dir DIR] [--duration-s N]")
 	}
 	specPath := args[0]
 	fs := flag.NewFlagSet("char matrix", flag.ContinueOnError)
@@ -61,7 +62,15 @@ func cmdCharMatrix(client *api.Client, args []string, asJSON bool) error {
 		return err
 	}
 
-	data, err := os.ReadFile(specPath)
+	// `-` reads the spec from stdin, so a generator can pipe YAML straight in
+	// without a scratch file: `gen | harness char matrix -`.
+	var data []byte
+	var err error
+	if specPath == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(specPath)
+	}
 	if err != nil {
 		return fmt.Errorf("read spec: %w", err)
 	}
@@ -167,8 +176,22 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 		}
 	}
 
+	// Startup/recovery knobs are run-level (the same for every arm) — the probe
+	// used to read these from its own env; the CLI now resolves them once and
+	// stamps each arm. ParseBool is the single local_proxy/auto_recovery parser;
+	// WithDefaults (per arm, below) fills the false/true defaults.
+	fwdBuffer := strings.TrimSpace(os.Getenv("CHAR_FWD_BUFFER_S"))
+	fwdRelease := strings.TrimSpace(os.Getenv("CHAR_FWD_RELEASE"))
+	persistPeak := strings.TrimSpace(os.Getenv("CHAR_PERSIST_PEAK"))
+	localProxy := charplan.ParseBool(os.Getenv("CHAR_LOCAL_PROXY"))
+	autoRecovery := charplan.ParseBool(os.Getenv("CHAR_AUTO_RECOVERY"))
+
 	results := make([]charmatrix.ArmResult, len(arms))
 	var armEnv []string
+	// planArms is index-aligned with arms: a skipped (bootstrap-failed) arm stays
+	// a zero-value ArmConfig (empty PlayerID), so its fleet index skips — exactly
+	// like the old "no CHAR_ARM_i_PLAYER_ID emitted" behavior.
+	planArms := make([]charplan.ArmConfig, len(arms))
 	window := 0
 	for i, a := range arms {
 		res := charmatrix.ArmResult{Arm: a, IntendedOff: intendedOf(a)}
@@ -203,29 +226,43 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 		}
 		results[i] = res
 		fmt.Fprintf(os.Stderr, "bootstrapped arm %d/%d: %s (player_id=%s)\n", i+1, len(arms), a.ID, playerID)
-		armEnv = append(armEnv,
-			fmt.Sprintf("CHAR_ARM_%d_PLAYER_ID=%s", i, playerID),
-			fmt.Sprintf("CHAR_ARM_%d_PLATFORM=%s", i, a.Platform),
-			fmt.Sprintf("CHAR_ARM_%d_SEGMENT=%s", i, a.Segment),
-			fmt.Sprintf("CHAR_ARM_%d_LIVE_OFFSET=%s", i, a.ClientLiveOffsetS()),
-			fmt.Sprintf("CHAR_ARM_%d_PROTOCOL=%s", i, a.Protocol),
-			fmt.Sprintf("CHAR_ARM_%d_CODEC=%s", i, a.Codec),
-			fmt.Sprintf("CHAR_ARM_%d_PEAK_BITRATE=%d", i, a.PeakBitrateMbps),
-			fmt.Sprintf("CHAR_ARM_%d_FIRST_VARIANT=%s", i, a.StartsFirstVariantS()),
-			fmt.Sprintf("CHAR_ARM_%d_MUTED=%s", i, a.MutedS()),
-			fmt.Sprintf("CHAR_ARM_%d_PATTERN=%s", i, shapePattern(a)),
-			fmt.Sprintf("CHAR_ARM_%d_STEP_S=%d", i, shapeStepS(a)),
-			fmt.Sprintf("CHAR_ARM_%d_MARGIN=%d", i, shapeMargin(a)),
-			fmt.Sprintf("CHAR_ARM_%d_PATTERN_MASTER=%t", i, i == patternMaster),
-			fmt.Sprintf("CHAR_ARM_%d_CONTENT=%s", i, clip),
-		)
+		// CHAR_ARM_<i>_PLATFORM is the ONLY per-arm env still emitted — fleet.go's
+		// generic resolver reads it to assign a device of the right platform to each
+		// fleet index (mixed-platform fleets, #860), and it's shared by every fleet
+		// mode, not just this one. Every other per-arm knob now rides in the typed
+		// RunPlan below (the probe reads CHAR_RUN_PLAN_FILE), so the old flat
+		// CHAR_ARM_<i>_{SEGMENT,CODEC,MUTED,…} surface is gone.
+		armEnv = append(armEnv, fmt.Sprintf("CHAR_ARM_%d_PLATFORM=%s", i, a.Platform))
+		arm := charplan.ArmConfig{
+			PlayerID:           playerID,
+			Platform:           a.Platform,
+			Content:            clip,
+			Segment:            a.Segment,
+			LiveOffsetS:        a.ClientLiveOffsetS(),
+			Protocol:           a.Protocol,
+			Codec:              a.Codec,
+			PeakBitrateMbps:    a.PeakBitrateMbps,
+			StartsFirstVariant: charplan.ParseBool(a.StartsFirstVariantS()),
+			Muted:              charplan.ParseBool(a.MutedS()),
+			StartupFwdBufferS:  fwdBuffer,
+			StartupFwdRelease:  fwdRelease,
+			PersistentPeakMbps: persistPeak,
+			LocalProxy:         localProxy,
+			AutoRecovery:       autoRecovery,
+			Pattern:            shapePattern(a),
+			StepS:              shapeStepS(a),
+			MarginPct:          shapeMargin(a),
+			PatternMaster:      i == patternMaster,
+		}
+		arm.WithDefaults()
+		planArms[i] = arm
 	}
 	if window <= 0 {
 		window = 60
 	}
 
 	// One fleet run drives every bootstrapped arm at once.
-	if err := driveFleet(client, platform, len(arms), window, charDir, armEnv); err != nil {
+	if err := driveFleet(client, platform, len(arms), window, charDir, armEnv, planArms); err != nil {
 		// Non-fatal: the plays may still have registered. Surface it and measure
 		// what landed rather than dropping the whole table.
 		fmt.Fprintf(os.Stderr, "fleet run reported an error (measuring anyway): %v\n", err)
@@ -244,7 +281,7 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 // given platform, one arm each (CHAR_FLEET_COUNT=N + the per-arm env), playing
 // simultaneously. Streams the test output through so the operator sees live
 // progress + per-arm viewer links.
-func driveFleet(client *api.Client, platform string, n, windowS int, charDir string, armEnv []string) error {
+func driveFleet(client *api.Client, platform string, n, windowS int, charDir string, armEnv []string, planArms []charplan.ArmConfig) error {
 	// Fleet bring-up (N parallel WDA builds + the shared home barrier) is slower
 	// than a single launch, so budget more headroom than the sequential probe.
 	timeout := time.Duration(windowS+600) * time.Second
@@ -283,6 +320,29 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 		mf.Close()
 		defer os.Remove(manifest)
 	}
+
+	// Typed run plan — the single config channel that supersedes the per-arm
+	// CHAR_ARM_<i>_* env (still emitted alongside for this migration step). The
+	// probe reads it from CHAR_RUN_PLAN_FILE; an operator can `cat` it to see the
+	// exact config every arm received.
+	planPath := ""
+	if pf, err := os.CreateTemp("", "char-run-plan-*.json"); err == nil {
+		planPath = pf.Name()
+		pf.Close()
+		defer os.Remove(planPath)
+		plan := &charplan.RunPlan{
+			BaseURL:        client.BaseURL,
+			Platform:       platform,
+			FleetCount:     n,
+			DurationS:      windowS,
+			DeviceManifest: manifest,
+			Arms:           planArms,
+		}
+		if err := charplan.Save(planPath, plan); err != nil {
+			return fmt.Errorf("write run plan: %w", err)
+		}
+	}
+
 	cmd := exec.Command(bin, "-test.run=TestCharMatrixFleet", "-test.count=1",
 		fmt.Sprintf("-test.timeout=%ds", int(timeout.Seconds())), "-test.v=true")
 	cmd.Dir = charDir
@@ -296,6 +356,7 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 		"CHAR_FLEET_COUNT="+strconv.Itoa(n),
 		"CHAR_SWEEP_DURATION_S="+strconv.Itoa(windowS),
 		"CHAR_DEVICE_MANIFEST="+manifest,
+		"CHAR_RUN_PLAN_FILE="+planPath,
 	)
 	cmd.Env = append(cmd.Env, armEnv...)
 

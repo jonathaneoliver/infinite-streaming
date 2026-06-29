@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/charplan"
 )
 
 // AppiumLauncher drives an Appium server (default http://localhost:4723)
@@ -211,18 +213,15 @@ func withBaselineTestFlags(args []string) []string {
 	return out
 }
 
-// charAutoRecovery resolves CHAR_AUTO_RECOVERY to the value forced onto
-// -is.flag.auto_recovery on every characterization launch. Default "true"
-// (matches the app's own default); "0" / "false" / "off" / "no" force it OFF —
-// for modes that need to observe the player's raw, unmasked stall behavior
-// rather than have the recovery ladder self-heal it.
+// charAutoRecovery resolves CHAR_AUTO_RECOVERY to the value withBaselineTestFlags
+// forces onto -is.flag.auto_recovery for any mode that didn't set it explicitly.
+// Default "true" (matches the app's own default); "0" / "false" / "off" / "no"
+// force it OFF — for modes observing the player's raw, unmasked stall behavior.
+// Delegates to the single charplan.ParseBool so there is ONE auto_recovery parser
+// across the CLI, the probe, and this baseline fill (the matrix runner used to
+// parse it a second, divergent way — see #charplan).
 func charAutoRecovery() string {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("CHAR_AUTO_RECOVERY"))) {
-	case "0", "false", "off", "no":
-		return "false"
-	default:
-		return "true"
-	}
+	return strconv.FormatBool(charplan.Bool(charplan.ParseBool(os.Getenv("CHAR_AUTO_RECOVERY")), true))
 }
 
 // defaultContentClip resolves the clip every appium test plays: CHAR_CONTENT
