@@ -589,6 +589,8 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 					loopCountLL,
 					minDuration,
 					maxDuration,
+					totalDuration,
+					timeOffset,
 				)
 				if err != nil {
 					logf("ERROR: Failed to generate variant %s: %v\n", variant.URI, err)
@@ -616,6 +618,8 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 					loopCountLL,
 					minDuration,
 					maxDuration,
+					totalDuration,
+					timeOffset,
 				)
 				if err != nil {
 					logf("ERROR: Failed to generate audio %s: %v\n", audioURI, err)
@@ -1823,6 +1827,8 @@ func runContinuousLLHLS(ctx context.Context, inputPath, outputPath, content stri
 				loopCount,
 				minDuration,
 				maxDuration,
+				0,
+				0,
 			)
 
 			if err != nil {
@@ -1858,6 +1864,8 @@ func runContinuousLLHLS(ctx context.Context, inputPath, outputPath, content stri
 				loopCount,
 				minDuration,
 				maxDuration,
+				0,
+				0,
 			)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "ERROR: Failed to generate audio %s: %v\n", audioURI, err)
