@@ -116,6 +116,61 @@ func TestLiveOffsetMatrixArms(t *testing.T) {
 	}
 }
 
+func TestSeedContentsMultiClip(t *testing.T) {
+	clips := []string{"clip_a", "clip_b", "clip_c"}
+	es := SeedContents(ClassConfig, false, "2026-06-13T00:00:00Z", clips)
+	// 1 platform × protocols × clips × recipes.
+	want := len(seedProtocols) * len(clips) * len(recipesFor(ClassConfig))
+	if len(es) != want {
+		t.Fatalf("multi-content seed want %d, got %d", want, len(es))
+	}
+	seen := map[string]bool{}
+	byClip := map[string]int{}
+	for _, e := range es {
+		if seen[e.ID] {
+			t.Fatalf("duplicate seed id across clips: %s", e.ID)
+		}
+		seen[e.ID] = true
+		byClip[e.Content]++
+	}
+	// Every requested clip is represented, none extra.
+	if len(byClip) != len(clips) {
+		t.Fatalf("want %d distinct clips, got %d (%v)", len(clips), len(byClip), byClip)
+	}
+	for _, c := range clips {
+		if byClip[c] != len(seedProtocols)*len(recipesFor(ClassConfig)) {
+			t.Fatalf("clip %s seeded %d times, want %d", c, byClip[c], len(seedProtocols)*len(recipesFor(ClassConfig)))
+		}
+	}
+}
+
+func TestSeedContentsEmptyFallsBackToDefaultClip(t *testing.T) {
+	// nil/empty contents must reproduce Seed exactly (same count, ids, content).
+	a := Seed(ClassConfig, false, "t")
+	b := SeedContents(ClassConfig, false, "t", nil)
+	if len(a) != len(b) {
+		t.Fatalf("empty contents diverged from Seed: %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID || a[i].Content != b[i].Content || a[i].Content != SeedContent {
+			t.Fatalf("empty contents diverged at %d: %q/%q", i, a[i].ID, b[i].ID)
+		}
+	}
+}
+
+func TestManualKindOutranksSeedBelowHits(t *testing.T) {
+	// A manual ad-hoc probe must jump the seed backlog but yield to hit-derived
+	// work (isolation/bisect/hypothesis).
+	if kindRank(KindManual) <= kindRank(KindSeed) {
+		t.Fatalf("manual must outrank seed: manual=%v seed=%v", kindRank(KindManual), kindRank(KindSeed))
+	}
+	for _, k := range []Kind{KindHypothesis, KindBisect, KindIsolation} {
+		if kindRank(KindManual) >= kindRank(k) {
+			t.Fatalf("manual must yield to %s: manual=%v %s=%v", k, kindRank(KindManual), k, kindRank(k))
+		}
+	}
+}
+
 func TestSeedFaultClass(t *testing.T) {
 	es := Seed(ClassFault, false, "2026-06-13T00:00:00Z")
 	want := len(seedProtocols) * len(faultRecipes)

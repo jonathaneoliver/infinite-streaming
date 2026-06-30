@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  QE Lab off-hours runner LaunchAgent (#772) — fires tools/qe-offhours.sh at
+  21:00 daily; the script self-bounds to a 05:00 deadline or an empty backlog.
+
+  This is a per-USER LaunchAgent (not a system daemon) on purpose: the runner
+  drives iOS simulators + appium, which need a logged-in GUI session. So the
+  Mac must be logged in and awake — `caffeinate -is` (below) keeps it awake on
+  AC while the run is in flight, but the machine still has to be powered on and
+  unlocked-enough for the GUI session to exist.
+
+  Install (per user):
+    cp tools/com.infinitestream.qe-offhours.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.infinitestream.qe-offhours.plist
+  Run it once now (out of schedule), to smoke-test:
+    launchctl kickstart -k gui/$(id -u)/com.infinitestream.qe-offhours
+  Inspect / remove:
+    launchctl print gui/$(id -u)/com.infinitestream.qe-offhours
+    launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.infinitestream.qe-offhours.plist
+
+  Machine-specific values (PATH, repo path, sim UDIDs, base URL) mirror the
+  defaults baked into tools/qe-offhours.sh. Edit BOTH if they drift, or override
+  here — the EnvironmentVariables below win over the script's `${QE_*:-default}`.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.infinitestream.qe-offhours</string>
+
+  <!-- Run the script under caffeinate so an overnight sweep isn't cut short by
+       idle/AC sleep. -i = prevent idle sleep, -s = prevent sleep on AC. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/bash</string>
+    <string>-lc</string>
+    <string>exec /usr/bin/caffeinate -is /opt/homebrew/bin/bash "$QE_REPO/tools/qe-offhours.sh"</string>
+  </array>
+
+  <!-- 21:00 every day. The script computes its own 05:00 deadline + budget. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>21</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <!-- Scheduled only — don't also fire on every login/bootstrap. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- launchd agents get a minimal PATH; spell out every tool the runner
+         shells: bash/jq (homebrew), go, harness (~/.local/bin), xcrun/curl/
+         caffeinate (/usr/bin), adb (Android SDK), appium/node (nvm). -->
+    <key>PATH</key>
+    <string>/Users/jonathanoliver/.local/bin:/opt/homebrew/bin:/usr/local/go/bin:/Users/jonathanoliver/.nvm/versions/node/v20.19.6/bin:/Users/jonathanoliver/Library/Android/sdk/platform-tools:/usr/bin:/bin:/usr/sbin:/sbin</string>
+
+    <key>QE_REPO</key>
+    <string>/Users/jonathanoliver/Projects/smashing</string>
+
+    <key>HARNESS_BASE_URL</key>
+    <string>https://dev.jeoliver.com:21000</string>
+
+    <key>HARNESS_INSECURE</key>
+    <string>1</string>
+
+    <!-- Default clip the seed/probe stream (matches .env CHAR_CONTENT). -->
+    <key>QE_CONTENT</key>
+    <string>insane_newer_p200_h264</string>
+
+    <!-- Simulator UDIDs the runner binds per platform (mirror qe-offhours.sh
+         defaults). iPad (A16) for ipad-sim; Fleet iPhone 15 #1 for iphone-sim. -->
+    <key>QE_IPADSIM_UDID</key>
+    <string>6E1441F3-EEAD-43E4-ABEC-FA0BC2BEDCE2</string>
+    <key>QE_IPHONESIM_UDID</key>
+    <string>4D62CB39-BAB7-4294-99D7-8E28FBCD0FF0</string>
+  </dict>
+
+  <!-- Early-failure safety net; the script itself reopens stdout/err onto
+       ~/Library/Logs/qe-offhours.log once it starts. -->
+  <key>StandardOutPath</key>
+  <string>/Users/jonathanoliver/Library/Logs/qe-offhours.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jonathanoliver/Library/Logs/qe-offhours.err.log</string>
+</dict>
+</plist>

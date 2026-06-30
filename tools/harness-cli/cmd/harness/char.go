@@ -32,7 +32,7 @@ import (
 // reusing the sweep's config-on-connect bootstrap and measurement helpers.
 func cmdChar(client *api.Client, args []string, asJSON bool) error {
 	if len(args) == 0 {
-		return errors.New("usage: harness char matrix <spec.yaml> [--dry-run] [--char-dir DIR] [--duration-s N]")
+		return errors.New("usage: harness char matrix <spec.yaml> [--validate|--dry-run] [--char-dir DIR] [--duration-s N]")
 	}
 	switch args[0] {
 	case "matrix":
@@ -50,11 +50,12 @@ func cmdChar(client *api.Client, args []string, asJSON bool) error {
 // spec delegates to the existing fleet go-test backend.
 func cmdCharMatrix(client *api.Client, args []string, asJSON bool) error {
 	if len(args) < 1 || args[0] == "" {
-		return errors.New("usage: harness char matrix <spec.yaml|-> [--dry-run] [--char-dir DIR] [--duration-s N]")
+		return errors.New("usage: harness char matrix <spec.yaml|-> [--validate|--dry-run] [--char-dir DIR] [--duration-s N]")
 	}
 	specPath := args[0]
 	fs := flag.NewFlagSet("char matrix", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "expand + print the planned arms; touch no sessions")
+	validate := fs.Bool("validate", false, "load + expand only; report ok/error and exit non-zero on a bad spec (offline, no table)")
 	charDir := fs.String("char-dir", envOrDefault("CHAR_DIR", "tests/characterization"), "path to the characterization Go module (drives the probe via `go test`)")
 	durationOverride := fs.Int("duration-s", 0, "override every arm's play window (seconds)")
 	group := fs.String("group", "", "group_id to born-group every arm's session (dashboard A/B compare)")
@@ -87,6 +88,20 @@ func cmdCharMatrix(client *api.Client, args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
+
+	// --validate: the spec loaded + expanded cleanly. Report and stop — quiet
+	// pass/fail for the test-author skill's fast loop and CI, no network, no
+	// arm table (that's --dry-run). A bad spec already returned non-nil above.
+	if *validate {
+		if asJSON {
+			return json.NewEncoder(os.Stdout).Encode(map[string]any{
+				"spec": spec.Name, "arms": len(arms), "parallel": spec.Parallel, "ok": true,
+			})
+		}
+		fmt.Printf("spec OK: %s — %d arm(s), parallel=%v\n", spec.Name, len(arms), spec.Parallel)
+		return nil
+	}
+
 	fmt.Fprintf(os.Stderr, "char matrix run id: %s\n", runID)
 
 	// Dry run: show the plan (one row per arm, no measurements) and stop. Pure —

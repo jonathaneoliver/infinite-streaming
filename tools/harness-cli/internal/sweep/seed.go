@@ -116,13 +116,23 @@ func recipesFor(class Class) []seedRecipe {
 	return append(out, liveOffsetRecipes...)
 }
 
-// Seed builds the starter backlog for one class. full=false is the narrow
-// depth-first set (iPad-sim only); full=true widens across the physical-device
-// platforms. `now` is the RFC3339 UTC stamp for created_at (passed in so
-// callers control the clock). Scores are stamped with the default weights.
-// Seed builds the starter experiment set. platformsOverride (optional) targets a
+// Seed builds the starter backlog for one class against the single default clip
+// (SeedContent). full=false is the narrow depth-first set (iPad-sim only);
+// full=true widens across the physical-device platforms. `now` is the RFC3339
+// UTC stamp for created_at (passed in so callers control the clock). Scores are
+// stamped with the default weights. platformsOverride (optional) targets a
 // specific platform (e.g. "androidtv") instead of the narrow/full defaults.
 func Seed(class Class, full bool, now string, platformsOverride ...string) []*Experiment {
+	return SeedContents(class, full, now, nil, platformsOverride...)
+}
+
+// SeedContents is Seed widened across a list of clips: the recipe set is seeded
+// once per content (platforms × protocols × contents × recipes), so one seed
+// call can cover several pieces of content instead of just SeedContent. A nil/
+// empty contents list falls back to the single default clip (so Seed's behaviour
+// — and its ids — are unchanged). The content slug is folded into the id only
+// when more than one clip is seeded, keeping single-clip ids stable.
+func SeedContents(class Class, full bool, now string, contents []string, platformsOverride ...string) []*Experiment {
 	if class == "" {
 		class = ClassConfig
 	}
@@ -133,39 +143,63 @@ func Seed(class Class, full bool, now string, platformsOverride ...string) []*Ex
 	if len(platformsOverride) > 0 {
 		platforms = platformsOverride
 	}
+	if len(contents) == 0 {
+		contents = []string{SeedContent}
+	}
+	multiContent := len(contents) > 1
 	recipes := recipesFor(class)
 	w := DefaultWeights()
 	var out []*Experiment
 	for _, p := range platforms {
 		for _, proto := range seedProtocols {
-			for _, r := range recipes {
-				e := &Experiment{
-					ID:                  fmt.Sprintf("seed-%s-%s-%s-%s-%s", class, p, proto, r.family, r.mode),
-					CreatedAt:           now,
-					Class:               class,
-					Platform:            p,
-					LaunchMode:          LaunchModeAppium, // every item is driven by appium (the only mode the probe supports), incl. the physical Android TV
-					Protocol:            proto,
-					Content:             SeedContent,
-					Segment:             r.segment,
-					Mode:                r.mode,
-					ContentManipulation: cloneCM(r.cm),
-					Shape:               cloneShape(r.shape),
-					TransferTimeouts:    cloneTransfer(r.transfer),
-					Fault:               cloneFault(r.fault),
-					Kind:                KindSeed,
-					Group:               groupID(r.groupSlug, p),
-					Reps:                1,
-					Depth:               0,
-					Why:                 "starter_seed",
-					WhyText:             seedWhyText(r, class, p, proto),
+			for _, clip := range contents {
+				for _, r := range recipes {
+					id := fmt.Sprintf("seed-%s-%s-%s-%s-%s", class, p, proto, r.family, r.mode)
+					if multiContent {
+						id += "-" + contentSlug(clip)
+					}
+					e := &Experiment{
+						ID:                  id,
+						CreatedAt:           now,
+						Class:               class,
+						Platform:            p,
+						LaunchMode:          LaunchModeAppium, // every item is driven by appium (the only mode the probe supports), incl. the physical Android TV
+						Protocol:            proto,
+						Content:             clip,
+						Segment:             r.segment,
+						Mode:                r.mode,
+						ContentManipulation: cloneCM(r.cm),
+						Shape:               cloneShape(r.shape),
+						TransferTimeouts:    cloneTransfer(r.transfer),
+						Fault:               cloneFault(r.fault),
+						Kind:                KindSeed,
+						Group:               groupID(r.groupSlug, p),
+						Reps:                1,
+						Depth:               0,
+						Why:                 "starter_seed",
+						WhyText:             seedWhyText(r, class, p, proto),
+					}
+					e.Score = w.Score(e)
+					out = append(out, e)
 				}
-				e.Score = w.Score(e)
-				out = append(out, e)
 			}
 		}
 	}
 	return out
+}
+
+// contentSlug sanitises a clip name into an id-safe fragment (alphanumerics and
+// '_' kept, everything else dropped) so a multi-content seed yields unique,
+// readable ids.
+func contentSlug(clip string) string {
+	var b strings.Builder
+	for _, r := range clip {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // groupID expands a recipe's group slug into a per-platform comparison group

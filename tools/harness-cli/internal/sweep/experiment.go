@@ -63,6 +63,7 @@ type Kind string
 
 const (
 	KindSeed       Kind = "seed"       // broad starter cell
+	KindManual     Kind = "manual"     // operator-authored ad-hoc probe (`sweep add`); jumps the seed backlog, stays below hit-derived work
 	KindIsolation  Kind = "isolation"  // one-factor-at-a-time probe off a confirmed hit (non-recursive)
 	KindHypothesis Kind = "hypothesis" // proactive A/B comparison (non-recursive)
 	KindBisect     Kind = "bisect"     // recursive narrowing of a continuous axis (depth-bounded)
