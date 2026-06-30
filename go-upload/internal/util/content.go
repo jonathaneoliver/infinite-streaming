@@ -250,6 +250,9 @@ func availableSegmentDurations(contentPath string, hasHls bool, native *int) []i
 	if hasHls {
 		set[2] = true
 		set[6] = true
+		if contentHasPartials(contentPath) { // 1s rung is composed from LL partials (go-live groups parts into ~1s GOP sub-segments)
+			set[1] = true
+		}
 	}
 	if native != nil {
 		set[*native] = true

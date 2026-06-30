@@ -856,6 +856,7 @@ final class PlayerViewModel: ObservableObject {
             }
             switch segment {
             case .ll: return item.supportsLL
+            case .s1: return item.supportsSegment(1)
             case .s2: return item.supportsSegment(2)
             case .s6: return item.supportsSegment(6)
             }
@@ -880,6 +881,7 @@ final class PlayerViewModel: ObservableObject {
             }
             switch segment {
             case .ll: return item.supportsLL
+            case .s1: return item.supportsSegment(1)
             case .s2: return item.supportsSegment(2)
             case .s6: return item.supportsSegment(6)
             }

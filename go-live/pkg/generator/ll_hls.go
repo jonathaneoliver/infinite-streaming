@@ -2,7 +2,6 @@ package generator
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"strings"
 	"sync"
@@ -42,14 +41,16 @@ func logOncePerSecondLL(message string) {
 // LLHLSGenerator generates LL-HLS playlists
 type LLHLSGenerator struct{}
 
-func writeLoopDateRange(sb *strings.Builder, loopCount int, at time.Time, marker string) {
-	timestamp := at.UTC().Format("2006-01-02T15:04:05.000Z")
-	// Loop boundary marker for downstream analytics and loop counters.
-	// sb.WriteString(fmt.Sprintf("#EXT-X-DATERANGE:ID=\"loop-%d-%s\",CLASS=\"com.infinite.loop\",START-DATE=\"%s\",X-LOOP-COUNT=\"%d\"\n", loopCount, marker, timestamp, loopCount))
-	logOncePerSecondLL(fmt.Sprintf("[GO-LIVE:LOOP][LL] marker=%s loop_count=%d start_date=%s", marker, loopCount, timestamp))
-}
-
-// GenerateVariantPlaylist generates a single variant playlist with byte-range partials
+// GenerateVariantPlaylist generates a single LL-HLS variant playlist.
+//
+// The LL playlist is, by construction, the 1s range playlist (the `s1` rung
+// built by buildRangeSegments with targetSeconds=1) PLUS per-segment
+// EXT-X-PART tags and the LL-only header. It shares ALL of the
+// MEDIA-SEQUENCE / DISCONTINUITY-SEQUENCE / sliding-window / loop-wrap math
+// with the range generator via generateVariantPlaylistCore, so the sequence
+// number is derived from len(segments) — the flat 1s-segment count — and can
+// never drift (the historical bug where the underlying-6s-segment count was
+// used for MEDIA-SEQUENCE while ~6× as many EXTINFs aged out of the window).
 func (g *LLHLSGenerator) GenerateVariantPlaylist(
 	pl *playlist.Media,
 	byteranges map[string][]parser.ByteRange,
@@ -59,224 +60,35 @@ func (g *LLHLSGenerator) GenerateVariantPlaylist(
 	loopCount int,
 	minDuration float64,
 	maxDuration float64,
+	syncTotalDuration float64,
+	syncTimeOffset float64,
 ) (string, error) {
+	_ = maxDuration
 
-	// Auto-detect content characteristics from first segment
-	segmentDuration, partialsPerSegment, partialDuration := detectContentCharacteristics(pl, byteranges)
+	// PART-TARGET (the ~200ms partial duration). Detected from the first
+	// underlying segment's fragment count, matching prior behaviour.
+	_, _, partialDuration := detectContentCharacteristics(pl, byteranges)
 
-	// Playlist position remains absolute-time based.
-	timeOffset := math.Mod(timeNow, minDuration)
-
-	// Calculate PDT (Program Date Time)
-	pdtSeconds := timeNow - maxDuration
-	pdt := time.Unix(int64(pdtSeconds), 0).UTC()
-
-	// Calculate which segment we're on using ideal segment duration
-	// This matches live.py approach and handles variable-length final segments correctly
-	numSegments := countSegments(pl)
-	idealSegmentDuration := minDuration / float64(numSegments)
-	currentSegmentIdx := int(timeOffset / idealSegmentDuration)
-
-	// Clamp to valid range
-	if currentSegmentIdx >= numSegments {
-		currentSegmentIdx = numSegments - 1
-	}
-	if currentSegmentIdx < 0 {
-		currentSegmentIdx = 0
+	// Build the SAME flat 1s segments the s1 range rung uses (group ~5
+	// fragments → one 1s segment), so the LL's complete segments are
+	// byte-identical to s1. Each rangeSegment now also carries its Fragments,
+	// which the core emits as EXT-X-PART tags.
+	const llTargetSeconds = 1.0
+	segments, totalDuration, err := buildRangeSegments(pl, byteranges, llTargetSeconds, true)
+	if err != nil {
+		return "", err
 	}
 
-	// Calculate which partial within the current segment
-	segmentStartTime := float64(currentSegmentIdx) * idealSegmentDuration
-	timeWithinSegment := timeOffset - segmentStartTime
-	currentPartialIdx := int(timeWithinSegment / partialDuration)
-
-	// Clamp partial index to valid range
-	if currentPartialIdx > partialsPerSegment-1 {
-		currentPartialIdx = partialsPerSegment - 1
-	}
-	if currentPartialIdx < 0 {
-		currentPartialIdx = 0
-	}
-
-	// Calculate media sequence (segment number)
-	sequence := (loopCount * numSegments) + currentSegmentIdx
-
-	// Pre-compute the window wrap decision here so we can emit the correct
-	// EXT-X-DISCONTINUITY-SEQUENCE in the playlist header below. The actual
-	// window-building logic further down uses the same computation.
-	segmentsNeededForDiscSeq := int(MAX_LIVE_WINDOW_DURATION / idealSegmentDuration)
-	wrapAroundForDiscSeq := currentSegmentIdx < segmentsNeededForDiscSeq-1
-	firstSegLoop := loopCount
-	if wrapAroundForDiscSeq {
-		// Wrapping: first segment in window comes from the previous loop,
-		// and this playlist contains the discontinuity marker itself.
-		firstSegLoop = loopCount - 1
-		if firstSegLoop < 0 {
-			firstSegLoop = 0
-		}
-	}
-
-	// Build playlist
-	var sb strings.Builder
-
-	// LL-HLS playlist header
-	sb.WriteString("#EXTM3U\n")
-	sb.WriteString("#EXT-X-VERSION:10\n") // Version 10 for LL-HLS
-	sb.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(segmentDuration)))
-	sb.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", sequence))
-	// EXT-X-DISCONTINUITY-SEQUENCE is REQUIRED by RFC 8216 §4.3.3.3 when the
-	// playlist contains an EXT-X-DISCONTINUITY tag. Required for cross-variant
-	// synchronization during ABR evaluation; absence causes AVPlayer -12642
-	// "No matching mediaFile found from playlist".
-	sb.WriteString(fmt.Sprintf("#EXT-X-DISCONTINUITY-SEQUENCE:%d\n", firstSegLoop))
-
-	// LL-HLS specific tags
-	sb.WriteString(fmt.Sprintf("#EXT-X-PART-INF:PART-TARGET=%.3f\n", partialDuration))
-	sb.WriteString("#EXT-X-SERVER-CONTROL:PART-HOLD-BACK=3.0\n")
-
-	// Program date time
-	sb.WriteString(fmt.Sprintf("#EXT-X-PROGRAM-DATE-TIME:%s\n", pdt.Format("2006-01-02T15:04:05.000Z")))
-
-	// Start time-offset: 3.0 seconds to match PART-HOLD-BACK
-	sb.WriteString("#EXT-X-START:TIME-OFFSET=-3.0,PRECISE=YES\n")
-
-	// Init segment (fMP4 initialization)
-	if segmentMap != "" {
-		sb.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", baseURI(segmentMap)))
-	}
-
-	// Add discontinuity at loop boundary
-	if currentSegmentIdx == 0 {
-		writeLoopDateRange(&sb, loopCount, pdt, "head")
-		sb.WriteString("#EXT-X-DISCONTINUITY\n")
-		if segmentMap != "" {
-			sb.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", baseURI(segmentMap)))
-		}
-	}
-
-	// Calculate sliding window - how many past segments to show
-	// Use idealSegmentDuration so audio/video windows align on segment count.
-	segmentsNeeded := int(MAX_LIVE_WINDOW_DURATION / idealSegmentDuration)
-
-	// Handle wrap-around at loop boundary
-	var startIdx int
-	var wrapAround bool
-
-	if currentSegmentIdx < segmentsNeeded-1 {
-		// Need to wrap around - show segments from end of previous loop
-		segmentsFromEnd := segmentsNeeded - 1 - currentSegmentIdx
-		startIdx = numSegments - segmentsFromEnd
-		wrapAround = true
-	} else {
-		// Normal case - enough segments in current position
-		startIdx = currentSegmentIdx - segmentsNeeded + 1
-		wrapAround = false
-	}
-
-	accumulatedDuration := 0.0
-
-	// FIRST: Write all PAST segments (fully available, in chronological order)
-	// Handle wrap-around case: segments from end of video, then segments from beginning
-	if wrapAround {
-		// Write segments from end of video (previous loop)
-		for segIdx := startIdx; segIdx < numSegments; segIdx++ {
-			segment := getSegment(pl, segIdx)
-			if segment == nil {
-				continue
-			}
-			segmentURI := baseURI(segment.URI)
-			fragments := byteranges[segment.URI]
-
-			// Write all partials for this complete segment
-			for _, fragment := range fragments {
-				partTag := fmt.Sprintf("#EXT-X-PART:DURATION=%.3f,URI=\"%s\",BYTERANGE=\"%d@%d\"",
-					partialDuration, segmentURI, fragment.Length, fragment.Offset)
-
-				if fragment.Independent {
-					partTag += ",INDEPENDENT=YES"
-				}
-
-				sb.WriteString(partTag + "\n")
-			}
-
-			sb.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", segment.Duration.Seconds()))
-			sb.WriteString(segmentURI + "\n")
-
-			accumulatedDuration += segment.Duration.Seconds()
-		}
-
-		// Add discontinuity before switching from previous loop to current loop segments
-		boundaryAt := pdt.Add(time.Duration(accumulatedDuration * float64(time.Second)))
-		writeLoopDateRange(&sb, loopCount, boundaryAt, "wrap")
-		sb.WriteString("#EXT-X-DISCONTINUITY\n")
-		if segmentMap != "" {
-			sb.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", baseURI(segmentMap)))
-		}
-	}
-
-	// Write segments from current loop (0 to current_segment_idx)
-	startSegIdx := 0
-	if !wrapAround {
-		startSegIdx = startIdx
-	}
-
-	for segIdx := startSegIdx; segIdx < currentSegmentIdx; segIdx++ {
-		segment := getSegment(pl, segIdx)
-		if segment == nil {
-			continue
-		}
-		segmentURI := baseURI(segment.URI)
-		fragments := byteranges[segment.URI]
-
-		// Write all partials for this complete segment
-		for _, fragment := range fragments {
-			partTag := fmt.Sprintf("#EXT-X-PART:DURATION=%.3f,URI=\"%s\",BYTERANGE=\"%d@%d\"",
-				partialDuration, segmentURI, fragment.Length, fragment.Offset)
-
-			if fragment.Independent {
-				partTag += ",INDEPENDENT=YES"
-			}
-
-			sb.WriteString(partTag + "\n")
-		}
-
-		sb.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", segment.Duration.Seconds()))
-		sb.WriteString(segmentURI + "\n")
-
-		accumulatedDuration += segment.Duration.Seconds()
-
-		if accumulatedDuration >= MAX_LIVE_WINDOW_DURATION {
-			break
-		}
-	}
-
-	// LAST: Write the CURRENT segment (live edge - may be incomplete)
-	currentSegment := getSegment(pl, currentSegmentIdx)
-	if currentSegment != nil {
-		segmentURI := baseURI(currentSegment.URI)
-		fragments := byteranges[currentSegment.URI]
-
-		// For current segment: show partials from 0 up to current_partial_idx (inclusive)
-		for partialIdx := 0; partialIdx <= currentPartialIdx && partialIdx < len(fragments); partialIdx++ {
-			fragment := fragments[partialIdx]
-			partTag := fmt.Sprintf("#EXT-X-PART:DURATION=%.3f,URI=\"%s\",BYTERANGE=\"%d@%d\"",
-				partialDuration, segmentURI, fragment.Length, fragment.Offset)
-
-			if fragment.Independent {
-				partTag += ",INDEPENDENT=YES"
-			}
-
-			sb.WriteString(partTag + "\n")
-		}
-
-		// Only write EXTINF if current segment is complete (all partials available)
-		if currentPartialIdx >= len(fragments)-1 {
-			sb.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", currentSegment.Duration.Seconds()))
-			sb.WriteString(segmentURI + "\n")
-		}
-	}
-
-	return sb.String(), nil
+	return generateVariantPlaylistCore(segments, totalDuration, segmentMap, relPath, timeNow, loopCount, minDuration, syncTotalDuration, syncTimeOffset, variantPlaylistOptions{
+		emitPartials: true,
+		useByterange: true,
+		renderURI: func(uri string) string {
+			return baseURI(uri)
+		},
+		partTarget:   partialDuration,
+		partHoldBack: 3.0,
+		loopMarker:   "LL",
+	})
 }
 
 func joinURI(relPath, uri string) string {
@@ -325,23 +137,4 @@ func detectContentCharacteristics(pl *playlist.Media, byteranges map[string][]pa
 		segmentDuration, fragmentCount, partialDuration))
 
 	return segmentDuration, fragmentCount, partialDuration
-}
-
-// countSegments counts non-nil segments in playlist
-func countSegments(pl *playlist.Media) int {
-	count := 0
-	for _, seg := range pl.Segments {
-		if seg != nil {
-			count++
-		}
-	}
-	return count
-}
-
-// getSegment safely gets a segment by index
-func getSegment(pl *playlist.Media, idx int) *playlist.MediaSegment {
-	if idx < 0 || idx >= len(pl.Segments) {
-		return nil
-	}
-	return pl.Segments[idx]
 }

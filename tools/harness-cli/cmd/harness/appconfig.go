@@ -25,7 +25,7 @@ Use this to reconfigure a RUNNING app between plays without a cold relaunch.
 'app.<field>' bootstrap args for that; this command targets subsequent plays.)
 
 Flags:
-  --segment LADDER     ll | s2 | s6
+  --segment LADDER     ll | s1 | s2 | s6
   --protocol PROTO     hls | dash
   --live-offset SEC    seconds behind live edge (>=0; 0 = manifest/Go-Live decides)
   --peak-bitrate MBPS  ABR ceiling in Mbps (>=0; 0 = no cap)
@@ -95,10 +95,10 @@ func buildAppConfigBody(segment, protocol string, liveOffset float64, peakBitrat
 	ac := map[string]any{}
 	if set["segment"] {
 		switch segment {
-		case "ll", "s2", "s6":
+		case "ll", "s1", "s2", "s6":
 			ac["segment"] = segment
 		default:
-			return nil, fmt.Errorf("invalid --segment %q (want ll|s2|s6)", segment)
+			return nil, fmt.Errorf("invalid --segment %q (want ll|s1|s2|s6)", segment)
 		}
 	}
 	if set["protocol"] {

@@ -31,7 +31,7 @@ type runConfig struct {
 	appium      bool
 }
 
-var segmentRawValue = map[string]string{"2s": "s2", "6s": "s6", "ll": "ll"}
+var segmentRawValue = map[string]string{"1s": "s1", "2s": "s2", "6s": "s6", "ll": "ll"}
 
 // readRunConfig parses the CHAR_* axes. isAppium gates the launch-arg axes
 // (segment, LocalProxy) which need XCUITest processArguments — they're
@@ -42,7 +42,7 @@ func readRunConfig(t *testing.T, isAppium bool) runConfig {
 
 	if v := strings.TrimSpace(os.Getenv("CHAR_SEGMENT")); v != "" {
 		if _, ok := segmentRawValue[v]; !ok {
-			t.Fatalf("CHAR_SEGMENT must be one of 2s|6s|ll (got %q)", v)
+			t.Fatalf("CHAR_SEGMENT must be one of 1s|2s|6s|ll (got %q)", v)
 		}
 		if isAppium {
 			cfg.segment = v

@@ -63,7 +63,7 @@ enum class Protocol(val label: String) {
     }
 }
 enum class Segment(val label: String, val suffix: String) {
-    LL("LL", ""), TWO("2s", "_2s"), SIX("6s", "_6s");
+    LL("LL", ""), ONE("1s", "_1s"), TWO("2s", "_2s"), SIX("6s", "_6s");
 
     companion object {
         /** Map an `is.segment` launch-arg / wire value (iOS `SegmentLength`
@@ -71,6 +71,7 @@ enum class Segment(val label: String, val suffix: String) {
          *  label form too. null = unrecognised. #797. */
         fun fromArg(raw: String): Segment? = when (raw.trim().lowercase()) {
             "ll" -> LL
+            "s1", "1s" -> ONE
             "s2", "2s" -> TWO
             "s6", "6s" -> SIX
             else -> null
@@ -211,6 +212,7 @@ data class UiState(
             if (codec != Codec.AUTO && inferCodec(c.name) != codec) return@filter false
             when (segment) {
                 Segment.LL -> c.hasLL ?: true
+                Segment.ONE -> c.supportsSegment(1)
                 Segment.TWO -> c.supportsSegment(2)
                 Segment.SIX -> c.supportsSegment(6)
             }

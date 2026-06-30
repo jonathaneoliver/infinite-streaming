@@ -229,12 +229,14 @@ enum StreamProtocol: String, CaseIterable, Identifiable, Codable {
 
 enum SegmentLength: String, CaseIterable, Identifiable, Codable {
     case ll
+    case s1
     case s2
     case s6
     var id: String { rawValue }
     var label: String {
         switch self {
         case .ll: return "LL"
+        case .s1: return "1s"
         case .s2: return "2s"
         case .s6: return "6s"
         }
@@ -243,6 +245,7 @@ enum SegmentLength: String, CaseIterable, Identifiable, Codable {
     var suffix: String {
         switch self {
         case .ll: return ""
+        case .s1: return "_1s"
         case .s2: return "_2s"
         case .s6: return "_6s"
         }
@@ -251,11 +254,13 @@ enum SegmentLength: String, CaseIterable, Identifiable, Codable {
     /// Worst-case (max) segment duration in seconds — segments aren't exactly the
     /// nominal length, so this is the ceiling the manifest declares. Used to size
     /// the startup forward-buffer cap (3× this): 6s-nominal tops out ~7s, 2s-
-    /// nominal ~9s (LL shares the 6s ceiling).
+    /// nominal ~9s (LL shares the 6s ceiling). 1s-nominal (TARGETDURATION 2)
+    /// tops out ~3s.
     var maxSegmentSeconds: Double {
         switch self {
         case .ll, .s6: return 7
         case .s2: return 9
+        case .s1: return 3
         }
     }
 }
