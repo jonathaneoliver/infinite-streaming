@@ -64,6 +64,15 @@ func (g *LLHLSGenerator) GenerateVariantPlaylist(
 	// Auto-detect content characteristics from first segment
 	segmentDuration, partialsPerSegment, partialDuration := detectContentCharacteristics(pl, byteranges)
 
+	// Determine TARGETDURATION from the actual GOP-aligned sub-segment sizes.
+	// We split each underlying segment into sub-segments that start at each
+	// INDEPENDENT fragment (≈1s GOPs), so the largest sub-segment governs
+	// TARGETDURATION (ceil of the max group duration → ~1). This drops the
+	// AVPlayer HOLD-BACK floor from 18s (with a 6s EXTINF) to 3s.
+	subSegTargetDuration := computeSubSegmentTargetDuration(pl, byteranges, partialDuration, segmentDuration)
+	// HOLD-BACK is 3 × TARGETDURATION per RFC 8216 recommendation.
+	holdBack := 3.0 * float64(subSegTargetDuration)
+
 	// Playlist position remains absolute-time based.
 	timeOffset := math.Mod(timeNow, minDuration)
 
@@ -122,7 +131,7 @@ func (g *LLHLSGenerator) GenerateVariantPlaylist(
 	// LL-HLS playlist header
 	sb.WriteString("#EXTM3U\n")
 	sb.WriteString("#EXT-X-VERSION:10\n") // Version 10 for LL-HLS
-	sb.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(segmentDuration)))
+	sb.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", subSegTargetDuration))
 	sb.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", sequence))
 	// EXT-X-DISCONTINUITY-SEQUENCE is REQUIRED by RFC 8216 §4.3.3.3 when the
 	// playlist contains an EXT-X-DISCONTINUITY tag. Required for cross-variant
@@ -132,7 +141,7 @@ func (g *LLHLSGenerator) GenerateVariantPlaylist(
 
 	// LL-HLS specific tags
 	sb.WriteString(fmt.Sprintf("#EXT-X-PART-INF:PART-TARGET=%.3f\n", partialDuration))
-	sb.WriteString("#EXT-X-SERVER-CONTROL:PART-HOLD-BACK=3.0\n")
+	sb.WriteString(fmt.Sprintf("#EXT-X-SERVER-CONTROL:HOLD-BACK=%.3f,PART-HOLD-BACK=3.0\n", holdBack))
 
 	// Program date time
 	sb.WriteString(fmt.Sprintf("#EXT-X-PROGRAM-DATE-TIME:%s\n", pdt.Format("2006-01-02T15:04:05.000Z")))
@@ -187,20 +196,8 @@ func (g *LLHLSGenerator) GenerateVariantPlaylist(
 			segmentURI := baseURI(segment.URI)
 			fragments := byteranges[segment.URI]
 
-			// Write all partials for this complete segment
-			for _, fragment := range fragments {
-				partTag := fmt.Sprintf("#EXT-X-PART:DURATION=%.3f,URI=\"%s\",BYTERANGE=\"%d@%d\"",
-					partialDuration, segmentURI, fragment.Length, fragment.Offset)
-
-				if fragment.Independent {
-					partTag += ",INDEPENDENT=YES"
-				}
-
-				sb.WriteString(partTag + "\n")
-			}
-
-			sb.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", segment.Duration.Seconds()))
-			sb.WriteString(segmentURI + "\n")
+			// Emit GOP-aligned sub-segments (each ≈1s) with their partials.
+			writeCompleteSegmentSubSegments(&sb, segmentURI, fragments, partialDuration)
 
 			accumulatedDuration += segment.Duration.Seconds()
 		}
@@ -228,20 +225,8 @@ func (g *LLHLSGenerator) GenerateVariantPlaylist(
 		segmentURI := baseURI(segment.URI)
 		fragments := byteranges[segment.URI]
 
-		// Write all partials for this complete segment
-		for _, fragment := range fragments {
-			partTag := fmt.Sprintf("#EXT-X-PART:DURATION=%.3f,URI=\"%s\",BYTERANGE=\"%d@%d\"",
-				partialDuration, segmentURI, fragment.Length, fragment.Offset)
-
-			if fragment.Independent {
-				partTag += ",INDEPENDENT=YES"
-			}
-
-			sb.WriteString(partTag + "\n")
-		}
-
-		sb.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", segment.Duration.Seconds()))
-		sb.WriteString(segmentURI + "\n")
+		// Emit GOP-aligned sub-segments (each ≈1s) with their partials.
+		writeCompleteSegmentSubSegments(&sb, segmentURI, fragments, partialDuration)
 
 		accumulatedDuration += segment.Duration.Seconds()
 
@@ -256,27 +241,129 @@ func (g *LLHLSGenerator) GenerateVariantPlaylist(
 		segmentURI := baseURI(currentSegment.URI)
 		fragments := byteranges[currentSegment.URI]
 
-		// For current segment: show partials from 0 up to current_partial_idx (inclusive)
-		for partialIdx := 0; partialIdx <= currentPartialIdx && partialIdx < len(fragments); partialIdx++ {
-			fragment := fragments[partialIdx]
-			partTag := fmt.Sprintf("#EXT-X-PART:DURATION=%.3f,URI=\"%s\",BYTERANGE=\"%d@%d\"",
-				partialDuration, segmentURI, fragment.Length, fragment.Offset)
+		// Only fragments up to current_partial_idx (inclusive) are "live".
+		availableCount := currentPartialIdx + 1
+		if availableCount > len(fragments) {
+			availableCount = len(fragments)
+		}
+		segmentComplete := currentPartialIdx >= len(fragments)-1
 
-			if fragment.Independent {
-				partTag += ",INDEPENDENT=YES"
+		// Walk the available fragments, grouping into GOP-aligned sub-segments
+		// that start at each INDEPENDENT fragment. A group is emitted as a
+		// closed sub-segment (parts + #EXT-X-BYTERANGE + #EXTINF) only once its
+		// closing boundary is known — either the next INDEPENDENT fragment has
+		// appeared, or the whole segment is complete. The trailing, not-yet-
+		// closed group stays as bare #EXT-X-PART lines (no #EXTINF yet),
+		// preserving the existing live-edge behaviour.
+		groups := groupFragmentsByGOP(fragments[:availableCount])
+		for gi, group := range groups {
+			// A group is closed if it is not the last available group, or if
+			// it is the last group AND the segment is complete (no more
+			// fragments will arrive to extend it).
+			closed := gi < len(groups)-1 || segmentComplete
+
+			// Emit every part in the group (unchanged part formatting).
+			for _, fragment := range group {
+				partTag := fmt.Sprintf("#EXT-X-PART:DURATION=%.3f,URI=\"%s\",BYTERANGE=\"%d@%d\"",
+					partialDuration, segmentURI, fragment.Length, fragment.Offset)
+				if fragment.Independent {
+					partTag += ",INDEPENDENT=YES"
+				}
+				sb.WriteString(partTag + "\n")
 			}
 
-			sb.WriteString(partTag + "\n")
-		}
-
-		// Only write EXTINF if current segment is complete (all partials available)
-		if currentPartialIdx >= len(fragments)-1 {
-			sb.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", currentSegment.Duration.Seconds()))
-			sb.WriteString(segmentURI + "\n")
+			if closed {
+				writeSubSegmentTail(&sb, segmentURI, group, partialDuration)
+			}
 		}
 	}
 
 	return sb.String(), nil
+}
+
+// groupFragmentsByGOP splits a contiguous run of fragments into GOP-aligned
+// sub-segment groups. A new group begins at every INDEPENDENT fragment (a
+// keyframe boundary); following non-independent fragments accumulate into the
+// current group until the next INDEPENDENT fragment or end of input. If the
+// first fragment is not independent (e.g. mid-GOP at a window edge), it seeds
+// the first group so no fragment is dropped.
+func groupFragmentsByGOP(fragments []parser.ByteRange) [][]parser.ByteRange {
+	var groups [][]parser.ByteRange
+	var current []parser.ByteRange
+	for _, fragment := range fragments {
+		if fragment.Independent && len(current) > 0 {
+			groups = append(groups, current)
+			current = nil
+		}
+		current = append(current, fragment)
+	}
+	if len(current) > 0 {
+		groups = append(groups, current)
+	}
+	return groups
+}
+
+// writeSubSegmentTail emits the #EXT-X-BYTERANGE + #EXTINF + URI lines that
+// close one GOP-aligned sub-segment. The byterange spans the contiguous run of
+// the group's fragments (length = sum of fragment lengths, offset = first
+// fragment offset); the EXTINF duration = sum of the group's part durations
+// (≈ len(group) × partialDuration).
+func writeSubSegmentTail(sb *strings.Builder, segmentURI string, group []parser.ByteRange, partialDuration float64) {
+	if len(group) == 0 {
+		return
+	}
+	totalLength := 0
+	for _, fragment := range group {
+		totalLength += fragment.Length
+	}
+	firstOffset := group[0].Offset
+	groupDuration := float64(len(group)) * partialDuration
+
+	sb.WriteString(fmt.Sprintf("#EXT-X-BYTERANGE:%d@%d\n", totalLength, firstOffset))
+	sb.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", groupDuration))
+	sb.WriteString(segmentURI + "\n")
+}
+
+// writeCompleteSegmentSubSegments emits all GOP-aligned sub-segments for a
+// fully-available underlying segment: every part, then a closing
+// #EXT-X-BYTERANGE + #EXTINF per sub-segment group.
+func writeCompleteSegmentSubSegments(sb *strings.Builder, segmentURI string, fragments []parser.ByteRange, partialDuration float64) {
+	for _, group := range groupFragmentsByGOP(fragments) {
+		for _, fragment := range group {
+			partTag := fmt.Sprintf("#EXT-X-PART:DURATION=%.3f,URI=\"%s\",BYTERANGE=\"%d@%d\"",
+				partialDuration, segmentURI, fragment.Length, fragment.Offset)
+			if fragment.Independent {
+				partTag += ",INDEPENDENT=YES"
+			}
+			sb.WriteString(partTag + "\n")
+		}
+		writeSubSegmentTail(sb, segmentURI, group, partialDuration)
+	}
+}
+
+// computeSubSegmentTargetDuration returns the integer ceiling of the largest
+// GOP-aligned sub-segment duration across the playlist's segments. This is the
+// EXT-X-TARGETDURATION for the sub-segmented LL playlist (≈1 for ~1s GOPs).
+// Falls back to the segment duration if no fragment byteranges are available.
+func computeSubSegmentTargetDuration(pl *playlist.Media, byteranges map[string][]parser.ByteRange, partialDuration float64, segmentDuration float64) int {
+	maxGroupDuration := 0.0
+	if pl != nil {
+		for _, seg := range pl.Segments {
+			if seg == nil {
+				continue
+			}
+			for _, group := range groupFragmentsByGOP(byteranges[seg.URI]) {
+				if d := float64(len(group)) * partialDuration; d > maxGroupDuration {
+					maxGroupDuration = d
+				}
+			}
+		}
+	}
+	if maxGroupDuration <= 0 {
+		// No byterange data — preserve prior behaviour (whole-segment EXTINF).
+		return int(segmentDuration)
+	}
+	return int(math.Ceil(maxGroupDuration))
 }
 
 func joinURI(relPath, uri string) string {
