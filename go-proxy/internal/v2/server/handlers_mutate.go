@@ -605,7 +605,7 @@ func applyAppConfigPatch(s map[string]any, c any) {
 		}
 	}
 	if v, present := m["segment"]; present {
-		setEnum("segment", v, "ll", "s2", "s6")
+		setEnum("segment", v, "ll", "s1", "s2", "s6")
 	}
 	if v, present := m["protocol"]; present {
 		setEnum("protocol", v, "hls", "dash")

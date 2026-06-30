@@ -78,7 +78,7 @@ type Arm struct {
 	Reps      int    `json:"reps,omitempty"`       // confirmation reps (overrides the spec default)
 
 	// --- client knobs (is.* — launch arg, cold relaunch on change) ---
-	Segment            string   `json:"is.segment,omitempty"`              // s2 | s6 | ll (empty = app default s6)
+	Segment            string   `json:"is.segment,omitempty"`              // s1 | s2 | s6 | ll (empty = app default s6)
 	Protocol           string   `json:"is.protocol,omitempty"`             // hls | dash
 	Codec              string   `json:"is.codec,omitempty"`                // h264 | hevc | av1
 	AppLiveOffset      *float64 `json:"is.live_offset,omitempty"`          // app-side target-latency override

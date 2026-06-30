@@ -383,8 +383,8 @@ func validateArm(a *Arm) error {
 	if a.Protocol != "" && a.Protocol != "hls" && a.Protocol != "dash" {
 		return fmt.Errorf("protocol %q invalid (hls|dash)", a.Protocol)
 	}
-	if a.Segment != "" && a.Segment != "s2" && a.Segment != "s6" && a.Segment != "ll" {
-		return fmt.Errorf("segment %q invalid (s2|s6|ll)", a.Segment)
+	if a.Segment != "" && a.Segment != "s1" && a.Segment != "s2" && a.Segment != "s6" && a.Segment != "ll" {
+		return fmt.Errorf("segment %q invalid (s1|s2|s6|ll)", a.Segment)
 	}
 	if a.Role != "" && a.Role != string(sweep.ArmControl) && a.Role != string(sweep.ArmVariant) {
 		return fmt.Errorf("role %q invalid (control|variant)", a.Role)
