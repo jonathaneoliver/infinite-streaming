@@ -26,6 +26,8 @@ func kindRank(k Kind) float64 {
 		return 3
 	case KindHypothesis:
 		return 2
+	case KindManual:
+		return 1.5 // an operator-authored ad-hoc probe jumps the seed backlog but yields to any hit-derived follow-up
 	case KindSeed:
 		return 1
 	default:

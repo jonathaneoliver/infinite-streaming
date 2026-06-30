@@ -8,7 +8,18 @@ last_reviewed: 2026-06-23
 
 Operationalises the **test contract** in [`.claude/standards/characterization-principles.md`](../../standards/characterization-principles.md) — but as a *fill-the-blanks* helper, not an interrogation. Parse the request, resolve every blank from the registry below, **echo the resolved spec so the operator sees what was assumed**, and dry-run verify. The echo-back is the safety net; questions are the exception.
 
-**Conventions:** follows [`.claude/skills/CONVENTIONS.md`](../CONVENTIONS.md) — no-guessing (§2), pass-signal-is-DATA (§5), Bash-first (§1). **This skill authors specs; it does not run them** (running is `make characterize-*` / `harness char matrix`).
+**Conventions:** follows [`.claude/skills/CONVENTIONS.md`](../CONVENTIONS.md) — no-guessing (§2), pass-signal-is-DATA (§5), Bash-first (§1). **This skill authors specs.** It can then either hand the spec to the unattended runner (**enqueue**, non-blocking) or leave it for a synchronous run (`make characterize-*` / `harness char matrix`) — see *Two ways to run* below.
+
+## Two ways to run an authored test
+
+A synchronous run blocks for the whole 5–10 min (bootstrap → cold launch → settle → stream). Most exploratory asks don't need you to watch — so prefer **enqueue**:
+
+- **Enqueue (default for exploration, non-blocking).** Resolve the one-liner, then drop ONE experiment on the sweep queue and return immediately:
+  `harness sweep add --class config --platform ipad-sim --mode pyramid --content <live> [--rate-mbps N | --pattern P --step-seconds S] [--segment s2|s6|ll] [--why "…"]`
+  The unattended runner (`tools/qe-offhours.sh`, kind=`manual` jumps the seed backlog) claims it; the verdict lands in `sweep_runs`. Read it later with `harness sweep agenda` / `harness sweep ls done` / `harness query`. Queue several adds in seconds, then walk away. (Multi-clip breadth without N adds: `harness sweep seed --contents a,b,c`.)
+- **Synchronous (when you want to watch it now, or need the full arm table / A-B matrix).** Author the YAML and run `harness char matrix <file>` (parallel arms, `axes:`/`groups:`) or `make characterize-*`.
+
+Enqueue is single-experiment + queue-driven; a `char matrix` YAML is the right tool for an A/B `axes:` sweep you want rendered as one table. Driving the *whole* unattended loop is still the `sweep` skill — this skill only adds individual items to it.
 
 ## The rule: assume-and-surface, ask-only-on-consequential-ambiguity
 
@@ -40,7 +51,7 @@ Operationalises the **test contract** in [`.claude/standards/characterization-pr
 2. **Resolve** every blank from the registry; verify content against `/api/content`.
 3. **Echo the resolved spec** — a short table: behavior, class, platform(s), content (confirmed), held-constant, what-varies (namespaced knobs), pass signal, cost. Mark anything assumed.
 4. **Ask** only the consequential blank(s), if any (per the rule).
-5. **Verify** — write the YAML to `tests/characterization/matrix/scratch/<name>.yaml` (gitignored — throwaway by default, no `git status` noise) and `harness char matrix <file> --dry-run` (shows the expanded arms); for server-behavior, name the exact `go test … -run TestServer<X>`.
+5. **Verify** — for the **enqueue** path, just run `harness sweep add …` (it validates flags + content resolution and prints the queued id). For a **char-matrix** spec, write the YAML to `tests/characterization/matrix/scratch/<name>.yaml` (gitignored — throwaway by default, no `git status` noise) and check it **offline** first with `harness char matrix <file> --validate` (Load+Expand, fails fast on an unknown field / bad axis, no network); use `--dry-run` when you also want the expanded arm table. Both are offline — `api.New` never dials, so neither needs a reachable `--base`. For server-behavior, name the exact `go test … -run TestServer<X>`.
 6. **Promote on request** — specs default to `scratch/`; most are throwaway. After a run the user likes, OFFER to keep it: `git mv tests/characterization/matrix/scratch/<name>.yaml tests/characterization/matrix/ && git add` (now tracked + covered by the `matrix/*.yaml` validation glob). Never promote unasked.
 
 ## char-matrix knob reference (authoritative — `internal/charmatrix/spec.go`)

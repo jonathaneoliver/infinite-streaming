@@ -21,10 +21,22 @@ forwarder API on the harness's --base deploy (no local files). Findings are
 promoted to GitHub Issues elsewhere.
 
 Subcommands:
-  seed [--class C][--full] populate backlog/ with the starter set.
+  seed [--class C][--full][--contents a,b,c]
+                           populate backlog/ with the starter set.
                            --class config (default: realistic stream/network)
                            or fault (explicit-error recovery). --full widens
-                           past the narrow depth-first ipad-sim set.
+                           past the narrow depth-first ipad-sim set. --contents
+                           seeds the recipe set against each clip (default: the
+                           .env CHAR_CONTENT single clip).
+  add [flags]              enqueue ONE operator-authored experiment (kind=manual)
+                           without running it — the runner picks it up and the
+                           verdict lands in sweep_runs. Non-blocking authoring:
+                           drop it and read 'sweep agenda' / 'query' later.
+                           --class --platform --protocol --content --mode
+                           --segment --duration-s --reps --why ; shape:
+                           --rate-mbps --pattern --step-seconds --margin-pct ;
+                           fault (class=fault): --fault-type --fault-kind
+                           --fault-frequency --fault-mode .
   status                   counts per bucket (backlog/running/done/…)
   ls <status>              list experiments in a bucket (one line each)
   next [--claim --owner O] show the highest-score backlog experiment;
@@ -78,6 +90,8 @@ func cmdSweep(client *api.Client, args []string, asJSON bool) error {
 	switch args[0] {
 	case "seed":
 		return cmdSweepSeed(client, args[1:], asJSON)
+	case "add":
+		return cmdSweepAdd(client, args[1:], asJSON)
 	case "status":
 		return cmdSweepStatus(client, args[1:], asJSON)
 	case "ls":
@@ -123,6 +137,7 @@ func cmdSweepSeed(client *api.Client, args []string, asJSON bool) error {
 	full := fs.Bool("full", false, "widen the seed across all platforms (default narrow depth-first)")
 	class := fs.String("class", "config", "sweep class: config (realistic stream/network) | fault (error-recovery)")
 	platform := fs.String("platform", "", "seed only this platform (e.g. androidtv); overrides --full/narrow")
+	contents := fs.String("contents", "", "comma-separated clips to seed the recipe set against (default: the .env CHAR_CONTENT single clip)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -130,23 +145,28 @@ func cmdSweepSeed(client *api.Client, args []string, asJSON bool) error {
 	if c != sweep.ClassConfig && c != sweep.ClassFault {
 		return fmt.Errorf("invalid --class %q: config|fault", *class)
 	}
+	var clips []string
+	for _, p := range strings.Split(*contents, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			clips = append(clips, p)
+		}
+	}
 	s, err := openStore(client)
 	if err != nil {
 		return err
 	}
-	var exps []*sweep.Experiment
+	var platformsOverride []string
 	if *platform != "" {
-		exps = sweep.Seed(c, *full, nowUTC(), *platform)
-	} else {
-		exps = sweep.Seed(c, *full, nowUTC())
+		platformsOverride = []string{*platform}
 	}
+	exps := sweep.SeedContents(c, *full, nowUTC(), clips, platformsOverride...)
 	for _, e := range exps {
 		if err := s.Save(sweep.StatusBacklog, e); err != nil {
 			return err
 		}
 	}
 	if asJSON {
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{"seeded": len(exps), "full": *full, "class": *class})
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"seeded": len(exps), "full": *full, "class": *class, "contents": clips})
 	}
 	mode := "narrow (depth-first, ipad-sim)"
 	if *full {
@@ -155,7 +175,123 @@ func cmdSweepSeed(client *api.Client, args []string, asJSON bool) error {
 	if *platform != "" {
 		mode = "platform=" + *platform
 	}
-	fmt.Printf("seeded %d %s-class experiments into backlog (%s) — %s\n", len(exps), c, s.Label(), mode)
+	clipNote := "default clip"
+	if len(clips) > 0 {
+		clipNote = fmt.Sprintf("%d clip(s): %s", len(clips), strings.Join(clips, ", "))
+	}
+	fmt.Printf("seeded %d %s-class experiments into backlog (%s) — %s, %s\n", len(exps), c, s.Label(), mode, clipNote)
+	return nil
+}
+
+// cmdSweepAdd enqueues ONE operator-authored experiment (kind=manual) onto the
+// backlog without running it — the producer half of the producer/consumer loop.
+// Authoring a test becomes a non-blocking drop: the runner (qe-offhours.sh)
+// claims it, and the verdict lands in sweep_runs for later reading. Mirrors the
+// Experiment construction in internal/sweep/seed.go so an ad-hoc item schedules
+// consistently with seeded ones (same scoring, same launch mode).
+func cmdSweepAdd(client *api.Client, args []string, asJSON bool) error {
+	fs := flag.NewFlagSet("sweep add", flag.ContinueOnError)
+	class := fs.String("class", "config", "sweep class: config | fault")
+	platform := fs.String("platform", "ipad-sim", "ipad-sim | iphone | appletv | androidtv | web")
+	protocol := fs.String("protocol", "hls", "hls | dash")
+	content := fs.String("content", "", "catalogue clip (default: .env CHAR_CONTENT); verify live via /api/content first")
+	mode := fs.String("mode", "steps", "playback motion: steps | pyramid | rampup | rampdown | downshift_severity | transient_shock | startup | abort | …")
+	segment := fs.String("segment", "", "master variant the probe requests: s2 | s6 | ll (empty = app default s6)")
+	durationS := fs.Int("duration-s", 0, "per-run window in seconds (0 = runner/probe default)")
+	reps := fs.Int("reps", 1, "confirmation reps requested")
+	why := fs.String("why", "", "rationale recorded on the row (why this test)")
+	id := fs.String("id", "", "explicit experiment id (default: auto manual-… with a unique stamp)")
+	// shape (config-class network motion)
+	rate := fs.Float64("rate-mbps", 0, "static bandwidth cap in Mbps (0 = no static cap)")
+	pattern := fs.String("pattern", "", "ladder-derived pattern: pyramid | valley | ramp_up | ramp_down | square_wave | transient_shock")
+	stepSeconds := fs.Int("step-seconds", 0, "pattern step length (6|12|18|24|60|120)")
+	marginPct := fs.Int("margin-pct", 0, "pattern headroom margin %")
+	// fault (fault-class only)
+	faultType := fs.String("fault-type", "", "500 | timeout | corrupted | connection_refused | …")
+	faultKind := fs.String("fault-kind", "", "request kind to fault: segment | manifest | master_manifest | init | audio_segment")
+	faultFreq := fs.Int("fault-frequency", 0, "fault cadence count")
+	faultMode := fs.String("fault-mode", "", "requests | seconds | failures_per_seconds | failures_per_packets")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	c := sweep.Class(*class)
+	if c != sweep.ClassConfig && c != sweep.ClassFault {
+		return fmt.Errorf("invalid --class %q: config|fault", *class)
+	}
+	clip := sweep.ContentOrDefault(*content)
+
+	e := &sweep.Experiment{
+		CreatedAt:  nowUTC(),
+		Class:      c,
+		Platform:   *platform,
+		LaunchMode: sweep.LaunchModeAppium, // the only mode TestSweepProbe supports
+		Protocol:   *protocol,
+		Content:    clip,
+		Segment:    *segment,
+		Mode:       *mode,
+		DurationS:  *durationS,
+		Kind:       sweep.KindManual,
+		Reps:       *reps,
+		Depth:      0,
+		Why:        "manual_add",
+		WhyText:    *why,
+	}
+	if strings.TrimSpace(*why) == "" {
+		e.WhyText = fmt.Sprintf("operator-authored %s-class probe: %s on %s/%s", c, *mode, *platform, *protocol)
+	}
+
+	// Shape: a static cap and/or a ladder-derived pattern (config-class motion).
+	if *rate > 0 || *pattern != "" {
+		sh := &sweep.Shape{Pattern: *pattern, StepSeconds: *stepSeconds, MarginPct: *marginPct}
+		if *rate > 0 {
+			r := *rate
+			sh.RateMbps = &r
+		}
+		e.Shape = sh
+	}
+
+	// Fault: fault-class only; building one on a config-class item is a mistake.
+	if *faultType != "" {
+		if c != sweep.ClassFault {
+			return fmt.Errorf("--fault-type set but --class is %q; faults are fault-class only", c)
+		}
+		e.Fault = &sweep.Fault{
+			Type:        *faultType,
+			RequestKind: *faultKind,
+			Frequency:   *faultFreq,
+			Mode:        *faultMode,
+		}
+	}
+
+	if *id != "" {
+		e.ID = *id
+	} else {
+		// UnixNano keeps repeated adds in the same second distinct (the queue
+		// collapses by exp_id, so a stable id would overwrite the prior add).
+		e.ID = fmt.Sprintf("manual-%s-%s-%s-%s-%d", c, *platform, *protocol, *mode, time.Now().UnixNano())
+	}
+	e.Score = sweep.DefaultWeights().Score(e)
+
+	s, err := openStore(client)
+	if err != nil {
+		return err
+	}
+	if err := s.Save(sweep.StatusBacklog, e); err != nil {
+		return err
+	}
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(e)
+	}
+	fmt.Printf("enqueued %s (kind=manual, score=%.1f) → backlog\n", e.ID, e.Score)
+	fmt.Printf("  %s-class %s on %s/%s · content=%s%s\n", c, *mode, *platform, *protocol, clip,
+		func() string {
+			if *segment != "" {
+				return " · segment=" + *segment
+			}
+			return ""
+		}())
+	fmt.Println("  the runner will claim it; read the verdict later via 'harness sweep agenda' / 'harness sweep ls done'")
 	return nil
 }
 
