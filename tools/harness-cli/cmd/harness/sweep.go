@@ -78,6 +78,12 @@ Subcommands:
                            how) onto Result.Note [--from found].
   reap [--max-age-min N]   return running experiments orphaned by a dead runner
                            to backlog (default 60; ~2× the longest expected run).
+  run-fan <parent-id> [--dry-run] [--duration-s N]
+                           run a ≥2-arm isolation fan CONCURRENTLY on the device
+                           farm — one device per arm, all sharing the isolation
+                           group/pattern (control masters; variants bind). Reuses
+                           the char-matrix fleet path. --dry-run prints the
+                           RunPlan. Singletons stay on the single-device probe.
   isolate <id> --flip axis=value [--flip …]
                            materialise an OFAT isolation fan off a confirmed
                            hit (control + one variant per flip) into backlog/.
@@ -109,6 +115,8 @@ func cmdSweep(client *api.Client, args []string, asJSON bool) error {
 		return cmdSweepImport(client, args[1:], asJSON)
 	case "export":
 		return cmdSweepExport(client, args[1:], asJSON)
+	case "run-fan":
+		return cmdSweepRunFan(client, args[1:], asJSON)
 	case "status":
 		return cmdSweepStatus(client, args[1:], asJSON)
 	case "ls":
