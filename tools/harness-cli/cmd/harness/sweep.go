@@ -5,11 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/api"
+	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/charmatrix"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/sweep"
 )
 
@@ -37,6 +39,17 @@ Subcommands:
                            --rate-mbps --pattern --step-seconds --margin-pct ;
                            fault (class=fault): --fault-type --fault-kind
                            --fault-frequency --fault-mode .
+  import [--from] <yaml>   prime the queue from a char-matrix YAML spec: expand
+                           its arms and insert each as a (kind=hypothesis)
+                           experiment. Refuses loudly if an arm sets client-only
+                           is.* knobs the queue can't carry (run those via
+                           'harness char matrix'). [--dry-run prints the rows].
+  export <id|--fan PARENT|--rep-group G>
+                           author a re-runnable char-matrix YAML from the queue:
+                           a single experiment, an isolation fan (control +
+                           variants), or a rep-batch. Prints YAML to stdout —
+                           redirect it to a file 'harness char matrix' can run.
+                           [--name NAME].
   status                   counts per bucket (backlog/running/done/…)
   ls <status>              list experiments in a bucket (one line each)
   next [--claim --owner O] show the highest-score backlog experiment;
@@ -92,6 +105,10 @@ func cmdSweep(client *api.Client, args []string, asJSON bool) error {
 		return cmdSweepSeed(client, args[1:], asJSON)
 	case "add":
 		return cmdSweepAdd(client, args[1:], asJSON)
+	case "import":
+		return cmdSweepImport(client, args[1:], asJSON)
+	case "export":
+		return cmdSweepExport(client, args[1:], asJSON)
 	case "status":
 		return cmdSweepStatus(client, args[1:], asJSON)
 	case "ls":
@@ -293,6 +310,195 @@ func cmdSweepAdd(client *api.Client, args []string, asJSON bool) error {
 		}())
 	fmt.Println("  the runner will claim it; read the verdict later via 'harness sweep agenda' / 'harness sweep ls done'")
 	return nil
+}
+
+// cmdSweepImport primes the queue from an authored char-matrix YAML spec — the
+// "run this hand-written spec through the sweep" direction (#873). It reuses
+// charmatrix Load+Expand (no fork), maps each arm → Experiment via ToExperiment,
+// and inserts them as backlog rows the loop schedules like any seeded work.
+// Imported arms enter at the normal seed reps (≥1) — import never pre-confirms,
+// so the n=1 discipline holds.
+func cmdSweepImport(client *api.Client, args []string, asJSON bool) error {
+	// Accept the spec path as a positional or via --from; '-' reads stdin
+	// (treated as a positional even though it begins with '-').
+	var path string
+	rest := args
+	if len(args) > 0 && (args[0] == "-" || !strings.HasPrefix(args[0], "-")) {
+		path, rest = args[0], args[1:]
+	}
+	fs := flag.NewFlagSet("sweep import", flag.ContinueOnError)
+	from := fs.String("from", "", "char-matrix YAML spec to import ('-' = stdin)")
+	dryRun := fs.Bool("dry-run", false, "print the queue rows that would be inserted; insert nothing")
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	if path == "" {
+		path = *from
+	}
+	if path == "" {
+		return errors.New("usage: harness sweep import [--from] <spec.yaml|-> [--dry-run]")
+	}
+
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return fmt.Errorf("read spec: %w", err)
+	}
+	spec, err := charmatrix.Load(data)
+	if err != nil {
+		return err
+	}
+	arms, err := charmatrix.Expand(spec)
+	if err != nil {
+		return err
+	}
+
+	idSafe := strings.NewReplacer("/", "-", " ", "-")
+	exps := make([]*sweep.Experiment, 0, len(arms))
+	for _, a := range arms {
+		// Never silently lose a knob the queue can't represent (the LabelPlay
+		// trap): if an arm sets client-only is.* knobs, refuse and point at the
+		// runner that DOES honour them.
+		if dropped := a.DroppedClientKnobs(); len(dropped) > 0 {
+			return fmt.Errorf("arm %q sets client-only knobs the sweep queue can't carry: %s — remove them, or run this spec with 'harness char matrix' (which honours is.* launch args)",
+				a.ID, strings.Join(dropped, ", "))
+		}
+		e := a.ToExperiment()
+		e.ID = "import-" + idSafe.Replace(a.ID)
+		e.CreatedAt = nowUTC()
+		if e.Reps == 0 {
+			e.Reps = 1
+		}
+		e.Why = "imported"
+		e.WhyText = "imported from char-matrix spec " + spec.Name
+		e.Score = sweep.DefaultWeights().Score(e)
+		exps = append(exps, e)
+	}
+
+	if *dryRun {
+		if asJSON {
+			return json.NewEncoder(os.Stdout).Encode(map[string]any{"spec": spec.Name, "would_insert": len(exps), "experiments": exps})
+		}
+		fmt.Printf("DRY RUN — %d experiment(s) from spec %q would enter backlog:\n", len(exps), spec.Name)
+		for _, e := range exps {
+			fmt.Printf("  %-44s %-9s %-5s %-18s group=%s arm=%s\n", e.ID, e.Platform, e.Protocol, e.Mode, e.Group, e.Arm)
+		}
+		return nil
+	}
+
+	s, err := openStore(client)
+	if err != nil {
+		return err
+	}
+	for _, e := range exps {
+		if err := s.Save(sweep.StatusBacklog, e); err != nil {
+			return err
+		}
+	}
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"spec": spec.Name, "imported": len(exps)})
+	}
+	fmt.Printf("imported %d experiment(s) from spec %q → backlog (%s)\n", len(exps), spec.Name, s.Label())
+	return nil
+}
+
+// cmdSweepExport authors a re-runnable char-matrix YAML from queue experiments —
+// the "turn what sweep found into a deterministic regression spec" direction
+// (#873). It serialises a single experiment, an isolation fan (control +
+// single-axis-flip variants, gathered by Parent), or a rep-batch, and prints the
+// YAML to stdout for redirection into a file `harness char matrix` runs.
+func cmdSweepExport(client *api.Client, args []string, asJSON bool) error {
+	var id string
+	rest := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		id, rest = args[0], args[1:]
+	}
+	fs := flag.NewFlagSet("sweep export", flag.ContinueOnError)
+	fan := fs.String("fan", "", "export the isolation fan rooted at this parent experiment id")
+	repGroup := fs.String("rep-group", "", "export every experiment in this rep-group")
+	name := fs.String("name", "", "spec name (default derived from the selector)")
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	// Exactly one selector.
+	selectors := 0
+	for _, set := range []bool{id != "", *fan != "", *repGroup != ""} {
+		if set {
+			selectors++
+		}
+	}
+	if selectors != 1 {
+		return errors.New("usage: harness sweep export <id> | --fan <parent-id> | --rep-group <g> [--name NAME]")
+	}
+
+	s, err := openStore(client)
+	if err != nil {
+		return err
+	}
+	all, err := s.List("") // every status — a found fan can span buckets
+	if err != nil {
+		return err
+	}
+
+	var picked []*sweep.Experiment
+	specName := *name
+	switch {
+	case id != "":
+		for _, e := range all {
+			if e.ID == id {
+				picked = append(picked, e)
+			}
+		}
+		if len(picked) == 0 {
+			return fmt.Errorf("no experiment with id %q in the queue", id)
+		}
+		if specName == "" {
+			specName = "export-" + id
+		}
+	case *fan != "":
+		for _, e := range all {
+			if e.Parent == *fan {
+				picked = append(picked, e)
+			}
+		}
+		if len(picked) == 0 {
+			return fmt.Errorf("no fan members with parent %q (an isolation fan stamps Parent on its control+variants)", *fan)
+		}
+		if specName == "" {
+			specName = "fan-" + *fan
+		}
+	case *repGroup != "":
+		for _, e := range all {
+			if e.RepGroup == *repGroup {
+				picked = append(picked, e)
+			}
+		}
+		if len(picked) == 0 {
+			return fmt.Errorf("no experiments in rep-group %q", *repGroup)
+		}
+		if specName == "" {
+			specName = "repgroup-" + *repGroup
+		}
+	}
+
+	spec, err := charmatrix.SpecFromExperiments(specName, picked)
+	if err != nil {
+		return err
+	}
+	out, err := charmatrix.Marshal(spec)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"spec": spec.Name, "yaml": string(out)})
+	}
+	_, err = os.Stdout.Write(out)
+	return err
 }
 
 // cmdSweepAnnotate records the LLM's interpretation (what happened / where /
