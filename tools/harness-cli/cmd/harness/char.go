@@ -170,36 +170,22 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 	// ladder would build a pyramid that only spans its reduced range. Prefer the
 	// first full-ladder arm carrying the pattern; fall back to the first pattern
 	// arm (with a warning) if none is full.
-	patternMaster, firstPatternArm := -1, -1
-	for i, a := range arms {
-		if shapePattern(a) == "" {
-			continue
-		}
-		if firstPatternArm < 0 {
-			firstPatternArm = i
-		}
-		e := a.ToExperiment()
-		if e.ContentManipulation == nil || e.ContentManipulation.AllowedVariants == "" {
-			patternMaster = i
-			break
-		}
-	}
-	if patternMaster < 0 {
-		patternMaster = firstPatternArm
-		if patternMaster >= 0 {
-			fmt.Fprintf(os.Stderr, "warn: no full-ladder arm to master the pattern — arm %d masters with a thinned ladder\n", patternMaster)
-		}
+	patternMaster, thinned := charmatrix.PatternMasterIndex(arms)
+	if thinned {
+		fmt.Fprintf(os.Stderr, "warn: no full-ladder arm to master the pattern — arm %d masters with a thinned ladder\n", patternMaster)
 	}
 
 	// Startup/recovery knobs are run-level (the same for every arm) — the probe
 	// used to read these from its own env; the CLI now resolves them once and
 	// stamps each arm. ParseBool is the single local_proxy/auto_recovery parser;
 	// WithDefaults (per arm, below) fills the false/true defaults.
-	fwdBuffer := strings.TrimSpace(os.Getenv("CHAR_FWD_BUFFER_S"))
-	fwdRelease := strings.TrimSpace(os.Getenv("CHAR_FWD_RELEASE"))
-	persistPeak := strings.TrimSpace(os.Getenv("CHAR_PERSIST_PEAK"))
-	localProxy := charplan.ParseBool(os.Getenv("CHAR_LOCAL_PROXY"))
-	autoRecovery := charplan.ParseBool(os.Getenv("CHAR_AUTO_RECOVERY"))
+	rl := charmatrix.RunLevel{
+		StartupFwdBufferS:  strings.TrimSpace(os.Getenv("CHAR_FWD_BUFFER_S")),
+		StartupFwdRelease:  strings.TrimSpace(os.Getenv("CHAR_FWD_RELEASE")),
+		PersistentPeakMbps: strings.TrimSpace(os.Getenv("CHAR_PERSIST_PEAK")),
+		LocalProxy:         charplan.ParseBool(os.Getenv("CHAR_LOCAL_PROXY")),
+		AutoRecovery:       charplan.ParseBool(os.Getenv("CHAR_AUTO_RECOVERY")),
+	}
 
 	results := make([]charmatrix.ArmResult, len(arms))
 	var armEnv []string
@@ -248,29 +234,7 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 		// RunPlan below (the probe reads CHAR_RUN_PLAN_FILE), so the old flat
 		// CHAR_ARM_<i>_{SEGMENT,CODEC,MUTED,…} surface is gone.
 		armEnv = append(armEnv, fmt.Sprintf("CHAR_ARM_%d_PLATFORM=%s", i, a.Platform))
-		arm := charplan.ArmConfig{
-			PlayerID:           playerID,
-			Platform:           a.Platform,
-			Content:            clip,
-			Segment:            a.Segment,
-			LiveOffsetS:        a.ClientLiveOffsetS(),
-			Protocol:           a.Protocol,
-			Codec:              a.Codec,
-			PeakBitrateMbps:    a.PeakBitrateMbps,
-			StartsFirstVariant: charplan.ParseBool(a.StartsFirstVariantS()),
-			Muted:              charplan.ParseBool(a.MutedS()),
-			StartupFwdBufferS:  fwdBuffer,
-			StartupFwdRelease:  fwdRelease,
-			PersistentPeakMbps: persistPeak,
-			LocalProxy:         localProxy,
-			AutoRecovery:       autoRecovery,
-			Pattern:            shapePattern(a),
-			StepS:              shapeStepS(a),
-			MarginPct:          shapeMargin(a),
-			PatternMaster:      i == patternMaster,
-		}
-		arm.WithDefaults()
-		planArms[i] = arm
+		planArms[i] = a.ToArmConfig(playerID, clip, rl, i == patternMaster)
 	}
 	if window <= 0 {
 		window = 60
@@ -627,9 +591,9 @@ func driveProbe(client *api.Client, a *charmatrix.Arm, playerID, clip string, du
 		"CHAR_SWEEP_PEAK_BITRATE="+strconv.Itoa(a.PeakBitrateMbps),
 		"CHAR_SWEEP_FIRST_VARIANT="+a.StartsFirstVariantS(),
 		"CHAR_SWEEP_MUTED="+a.MutedS(),
-		"CHAR_SWEEP_PATTERN="+shapePattern(a),
-		"CHAR_SWEEP_STEP_S="+strconv.Itoa(shapeStepS(a)),
-		"CHAR_SWEEP_MARGIN="+strconv.Itoa(shapeMargin(a)),
+		"CHAR_SWEEP_PATTERN="+a.ShapePattern(),
+		"CHAR_SWEEP_STEP_S="+strconv.Itoa(a.ShapeStepS()),
+		"CHAR_SWEEP_MARGIN="+strconv.Itoa(a.ShapeMargin()),
 		"CHAR_CONTENT="+clip,
 	)
 	if err := cmd.Run(); err != nil {
@@ -673,30 +637,9 @@ func measureArm(client *api.Client, a *charmatrix.Arm, playerID string, res *cha
 
 // --- small local helpers --------------------------------------------------
 
-// shapePattern / shapeStepS / shapeMargin extract the post-launch bandwidth
-// pattern from an arm's proxy.shape. The pattern is NOT applied by the
-// config-on-connect bootstrap (experimentPlayerPatch defers it); the probe arms
-// it after playback starts via ApplyPattern, so the runner passes it through env.
-func shapePattern(a *charmatrix.Arm) string {
-	if a.Shape != nil {
-		return a.Shape.Pattern
-	}
-	return ""
-}
-
-func shapeStepS(a *charmatrix.Arm) int {
-	if a.Shape != nil && a.Shape.StepSeconds > 0 {
-		return a.Shape.StepSeconds
-	}
-	return 12
-}
-
-func shapeMargin(a *charmatrix.Arm) int {
-	if a.Shape != nil && a.Shape.MarginPct > 0 {
-		return a.Shape.MarginPct
-	}
-	return 5
-}
+// shapePattern/shapeStepS/shapeMargin moved to charmatrix as Arm methods
+// (Arm.ShapePattern/ShapeStepS/ShapeMargin) so the fleet-fan path (#874) reuses
+// the same projection.
 
 func intendedOf(a *charmatrix.Arm) float64 {
 	if off, ok := a.IntendedLiveOffset(); ok {
