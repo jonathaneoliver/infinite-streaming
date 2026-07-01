@@ -34,6 +34,7 @@ func cmdCharReport(client *api.Client, args []string, asJSON bool) error {
 	from := fs.String("from", "", "ISO 8601 lower bound (default: 48h ago)")
 	to := fs.String("to", "", "ISO 8601 upper bound (exclusive)")
 	limit := fs.Int("limit", 500, "max plays to scan for the group")
+	reps := fs.Bool("reps", false, "aggregate plays by config into per-config medians (a study across reps/runs)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -92,16 +93,17 @@ func cmdCharReport(client *api.Client, args []string, asJSON bool) error {
 		_, err = os.Stdout.Write(out)
 		return err
 	}
-	renderStudyReport(os.Stdout, *group, rows)
+	if *reps {
+		renderStudyReps(os.Stdout, *group, rows)
+	} else {
+		renderStudyReport(os.Stdout, *group, rows)
+	}
 	return nil
 }
 
-// rptScenarioFacets are the play-identity fields treated as IV candidates, in
-// display order. A facet that varies across the group becomes a column; one
-// shared by every arm is printed once as held-constant context.
-var rptScenarioFacets = []string{"manifest_variant", "platform", "content_id", "device_model", "os_version", "app_version", "test"}
-
-func renderStudyReport(w io.Writer, group string, rows []map[string]any) {
+// rptDetectIV finds which scenario facets VARY across the plays (the IV columns)
+// vs which are shared by every play (held-constant context).
+func rptDetectIV(rows []map[string]any) (ivCols, constants []string) {
 	facetVals := map[string]map[string]bool{}
 	for _, p := range rows {
 		sc, _ := p["scenario"].(map[string]any)
@@ -114,7 +116,6 @@ func renderStudyReport(w io.Writer, group string, rows []map[string]any) {
 			}
 		}
 	}
-	var ivCols, constants []string
 	for _, f := range rptScenarioFacets {
 		switch len(facetVals[f]) {
 		case 0: // absent on every arm — skip
@@ -127,6 +128,166 @@ func renderStudyReport(w io.Writer, group string, rows []map[string]any) {
 		}
 	}
 	sort.Strings(constants)
+	return ivCols, constants
+}
+
+func rptIVKey(p map[string]any, ivCols []string) []string {
+	sc, _ := p["scenario"].(map[string]any)
+	vals := make([]string, len(ivCols))
+	for i, f := range ivCols {
+		vals[i] = rptStr(sc[f])
+	}
+	return vals
+}
+
+// renderStudyReps groups the plays by config (IV tuple) and reports per-config
+// medians across reps/runs — the characterization view: rank configs by median
+// performance over N reps so n=1 noise doesn't masquerade as a result. TTFF also
+// shows its min–max spread. NOTE: aggregating across runs can conflate config
+// with time — a small-N study spanning hours may bake an environmental blip into
+// a config's median (docs/characterization-results-design.md, Gap 0 temporal
+// guard: a follow-up).
+func renderStudyReps(w io.Writer, group string, rows []map[string]any) {
+	ivCols, constants := rptDetectIV(rows)
+
+	type bucket struct {
+		iv       []string
+		n        int
+		ttff     []float64
+		frames   []float64
+		dropped  []float64
+		stalls   []float64
+		shifts   []float64
+		verdicts []string
+		worst    map[string]int
+	}
+	order := []string{}
+	buckets := map[string]*bucket{}
+	for _, p := range rows {
+		iv := rptIVKey(p, ivCols)
+		key := strings.Join(iv, "\x1f")
+		b := buckets[key]
+		if b == nil {
+			b = &bucket{iv: iv, worst: map[string]int{}}
+			buckets[key] = b
+			order = append(order, key)
+		}
+		b.n++
+		rptAddF(&b.ttff, p["first_frame_s"])
+		rptAddF(&b.frames, p["frames_displayed"])
+		rptAddF(&b.dropped, p["frames_dropped"])
+		rptAddF(&b.stalls, p["stalls"])
+		rptAddF(&b.shifts, p["bitrate_shifts"])
+		verdict, worst := rptVerdict(p["label_histogram"])
+		b.verdicts = append(b.verdicts, verdict)
+		if worst != "" {
+			b.worst[worst]++
+		}
+	}
+	sort.Strings(order)
+
+	fmt.Fprintf(w, "study report — %s  (%d configs, %d plays, aggregated by config)\n", group, len(order), len(rows))
+	if len(constants) > 0 {
+		fmt.Fprintf(w, "held constant: %s\n", strings.Join(constants, "  "))
+	}
+	fmt.Fprintln(w)
+
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	hdr := append([]string{}, ivCols...)
+	hdr = append(hdr, "n", "TTFF_med", "TTFF_range", "frames_med", "dropped_med", "stalls_med", "shifts_med", "verdict", "worst_qoe")
+	fmt.Fprintln(tw, strings.Join(hdr, "\t"))
+	for _, k := range order {
+		b := buckets[k]
+		cells := make([]string, 0, len(hdr))
+		for _, v := range b.iv {
+			cells = append(cells, rptDash(v))
+		}
+		cells = append(cells,
+			fmt.Sprintf("%d", b.n),
+			rptMed(b.ttff, 2),
+			rptRange(b.ttff, 2),
+			rptMed(b.frames, 0),
+			rptMed(b.dropped, 0),
+			rptMed(b.stalls, 0),
+			rptMed(b.shifts, 0),
+			rptWorstVerdict(b.verdicts),
+			rptDash(rptTopKey(b.worst)),
+		)
+		fmt.Fprintln(tw, strings.Join(cells, "\t"))
+	}
+	tw.Flush()
+	fmt.Fprintln(w, "\nper-config medians over reps — rank by TTFF_med etc.; TTFF_range flags rep spread (noise).")
+	fmt.Fprintln(w, "verdict = worst qoe_tier across the config's reps; worst_qoe = its most-common worst QoE label.")
+}
+
+func rptAddF(dst *[]float64, v any) {
+	if f, ok := rptFloat(v); ok {
+		*dst = append(*dst, f)
+	}
+}
+
+func rptMed(xs []float64, dp int) string {
+	if len(xs) == 0 {
+		return "-"
+	}
+	s := append([]float64(nil), xs...)
+	sort.Float64s(s)
+	n := len(s)
+	m := s[n/2]
+	if n%2 == 0 {
+		m = (s[n/2-1] + s[n/2]) / 2
+	}
+	return fmt.Sprintf("%.*f", dp, m)
+}
+
+func rptRange(xs []float64, dp int) string {
+	if len(xs) < 2 {
+		return "-"
+	}
+	lo, hi := xs[0], xs[0]
+	for _, x := range xs {
+		if x < lo {
+			lo = x
+		}
+		if x > hi {
+			hi = x
+		}
+	}
+	return fmt.Sprintf("%.*f–%.*f", dp, lo, dp, hi)
+}
+
+// rptWorstVerdict returns the worst qoe_tier verdict word across a config's reps.
+func rptWorstVerdict(vs []string) string {
+	rank := map[string]int{"premium": 0, "ok": 1, "warn": 2, "BAD": 3}
+	worst, wr := "", -1
+	for _, v := range vs {
+		if r, ok := rank[v]; ok && r > wr {
+			wr, worst = r, v
+		}
+	}
+	if worst == "" {
+		return "-"
+	}
+	return worst
+}
+
+func rptTopKey(m map[string]int) string {
+	best, bn := "", 0
+	for k, n := range m {
+		if n > bn {
+			bn, best = n, k
+		}
+	}
+	return best
+}
+
+// rptScenarioFacets are the play-identity fields treated as IV candidates, in
+// display order. A facet that varies across the group becomes a column; one
+// shared by every arm is printed once as held-constant context.
+var rptScenarioFacets = []string{"manifest_variant", "platform", "content_id", "device_model", "os_version", "app_version", "test"}
+
+func renderStudyReport(w io.Writer, group string, rows []map[string]any) {
+	ivCols, constants := rptDetectIV(rows)
 
 	fmt.Fprintf(w, "study report — group %s  (%d arms)\n", group, len(rows))
 	if len(constants) > 0 {
