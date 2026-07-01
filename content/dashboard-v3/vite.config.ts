@@ -52,7 +52,9 @@ export default defineConfig({
         // Stage 8 (#497) — AI chat fleet-mode entry. Lives at
         // /dashboard/v3/ask.html. The side-panel variant of the same
         // chat is also mounted on other v3 pages.
-        ask: resolve(__dirname, 'ask.html')
+        ask: resolve(__dirname, 'ask.html'),
+        // Study report (#880) — aggregated group/study characterization table.
+        study: resolve(__dirname, 'study.html')
       }
     }
   },
