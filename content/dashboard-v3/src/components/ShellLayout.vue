@@ -55,7 +55,7 @@ const DEV_BACKEND = 'https://jonathanoliver-ubuntu.local:21000';
 // /v3/ in dev so links stay on the Vite dev server (HMR); legacy/unmigrated
 // pages are served by the real backend.
 const V3_PAGES =
-  /^\/dashboard\/(dashboard|testing|testing-session|sessions|session-viewer|grid|characterization|sweep|ask|hello)\.html/;
+  /^\/dashboard\/(dashboard|testing|testing-session|sessions|session-viewer|grid|characterization|sweep|ask|hello|study)\.html/;
 function rewriteHrefForDev(href: string): string {
   if (typeof window === 'undefined') return href;
   if (window.location.port !== DEV_PORT) return href;
@@ -188,6 +188,7 @@ const sections: NavSection[] = [
       { id: 'test-playback', icon: '🧭', text: 'Testing Playback',href: '/dashboard/testing-session.html?nav=1' },
       { id: 'testing',       icon: '🧪', text: 'Testing Monitor', href: '/dashboard/testing.html' },
       { id: 'sessions',      icon: '⏪', text: 'Sessions',         href: '/dashboard/sessions.html' },
+      { id: 'study',         icon: '📊', text: 'Study Report',     href: '/dashboard/study.html' },
       { id: 'characterization', icon: '📈', text: 'Automated Testing', href: '/dashboard/characterization.html' },
       { id: 'sweep',         icon: '🔬', text: 'QE Lab',           href: '/dashboard/sweep.html', developerOnly: true },
       { id: 'quartet',       icon: '🎬', text: 'Quartet',          href: '/dashboard/quartet.html', alpha: true },

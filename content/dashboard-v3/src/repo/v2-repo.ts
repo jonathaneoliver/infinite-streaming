@@ -337,6 +337,7 @@ export interface ListPlaysParams {
   to?: string;
   player_id?: string;
   play_id?: string;
+  group?: string; // born-group id (or prefix); server-side filter on /api/v2/plays
   classification?: string;
   limit?: number;
 }

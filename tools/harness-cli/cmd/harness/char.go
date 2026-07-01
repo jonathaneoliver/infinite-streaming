@@ -32,13 +32,17 @@ import (
 // reusing the sweep's config-on-connect bootstrap and measurement helpers.
 func cmdChar(client *api.Client, args []string, asJSON bool) error {
 	if len(args) == 0 {
-		return errors.New("usage: harness char matrix <spec.yaml> [--validate|--dry-run] [--char-dir DIR] [--duration-s N]")
+		return errors.New("usage: harness char <matrix|report> …\n" +
+			"  matrix <spec.yaml> [--validate|--dry-run] [--char-dir DIR] [--duration-s N]\n" +
+			"  report --group <group_id> [--from ISO] [--to ISO] [--limit N]")
 	}
 	switch args[0] {
 	case "matrix":
 		return cmdCharMatrix(client, args[1:], asJSON)
+	case "report":
+		return cmdCharReport(client, args[1:], asJSON)
 	default:
-		return fmt.Errorf("unknown char subcommand %q (have: matrix)", args[0])
+		return fmt.Errorf("unknown char subcommand %q (have: matrix, report)", args[0])
 	}
 }
 
