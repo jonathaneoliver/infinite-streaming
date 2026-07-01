@@ -33,6 +33,15 @@ func FindPlays(ctx context.Context, b Backend, f PlayFilter) ([]map[string]any, 
 	var post []string
 	post, params = f.Labels.applyTo(post, params, "labels_agg.labels_distinct")
 
+	if f.GroupID != "" {
+		// Filter on the AGGREGATED group_id (agg.group_id = any(group_id)), NOT the
+		// base event rows: group_id is sparse per-event, so a base-row filter drops
+		// whole plays. Prefix match — a spec-name / run-id prefix selects a whole
+		// study (all its born-groups), an exact id one run.
+		post = append(post, "startsWith(agg.group_id, {group:String})")
+		params["group"] = f.GroupID
+	}
+
 	limit := f.Limit
 	if limit <= 0 {
 		limit = defaultPlaysLimit
@@ -87,12 +96,6 @@ func buildPlaysFilter(f PlayFilter) ([]string, map[string]string, error) {
 	if f.AttemptID != "" {
 		clauses = append(clauses, "attempt_id = {attempt:UInt32}")
 		params["attempt"] = f.AttemptID
-	}
-	if f.GroupID != "" {
-		// Prefix match so a spec-name / run-id prefix selects a whole study
-		// (all its born-groups), while an exact id selects one run.
-		clauses = append(clauses, "startsWith(group_id, {group:String})")
-		params["group"] = f.GroupID
 	}
 	if f.From != "" {
 		clauses = append(clauses, "ts >= parseDateTime64BestEffort({from:String})")
