@@ -18,36 +18,101 @@ import { ref, computed, onMounted } from 'vue';
 import { listPlays, type PlaySummary } from '@/repo/v2-repo';
 import ShellLayout from '@/components/ShellLayout.vue';
 
+const WINDOW_DAYS = 30;
 const qs = new URLSearchParams(window.location.search);
 const groupInput = ref(qs.get('group') ?? '');
 const activeGroup = ref('');
-const items = ref<PlaySummary[]>([]);
+const items = ref<PlaySummary[]>([]); // plays for the selected study's report
+const dirItems = ref<PlaySummary[]>([]); // recent plays for the study directory
 const loading = ref(false);
 const error = ref('');
 const mode = ref<'agg' | 'plays'>('agg');
 
-async function load() {
-  const g = groupInput.value.trim();
-  if (!g) { error.value = 'enter a group_id (or prefix)'; items.value = []; return; }
-  activeGroup.value = g;
-  loading.value = true;
-  error.value = '';
+function fromISO(): string {
+  return new Date(Date.now() - WINDOW_DAYS * 86400000).toISOString();
+}
+
+// ---- study directory (shown when no ?group=): one row per study, where a
+// "study" is the group_id prefix before the run stamp (e.g. seg-trio-valley). ----
+function studyKey(p: PlaySummary): string {
+  return String(p.group_id ?? '').split('/')[0];
+}
+interface Study { key: string; runs: Set<string>; plays: number; variants: Set<string>; platforms: Set<string>; last: string }
+const studies = computed<Study[]>(() => {
+  const map = new Map<string, Study>();
+  for (const p of dirItems.value) {
+    const k = studyKey(p);
+    if (!k) continue;
+    let s = map.get(k);
+    if (!s) { s = { key: k, runs: new Set(), plays: 0, variants: new Set(), platforms: new Set(), last: '' }; map.set(k, s); }
+    s.plays++;
+    s.runs.add(String(p.group_id ?? ''));
+    const v = facetVal(p, 'manifest_variant'); if (v) s.variants.add(v);
+    const pf = facetVal(p, 'platform'); if (pf) s.platforms.add(pf);
+    const t = String(p.last_seen_at ?? p.started_at ?? '');
+    if (t > s.last) s.last = t;
+  }
+  return [...map.values()].sort((a, b) => b.last.localeCompare(a.last));
+});
+
+async function loadDirectory() {
+  loading.value = true; error.value = '';
   try {
-    const rows = await listPlays({ group: g, limit: 5000 });
-    // Client-side narrow (older forwarders ignore ?group= and return the window).
-    items.value = rows.filter((p) => {
-      const gid = String(p.group_id ?? '');
-      return gid !== '' && gid.startsWith(g);
-    });
+    dirItems.value = await listPlays({ from: fromISO(), limit: 5000 });
+    if (dirItems.value.length === 0) error.value = `no studies in the last ${WINDOW_DAYS} days`;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+    dirItems.value = [];
+  } finally { loading.value = false; }
+}
+
+async function loadReport(g: string) {
+  loading.value = true; error.value = '';
+  try {
+    const rows = await listPlays({ group: g, from: fromISO(), limit: 5000 });
+    // Client-side narrow (an older forwarder ignores ?group= and returns the window).
+    items.value = rows.filter((p) => String(p.group_id ?? '').startsWith(g));
     if (items.value.length === 0) error.value = `no plays for group "${g}"`;
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
     items.value = [];
-  } finally {
-    loading.value = false;
-  }
+  } finally { loading.value = false; }
 }
-onMounted(() => { if (groupInput.value.trim()) load(); });
+
+function selectStudy(key: string) {
+  groupInput.value = key;
+  activeGroup.value = key;
+  const u = new URL(window.location.href);
+  u.searchParams.set('group', key);
+  window.history.pushState({}, '', u);
+  loadReport(key);
+}
+function backToDirectory() {
+  activeGroup.value = '';
+  groupInput.value = '';
+  items.value = [];
+  const u = new URL(window.location.href);
+  u.searchParams.delete('group');
+  window.history.pushState({}, '', u);
+  if (!dirItems.value.length) loadDirectory();
+}
+// Load button / Enter: a value → open that study's report; empty → directory.
+function load() {
+  const g = groupInput.value.trim();
+  if (g) selectStudy(g);
+  else backToDirectory();
+}
+
+onMounted(() => {
+  const g = groupInput.value.trim();
+  if (g) { activeGroup.value = g; loadReport(g); }
+  else loadDirectory();
+});
+window.addEventListener('popstate', () => {
+  const g = (new URLSearchParams(window.location.search).get('group') ?? '').trim();
+  if (g) { groupInput.value = g; activeGroup.value = g; loadReport(g); }
+  else { activeGroup.value = ''; if (!dirItems.value.length) loadDirectory(); }
+});
 
 // ---- helpers ported from the harness char-report logic ----
 const SCENARIO_FACETS = ['manifest_variant', 'platform', 'content_id', 'device_model', 'os_version', 'app_version', 'test'];
@@ -198,6 +263,11 @@ function healthClass(v: string): string {
 function incClass(pct: number): string {
   return pct >= 66 ? 'inc-hi' : pct >= 33 ? 'inc-mid' : pct > 0 ? 'inc-lo' : 'inc-zero';
 }
+function fmtTime(t: string): string {
+  if (!t) return '–';
+  const d = new Date(t.includes('T') ? t : t.replace(' ', 'T') + 'Z');
+  return isNaN(d.getTime()) ? t : d.toLocaleString();
+}
 </script>
 
 <template>
@@ -222,7 +292,7 @@ function incClass(pct: number): string {
               @keyup.enter="load"
             />
             <button class="btn" :disabled="loading" @click="load">{{ loading ? 'loading…' : 'Load' }}</button>
-            <div class="toggle" role="tablist">
+            <div v-if="activeGroup" class="toggle" role="tablist">
               <button :class="['tog', { on: mode === 'agg' }]" @click="mode = 'agg'">Aggregated</button>
               <button :class="['tog', { on: mode === 'plays' }]" @click="mode = 'plays'">Per-play</button>
             </div>
@@ -232,7 +302,32 @@ function incClass(pct: number): string {
 
         <p v-if="error" class="err">{{ error }}</p>
 
+        <!-- ===== Study directory (no study selected) ===== -->
+        <template v-else-if="!activeGroup">
+          <div v-if="studies.length" class="table-wrap">
+            <div class="dir-hint">{{ studies.length }} studies · last {{ WINDOW_DAYS }} days — click a row to open its report</div>
+            <table class="tbl">
+              <thead>
+                <tr><th>study</th><th class="num">runs</th><th class="num">plays</th><th>variants</th><th>platforms</th><th>last run</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="s in studies" :key="s.key" class="clickable" @click="selectStudy(s.key)">
+                  <td class="ivcell">{{ s.key }}</td>
+                  <td class="num">{{ s.runs.size }}</td>
+                  <td class="num">{{ s.plays }}</td>
+                  <td>{{ [...s.variants].join(' / ') || '–' }}</td>
+                  <td>{{ [...s.platforms].join(', ') || '–' }}</td>
+                  <td class="mono">{{ fmtTime(s.last) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else-if="!loading" class="hint">no studies in the last {{ WINDOW_DAYS }} days</p>
+        </template>
+
+        <!-- ===== Aggregated report (a study selected) ===== -->
         <template v-else-if="items.length">
+          <a class="back" @click="backToDirectory">← all studies</a>
           <p v-if="iv.constants.length" class="held">
             <span class="held-label">held constant:</span>
             <span v-for="c in iv.constants" :key="c" class="chip">{{ c }}</span>
@@ -337,8 +432,7 @@ function incClass(pct: number): string {
           </div>
         </template>
 
-        <p v-else-if="!loading && activeGroup" class="err">no data</p>
-        <p v-else-if="!activeGroup" class="hint">Enter a group_id or prefix and press Load.</p>
+        <p v-else-if="!loading" class="err">no data</p>
       </div>
     </main>
   </ShellLayout>
@@ -368,6 +462,11 @@ function incClass(pct: number): string {
 .status-message { font-size: 0.8rem; color: var(--text-secondary, #5f6368); }
 .err { color: var(--error, #d93025); font-size: 0.85rem; }
 .hint { color: var(--text-secondary, #5f6368); font-size: 0.85rem; }
+.dir-hint { font-size: 0.78rem; color: var(--text-secondary, #5f6368); margin-bottom: 0.4rem; }
+.clickable { cursor: pointer; }
+.clickable:hover td { background: var(--surface-hover, #f1f3f4); }
+.back { display: inline-block; margin: 0 0 0.6rem; font-size: 0.8rem; color: var(--primary-blue, #1a73e8); cursor: pointer; }
+.back:hover { text-decoration: underline; }
 
 .held { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; margin: 0.2rem 0 0.7rem; font-size: 0.78rem; }
 .held-label { color: var(--text-secondary, #5f6368); }
