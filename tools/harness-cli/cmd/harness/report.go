@@ -149,7 +149,7 @@ func renderStudyReport(w io.Writer, group string, rows []map[string]any) {
 
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 	hdr := append([]string{}, ivCols...)
-	hdr = append(hdr, "TTFF_s", "frames", "dropped", "stalls", "stall_s", "shifts", "res_chg", "verdict", "worst_label", "end", "play")
+	hdr = append(hdr, "TTFF_s", "frames", "dropped", "stalls", "stall_s", "shifts", "res_chg", "verdict", "worst_qoe", "end", "play")
 	fmt.Fprintln(tw, strings.Join(hdr, "\t"))
 	for _, p := range rows {
 		sc, _ := p["scenario"].(map[string]any)
@@ -157,7 +157,7 @@ func renderStudyReport(w io.Writer, group string, rows []map[string]any) {
 		for _, f := range ivCols {
 			cells = append(cells, rptDash(rptStr(sc[f])))
 		}
-		sev, worst := rptVerdictFromLabels(p["label_histogram"])
+		verdict, worst := rptVerdict(p["label_histogram"])
 		cells = append(cells,
 			rptNum(p["first_frame_s"]),
 			rptNum(p["frames_displayed"]),
@@ -166,7 +166,7 @@ func renderStudyReport(w io.Writer, group string, rows []map[string]any) {
 			rptMsToS(p["stalling_time_ms"]),
 			rptNum(p["bitrate_shifts"]),
 			rptNum(p["resolution_changes"]),
-			rptVerdictWord(sev),
+			verdict,
 			rptDash(worst),
 			rptDash(rptStr(p["last_state"])),
 			rptShort8(rptStr(p["play_id"])),
@@ -175,13 +175,20 @@ func renderStudyReport(w io.Writer, group string, rows []map[string]any) {
 	}
 	tw.Flush()
 	fmt.Fprintln(w, "\nmetrics are shown ALWAYS (not only when a label fires) — labels threshold the value and hide the")
-	fmt.Fprintln(w, "gradient among the 'good' arms; compare the numbers to rank them. verdict = worst label severity.")
+	fmt.Fprintln(w, "gradient among the 'good' arms; compare the numbers to rank them.")
+	fmt.Fprintln(w, "verdict = qoe_tier end-state (premium/ok/BAD); worst_qoe = worst QoE label (lifecycle/teardown excluded).")
 }
 
-// rptVerdictFromLabels returns the worst label severity + its event, from a
-// label_histogram: an array of [ "<severity>=<event>", count ] pairs.
-func rptVerdictFromLabels(v any) (severity, worstLabel string) {
+// rptVerdict computes a QoE verdict + the worst QoE-relevant label from a
+// label_histogram ([ "<severity>=<event>", count ] pairs). The verdict prefers
+// the forwarder's authoritative qoe_tier_* END-STATE rollup
+// (premium/acceptable/unacceptable, qoe_labels.go); absent that it falls back to
+// the worst QoE-scoped severity. Lifecycle/teardown labels (unexpected_*, etc.)
+// are excluded — they're error-tier but describe how the play *ended* (the
+// harness stops it at duration), not how it *performed*.
+func rptVerdict(v any) (verdict, worstQoE string) {
 	arr, _ := v.([]any)
+	tier := ""
 	best := 0
 	for _, e := range arr {
 		pair, _ := e.([]any)
@@ -193,11 +200,42 @@ func rptVerdictFromLabels(v any) (severity, worstLabel string) {
 		if i < 0 {
 			continue
 		}
-		if r := rptSeverityRank(lbl[:i]); r > best {
-			best, severity, worstLabel = r, lbl[:i], lbl[i+1:]
+		sev := lbl[:i]
+		event := strings.TrimPrefix(lbl[i+1:], "*") // strip the synth-label mark
+		if strings.HasPrefix(event, "qoe_tier_") {
+			tier = event
+			continue
+		}
+		if rptLifecycleLabel(event) {
+			continue
+		}
+		if r := rptSeverityRank(sev); r > best {
+			best, worstQoE = r, event
 		}
 	}
-	return severity, worstLabel
+	switch tier {
+	case "qoe_tier_premium":
+		verdict = "premium"
+	case "qoe_tier_acceptable":
+		verdict = "ok"
+	case "qoe_tier_unacceptable":
+		verdict = "BAD"
+	default:
+		verdict = rptSeverityWord(best) // no tier — fall back to the worst QoE severity
+	}
+	return verdict, worstQoE
+}
+
+// rptLifecycleLabel reports labels that describe session lifecycle/teardown
+// rather than playback QoE — excluded from the verdict + worst-label so a
+// harness-stopped play doesn't read as "BAD".
+func rptLifecycleLabel(event string) bool {
+	switch event {
+	case "unexpected_end", "unexpected_fault", "unexpected_startup",
+		"first_frame", "play_start", "session_start", "server_start", "loop_server":
+		return true
+	}
+	return false
 }
 
 func rptSeverityRank(sev string) int {
@@ -214,16 +252,15 @@ func rptSeverityRank(sev string) int {
 	return 0
 }
 
-func rptVerdictWord(sev string) string {
-	switch sev {
-	case "error", "critical":
+func rptSeverityWord(rank int) string {
+	switch {
+	case rank >= 3: // error / critical
 		return "BAD"
-	case "warning":
+	case rank == 2: // warning
 		return "warn"
-	case "info", "":
+	default:
 		return "ok"
 	}
-	return sev
 }
 
 // --- small any→string/number helpers (JSON numbers arrive as float64) ---
