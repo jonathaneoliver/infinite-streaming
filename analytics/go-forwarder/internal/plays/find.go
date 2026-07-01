@@ -88,6 +88,12 @@ func buildPlaysFilter(f PlayFilter) ([]string, map[string]string, error) {
 		clauses = append(clauses, "attempt_id = {attempt:UInt32}")
 		params["attempt"] = f.AttemptID
 	}
+	if f.GroupID != "" {
+		// Prefix match so a spec-name / run-id prefix selects a whole study
+		// (all its born-groups), while an exact id selects one run.
+		clauses = append(clauses, "startsWith(group_id, {group:String})")
+		params["group"] = f.GroupID
+	}
 	if f.From != "" {
 		clauses = append(clauses, "ts >= parseDateTime64BestEffort({from:String})")
 		params["from"] = f.From

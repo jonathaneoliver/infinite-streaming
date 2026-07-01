@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -812,6 +813,24 @@ func (c *Client) archiveGET(call func() (*http.Response, error), ctx string) ([]
 func (c *Client) ArchivePlays(ctx context.Context, params *forwarder.GetApiV2PlaysParams) ([]byte, error) {
 	return c.archiveGET(func() (*http.Response, error) {
 		return c.forwarder.GetApiV2Plays(ctx, params)
+	}, "GET /analytics/api/v2/plays")
+}
+
+// ArchivePlaysRaw GETs /analytics/api/v2/plays with an explicit query — used for
+// filter params (e.g. group) not yet in the generated client surface. A forwarder
+// that predates the param simply ignores it (callers keep a client-side filter as
+// the correctness fallback).
+func (c *Client) ArchivePlaysRaw(ctx context.Context, q url.Values) ([]byte, error) {
+	u := strings.TrimRight(c.BaseURL, "/") + "/analytics/api/v2/plays?" + q.Encode()
+	return c.archiveGET(func() (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		if i := strings.IndexByte(c.BasicAuth, ':'); i >= 0 {
+			req.SetBasicAuth(c.BasicAuth[:i], c.BasicAuth[i+1:])
+		}
+		return c.HTTP.Do(req)
 	}, "GET /analytics/api/v2/plays")
 }
 

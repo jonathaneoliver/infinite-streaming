@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -14,7 +15,6 @@ import (
 	"time"
 
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/api"
-	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/v2gen/forwarder"
 )
 
 // cmdCharReport renders a STUDY comparison from the archive. Given a group_id
@@ -43,27 +43,25 @@ func cmdCharReport(client *api.Client, args []string, asJSON bool) error {
 		return fmt.Errorf("usage: harness char report --group <group_id> [--from ISO] [--to ISO] [--limit N]")
 	}
 
-	params := &forwarder.GetApiV2PlaysParams{}
-	lim := *limit
-	params.Limit = &lim
-	lower := time.Now().Add(-48 * time.Hour)
+	q := url.Values{}
+	q.Set("group", *group) // server-side prefix filter (older forwarders ignore it → client-side fallback below)
+	q.Set("limit", strconv.Itoa(*limit))
+	lower := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339)
 	if *from != "" {
-		t, err := time.Parse(time.RFC3339, *from)
-		if err != nil {
+		if _, err := time.Parse(time.RFC3339, *from); err != nil {
 			return fmt.Errorf("invalid --from %q (need RFC3339): %w", *from, err)
 		}
-		lower = t
+		lower = *from
 	}
-	params.From = &lower
+	q.Set("from", lower)
 	if *to != "" {
-		t, err := time.Parse(time.RFC3339, *to)
-		if err != nil {
+		if _, err := time.Parse(time.RFC3339, *to); err != nil {
 			return fmt.Errorf("invalid --to %q (need RFC3339): %w", *to, err)
 		}
-		params.To = &t
+		q.Set("to", *to)
 	}
 
-	body, err := client.ArchivePlays(context.Background(), params)
+	body, err := client.ArchivePlaysRaw(context.Background(), q)
 	if err != nil {
 		return err
 	}
@@ -74,8 +72,9 @@ func cmdCharReport(client *api.Client, args []string, asJSON bool) error {
 		return fmt.Errorf("decode plays: %w", err)
 	}
 
-	// The /api/v2/plays query has no group filter yet (Gap 0) — filter client-side
-	// on the group_id each row already carries.
+	// Belt-and-suspenders: the forwarder now filters by ?group= server-side, but
+	// re-filter client-side on the group_id each row carries so an OLDER forwarder
+	// (which ignores the param and returns the whole window) still yields the group.
 	var rows []map[string]any
 	for _, p := range env.Items {
 		if g := rptStr(p["group_id"]); g != "" && (g == *group || strings.HasPrefix(g, *group)) {
