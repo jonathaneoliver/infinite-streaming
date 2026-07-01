@@ -1,0 +1,297 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/api"
+	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/v2gen/forwarder"
+)
+
+// cmdCharReport renders a STUDY comparison from the archive. Given a group_id
+// (the ≤4 concurrent arms of one run) it pulls each arm's per-play summary and
+// tabulates the config that VARIED (the IV — segment/pattern/… surfaced via the
+// play `scenario`) against the continuous QoE metrics (the DV — TTFF/stalls/
+// shifts…) plus a label-derived verdict. It ALWAYS shows the metric value, not
+// just a label: labels threshold the value and hide the gradient among the
+// "good" arms — the continuous numbers are what let you rank them.
+//
+// This is the first cut of epic #880 Gap 1 (docs/characterization-results-design.md).
+// group_id is the minimal study key; Gap 0's `scenario` facet-join / `study_id`
+// (to stitch N reps / >4 variations across runs) is a follow-up.
+func cmdCharReport(client *api.Client, args []string, asJSON bool) error {
+	fs := flag.NewFlagSet("char report", flag.ContinueOnError)
+	group := fs.String("group", "", "group_id (or prefix) to compare — the run's arms")
+	from := fs.String("from", "", "ISO 8601 lower bound (default: 48h ago)")
+	to := fs.String("to", "", "ISO 8601 upper bound (exclusive)")
+	limit := fs.Int("limit", 500, "max plays to scan for the group")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *group == "" {
+		return fmt.Errorf("usage: harness char report --group <group_id> [--from ISO] [--to ISO] [--limit N]")
+	}
+
+	params := &forwarder.GetApiV2PlaysParams{}
+	lim := *limit
+	params.Limit = &lim
+	lower := time.Now().Add(-48 * time.Hour)
+	if *from != "" {
+		t, err := time.Parse(time.RFC3339, *from)
+		if err != nil {
+			return fmt.Errorf("invalid --from %q (need RFC3339): %w", *from, err)
+		}
+		lower = t
+	}
+	params.From = &lower
+	if *to != "" {
+		t, err := time.Parse(time.RFC3339, *to)
+		if err != nil {
+			return fmt.Errorf("invalid --to %q (need RFC3339): %w", *to, err)
+		}
+		params.To = &t
+	}
+
+	body, err := client.ArchivePlays(context.Background(), params)
+	if err != nil {
+		return err
+	}
+	var env struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return fmt.Errorf("decode plays: %w", err)
+	}
+
+	// The /api/v2/plays query has no group filter yet (Gap 0) — filter client-side
+	// on the group_id each row already carries.
+	var rows []map[string]any
+	for _, p := range env.Items {
+		if g := rptStr(p["group_id"]); g != "" && (g == *group || strings.HasPrefix(g, *group)) {
+			rows = append(rows, p)
+		}
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("no plays for group %q in the window — widen --from or raise --limit", *group)
+	}
+
+	if asJSON {
+		out, err := json.Marshal(rows)
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(out)
+		return err
+	}
+	renderStudyReport(os.Stdout, *group, rows)
+	return nil
+}
+
+// rptScenarioFacets are the play-identity fields treated as IV candidates, in
+// display order. A facet that varies across the group becomes a column; one
+// shared by every arm is printed once as held-constant context.
+var rptScenarioFacets = []string{"manifest_variant", "platform", "content_id", "device_model", "os_version", "app_version", "test"}
+
+func renderStudyReport(w io.Writer, group string, rows []map[string]any) {
+	facetVals := map[string]map[string]bool{}
+	for _, p := range rows {
+		sc, _ := p["scenario"].(map[string]any)
+		for _, f := range rptScenarioFacets {
+			if v := rptStr(sc[f]); v != "" {
+				if facetVals[f] == nil {
+					facetVals[f] = map[string]bool{}
+				}
+				facetVals[f][v] = true
+			}
+		}
+	}
+	var ivCols, constants []string
+	for _, f := range rptScenarioFacets {
+		switch len(facetVals[f]) {
+		case 0: // absent on every arm — skip
+		case 1:
+			for v := range facetVals[f] {
+				constants = append(constants, f+"="+v)
+			}
+		default:
+			ivCols = append(ivCols, f)
+		}
+	}
+	sort.Strings(constants)
+
+	fmt.Fprintf(w, "study report — group %s  (%d arms)\n", group, len(rows))
+	if len(constants) > 0 {
+		fmt.Fprintf(w, "held constant: %s\n", strings.Join(constants, "  "))
+	}
+	fmt.Fprintln(w)
+
+	// Sort arms by the IV columns so the gradient reads top-to-bottom.
+	sort.SliceStable(rows, func(i, j int) bool {
+		si, _ := rows[i]["scenario"].(map[string]any)
+		sj, _ := rows[j]["scenario"].(map[string]any)
+		for _, f := range ivCols {
+			a, b := rptStr(si[f]), rptStr(sj[f])
+			if a != b {
+				return a < b
+			}
+		}
+		return false
+	})
+
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	hdr := append([]string{}, ivCols...)
+	hdr = append(hdr, "TTFF_s", "frames", "dropped", "stalls", "stall_s", "shifts", "res_chg", "verdict", "worst_label", "end", "play")
+	fmt.Fprintln(tw, strings.Join(hdr, "\t"))
+	for _, p := range rows {
+		sc, _ := p["scenario"].(map[string]any)
+		cells := make([]string, 0, len(hdr))
+		for _, f := range ivCols {
+			cells = append(cells, rptDash(rptStr(sc[f])))
+		}
+		sev, worst := rptVerdictFromLabels(p["label_histogram"])
+		cells = append(cells,
+			rptNum(p["first_frame_s"]),
+			rptNum(p["frames_displayed"]),
+			rptNum(p["frames_dropped"]),
+			rptNum(p["stalls"]),
+			rptMsToS(p["stalling_time_ms"]),
+			rptNum(p["bitrate_shifts"]),
+			rptNum(p["resolution_changes"]),
+			rptVerdictWord(sev),
+			rptDash(worst),
+			rptDash(rptStr(p["last_state"])),
+			rptShort8(rptStr(p["play_id"])),
+		)
+		fmt.Fprintln(tw, strings.Join(cells, "\t"))
+	}
+	tw.Flush()
+	fmt.Fprintln(w, "\nmetrics are shown ALWAYS (not only when a label fires) — labels threshold the value and hide the")
+	fmt.Fprintln(w, "gradient among the 'good' arms; compare the numbers to rank them. verdict = worst label severity.")
+}
+
+// rptVerdictFromLabels returns the worst label severity + its event, from a
+// label_histogram: an array of [ "<severity>=<event>", count ] pairs.
+func rptVerdictFromLabels(v any) (severity, worstLabel string) {
+	arr, _ := v.([]any)
+	best := 0
+	for _, e := range arr {
+		pair, _ := e.([]any)
+		if len(pair) == 0 {
+			continue
+		}
+		lbl := rptStr(pair[0])
+		i := strings.IndexByte(lbl, '=')
+		if i < 0 {
+			continue
+		}
+		if r := rptSeverityRank(lbl[:i]); r > best {
+			best, severity, worstLabel = r, lbl[:i], lbl[i+1:]
+		}
+	}
+	return severity, worstLabel
+}
+
+func rptSeverityRank(sev string) int {
+	switch sev {
+	case "error":
+		return 4
+	case "critical":
+		return 3
+	case "warning":
+		return 2
+	case "info":
+		return 1
+	}
+	return 0
+}
+
+func rptVerdictWord(sev string) string {
+	switch sev {
+	case "error", "critical":
+		return "BAD"
+	case "warning":
+		return "warn"
+	case "info", "":
+		return "ok"
+	}
+	return sev
+}
+
+// --- small any→string/number helpers (JSON numbers arrive as float64) ---
+
+func rptStr(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case nil:
+		return ""
+	default:
+		return fmt.Sprintf("%v", t)
+	}
+}
+
+func rptDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+func rptNum(v any) string {
+	f, ok := rptFloat(v)
+	if !ok {
+		return "-"
+	}
+	if f == float64(int64(f)) {
+		return fmt.Sprintf("%d", int64(f))
+	}
+	return fmt.Sprintf("%.2f", f)
+}
+
+func rptMsToS(v any) string {
+	f, ok := rptFloat(v)
+	if !ok {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f", f/1000)
+}
+
+func rptFloat(v any) (float64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return t, true
+	case int:
+		return float64(t), true
+	case int64:
+		return float64(t), true
+	case json.Number:
+		f, err := t.Float64()
+		return f, err == nil
+	case string:
+		// ClickHouse serializes UInt64 counts (frames_displayed, bitrate_shifts,
+		// resolution_changes, …) as JSON strings to avoid precision loss.
+		if t == "" {
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(t, 64)
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func rptShort8(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
+}
