@@ -35,6 +35,7 @@ func cmdCharReport(client *api.Client, args []string, asJSON bool) error {
 	to := fs.String("to", "", "ISO 8601 upper bound (exclusive)")
 	limit := fs.Int("limit", 500, "max plays to scan for the group")
 	reps := fs.Bool("reps", false, "aggregate plays by config into per-config medians (a study across reps/runs)")
+	curve := fs.String("curve", "", "append a response curve (ASCII bars of a metric's median per config): ttff|frames|dropped|stalls|shifts")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -98,7 +99,82 @@ func cmdCharReport(client *api.Client, args []string, asJSON bool) error {
 	} else {
 		renderStudyReport(os.Stdout, *group, rows)
 	}
+	if *curve != "" {
+		rptRenderCurve(os.Stdout, rows, *curve)
+	}
 	return nil
+}
+
+// rptCurveMetric maps a --curve metric name to its per-play field.
+var rptCurveMetric = map[string]string{
+	"ttff":    "first_frame_s",
+	"frames":  "frames_displayed",
+	"dropped": "frames_dropped",
+	"stalls":  "stalls",
+	"shifts":  "bitrate_shifts",
+}
+
+// rptRenderCurve draws the response function: an ASCII bar chart of a metric's
+// median across the IV values — the IV→DV relationship at a glance (the knee),
+// not a grid. Aggregates by config regardless of --reps.
+func rptRenderCurve(w io.Writer, rows []map[string]any, metric string) {
+	field, ok := rptCurveMetric[metric]
+	if !ok {
+		fmt.Fprintf(w, "\n(unknown --curve metric %q — have: ttff frames dropped stalls shifts)\n", metric)
+		return
+	}
+	ivCols, _ := rptDetectIV(rows)
+
+	order := []string{}
+	vals := map[string][]float64{}
+	for _, p := range rows {
+		key := strings.Join(rptIVKey(p, ivCols), "/")
+		if _, seen := vals[key]; !seen {
+			order = append(order, key)
+		}
+		if f, ok := rptFloat(p[field]); ok {
+			vals[key] = append(vals[key], f)
+		}
+	}
+	sort.Strings(order)
+
+	type pt struct {
+		label string
+		med   float64
+		n     int
+	}
+	var pts []pt
+	maxv := 0.0
+	for _, k := range order {
+		xs := vals[k]
+		if len(xs) == 0 {
+			continue
+		}
+		s := append([]float64(nil), xs...)
+		sort.Float64s(s)
+		med := s[len(s)/2]
+		if len(s)%2 == 0 {
+			med = (s[len(s)/2-1] + s[len(s)/2]) / 2
+		}
+		pts = append(pts, pt{k, med, len(xs)})
+		if med > maxv {
+			maxv = med
+		}
+	}
+	if len(pts) == 0 {
+		fmt.Fprintf(w, "\n(no %s values to plot)\n", metric)
+		return
+	}
+
+	fmt.Fprintf(w, "\nresponse curve — %s (median) by %s:\n", metric, strings.Join(ivCols, "/"))
+	const width = 40
+	for _, p := range pts {
+		bars := 0
+		if maxv > 0 {
+			bars = int(p.med/maxv*width + 0.5)
+		}
+		fmt.Fprintf(w, "  %-16s %9.2f  n=%d  %s\n", p.label, p.med, p.n, strings.Repeat("█", bars))
+	}
 }
 
 // rptDetectIV finds which scenario facets VARY across the plays (the IV columns)
