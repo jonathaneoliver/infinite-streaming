@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """#506/#608 anomaly-LABEL deriver (PER ROW) — now split into TRAIN and SCORE modes.
 
-#506 introduced per-row VOMM "surprise" labels (unexpected_<condition>). #608 decouples the
+#506 introduced per-row VOMM "surprise" labels (anomaly_<condition>_<surface>). #608 decouples the
 two operations that used to run together every tick:
 
   --mode train  (SLOW, nightly): build per-condition VOMMs (PPM-C back-off, from scorer.py)
@@ -22,7 +22,7 @@ out-of-sample by construction. `trained_at` IS the cutoff; no `now − score_hou
 
 The model that changes slowly (the learned grammar of typical episodes) is rebuilt slowly;
 scoring, which we want fresh, is cheap (dict lookups) and runs often. No hand-built reaction
-taxonomy: the tag is the condition (unexpected_<condition>) + a severity from the surprise
+taxonomy: the tag is the condition (anomaly_<condition>_<surface>) + a severity from the surprise
 magnitude. Reads ClickHouse directly (reuses derive_tokens.py's ch()/fetch_rows()); reuses
 scorer.py's model + tokenize.py's cross-stream tokeniser/episodes.
 
@@ -219,7 +219,7 @@ def cmd_score(args):
                     efp, surf = (0, "event") if fp is None else (fp, surface or "net")
                     rows.append({"ts": ts, "player_id": b["pid"], "play_id": play,
                                  "entry_fingerprint": efp, "surface": surf, "condition": cond,
-                                 "label": f"unexpected_{cond}",
+                                 "label": f"anomaly_{cond}_{surf}",
                                  "severity": severity_for(surprise, thr), "score": round(surprise, 3),
                                  "model_version": art["model_version"], "scored_at": scored_at})
                     n += 1
