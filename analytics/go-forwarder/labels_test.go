@@ -722,7 +722,13 @@ func TestQoEReFiresOnNewInstance(t *testing.T) {
 	}
 }
 
-func TestQoETerminalSummaryForcesStillTrue(t *testing.T) {
+// TestQoETerminalNoForceEmitTwoAxes — the terminal row no longer force-emits
+// still-true conditions (each appears once, at its rising edge, on the
+// per-moment timeline). Instead it carries two aggregates: qoe_exit_* (state at
+// close) and qoe_tier_* (whole-play grade). A VST-concerning that fired at
+// startup and stayed true is NOT re-stamped on the terminal row, but both
+// aggregates read warning → acceptable.
+func TestQoETerminalNoForceEmitTwoAxes(t *testing.T) {
 	s := newLabelState()
 	concerning := qoeLabel(SevWarning, "qoe_vst_concerning")
 	mk := func(ts, ev, status string) *row {
@@ -730,13 +736,40 @@ func TestQoETerminalSummaryForcesStillTrue(t *testing.T) {
 	}
 	computeEventLabelsWithState(s, mk("2026-06-03 00:00:01.000", "", "in_progress")) // first determination (emits)
 	computeEventLabelsWithState(s, mk("2026-06-03 00:00:02.000", "", "in_progress")) // sustained (suppressed)
-	// Terminal row: summary must force-emit the still-true VST + the tier.
 	got := computeEventLabelsWithState(s, mk("2026-06-03 00:00:03.000", "session_end", "completed"))
-	if !hasLabel(got, concerning) {
-		t.Fatalf("terminal summary must carry still-true %s: %v", concerning, got)
+	if hasLabel(got, concerning) {
+		t.Fatalf("terminal row must NOT force-emit the still-true %s: %v", concerning, got)
+	}
+	if !hasLabel(got, qoeLabel(SevWarning, "qoe_exit_acceptable")) {
+		t.Fatalf("qoe_exit must reflect state-at-close (warning → acceptable): %v", got)
 	}
 	if !hasLabel(got, qoeLabel(SevWarning, "qoe_tier_acceptable")) {
-		t.Fatalf("tier must reflect the summary (warning → acceptable): %v", got)
+		t.Fatalf("qoe_tier must reflect whole-play (warning → acceptable): %v", got)
+	}
+}
+
+// TestQoETierWholePlayVsExit — the two aggregates diverge: a mid-play critical
+// (a freeze) that recovered downgrades the whole-play qoe_tier_* to
+// unacceptable, but qoe_exit_* stays premium because the stream was clean at
+// the moment the user closed it.
+func TestQoETierWholePlayVsExit(t *testing.T) {
+	s := newLabelState()
+	mk := func(ts, ev, status string) *row {
+		return &row{Ts: ts, PlayerID: "p", PlayID: "x", LastEvent: ev, PlaybackStatus: status}
+	}
+	computeEventLabelsWithState(s, mk("2026-06-05 00:00:01.000", "play_start", "in_progress"))
+	// Mid-play freeze (critical), then recovery to clean.
+	if got := computeEventLabelsWithState(s, mk("2026-06-05 00:00:05.000", "frozen", "in_progress")); !hasLabel(got, SevCritical+"=stall_frozen") {
+		t.Fatalf("frozen row should emit stall_frozen: %v", got)
+	}
+	computeEventLabelsWithState(s, mk("2026-06-05 00:00:10.000", "", "in_progress")) // recovered, clean
+	// Clean close.
+	got := computeEventLabelsWithState(s, mk("2026-06-05 00:05:00.000", "session_end", "completed"))
+	if !hasLabel(got, qoeLabel(SevCritical, "qoe_tier_unacceptable")) {
+		t.Fatalf("whole-play tier must be unacceptable (mid-play freeze): %v", got)
+	}
+	if !hasLabel(got, qoeLabel(SevInfo, "qoe_exit_premium")) {
+		t.Fatalf("exit must be premium (clean at close): %v", got)
 	}
 }
 
@@ -760,11 +793,14 @@ func TestQoELeadingTerminalIgnored(t *testing.T) {
 			t.Fatalf("leading play_end must not emit %s: %v", bad, got)
 		}
 	}
-	// Play opens (restart), then a real clean terminal — should still get a
-	// tier, proving the guard wasn't consumed by the leaked frame.
-	computeEventLabelsWithState(s, &row{Ts: "2026-06-04 00:00:01.100", PlayerID: "p", PlayID: "x", LastEvent: "restart", PlaybackStatus: "in_progress"})
+	// Play opens (play_start — a clean, non-terminal open), then a real clean
+	// terminal — should still get a premium tier, proving the guard wasn't
+	// consumed by the leaked frame. (Opening with `restart` would inject a
+	// critical restart_auto_recovery, which now correctly downgrades the
+	// whole-play tier — a separate behavior, not what this test isolates.)
+	computeEventLabelsWithState(s, &row{Ts: "2026-06-04 00:00:01.100", PlayerID: "p", PlayID: "x", LastEvent: "play_start", PlaybackStatus: "in_progress"})
 	end := computeEventLabelsWithState(s, &row{Ts: "2026-06-04 00:05:00.000", PlayerID: "p", PlayID: "x", LastEvent: "play_end", PlaybackStatus: "completed", PlayingTimeMs: 290000})
 	if !hasLabel(end, qoeLabel(SevInfo, "qoe_tier_premium")) {
-		t.Fatalf("real terminal after the play opened should still get a tier: %v", end)
+		t.Fatalf("real terminal after the play opened should still get a premium tier: %v", end)
 	}
 }
