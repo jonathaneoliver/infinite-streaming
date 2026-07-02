@@ -117,8 +117,19 @@ func TestSweepProbe(t *testing.T) {
 		_ = sess.CloseViaUI(cleanupCtx) // clean client play_end
 		_ = sess.Release(cleanupCtx)    // delete the proxy session, free the slot
 	})
-	if err := appium.ResumePlayback(setupCtx, *picked); err != nil {
-		t.Fatalf("ResumePlayback: %v", err)
+	// When CHAR_CONTENT pins a clip, tap that clip's specific tile rather than
+	// the continue-watching hero (which races the catalogue load and can land on
+	// the featured clip — a pinned recipe otherwise silently streams Big Buck
+	// Bunny). Falls back to continue-watching inside ResumePlaybackClip when the
+	// clip tile never renders. Mirrors pyramid/char-matrix-fleet.
+	var rerr error
+	if clip := strings.TrimSpace(os.Getenv("CHAR_CONTENT")); clip != "" {
+		rerr = appium.ResumePlaybackClip(setupCtx, *picked, clipIDFromContent(clip))
+	} else {
+		rerr = appium.ResumePlayback(setupCtx, *picked)
+	}
+	if rerr != nil {
+		t.Fatalf("ResumePlayback: %v", rerr)
 	}
 
 	// Drive the bandwidth motion for a config-class pattern recipe: once the
