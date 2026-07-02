@@ -92,12 +92,15 @@ const props = defineProps<{
    *  (above the control panels), so they pass this flag and SessionDisplay
    *  omits the duplicate panel from its stack. */
   hideSessionDetails?: boolean;
-  /** SessionViewer "show before/after" toggle. When true the SSE
-   *  drops the play_id filter and widens fromMs/toMs to the cached
-   *  play bounds ± 5 minutes so the operator can scroll through the
-   *  surrounding context for the same player. Default: false — the
-   *  view is locked to this play. */
-  showContext?: boolean;
+  /** Play-scope filter. Default true → the SSE + caches are locked to
+   *  this play_id. False → drop the filter so neighbouring plays of the
+   *  same player land in the caches (pairs with a widened window). */
+  scopeToPlay?: boolean;
+  /** Symmetric time-window padding (ms) added on each side of the URL
+   *  start/end so the operator can widen the view for context. Repeatable
+   *  from SessionViewer's Expand control. The end side is clamped to now
+   *  (never padded into the future). Default 0. */
+  windowPadMs?: number;
   /** Initial time window. Caller (SessionViewer reading the URL)
    *  passes startMs (ms-since-epoch) and endMs. endMs = null means
    *  "follow live edge" — the SSE backfills from startMs but doesn't
@@ -499,31 +502,32 @@ if (props.startMs != null && props.endMs != null) {
   windowBoundsRef.value = { min: props.startMs, max: props.startMs };
 }
 
-/** Effective play_id for the SSE subscription. `showContext = true`
- *  drops the play_id filter so rows from neighbouring plays of the
- *  same player land in the caches. */
+/** Effective play_id for the SSE subscription. scopeToPlay=false drops
+ *  the play_id filter so rows from neighbouring plays of the same player
+ *  land in the caches. */
 const effectivePlayIdRef = computed<string | null>(() =>
-  props.showContext ? null : playIdRef.value,
+  props.scopeToPlay === false ? null : playIdRef.value,
 );
 
 /** Reactive fromMs / toMs for the SSE.
- *  - Base case (showContext off): use the URL's startMs/endMs as-is.
+ *  - windowPadMs = 0 (default): use the URL's startMs/endMs as-is.
  *    endMs=null means "follow live" — pass through as null so SSE
  *    tails the live edge.
- *  - showContext on: widen by CONTEXT_PAD_MS on each side so the
- *    operator can scroll through before/after; toMs stays null when
+ *  - windowPadMs > 0: widen by that much on each side so the operator
+ *    can scroll through before/after. The end side is clamped to now so
+ *    padding never reaches into the future; toMs stays null when
  *    end_time was "live". */
-const CONTEXT_PAD_MS = 5 * 60 * 1000;
 const fromMsRef = computed<number | null>(() => {
   const startMs = props.startMs ?? windowBoundsRef.value?.min ?? null;
   if (startMs == null) return null;
-  return props.showContext ? startMs - CONTEXT_PAD_MS : startMs;
+  return startMs - (props.windowPadMs ?? 0);
 });
 const toMsRef = computed<number | null>(() => {
   // end_time=live (props.endMs == null but startMs set) → no upper
-  // bound on the SSE backfill, regardless of showContext.
+  // bound on the SSE backfill, regardless of padding.
   if (props.endMs == null) return null;
-  return props.showContext ? props.endMs + CONTEXT_PAD_MS : props.endMs;
+  const pad = props.windowPadMs ?? 0;
+  return pad > 0 ? Math.min(props.endMs + pad, Date.now()) : props.endMs;
 });
 
 /* ─── Refetch-on-pan (#587) ─────────────────────────────────────────
@@ -591,14 +595,14 @@ function onLifecycleToggle(kind: LifecycleKind, e: Event) {
 
 // Fallback: when the URL didn't carry start_time/end_time, capture
 // the play's bounds the first time samples arrive in archive mode
-// so windowBoundsRef can drive the SSE re-subscribe on showContext
-// toggles. Skipped when URL props are present — those take precedence.
+// so windowBoundsRef can drive the SSE re-subscribe on window-pad
+// changes. Skipped when URL props are present — those take precedence.
 watch(
   () => timeseries.events.rangeBounds.value,
   (b) => {
     if (!b) return;
     if (props.startMs != null) return;   // URL gave us the truth
-    if (props.showContext) return;        // wider window, don't anchor on it
+    if ((props.windowPadMs ?? 0) > 0) return; // widened window, don't anchor on it
     if (props.followLive) return;         // live mode uses liveFromRef (#587)
     if (!playIdRef.value) return;         // live mode
     if (windowBoundsRef.value !== null) return;
@@ -612,6 +616,22 @@ watch(
 // — and so any earlier reactive code (window watcher, brush clamps)
 // sees a coord instance even though it gets consumed mostly later.
 const coord = useChartCoordination(coordId);
+
+// Widening the window (Expand, or the auto-widen when "this play only" is
+// unchecked) loads more data but the focus brush stays pinned to the original
+// play span — so the added context isn't actually visible. Grow the brush to
+// the widened request window whenever windowPadMs changes; Reset (pad → 0)
+// snaps it back to the play's own span. Guarded to archive views with a
+// bounded end (toMs set) — live-follow keeps its null range.
+watch(
+  () => props.windowPadMs ?? 0,
+  () => {
+    const from = fromMsRef.value;
+    const to = toMsRef.value;
+    if (from == null || to == null) return;
+    coord.setRange({ min: from, max: to });
+  },
+);
 
 // A new play (new play_id) on the same player keeps the chosen Bitrate Y-max +
 // zoom width (the view scope is play-independent), but the absolute-position
@@ -666,7 +686,7 @@ let hasPinnedBrush = false;
 function tryPinBrush(min: number | null, max: number | null) {
   if (hasPinnedBrush) return;
   if (min == null || max == null) return;
-  if (props.showContext) return;
+  if ((props.windowPadMs ?? 0) > 0) return;
   if (coord.state.range !== null) return;
   coord.setRange({ min, max });
   hasPinnedBrush = true;
@@ -685,7 +705,7 @@ watch(
   (b) => {
     if (hasPinnedBrush) return;
     if (!b) return;
-    if (props.showContext) return;
+    if ((props.windowPadMs ?? 0) > 0) return;
     if (!playIdRef.value) return;
     tryPinBrush(b.min - 5000, b.max);
   },

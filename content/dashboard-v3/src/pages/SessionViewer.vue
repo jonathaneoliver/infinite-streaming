@@ -13,7 +13,7 @@
  * routes display panels to the side-channel store in v2-repo instead
  * of the live `/api/v2/players` fetch.
  */
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
 import SessionDisplay from '@/components/SessionDisplay.vue';
@@ -47,6 +47,25 @@ const playerId = computed<string>(() =>
 const playId = computed<string | null>(() =>
   comparePlays.length ? (comparePlays[activeIdx.value].playId ?? null) : urlPlayId,
 );
+
+// Two independent viewer controls (paired with the enqueueRow play-scope
+// guard in useSessionTimeSeries):
+//   scopeToPlay — the play_id row filter. Default on = only this play.
+//   expandSteps — repeatable window widening; each step = ±5 min, end
+//                 clamped to now by SessionDisplay so it never pads into
+//                 the future. windowPadMs is the derived symmetric pad.
+const CONTEXT_STEP_MS = 5 * 60 * 1000;
+const scopeToPlay = ref(true);
+const expandSteps = ref(0);
+const windowPadMs = computed(() => expandSteps.value * CONTEXT_STEP_MS);
+
+// Unchecking "this play only" against a tight URL window would show nothing
+// new (neighbouring plays fall outside it), so auto-expand one step the
+// first time the filter is dropped. Re-checking leaves the window as-is
+// (use Reset to snap back).
+watch(scopeToPlay, (on) => {
+  if (!on && expandSteps.value === 0) expandSteps.value = 1;
+});
 
 /** Initial time window. New canonical param names are `from` / `to`
  *  (shorter, no `:` in compact ISO → no `%3A` clutter). Legacy
@@ -248,9 +267,41 @@ const backHref = '/dashboard/sessions.html';
               <span class="meta-label">player</span>
               <code class="id-pill" :title="playerId">{{ playerId || '(no player)' }}</code>
               <span class="meta-label">play</span>
-              <code class="id-pill" :title="playId ?? '(all plays)'">{{ playId ?? '(all plays)' }}</code>
+              <code
+                class="id-pill"
+                :class="{ 'id-pill-disabled': !scopeToPlay }"
+                :title="!scopeToPlay ? `${playId} — filter off, showing all plays in the window` : (playId ?? '(all plays)')"
+              >{{ playId ?? '(all plays)' }}</code>
             </div>
             <div class="banner-actions">
+              <label
+                class="banner-toggle"
+                :class="{ disabled: !playId }"
+                :title="scopeToPlay
+                  ? 'Showing only this play. Uncheck to include neighbouring plays of this player (auto-widens the window)'
+                  : `Showing all of this player's plays in the window. Check to lock to this play`"
+              >
+                <input type="checkbox" v-model="scopeToPlay" :disabled="!playId" />
+                This play only
+              </label>
+              <button
+                type="button"
+                class="banner-btn"
+                @click="expandSteps++"
+                :disabled="!playId"
+                :title="`Widen the window ±5 min for more context (end won't pass now). Currently ±${expandSteps * 5} min — click again for more`"
+              >
+                ⊕ Expand 5m<span v-if="expandSteps"> · ±{{ expandSteps * 5 }}m</span>
+              </button>
+              <button
+                v-if="expandSteps"
+                type="button"
+                class="banner-btn"
+                @click="expandSteps = 0"
+                title="Reset the window back to this play's span"
+              >
+                ⊙ Reset
+              </button>
               <button
                 type="button"
                 class="banner-btn"
@@ -271,6 +322,8 @@ const backHref = '/dashboard/sessions.html';
             :play-id="playId"
             :start-ms="startMs"
             :end-ms="endMs"
+            :scope-to-play="scopeToPlay"
+            :window-pad-ms="windowPadMs"
             :compare-plays="comparePlays"
           />
         </template>
@@ -435,6 +488,24 @@ const backHref = '/dashboard/sessions.html';
   color: #fff;
 }
 .banner-btn.disabled { opacity: 0.4; pointer-events: none; }
+
+/* "This play only" filter checkbox — styled to sit alongside .banner-btn. */
+.banner-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #fff;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #1f2937;
+  cursor: pointer;
+  user-select: none;
+}
+.banner-toggle input { cursor: pointer; margin: 0; }
+.banner-toggle.disabled { opacity: 0.4; pointer-events: none; }
 
 .empty {
   text-align: center;

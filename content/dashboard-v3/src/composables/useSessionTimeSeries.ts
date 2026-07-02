@@ -376,10 +376,28 @@ export function useSessionTimeSeries(
   }
 
   /** Append one parsed row to the named pending queue. Cheap: no
-   *  reactive writes happen here. */
+   *  reactive writes happen here.
+   *
+   *  Play-scope guard: when the subscription is pinned to a specific
+   *  play_id, drop any row belonging to a different play of the same
+   *  player. The server already filters, but events + network flow
+   *  through the player-keyed ring (unlike control/avmetrics, which
+   *  re-query per play), so a stale/rotated live subscription could
+   *  otherwise leak a neighbouring play's rows into the events-derived
+   *  lanes (the PLAY ID / VIDEO RES / bitrate swim-lanes). Enforcing the
+   *  invariant here keeps the cache play-scoped regardless of how a row
+   *  arrived. When the viewer's "this play only" filter is off the
+   *  subscription's playId is null, so this is a no-op and neighbouring
+   *  plays are intentionally kept. Case-insensitive:
+   *  iOS emits uppercase UUIDs; CH stores canonical lowercase. */
   function enqueueRow(data: string, queue: Record<string, unknown>[]) {
     let row: Record<string, unknown>;
     try { row = JSON.parse(data); } catch { return; }
+    const scope = playId.value;
+    if (scope) {
+      const rid = row.play_id;
+      if (typeof rid === 'string' && rid && rid.toLowerCase() !== scope.toLowerCase()) return;
+    }
     queue.push(row);
   }
 
