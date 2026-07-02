@@ -88,10 +88,30 @@ const GLOSSARY: Record<string, Entry> = {
   play_start: { what: 'Playback started' },
   play_end: { what: 'Playback ended' },
   loop_server: { what: 'The origin is looping VOD-as-live (test content marker)' },
-  unexpected_startup: { what: 'Startup behaved outside the expected envelope' },
-  unexpected_fault: { what: 'A fault produced an outcome outside its recovery-expected envelope' },
-  unexpected_end: { what: 'Playback ended unexpectedly (not a clean user stop)' },
+  // VOMM anomaly labels (`anomaly_<cond>_<surf>`, and legacy `unexpected_<cond>`)
+  // are matched by prefix in anomalyWhat() below, not enumerated here — the
+  // family is 4 conditions × 2 surfaces. See analytics/tools/derive_labels.py.
 };
+
+/**
+ * VOMM per-row surprise labels: `anomaly_<cond>_<surf>` (derive_labels.py), where
+ * cond ∈ {startup,fault,stall,end} anchors a play episode and surf ∈ {net,event}
+ * is the surface the surprising token landed on. Also matches the legacy
+ * `unexpected_<cond>` name (pre-rename rows still in ClickHouse until TTL).
+ */
+const ANOMALY_RE = /^(?:anomaly|unexpected)_(startup|fault|stall|end)(?:_(net|event))?$/;
+const ANOMALY_COND: Record<string, string> = {
+  startup: 'startup', fault: 'fault-handling', stall: 'stall', end: 'end-of-play',
+};
+function anomalyWhat(ev: string): string | undefined {
+  const m = ANOMALY_RE.exec(ev);
+  if (!m) return undefined;
+  const [, cond, surf] = m;
+  const where = surf === 'net' ? ' on a network-transfer row'
+    : surf === 'event' ? ' on a player-event row' : '';
+  return `VOMM flagged the ${ANOMALY_COND[cond] ?? cond} episode as statistically `
+    + `surprising vs trained plays${where}`;
+}
 
 /** eventOf strips the `<severity>=` prefix and any leading `*` marker. */
 export function eventOf(label: string): string {
@@ -102,12 +122,16 @@ export function eventOf(label: string): string {
 
 /** labelTooltip returns a hover string ("what · how") for a label, or '' if unknown. */
 export function labelTooltip(label: string): string {
-  const e = GLOSSARY[eventOf(label)];
+  const ev = eventOf(label);
+  const anom = anomalyWhat(ev);
+  if (anom) return anom;
+  const e = GLOSSARY[ev];
   if (!e) return '';
   return e.how ? `${e.what} · ${e.how}` : e.what;
 }
 
 /** hasGlossary reports whether a label has a definition (to style it as hoverable). */
 export function hasGlossary(label: string): boolean {
-  return GLOSSARY[eventOf(label)] !== undefined;
+  const ev = eventOf(label);
+  return anomalyWhat(ev) !== undefined || GLOSSARY[ev] !== undefined;
 }
