@@ -370,7 +370,20 @@ func minVariantStuckLabel(cfg *QoEThresholds, ps *playLabelState, r *row, now ti
 // the proxy for "displayed fps fell below (1 - ratio) of nominal".
 // Uses the cumulative displayed/dropped counters (per-interval rate is
 // Phase 4 work).
+// playbackStarted reports whether the play has rendered its first frame.
+// Metrics derived from the playhead — live_offset and displayed frame rate —
+// are meaningless before then: during startup buffering the playhead sits at
+// position 0 and those fields carry uninitialised/settling values (e.g. a
+// live_offset of edge+recommended, which trips a spurious offset breach). Labels
+// built from them gate on this so one garbage startup sample can't poison the
+// whole-play tier. video_first_frame_time_ms is sticky — set once the first
+// frame renders, then resent on every heartbeat.
+func playbackStarted(r *row) bool { return r.VideoFirstFrameTimeMs > 0 }
+
 func fpsDipLabel(cfg *QoEThresholds, r *row) string {
+	if !playbackStarted(r) {
+		return "" // no stable render rate before the first frame
+	}
 	total := r.FramesDisplayed + uint64(r.FramesDropped)
 	if total == 0 {
 		return ""
@@ -504,6 +517,9 @@ func cmcdMTPDriftLabel(cfg *QoEThresholds, r *row) string {
 // manifest advertised a recommended offset (rec > 0) — VOD has none, so
 // these stay silent there.
 func liveOffsetLabels(cfg *QoEThresholds, r *row) []string {
+	if !playbackStarted(r) {
+		return nil // offset is invalid pre-first-frame (playhead still at 0)
+	}
 	rec := float64(r.RecommendedOffsetS)
 	if rec <= 0 {
 		return nil

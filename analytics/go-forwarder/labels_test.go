@@ -348,12 +348,17 @@ func TestQoEMinVariantStuck(t *testing.T) {
 }
 
 func TestQoEFPSDip(t *testing.T) {
-	// dropped/(displayed+dropped) ≥ 0.2.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", FramesDisplayed: 81, FramesDropped: 19}); hasLabel(got, qoeLabel(SevWarning, "qoe_fps_dip")) {
+	// dropped/(displayed+dropped) ≥ 0.2. Rows carry a first frame — fps is
+	// gated behind playback start (no stable render rate before then).
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", VideoFirstFrameTimeMs: 100, FramesDisplayed: 81, FramesDropped: 19}); hasLabel(got, qoeLabel(SevWarning, "qoe_fps_dip")) {
 		t.Fatalf("19%% drop should not dip: %v", got)
 	}
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", FramesDisplayed: 80, FramesDropped: 20}); !hasLabel(got, qoeLabel(SevWarning, "qoe_fps_dip")) {
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", VideoFirstFrameTimeMs: 100, FramesDisplayed: 80, FramesDropped: 20}); !hasLabel(got, qoeLabel(SevWarning, "qoe_fps_dip")) {
 		t.Fatalf("20%% drop should dip: %v", got)
+	}
+	// Pre-first-frame: a high drop ratio must NOT fire (startup gate).
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", VideoFirstFrameTimeMs: 0, FramesDisplayed: 80, FramesDropped: 20}); hasLabel(got, qoeLabel(SevWarning, "qoe_fps_dip")) {
+		t.Fatalf("pre-first-frame fps must not fire: %v", got)
 	}
 }
 
@@ -499,7 +504,7 @@ func TestQoENetworkRowLabels(t *testing.T) {
 func TestQoELiveOffset(t *testing.T) {
 	mk := func(off, cfgd float32) []string {
 		return evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress",
-			RecommendedOffsetS: 5, LiveOffsetS: off, ConfiguredOffsetS: cfgd})
+			VideoFirstFrameTimeMs: 100, RecommendedOffsetS: 5, LiveOffsetS: off, ConfiguredOffsetS: cfgd})
 	}
 	concerning := qoeLabel(SevWarning, "qoe_live_offset_concerning")
 	breach := qoeLabel(SevCritical, "qoe_live_offset_breach")
@@ -532,12 +537,33 @@ func TestQoELiveOffset(t *testing.T) {
 }
 
 func TestQoELiveOffsetSilentOnVOD(t *testing.T) {
-	// No recommended offset (VOD) → no live labels.
-	got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", LiveOffsetS: 60})
+	// No recommended offset (VOD) → no live labels. First frame present so
+	// it's the VOD/no-rec path being tested, not the startup gate.
+	got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", VideoFirstFrameTimeMs: 100, LiveOffsetS: 60})
 	for _, l := range got {
 		if l == qoeLabel(SevWarning, "qoe_live_offset_concerning") || l == qoeLabel(SevCritical, "qoe_live_offset_breach") {
 			t.Fatalf("VOD row should emit no live-offset label: %v", got)
 		}
+	}
+}
+
+// TestQoELiveOffsetStartupGate — a breach-magnitude offset must NOT fire
+// before the first frame (the playhead is still at 0 during startup buffering
+// and live_offset_s is uninitialised, e.g. edge+recommended). The same offset
+// with a first frame present DOES fire. Guards the whole-play tier against a
+// spurious startup breach (the d1412504 case).
+func TestQoELiveOffsetStartupGate(t *testing.T) {
+	breach := qoeLabel(SevCritical, "qoe_live_offset_breach")
+	// excess = 120 - 21 = 99 ≫ the 10s breach margin.
+	pre := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress",
+		VideoFirstFrameTimeMs: 0, RecommendedOffsetS: 21, LiveOffsetS: 120})
+	if hasLabel(pre, breach) {
+		t.Fatalf("pre-first-frame offset must not breach: %v", pre)
+	}
+	post := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress",
+		VideoFirstFrameTimeMs: 2493, RecommendedOffsetS: 21, LiveOffsetS: 120})
+	if !hasLabel(post, breach) {
+		t.Fatalf("post-first-frame offset breach should fire: %v", post)
 	}
 }
 
