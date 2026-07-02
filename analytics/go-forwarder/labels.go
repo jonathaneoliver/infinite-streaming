@@ -132,8 +132,10 @@ type playLabelState struct {
 	// A label is emitted only on its rising edge (off→on): its first
 	// determination, or a new instance after it cleared. While a condition
 	// stays continuously true it is suppressed (no per-heartbeat repeats).
-	// The terminal row force-emits the still-true set so the summary +
-	// qoe_tier_* reflect end state. nil until first use.
+	// The terminal row no longer force-emits the still-true set: the
+	// end-state grade is emitted separately as qoe_exit_* (conditions active
+	// at close), and the whole-play grade qoe_tier_* reads worstSeen below.
+	// nil until first use.
 	qoeActive map[string]struct{}
 	// #657 — clear-cooldown re-arm. qoeLastOn records the last row-time each
 	// qoe label was TRUE. A rising edge re-fires only if the label has been
@@ -141,6 +143,12 @@ type playLabelState struct {
 	// above/below its threshold within the cooldown counts as one episode
 	// (one chip) instead of re-chipping on every re-crossing. nil until use.
 	qoeLastOn map[string]time.Time
+	// Whole-play worst-severity accumulator. Folded on EVERY row (lifecycle
+	// labels + qoe conditions true on the row + terminal outcome) so the
+	// terminal qoe_tier_* grades the ENTIRE playback, not just the end state
+	// — a mid-play critical that recovered still downgrades the tier. "" =
+	// nothing ranked yet. The end-state grade is qoe_exit_* (current-at-close).
+	worstSeen string
 	// LRU touch for GC.
 	seen time.Time
 }
@@ -388,6 +396,12 @@ func computeEventLabelsWithState(s *labelState, r *row) []string {
 			out = []string{bufferingLabel(dur, bufferingContext(ps, now))}
 		}
 	}
+
+	// Fold this row's lifecycle labels into the whole-play worst-severity
+	// accumulator before the qoe labeler layers on (it folds its own
+	// conditions and reads worstSeen for the terminal qoe_tier_*). This is
+	// what lets a mid-play stall_frozen/wedge count toward the whole-play tier.
+	ps.worstSeen = worseSeverity(ps.worstSeen, worstSeverity(out))
 
 	// #550 Phase 3 — threshold-based QoE auto-labels. Orthogonal to the
 	// LastEvent switch above; layered on whatever the event arm emitted.
@@ -844,6 +858,33 @@ func worstSeverity(labels []string) string {
 		return SevInfo
 	}
 	return ""
+}
+
+// sevRank orders severities for the whole-play worst-severity accumulator.
+// "" (nothing ranked) is 0; error outranks critical to match worstSeverity's
+// own precedence.
+func sevRank(s string) int {
+	switch s {
+	case SevError:
+		return 4
+	case SevCritical:
+		return 3
+	case SevWarning:
+		return 2
+	case SevInfo:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// worseSeverity returns whichever of two severity strings ranks higher — the
+// fold step for the per-play worstSeen accumulator.
+func worseSeverity(a, b string) string {
+	if sevRank(b) > sevRank(a) {
+		return b
+	}
+	return a
 }
 
 // parseChTs parses CH's "YYYY-MM-DD HH:MM:SS.fff" timestamp form (or

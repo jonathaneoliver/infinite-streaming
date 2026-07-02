@@ -202,51 +202,61 @@ func computeQoEEventLabels(cfg *QoEThresholds, ps *playLabelState, r *row, now t
 	}
 	ps.qoeActive = next
 
-	// ── Terminal row: summary (current-at-end) + outcome + tier ────────
+	// Fold this row's qoe conditions (ALL true-on-row, not just the emitted
+	// rising edges) into the whole-play worst-severity accumulator — so a
+	// condition that flared and recovered mid-play still counts toward the
+	// terminal qoe_tier_*.
+	ps.worstSeen = worseSeverity(ps.worstSeen, worstSeverity(current))
+
+	// ── Terminal row: two aggregates + outcome ─────────────────────────
+	// No force-emit: the per-moment timeline carries each condition once, at
+	// its true rising edge. The terminal row instead carries two summaries —
+	// qoe_exit_* (state at close) and qoe_tier_* (whole-play grade).
 	if firstTerminal {
-		// Force-emit every still-true condition not already emitted this row
-		// (edge-trigger AND cooldown both suppress repeats), so the summary
-		// row carries the full current-at-end set and qoe_tier_* reads it right.
-		emitted := make(map[string]struct{}, len(out))
-		for _, l := range out {
-			emitted[l] = struct{}{}
-		}
-		for _, l := range current {
-			if _, e := emitted[l]; !e {
-				emitted[l] = struct{}{}
-				out = append(out, l)
-			}
-		}
-		// Startup outcome (terminal-only).
+		// Terminal outcome (whole-play failure state), terminal-only.
+		var outcome []string
 		switch {
 		case r.PlaybackStatus == "abandoned_start":
-			// Exit before video start — a user can simply bail during
-			// startup. Warning, not a system failure.
-			out = append(out, qoeLabel(SevWarning, "qoe_ebvs"))
+			// Exit before video start — a user can bail during startup.
+			// Warning, not a system failure.
+			outcome = append(outcome, qoeLabel(SevWarning, "qoe_ebvs"))
 		case isFailedStatus(r.PlaybackStatus) && r.VideoFirstFrameTimeMs == 0:
-			out = append(out, qoeLabel(SevError, "qoe_vsf"))
+			outcome = append(outcome, qoeLabel(SevError, "qoe_vsf"))
 		case isFailedStatus(r.PlaybackStatus) && r.VideoFirstFrameTimeMs > 0:
-			out = append(out, qoeLabel(SevError, "qoe_msf"))
+			outcome = append(outcome, qoeLabel(SevError, "qoe_msf"))
 		}
-		// Tier from the full terminal-row label set (worst severity).
-		out = append(out, qoeTierLabel(out))
+		out = append(out, outcome...)
+
+		// qoe_exit_* — worst severity of conditions STILL ACTIVE at close
+		// (current-at-end) + the terminal outcome. "What they were looking at
+		// when they left" — a churn/abandonment proxy, distinct from overall.
+		exitSev := worseSeverity(worstSeverity(current), worstSeverity(outcome))
+		out = append(out, tierFromSeverity("qoe_exit", exitSev))
+
+		// qoe_tier_* — worst severity seen ANYWHERE in the play (whole-play
+		// grade). Fold the terminal outcome in first so a terminal-only
+		// failure counts even though it never appeared on an earlier row.
+		ps.worstSeen = worseSeverity(ps.worstSeen, worstSeverity(outcome))
+		out = append(out, tierFromSeverity("qoe_tier", ps.worstSeen))
+
 		ps.terminalEmitted = true
 	}
 
 	return out
 }
 
-// qoeTierLabel collapses the row's worst qoe severity into one tier
-// label. No warning/critical/error ⇒ premium; worst == warning ⇒
-// acceptable; worst >= critical ⇒ unacceptable.
-func qoeTierLabel(labels []string) string {
-	switch worstSeverity(labels) {
+// tierFromSeverity maps a worst-severity to a tri-level tier label under the
+// given scope: "qoe_tier" (whole-play grade) or "qoe_exit" (state at close).
+// No warning/critical/error ⇒ premium; worst == warning ⇒ acceptable;
+// worst >= critical ⇒ unacceptable.
+func tierFromSeverity(scope, sev string) string {
+	switch sev {
 	case SevError, SevCritical:
-		return qoeLabel(SevCritical, "qoe_tier_unacceptable")
+		return qoeLabel(SevCritical, scope+"_unacceptable")
 	case SevWarning:
-		return qoeLabel(SevWarning, "qoe_tier_acceptable")
+		return qoeLabel(SevWarning, scope+"_acceptable")
 	default: // info or none
-		return qoeLabel(SevInfo, "qoe_tier_premium")
+		return qoeLabel(SevInfo, scope+"_premium")
 	}
 }
 
