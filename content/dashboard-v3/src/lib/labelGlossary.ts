@@ -43,9 +43,17 @@ const GLOSSARY: Record<string, Entry> = {
   stall_frozen: { what: 'The playhead froze — no progress while not paused', how: 'position stopped advancing (wall-clock confirmed)' },
   timejump: { what: 'The playhead jumped discontinuously', how: 'position moved more than wall-clock elapsed' },
 
-  // ── tiers (composite QoE verdict) ────────────────────────────────────────
-  qoe_tier_unacceptable: { what: 'Overall QoE tier: unacceptable', how: 'composite of startup + rebuffer + quality signals' },
-  qoe_tier_acceptable: { what: 'Overall QoE tier: acceptable (below premium)' },
+  // ── tiers (two axes) ─────────────────────────────────────────────────────
+  // qoe_tier_* = WHOLE-PLAY grade (worst QoE severity seen anywhere in the
+  // play). qoe_exit_* = state at CLOSE (conditions still active on the final
+  // row + terminal outcome) — a churn/abandonment proxy. They diverge when a
+  // play hit a critical mid-play but recovered: tier_unacceptable, exit_premium.
+  qoe_tier_unacceptable: { what: 'Whole-play QoE: unacceptable', how: 'worst severity seen anywhere in the play was critical/error' },
+  qoe_tier_acceptable: { what: 'Whole-play QoE: acceptable (below premium)', how: 'worst severity seen anywhere in the play was a warning' },
+  qoe_tier_premium: { what: 'Whole-play QoE: premium', how: 'no warning/critical/error seen during the play' },
+  qoe_exit_unacceptable: { what: 'State at close: unacceptable', how: 'a critical/error condition was still active when the play ended' },
+  qoe_exit_acceptable: { what: 'State at close: acceptable', how: 'a warning condition was still active when the play ended' },
+  qoe_exit_premium: { what: 'State at close: premium', how: 'nothing degraded was active when the play ended' },
 
   // ── ABR / quality ────────────────────────────────────────────────────────
   qoe_downshift_storm: { what: 'ABR thrashing down', how: '> downshift_storm_threshold (3) downshifts in downshift_storm_window_s (30s)' },
