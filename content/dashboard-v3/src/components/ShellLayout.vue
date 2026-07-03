@@ -463,16 +463,16 @@ const restrictContent = computed(
   () => typeof window !== 'undefined' && !isInternalNetworkHost(window.location.hostname),
 );
 
-// Developer mode — reuses the established `?developer=1` convention (shared-nav.js,
-// SessionDetails, Grid). Sticky: `?developer=1` persists to localStorage so dev-only
-// nav items survive navigation; `?developer=0` clears it.
+// Developer mode — the `?developer=1` convention (shared-nav.js, SessionDetails,
+// playback/quartet, …). NOT sticky: honoured only when the CURRENT URL carries
+// `?developer=1`, matching every other consumer. (This component used to persist
+// it to localStorage, so dev-only nav like QE Lab leaked across sessions.) Also
+// clears any stale `ismDeveloperMode` a previous sticky build left behind.
 const isDeveloper = ref<boolean>((() => {
   if (typeof window === 'undefined') return false;
   try {
-    const p = new URLSearchParams(window.location.search).get('developer');
-    if (p === '1') { localStorage.setItem('ismDeveloperMode', '1'); return true; }
-    if (p === '0') { localStorage.removeItem('ismDeveloperMode'); return false; }
-    return localStorage.getItem('ismDeveloperMode') === '1';
+    localStorage.removeItem('ismDeveloperMode'); // un-stick past persistence
+    return new URLSearchParams(window.location.search).get('developer') === '1';
   } catch {
     return false;
   }
