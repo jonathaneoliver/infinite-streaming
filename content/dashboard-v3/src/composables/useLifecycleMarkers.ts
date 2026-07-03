@@ -34,6 +34,22 @@ export interface LifecycleMarker {
   detail: string;
 }
 
+/** A severity-coloured vertical event bar overlaid on the metric charts —
+ *  the focus-window events, mirrored from SessionDisplay's event filter (so
+ *  the severity selector drives them). Distinct from LifecycleMarker (the
+ *  fixed restart/play_start/play_end lines): these are the filtered per-label
+ *  events, one thin line per timestamp, coloured by severity. */
+export interface EventMarker {
+  /** ms-since-epoch x-position of the line. */
+  ms: number;
+  /** Line colour (severity-derived). */
+  color: string;
+  /** Worst severity at this ts (drives the timeline custom-time id + CSS). */
+  sev: string;
+  /** Hover tooltip text: time · worst-severity + the event type(s) at this ts. */
+  detail: string;
+}
+
 /** Per-kind visual style + legend label. Restart is a single fixed colour
  *  (amber, matching the existing PLAYBACK-lane RESTART dot) regardless of
  *  reason — the reason shows on hover. */

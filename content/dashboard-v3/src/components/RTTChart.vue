@@ -9,7 +9,7 @@
 import { computed, toRef } from 'vue';
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import type { Stream } from '@/composables/useSessionTimeSeries';
-import type { LifecycleMarker } from '@/composables/useLifecycleMarkers';
+import type { LifecycleMarker, EventMarker } from '@/composables/useLifecycleMarkers';
 import type { PlayerRecord } from '@/repo/v2-repo';
 import { usePlayer } from '@/composables/usePlayer';
 import { useCompareOverlays, useCompareSelf } from '@/composables/useCompareContext';
@@ -22,6 +22,8 @@ const props = defineProps<{
   coordId?: string;
   /** Shared player-lifecycle vertical lines, forwarded to MetricsLineChart. */
   lifecycleMarkers?: LifecycleMarker[];
+  /** Focus-window event bars (severity-filtered), forwarded to MetricsLineChart. */
+  eventMarkers?: EventMarker[];
   eventsStream: Stream<Record<string, unknown>>;
 }>();
 
@@ -95,6 +97,7 @@ const series = computed<SeriesSpec[]>(() => {
     :player-id="playerId"
     :coord-id="coordId"
     :lifecycle-markers="lifecycleMarkers"
+    :event-markers="eventMarkers"
     title="Round-trip time"
     unit="ms"
     :series="series"

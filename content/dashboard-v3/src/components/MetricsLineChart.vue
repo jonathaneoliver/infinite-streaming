@@ -26,6 +26,7 @@ import { tsOfRow, chRowToPlayerRecord } from '@/composables/chRowAdapter';
 import {
   useLifecycleLineVisibility,
   type LifecycleMarker,
+  type EventMarker,
 } from '@/composables/useLifecycleMarkers';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
@@ -151,6 +152,13 @@ const props = defineProps({
    *  per-type toggle (useLifecycleLineVisibility), not a prop. */
   lifecycleMarkers: {
     type: Array as PropType<LifecycleMarker[]>,
+    default: () => [],
+  },
+  /** Severity-coloured vertical event bars — the focus-window events mirrored
+   *  from SessionDisplay's event filter (so the severity selector drives them).
+   *  Drawn thin + translucent so the line series stays readable. */
+  eventMarkers: {
+    type: Array as PropType<EventMarker[]>,
     default: () => [],
   },
   /** Grouped-sibling overlays (issue #579 compare mode). Each entry is
@@ -753,6 +761,38 @@ function createChartInstance(Chart: any): any {
         }
         ctx.restore();
       },
+    }, {
+      /** Focus-window event bars (severity-filtered), drawn thin + translucent
+       *  so they overlay without swamping the series or the lifecycle lines. */
+      id: 'eventLines',
+      afterDatasetsDraw(c: any) {
+        const list = props.eventMarkers;
+        if (!list || list.length === 0) return;
+        const sx = c.scales?.x;
+        const sy = c.scales?.y;
+        if (!sx || !sy) return;
+        const ctx = c.ctx;
+        ctx.save();
+        for (const m of list) {
+          if (!Number.isFinite(m.ms) || m.ms < sx.min || m.ms > sx.max) continue;
+          const x = sx.getPixelForValue(m.ms);
+          // Translucent dashed full-height line.
+          ctx.globalAlpha = 0.8;
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.moveTo(x, sy.top);
+          ctx.lineTo(x, sy.bottom);
+          ctx.strokeStyle = m.color;
+          ctx.stroke();
+          // Solid findable cap at the top — also the natural hover target.
+          ctx.globalAlpha = 1;
+          ctx.setLineDash([]);
+          ctx.fillStyle = m.color;
+          ctx.fillRect(x - 1.5, sy.top, 3, 5);
+        }
+        ctx.restore();
+      },
     }],
     options: {
       responsive: true,
@@ -1280,7 +1320,7 @@ function installLifecycleHoverTooltip() {
   if (!c) return;
   c.addEventListener('mousemove', (e) => {
     const list = visibleLifecycleMarkers();
-    if (list.length === 0 || !chart) {
+    if ((list.length === 0 && props.eventMarkers.length === 0) || !chart) {
       if (lcTooltipVisible.value) lcTooltipVisible.value = false;
       return;
     }
@@ -1297,6 +1337,16 @@ function installLifecycleHoverTooltip() {
     let bestDist = 6; // px tolerance
     let bestText = '';
     for (const m of list) {
+      if (!Number.isFinite(m.ms) || m.ms < sx.min || m.ms > sx.max) continue;
+      const px = sx.getPixelForValue(m.ms);
+      const d = Math.abs(mx - px);
+      if (d < bestDist) {
+        bestDist = d;
+        bestText = m.detail;
+      }
+    }
+    // Event bars share the same tooltip + proximity search.
+    for (const m of props.eventMarkers) {
       if (!Number.isFinite(m.ms) || m.ms < sx.min || m.ms > sx.max) continue;
       const px = sx.getPixelForValue(m.ms);
       const d = Math.abs(mx - px);
@@ -1945,6 +1995,14 @@ watch(
 // state. Cheap: chart.update('none') skips animations.
 watch(
   () => props.markers,
+  () => { try { chart?.update('none'); } catch { /* ignore */ } },
+  { deep: false },
+);
+
+// Redraw when the event-bar set changes (severity filter, focus window, or the
+// "Event bars" toggle emptying it) so the eventLines plugin repaints.
+watch(
+  () => props.eventMarkers,
   () => { try { chart?.update('none'); } catch { /* ignore */ } },
   { deep: false },
 );

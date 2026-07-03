@@ -30,7 +30,7 @@ import { usePlayer } from '@/composables/usePlayer';
 import { useCompareOverlays, useCompareSelf, useCompareSiblings, sessionMarkerColor, SELF_MARKER_COLOR } from '@/composables/useCompareContext';
 import { compareBandwidthSeries } from '@/composables/compareSeries';
 import type { Stream } from '@/composables/useSessionTimeSeries';
-import type { LifecycleMarker } from '@/composables/useLifecycleMarkers';
+import type { LifecycleMarker, EventMarker } from '@/composables/useLifecycleMarkers';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
 const props = defineProps<{
@@ -41,6 +41,8 @@ const props = defineProps<{
   coordId?: string;
   /** Shared player-lifecycle vertical lines, passed straight to MetricsLineChart. */
   lifecycleMarkers?: LifecycleMarker[];
+  /** Focus-window event bars (severity-filtered), forwarded to MetricsLineChart. */
+  eventMarkers?: EventMarker[];
   eventsStream: Stream<Record<string, unknown>>;
   /** AVMetrics stream — used to overlay per-segment throughput dots
    *  on the bandwidth chart (issue #486). Optional so existing
@@ -557,6 +559,7 @@ const compareOverlays = useCompareOverlays((sib) => {
     :player-id="playerId"
     :coord-id="coordId"
     :lifecycle-markers="lifecycleMarkers"
+    :event-markers="eventMarkers"
     title="Bandwidth"
     unit="Mbps"
     :series="series"
