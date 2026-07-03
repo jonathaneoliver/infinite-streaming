@@ -2434,7 +2434,17 @@ final class PlayerViewModel: ObservableObject {
         // First launch: no key yet → use the device's hardware cap so
         // the user starts with the richest preview their hardware can
         // run. After that, persist whatever they've chosen.
-        let storedSlots = d.object(forKey: Self.flagPreviewVideoSlots) as? Int
+        //
+        // Read via integer(forKey:) when the key is PRESENT in any domain so an
+        // NSArgumentDomain launch arg (which arrives as a String, e.g. the
+        // harness's `-is.flag.preview_video_slots 0` to cut sim decode load)
+        // coerces correctly. The old `as? Int` failed that cast and silently
+        // fell back to hwCap, so the launch arg never turned previews off.
+        // Absent in every domain → nil, so the hwCap default below still wins
+        // for normal/manual launches (unchanged).
+        let storedSlots: Int? = d.object(forKey: Self.flagPreviewVideoSlots) != nil
+            ? d.integer(forKey: Self.flagPreviewVideoSlots)
+            : nil
         let hwCap = DecodeBudget.shared.hardwareCap
         previewVideoSlots = storedSlots.map { max(0, min($0, hwCap)) } ?? hwCap
         DecodeBudget.shared.setUserCap(previewVideoSlots)
