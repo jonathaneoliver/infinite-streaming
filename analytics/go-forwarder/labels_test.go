@@ -830,3 +830,64 @@ func TestQoELeadingTerminalIgnored(t *testing.T) {
 		t.Fatalf("real terminal after the play opened should still get a premium tier: %v", end)
 	}
 }
+
+// --- Derived whole-tuple net_failure signature (#892) ----------------
+
+func TestNetFailureSignature(t *testing.T) {
+	cases := []struct {
+		name string
+		row  netRow
+		want string
+	}{
+		{"clean 2xx segment → no signature", netRow{Status: 200, RequestKind: "segment"}, ""},
+		{"client disconnect on segment (2xx partial)", netRow{Status: 200, Faulted: 1, RequestKind: "segment", FaultType: "partial", FaultCategory: "client_disconnect"}, "segment/client_disconnect/incomplete"},
+		{"socket drop on init (2xx corrupt)", netRow{Status: 200, Faulted: 1, RequestKind: "init", FaultType: "corrupt", FaultCategory: "socket"}, "segment/socket/incomplete"},
+		{"idle timeout on audio segment", netRow{Status: 0, Faulted: 1, RequestKind: "audio_segment", FaultType: "transfer_idle_timeout", FaultCategory: "transfer_timeout"}, "segment/idle_timeout/timeout"},
+		{"active timeout on segment", netRow{Status: 0, Faulted: 1, RequestKind: "segment", FaultType: "transfer_active_timeout", FaultCategory: "transfer_timeout"}, "segment/active_timeout/timeout"},
+		{"404 manifest, not faulted → status outcome", netRow{Status: 404, RequestKind: "manifest"}, "manifest/http_4xx"},
+		{"503 master manifest, not faulted", netRow{Status: 503, RequestKind: "master_manifest"}, "master_manifest/http_5xx"},
+		{"faulted with unknown category → cause omitted", netRow{Status: 200, Faulted: 1, RequestKind: "segment", FaultType: "partial", FaultCategory: ""}, "segment/incomplete"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := tc.row
+			if got := netFailureSignature(&r); got != tc.want {
+				t.Fatalf("netFailureSignature = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The signature rides ALONGSIDE the facets (never replaces them) so each axis
+// stays independently queryable, and it inherits the worst facet severity so
+// the classification-tier bump is unchanged.
+func TestNetFailureSignatureStacksWithFacets(t *testing.T) {
+	s := newLabelState()
+	got := computeNetworkLabelsWithState(s, &netRow{
+		Ts: tsBase, Status: 200, Faulted: 1, RequestKind: "segment",
+		FaultType: "partial", FaultCategory: "client_disconnect",
+	})
+	for _, want := range []string{
+		SevWarning + "=fault_incomplete",
+		SevWarning + "=" + synthMark + "segment_failure",
+		SevWarning + "=" + synthMark + "transport_disconnect",
+		SevWarning + "=" + synthMark + "net_failure:segment/client_disconnect/incomplete",
+	} {
+		if !hasLabel(got, want) {
+			t.Fatalf("missing %q in %v", want, got)
+		}
+	}
+}
+
+func TestNetFailureSignatureInheritsErrorSeverity(t *testing.T) {
+	s := newLabelState()
+	got := computeNetworkLabelsWithState(s, &netRow{
+		Ts: tsBase, Status: 0, Faulted: 1, RequestKind: "segment",
+		FaultType: "transfer_active_timeout", FaultCategory: "transfer_timeout",
+	})
+	// fault_timeout is an error facet → the signature must be error-sev too.
+	want := SevError + "=" + synthMark + "net_failure:segment/active_timeout/timeout"
+	if !hasLabel(got, want) {
+		t.Fatalf("timeout signature should inherit error severity: want %q in %v", want, got)
+	}
+}

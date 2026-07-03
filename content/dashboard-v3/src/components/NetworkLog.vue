@@ -20,6 +20,7 @@ import type { NetworkLogEntry } from '@/repo/v2-repo';
 import { usePlayer } from '@/composables/usePlayer';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 import type { Stream } from '@/composables/useSessionTimeSeries';
+import { collapseNetFailureLabels, humanizeNetFailure, labelTooltip } from '@/lib/labelGlossary';
 
 const props = defineProps<{
   playerId: string;
@@ -213,7 +214,13 @@ function labelSeverity(label: string): 'info' | 'warning' | 'critical' | 'error'
 function labelName(label: string): string {
   const eq = label.indexOf('=');
   const tail = eq > 0 ? label.slice(eq + 1) : label;
-  return tail.startsWith('*') ? tail.slice(1) : tail;
+  const ev = tail.startsWith('*') ? tail.slice(1) : tail;
+  return ev.startsWith('net_failure:') ? humanizeNetFailure(ev) : ev;
+}
+// A net_failure signature chip gets the composed tooltip; every other chip
+// keeps the raw label on hover (unchanged behaviour).
+function labelChipTitle(label: string): string {
+  return label.includes('net_failure:') ? (labelTooltip(label) || label) : label;
 }
 
 function isSuccessful(e: NetworkLogEntry): boolean {
@@ -662,11 +669,11 @@ function onRowsWheel(e: WheelEvent) {
           <div class="cell c-flags" :style="{ color: flagsFor(r).color }">{{ flagsFor(r).text }}</div>
           <div class="cell c-labels">
             <span
-              v-for="l in r.labels"
+              v-for="l in collapseNetFailureLabels(r.labels)"
               :key="l"
               class="nl-label-chip"
               :class="'label-' + labelSeverity(l)"
-              :title="l"
+              :title="labelChipTitle(l)"
             >{{ labelName(l) }}</span>
             <span v-if="!r.labels.length" class="dash">—</span>
           </div>

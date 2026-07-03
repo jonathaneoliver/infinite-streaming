@@ -181,6 +181,70 @@ function patternModeWhat(ev: string): string | undefined {
     : `Traffic-shaping pattern advanced a step (mode: ${mode})`;
 }
 
+/**
+ * Derived whole-tuple network-failure signature (#892):
+ * `net_failure:<kind>/<cause>/<outcome>` — one collapsed chip summarising the
+ * orthogonal facets of a single failed request (a network_requests row is one
+ * HTTP request, so the tuple is unambiguous). The facet labels stay in
+ * labels[] for filtering; this is the human-facing roll-up.
+ */
+const NET_FAILURE_PREFIX = 'net_failure:';
+const NET_FAILURE_CAUSE: Record<string, string> = {
+  client_disconnect: 'the client dropped it mid-transfer',
+  socket: 'the socket was cut',
+  active_timeout: 'an active-transfer timeout fired',
+  idle_timeout: 'an idle-transfer timeout fired',
+  transport: 'a transport timeout fired',
+};
+const NET_FAILURE_OUTCOME: Record<string, string> = {
+  incomplete: 'left incomplete',
+  timeout: 'timed out',
+  other: 'failed',
+  http_4xx: 'returned 4xx',
+  http_5xx: 'returned 5xx',
+};
+
+/** humanizeNetFailure turns `net_failure:segment/client_disconnect/incomplete`
+ *  into `segment · client_disconnect · incomplete` for the collapsed chip. */
+export function humanizeNetFailure(ev: string): string {
+  return ev.slice(NET_FAILURE_PREFIX.length).split('/').join(' · ');
+}
+
+function netFailureWhat(ev: string): string | undefined {
+  if (!ev.startsWith(NET_FAILURE_PREFIX)) return undefined;
+  const parts = ev.slice(NET_FAILURE_PREFIX.length).split('/');
+  const kind = parts[0] ?? '';
+  // outcome is always last; the optional cause sits between kind and outcome.
+  const outcome = parts.length > 1 ? parts[parts.length - 1] : '';
+  const cause = parts.length > 2 ? parts[1] : '';
+  const kindTxt = kind === 'master_manifest' ? 'master-playlist'
+    : kind === 'manifest' ? 'playlist' : kind;
+  const outTxt = NET_FAILURE_OUTCOME[outcome] ?? outcome;
+  const causeTxt = cause ? ` — ${NET_FAILURE_CAUSE[cause] ?? cause}` : '';
+  return `One request: a ${kindTxt} ${outTxt}${causeTxt}. `
+    + `Whole-tuple summary of the kind/cause/outcome facets on this row (each still filterable).`;
+}
+
+/** The facet events a net_failure signature rolls up. When the signature is
+ *  present on a row these are hidden from the inline chips (still in labels[]
+ *  for filtering) and surfaced via the signature chip's tooltip. */
+const NET_FAILURE_FACETS = new Set<string>([
+  'segment_failure', 'manifest_failure', 'master_manifest_failure',
+  'transport_socket', 'transport_disconnect',
+  'transfer_active_timeout', 'transfer_idle_timeout', 'transport_failure',
+  'fault_incomplete', 'fault_timeout', 'fault_other',
+  'http_4xx', 'http_5xx',
+]);
+
+/** collapseNetFailureLabels drops the constituent facet labels from a row's
+ *  chip list IFF a net_failure signature is present, so the line reads as one
+ *  failure. No-op otherwise. The input labels[] is untouched (query surface). */
+export function collapseNetFailureLabels(labels: string[]): string[] {
+  const hasSig = labels.some((l) => eventOf(l).startsWith(NET_FAILURE_PREFIX));
+  if (!hasSig) return labels;
+  return labels.filter((l) => !NET_FAILURE_FACETS.has(eventOf(l)));
+}
+
 /** eventOf strips the `<severity>=` prefix and any leading `*` marker. */
 export function eventOf(label: string): string {
   const eq = label.indexOf('=');
@@ -191,7 +255,7 @@ export function eventOf(label: string): string {
 /** labelTooltip returns a hover string ("what · how") for a label, or '' if unknown. */
 export function labelTooltip(label: string): string {
   const ev = eventOf(label);
-  const dyn = anomalyWhat(ev) ?? patternModeWhat(ev);
+  const dyn = anomalyWhat(ev) ?? patternModeWhat(ev) ?? netFailureWhat(ev);
   if (dyn) return dyn;
   const e = GLOSSARY[ev];
   if (!e) return '';
@@ -201,5 +265,6 @@ export function labelTooltip(label: string): string {
 /** hasGlossary reports whether a label has a definition (to style it as hoverable). */
 export function hasGlossary(label: string): boolean {
   const ev = eventOf(label);
-  return anomalyWhat(ev) !== undefined || patternModeWhat(ev) !== undefined || GLOSSARY[ev] !== undefined;
+  return anomalyWhat(ev) !== undefined || patternModeWhat(ev) !== undefined
+    || netFailureWhat(ev) !== undefined || GLOSSARY[ev] !== undefined;
 }
