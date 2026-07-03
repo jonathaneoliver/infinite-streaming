@@ -85,7 +85,7 @@ const GLOSSARY: Record<string, Entry> = {
   shift_down: { what: 'ABR shifted down a rung (informational)' },
 
   // ── network / transport (per-request) ────────────────────────────────────
-  qoe_rate_cap_breach: { what: 'Measured bitrate exceeded the applied cap', how: 'network bitrate > cap × rate_cap_breach_factor (1.10) — often an AVPlayer burst over-read' },
+  qoe_rate_cap_breach: { what: 'Measured bitrate exceeded the applied cap', how: 'network bitrate > cap × rate_cap_breach_factor (1.25) — often an AVPlayer burst over-read' },
   qoe_transfer_stall: { what: 'A segment transfer stalled mid-flight', how: 'no bytes received for transfer_stall_ms (5s)' },
   qoe_ttfb_breach: { what: 'Time-to-first-byte slow', how: 'responseStart − requestEnd > ttfb_breach_ms (500ms) — stream-level TTFB, generous on HTTP/2 keep-alive' },
   master_manifest_failure: { what: 'The master playlist request failed' },

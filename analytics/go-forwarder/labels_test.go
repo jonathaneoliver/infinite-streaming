@@ -413,17 +413,17 @@ func TestQoEAbrStartupGate(t *testing.T) {
 
 func TestQoERateCapBreach(t *testing.T) {
 	want := qoeLabel(SevWarning, "qoe_rate_cap_breach")
-	// #657: gate on the kernel-measured served rate. 12 > 10*1.10=11 → breach.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NftablesBandwidthMbps: 12, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
-		t.Fatalf("served 12 over cap 10 should breach: %v", got)
+	// #657: gate on the kernel-measured served rate. 13 > 10*1.25=12.5 → breach.
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NftablesBandwidthMbps: 13, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
+		t.Fatalf("served 13 over cap 10 should breach: %v", got)
 	}
 	// Fallback to the proxy per-segment transfer rate when nftables is absent.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", MbpsTransferRate: 12, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
-		t.Fatalf("transfer-rate fallback 12 over cap 10 should breach: %v", got)
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", MbpsTransferRate: 13, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
+		t.Fatalf("transfer-rate fallback 13 over cap 10 should breach: %v", got)
 	}
-	// 10.5 < 11 → no breach.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NftablesBandwidthMbps: 10.5, EffectiveRateLimitMbps: 10}); hasLabel(got, want) {
-		t.Fatalf("served 10.5 within factor should not breach: %v", got)
+	// 12 < 10*1.25=12.5 → no breach (would have breached under the old 1.10).
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NftablesBandwidthMbps: 12, EffectiveRateLimitMbps: 10}); hasLabel(got, want) {
+		t.Fatalf("served 12 within factor should not breach: %v", got)
 	}
 	// #657: a client network_bitrate over-read (30) must NOT breach when the
 	// server actually delivered under the cap (the whole point of the re-base).
