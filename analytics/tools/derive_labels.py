@@ -22,8 +22,10 @@ out-of-sample by construction. `trained_at` IS the cutoff; no `now − score_hou
 
 The model that changes slowly (the learned grammar of typical episodes) is rebuilt slowly;
 scoring, which we want fresh, is cheap (dict lookups) and runs often. No hand-built reaction
-taxonomy: the tag is the condition (anomaly_<condition>_<surface>) + a severity from the surprise
-magnitude. Reads ClickHouse directly (reuses derive_tokens.py's ch()/fetch_rows()); reuses
+taxonomy: the tag is the condition (anomaly_<condition>_<surface>) at info or warning severity —
+these are advisory surprise signals, never critical; the tier reflects magnitude (>= thr*1.5 →
+warning, else info), which also rides in each row's `score`. Reads ClickHouse directly (reuses
+derive_tokens.py's ch()/fetch_rows()); reuses
 scorer.py's model + tokenize.py's cross-stream tokeniser/episodes.
 
   python3 analytics/tools/derive_labels.py --mode train --train-days 7 --model-path /models/labels-model.json.gz
@@ -70,7 +72,11 @@ def episode_windows_full(full, anchor, lead, horizon):
 
 
 def severity_for(score, thr):
-    return "critical" if score >= thr * 1.5 else "warning"
+    # Anomalies are advisory "surprise" signals, never a hard failure — so the
+    # tier tops out at warning. Strong surprise (>= thr * 1.5) → warning; a
+    # milder surprise → info. (Was: critical/warning on the same boundary.) The
+    # raw magnitude also rides in each row's `score` for ranking.
+    return "warning" if score >= thr * 1.5 else "info"
 
 
 def build_plays(ch_url, days, hours, player):
