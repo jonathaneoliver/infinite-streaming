@@ -469,13 +469,16 @@ func cmdSweepExport(client *api.Client, args []string, asJSON bool) error {
 			specName = "export-" + id
 		}
 	case *fan != "":
+		// The isolation fan is the control + flip variants (Kind==isolation);
+		// filtering on Kind excludes confirmation reps that share the same Parent
+		// (same-recipe re-runs, not flip variants) — consistent with run-fan.
 		for _, e := range all {
-			if e.Parent == *fan {
+			if e.Parent == *fan && e.Kind == sweep.KindIsolation {
 				picked = append(picked, e)
 			}
 		}
 		if len(picked) == 0 {
-			return fmt.Errorf("no fan members with parent %q (an isolation fan stamps Parent on its control+variants)", *fan)
+			return fmt.Errorf("no isolation-fan members with parent %q (an isolation fan stamps Parent + Kind=isolation on its control+variants)", *fan)
 		}
 		if specName == "" {
 			specName = "fan-" + *fan
