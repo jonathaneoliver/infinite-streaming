@@ -68,6 +68,7 @@ import {
   LIFECYCLE_STYLE,
   LIFECYCLE_KINDS,
   type LifecycleKind,
+  type EventMarker,
 } from '@/composables/useLifecycleMarkers';
 import { useCompareMode } from '@/composables/useCompareMode';
 import { useGroupSiblings } from '@/composables/useGroupSiblings';
@@ -877,7 +878,7 @@ function toggleTier(p: Severity) {
 const visiblePriority = ref<Record<Severity, boolean>>({
   error: true, critical: true, warning: true, info: false, testing: false,
 });
-function togglePriorityVisibility(p: Severity, e: MouseEvent) {
+function togglePriorityVisibility(p: Severity, e: Event) {
   e.stopPropagation();
   const willBeVisible = !visiblePriority.value[p];
   visiblePriority.value[p] = willBeVisible;
@@ -976,6 +977,42 @@ const filteredEvents = computed<AnnotatedEvent[]>(
     return true;
   }),
 );
+
+// Focus-window event bars for the metric charts: mirror the SAME filtered
+// event set the timeline/filter shows, as thin vertical lines on every chart.
+// Deduped to one line per timestamp at its worst severity (a row with several
+// labels shares one ts). Driven by the same visiblePriority + category filter
+// as `filteredEvents`, so the severity selector already governs what appears.
+// The charts clip to their own x-window, so only in-focus events render.
+// Vivid per-severity colours for the chart event bars — more saturated than the
+// pastel filter-chip borders so a 1.5px line reads against the series + grid.
+const EVENT_BAR_COLOR: Record<Severity, string> = {
+  critical: '#dc2626', error: '#f97316', warning: '#eab308', info: '#0ea5e9', testing: '#94a3b8',
+};
+// The "Event bars" per-severity checkboxes are wired to the SAME
+// visiblePriority the focus-window event filter uses, so the two stay in sync.
+// The bars therefore come straight from filteredEvents (already severity-,
+// category- and type-filtered). One bar per timestamp at its worst severity.
+const EVENT_BAR_LEGEND = SEVERITY_ORDER.map((s) => ({ sev: s, color: EVENT_BAR_COLOR[s], label: SEVERITY_META[s].label }));
+const eventMarkers = computed<EventMarker[]>(() => {
+  const byMs = new Map<number, { sev: Severity; types: string[] }>();
+  for (const ev of filteredEvents.value) {
+    const e = byMs.get(ev._ts);
+    const type = ev.type ?? 'event';
+    if (!e) byMs.set(ev._ts, { sev: ev._p, types: [type] });
+    else {
+      e.types.push(type);
+      if (SEVERITY_ORDER.indexOf(ev._p) < SEVERITY_ORDER.indexOf(e.sev)) e.sev = ev._p;
+    }
+  }
+  const out: EventMarker[] = [];
+  for (const [ms, e] of byMs) {
+    const uniq = [...new Set(e.types)];
+    const shown = uniq.slice(0, 6).join(', ') + (uniq.length > 6 ? `, +${uniq.length - 6} more` : '');
+    out.push({ ms, sev: e.sev, color: EVENT_BAR_COLOR[e.sev], detail: `${new Date(ms).toLocaleTimeString()} · ${e.sev}\n${shown}` });
+  }
+  return out;
+});
 
 const tierCounts = computed<Record<Severity, number>>(() => {
   const c: Record<Severity, number> = { error: 0, critical: 0, warning: 0, info: 0, testing: 0 };
@@ -1840,7 +1877,7 @@ function skipToEnd() {
         :from-ms="cycleBandsDomain.fromMs"
         :to-ms="cycleBandsDomain.toMs"
       />
-      <EventsTimeline :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" :control-stream="timeseries.control" :lifecycle-markers="lifecycleMarkers" />
+      <EventsTimeline :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" :control-stream="timeseries.control" :lifecycle-markers="lifecycleMarkers" :event-markers="eventMarkers" />
     </CollapsibleSection>
 
     <CollapsibleSection title="Bitrate Chart etc" :open="true" eager persist-key="bitrate-chart">
@@ -1863,11 +1900,22 @@ function skipToEnd() {
           {{ LIFECYCLE_STYLE[k].label }}
         </label>
       </div>
+      <!-- Event-bar per-severity toggles (default to the focus-window severity
+           selection). Each governs whether that level's bars overlay the charts,
+           coloured to its severity. -->
+      <div class="lifecycle-toggles">
+        <span class="lt-label">Event bars:</span>
+        <label v-for="s in EVENT_BAR_LEGEND" :key="s.sev" class="lt-item">
+          <input type="checkbox" :checked="visiblePriority[s.sev]" @change="togglePriorityVisibility(s.sev, $event)" />
+          <span class="lt-sw" :style="{ background: s.color }" />
+          {{ s.label }}
+        </label>
+      </div>
       <div class="chart-stack">
-        <BandwidthChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" :lifecycle-markers="lifecycleMarkers" />
-        <BufferChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :lifecycle-markers="lifecycleMarkers" />
-        <RTTChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :lifecycle-markers="lifecycleMarkers" />
-        <FPSChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :lifecycle-markers="lifecycleMarkers" />
+        <BandwidthChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" :lifecycle-markers="lifecycleMarkers" :event-markers="eventMarkers" />
+        <BufferChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :lifecycle-markers="lifecycleMarkers" :event-markers="eventMarkers" />
+        <RTTChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :lifecycle-markers="lifecycleMarkers" :event-markers="eventMarkers" />
+        <FPSChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :lifecycle-markers="lifecycleMarkers" :event-markers="eventMarkers" />
       </div>
     </CollapsibleSection>
 

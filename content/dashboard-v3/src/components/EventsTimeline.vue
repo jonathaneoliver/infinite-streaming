@@ -31,7 +31,7 @@ import { computed, onBeforeUnmount, ref, toRef, watch } from 'vue';
 import { ensureVisTimeline } from '@/composables/useChartJs';
 import { useChartCoordination, DEFAULT_FOCUS_MS } from '@/composables/useChartCoordination';
 import type { Stream } from '@/composables/useSessionTimeSeries';
-import { useLifecycleLineVisibility, type LifecycleMarker } from '@/composables/useLifecycleMarkers';
+import { useLifecycleLineVisibility, type LifecycleMarker, type EventMarker } from '@/composables/useLifecycleMarkers';
 import { nearestVariantByBitrate } from '@/composables/useManifestVariants';
 
 interface LaneCfg { label: string; color: string }
@@ -254,6 +254,9 @@ const props = defineProps<{
    *  with the same lines on the value charts. Per-type visibility comes from
    *  the shared toggle (useLifecycleLineVisibility). */
   lifecycleMarkers?: LifecycleMarker[];
+  /** Severity-coloured focus-window event bars (mirrored from the metric
+   *  charts) — drawn as vis custom-time lines across every lane. */
+  eventMarkers?: EventMarker[];
 }>();
 const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
 const { lineVisibility } = useLifecycleLineVisibility();
@@ -1687,6 +1690,35 @@ watch(
   { immediate: true },
 );
 
+// Event-bar custom-time lines — mirror syncLifecycleLines. id `ev-<sev>-<ms>`
+// lands as a CSS class so the per-severity rules recolour each line; evLines
+// doubles as the id→detail lookup for the shared hover tooltip.
+const evLines = new Map<string, string>();
+function evIdFor(m: EventMarker): string {
+  return `ev-${m.sev}-${Math.round(m.ms)}`;
+}
+async function syncEventLines(): Promise<void> {
+  await ensureTimeline();
+  if (!timeline) return;
+  const desired = new Map<string, { ms: number; detail: string }>();
+  for (const m of props.eventMarkers ?? []) {
+    if (!Number.isFinite(m.ms)) continue;
+    desired.set(evIdFor(m), { ms: m.ms, detail: m.detail });
+  }
+  for (const id of [...evLines.keys()]) {
+    if (!desired.has(id)) {
+      try { timeline.removeCustomTime(id); } catch { /* ignore */ }
+      evLines.delete(id);
+    }
+  }
+  for (const [id, { ms, detail }] of desired) {
+    if (!evLines.has(id)) {
+      try { timeline.addCustomTime(new Date(ms), id); evLines.set(id, detail); } catch { /* ignore */ }
+    }
+  }
+}
+watch(() => props.eventMarkers, () => { void syncEventLines(); }, { immediate: true });
+
 /* Lifecycle-line hover tooltip — same custom-DOM approach as the cursor
  * tooltip, but hit-tests EVERY lifecycle custom-time element and shows the
  * nearest one's detail (restart reason / play_id / terminal status). */
@@ -1708,7 +1740,7 @@ function installLifecycleHoverTooltip() {
     const my = e.clientY - cRect.top;
     let bestDist = 6; // px tolerance
     let bestText = '';
-    const els = c.querySelectorAll('.vis-custom-time[class*="lc-"]');
+    const els = c.querySelectorAll('.vis-custom-time[class*="lc-"], .vis-custom-time[class*="ev-"]');
     els.forEach((el) => {
       const lineX = el.getBoundingClientRect().left - cRect.left;
       const d = Math.abs(mx - lineX);
@@ -1717,6 +1749,7 @@ function installLifecycleHoverTooltip() {
       let detail = '';
       el.classList.forEach((cls) => {
         if (cls.startsWith('lc-') && lcLines.has(cls)) detail = lcLines.get(cls) as string;
+        else if (cls.startsWith('ev-') && evLines.has(cls)) detail = evLines.get(cls) as string;
       });
       if (detail) { bestDist = d; bestText = detail; }
     });
@@ -2008,6 +2041,17 @@ onBeforeUnmount(() => {
   z-index: 4;
 }
 .events-timeline :deep(.vis-custom-time[class*='lc-server_loop-']::before) { border-top-color: #84cc16; }
+
+/* Event-bar custom-time lines (severity-coloured), mirrored from the metric
+ * charts. z-index 3 keeps them beneath the lifecycle lines (4) + cursor (5). */
+.events-timeline :deep(.vis-custom-time[class*='ev-critical-']) { border-left: 1.5px dashed #dc2626 !important; z-index: 3; }
+.events-timeline :deep(.vis-custom-time[class*='ev-critical-']::before) { border-top-color: #dc2626; }
+.events-timeline :deep(.vis-custom-time[class*='ev-error-']) { border-left: 1.5px dashed #f97316 !important; z-index: 3; }
+.events-timeline :deep(.vis-custom-time[class*='ev-error-']::before) { border-top-color: #f97316; }
+.events-timeline :deep(.vis-custom-time[class*='ev-warning-']) { border-left: 1.5px dashed #eab308 !important; z-index: 3; }
+.events-timeline :deep(.vis-custom-time[class*='ev-warning-']::before) { border-top-color: #eab308; }
+.events-timeline :deep(.vis-custom-time[class*='ev-info-']) { border-left: 1.5px dashed #0ea5e9 !important; z-index: 3; }
+.events-timeline :deep(.vis-custom-time[class*='ev-info-']::before) { border-top-color: #0ea5e9; }
 
 /* vis-timeline label panel + labelset pinned to the SAME 60px width
  * as the Chart.js charts' left y-axis (see MetricsLineChart.Y_WIDTH)
