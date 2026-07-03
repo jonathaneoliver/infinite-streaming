@@ -6059,6 +6059,21 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			manifestURL = manifestURL + "?" + r.URL.RawQuery
 		}
 		a.recordSessionStart(sessionData, manifestURL)
+		// Config-on-connect materialized labels onto the session (harness
+		// RunLabels: sweep/exp_id/platform/mode/recipe/… ) but — unlike the PATCH
+		// API — never surfaced them as a `label_changed` control event, so they
+		// never reached the forwarder's `testing=` tier and sweep plays were
+		// unattributable in the Sessions Test/Platform facets. Emit it here, right
+		// after session_start, so config-on-connect plays carry the same testing=
+		// metadata PATCH-stamped plays do. Mirrors the pattern_enabled emit, which
+		// already lands on these plays via the same per-port control channel.
+		if hasConfig {
+			if lbls, ok := configPatch["labels"]; ok && lbls != nil {
+				if p, perr := strconv.Atoi(assignedInternalPort); perr == nil {
+					a.emitControlEventForPort(p, "proxy", "label_changed", labelsInfoJSON(lbls))
+				}
+			}
+		}
 		host := hostWithoutPort(r.Host)
 		scheme := requestScheme(r)
 		newURL := fmt.Sprintf("%s://%s:%s/%s", scheme, host, assignedExternalPort, escapedPath)
