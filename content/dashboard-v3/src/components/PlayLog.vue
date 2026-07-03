@@ -24,6 +24,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, toRef, watch } from 'vue';
 import { usePlayer } from '@/composables/usePlayer';
 import { useChartCoordination } from '@/composables/useChartCoordination';
+import { collapseNetFailureLabels, humanizeNetFailure, labelTooltip } from '@/lib/labelGlossary';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 
 const props = defineProps<{
@@ -506,6 +507,25 @@ function rowLabels(r: Row): string[] {
   // control_events rows carry their own labels[] (see
   // computeControlLabels in labels.go) so no synthesis is needed.
   return [];
+}
+
+/** Chip list for display: collapse a failed network row's facet labels under
+ *  its derived `net_failure:` signature (#892) so the line reads as one
+ *  failure. rowLabels() (the query/tint surface) is left untouched — the
+ *  signature carries the worst facet severity, so the row tint is unchanged. */
+function displayLabels(r: Row): string[] {
+  return collapseNetFailureLabels(rowLabels(r));
+}
+/** Chip text: humanise the net_failure signature; every other label keeps its
+ *  existing form (event name with the `*` synth mark). */
+function labelChipText(l: string): string {
+  const tail = l.slice(l.indexOf('=') + 1);
+  const ev = tail.replace(/^\*/, '');
+  return ev.startsWith('net_failure:') ? humanizeNetFailure(ev) : tail;
+}
+/** Chip hover: composed tooltip for the signature, raw label otherwise. */
+function labelChipTitle(l: string): string {
+  return l.includes('net_failure:') ? (labelTooltip(l) || l) : l;
 }
 
 /** #506 batch-derived per-row token, LEFT-JOINed by the forwarder
@@ -1109,12 +1129,12 @@ function onRowsWheel(e: WheelEvent) {
           <div class="cell c-flags" :style="{ color: rowFlags(r).color }">{{ rowFlags(r).text }}</div>
           <div class="cell c-labels">
             <span
-              v-for="l in rowLabels(r)"
+              v-for="l in displayLabels(r)"
               :key="l"
               class="label-chip"
               :class="`label-${labelSeverity(l)}`"
-              :title="l"
-            >{{ l.slice(l.indexOf('=') + 1) }}</span>
+              :title="labelChipTitle(l)"
+            >{{ labelChipText(l) }}</span>
           </div>
           <div class="cell c-player" :title="r.playerId">{{ shortId(r.playerId) }}</div>
           <div class="cell c-play" :title="r.playId">{{ shortId(r.playId) }}</div>

@@ -623,6 +623,20 @@ func computeNetworkLabelsWithState(s *labelState, r *netRow) []string {
 		}
 	}
 
+	// Derived whole-tuple signature (#892). A network_requests row is ONE
+	// HTTP request, so kind × transport-cause × outcome are single-valued —
+	// exactly one tuple, no grouping ambiguity. Emit it ALONGSIDE (not
+	// instead of) the facets so the dashboard can show one collapsed chip
+	// while the facets stay independently queryable. Worst facet severity so
+	// the classification-tier bump is unchanged.
+	if sig := netFailureSignature(r); sig != "" {
+		sev := worstSeverity(out)
+		if sev == "" {
+			sev = SevWarning
+		}
+		out = append(out, sev+"="+synthMark+"net_failure:"+sig)
+	}
+
 	// Synthesized: request_retry on the second fetch of the same URL
 	// within 1-4 s, but ONLY when the previous fetch failed (status
 	// >= 400 OR faulted). Without that guard, normal LL-HLS manifest
@@ -646,6 +660,92 @@ func computeNetworkLabelsWithState(s *labelState, r *netRow) []string {
 	}
 
 	return out
+}
+
+// netFailureSignature composes the orthogonal failure facets of a single
+// network request — kind × transport-cause × outcome — into one canonical
+// whole-tuple string, e.g. "segment/client_disconnect/incomplete". Because a
+// network_requests row is exactly one HTTP request, each axis is single-valued
+// and the tuple is unambiguous (see .claude/standards/label-facets.md). Mirrors
+// the facet logic above so the signature and the facet labels never disagree.
+// Returns "" when the row is not a failure. Order: kind / cause / outcome;
+// cause is omitted when the row isn't faulted; outcome falls back to the HTTP
+// status class on a non-faulted >=400.
+func netFailureSignature(r *netRow) string {
+	if !(r.Status >= 400 || r.Faulted != 0) {
+		return ""
+	}
+
+	// kind — mirror the per-kind failure switch.
+	var kind string
+	switch r.RequestKind {
+	case "master_manifest":
+		kind = "master_manifest"
+	case "manifest", "audio_manifest":
+		kind = "manifest"
+	case "segment", "audio_segment", "init", "partial":
+		kind = "segment"
+	default:
+		kind = strings.ToLower(strings.TrimSpace(r.RequestKind))
+		if kind == "" {
+			kind = "request"
+		}
+	}
+
+	// outcome — mirror the fault classification, else the HTTP status class.
+	var outcome string
+	if r.Faulted != 0 {
+		ft := strings.ToLower(r.FaultType)
+		switch {
+		case strings.Contains(ft, "timeout"):
+			outcome = "timeout"
+		case strings.Contains(ft, "corrupt"),
+			strings.Contains(ft, "partial"),
+			strings.Contains(ft, "abandon"):
+			outcome = "incomplete"
+		default:
+			if r.Status >= 200 && r.Status < 300 {
+				outcome = "incomplete"
+			} else {
+				outcome = "other"
+			}
+		}
+	} else if r.Status >= 500 {
+		outcome = "http_5xx"
+	} else if r.Status >= 400 {
+		outcome = "http_4xx"
+	}
+
+	// cause — mirror the transport-fault classification (faulted rows only).
+	var cause string
+	if r.Faulted != 0 {
+		switch strings.ToLower(r.FaultCategory) {
+		case "socket":
+			cause = "socket"
+		case "client_disconnect":
+			cause = "client_disconnect"
+		case "transfer_timeout":
+			ft := strings.ToLower(r.FaultType)
+			switch {
+			case strings.Contains(ft, "active"):
+				cause = "active_timeout"
+			case strings.Contains(ft, "idle"):
+				cause = "idle_timeout"
+			default:
+				cause = "transport"
+			}
+		}
+	}
+
+	parts := make([]string, 0, 3)
+	parts = append(parts, kind)
+	if cause != "" {
+		parts = append(parts, cause)
+	}
+	if outcome != "" {
+		parts = append(parts, outcome)
+	}
+	return strings.Join(parts, "/")
 }
 
 // computeControlLabels stamps a control_events row's labels at ingest.
