@@ -78,6 +78,12 @@ Subcommands:
                            how) onto Result.Note [--from found].
   reap [--max-age-min N]   return running experiments orphaned by a dead runner
                            to backlog (default 60; ~2× the longest expected run).
+  run-fan <parent-id> [--dry-run] [--duration-s N]
+                           run a ≥2-arm isolation fan CONCURRENTLY on the device
+                           farm — one device per arm, all sharing the isolation
+                           group/pattern (control masters; variants bind). Reuses
+                           the char-matrix fleet path. --dry-run prints the
+                           RunPlan. Singletons stay on the single-device probe.
   isolate <id> --flip axis=value [--flip …]
                            materialise an OFAT isolation fan off a confirmed
                            hit (control + one variant per flip) into backlog/.
@@ -109,6 +115,8 @@ func cmdSweep(client *api.Client, args []string, asJSON bool) error {
 		return cmdSweepImport(client, args[1:], asJSON)
 	case "export":
 		return cmdSweepExport(client, args[1:], asJSON)
+	case "run-fan":
+		return cmdSweepRunFan(client, args[1:], asJSON)
 	case "status":
 		return cmdSweepStatus(client, args[1:], asJSON)
 	case "ls":
@@ -461,13 +469,16 @@ func cmdSweepExport(client *api.Client, args []string, asJSON bool) error {
 			specName = "export-" + id
 		}
 	case *fan != "":
+		// The isolation fan is the control + flip variants (Kind==isolation);
+		// filtering on Kind excludes confirmation reps that share the same Parent
+		// (same-recipe re-runs, not flip variants) — consistent with run-fan.
 		for _, e := range all {
-			if e.Parent == *fan {
+			if e.Parent == *fan && e.Kind == sweep.KindIsolation {
 				picked = append(picked, e)
 			}
 		}
 		if len(picked) == 0 {
-			return fmt.Errorf("no fan members with parent %q (an isolation fan stamps Parent on its control+variants)", *fan)
+			return fmt.Errorf("no isolation-fan members with parent %q (an isolation fan stamps Parent + Kind=isolation on its control+variants)", *fan)
 		}
 		if specName == "" {
 			specName = "fan-" + *fan
