@@ -1889,6 +1889,7 @@ function skipToEnd() {
            forwarder for a pre-joined view. -->
       <PlayLog
         :player-id="archivePlayerId"
+        :coord-id="coordId"
         :play-id="playIdRef"
         :events-stream="timeseries.events"
         :network-stream="timeseries.network"
