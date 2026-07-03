@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"math"
@@ -3933,6 +3934,19 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, np NetemParams) 
 				break
 			}
 		}
+	}
+	if mode == "" && stepCount > 0 {
+		// Custom / unnamed pattern — no template mode (hand-edited steps via the
+		// testing UI, or a pattern applied without a named template). Derive a
+		// stable signature from the step profile so it still earns a distinct
+		// `pattern_enabled_custom_<sig>` label instead of collapsing every custom
+		// pattern into one bare `pattern_enabled` — otherwise "which pattern is
+		// running", especially dynamically-applied ones, is unfilterable.
+		h := fnv.New32a()
+		for _, s := range cleanSteps {
+			fmt.Fprintf(h, "%.3f:%g;", s.RateMbps, s.DurationSeconds)
+		}
+		mode = fmt.Sprintf("custom_%08x", h.Sum32())
 	}
 	info := fmt.Sprintf(`{"mode":%q,"steps":%d,"rate_mbps_first":%.3f,"delay_ms":%d,"packet_loss":%.3f}`,
 		mode, stepCount, firstRate, delayMs, loss)
