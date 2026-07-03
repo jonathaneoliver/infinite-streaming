@@ -28,6 +28,12 @@ import type { Stream } from '@/composables/useSessionTimeSeries';
 
 const props = defineProps<{
   playerId: string;
+  /** Shared chart-coordination key (SessionDisplay's `view:<player>`) so the
+   *  Play Log's focus window matches every other panel. Falls back to playerId,
+   *  but SessionDisplay MUST pass it — otherwise the log reads an unpinned coord
+   *  bucket and shows nothing in archive views (#828 wired every other panel but
+   *  missed PlayLog). Data still keys off playerId. Mirrors NetworkLog. */
+  coordId?: string;
   /** play_id from the URL, used as the fallback `play_id` value for
    *  event rows — the events SSE doesn't yet project play_id (the
    *  derivation in events_query.go doesn't carry it through the
@@ -46,7 +52,7 @@ const props = defineProps<{
 
 const playerIdRef = toRef(props, 'playerId');
 usePlayer(playerIdRef); // keep the SSE subscription warm
-const coord = useChartCoordination(playerIdRef);
+const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
 
 /** Real player UUID for display purposes. The `playerId` prop is the
  *  shared cache key used by useChartCoordination + the streams cache;
