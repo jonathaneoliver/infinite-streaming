@@ -390,6 +390,13 @@ private struct HeroLiveVideo: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UIView {
         let view = HeroLayerView(frame: .zero)
+        // Decorative preview surface with no taps of its own. UIKit defaults
+        // isUserInteractionEnabled=true, which otherwise SWALLOWS touches landing
+        // here while the Settings drawer is open over Home — including the
+        // drawer's back chevron over the hero — because AppRoot's
+        // `.disabled(settingsOpen)` doesn't cross the UIViewRepresentable
+        // boundary into UIKit. Disabling touch lets those taps reach the overlay.
+        view.isUserInteractionEnabled = false
         // 720p variant — the hero surface is the visual centerpiece of
         // Home, so we trade the extra decode cost for the higher
         // resolution. Tiles stay at 360p for budget reasons.
