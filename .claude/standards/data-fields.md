@@ -568,23 +568,41 @@ mbps_shaper_rate
   type:        Float32
   units:       Mbps
   populated:   proxy
-  meaning:     the CURRENT applied shaper cap (instantaneous). Reflects
-               what the proxy is configured to limit egress to.
+  meaning:     MEASURED throughput (bytes*8 / elapsed) over adjacent
+               *backlog-active* samples in a ~1s window — the rate
+               actually delivered while the connection had demand. NOT a
+               configured cap. It is named "shaper" only because under
+               active backlog the delivered rate tracks the shaper's
+               binding limit, but mechanically it is a measurement.
+               null / absent when there is no active backlog (player idle
+               or not requesting).
+  gotchas:     for the actual rate LIMIT read effective_rate_limit_mbps
+               (kernel-enforced) or nftables_bandwidth_mbps (operator
+               intent) — NOT this field. Computed in main.go via
+               adjacentBacklogActiveRate().
 
 mbps_shaper_avg
   type:        Float32
   units:       Mbps
   populated:   proxy
-  meaning:     1s-window average of the shaper rate (smooths over
-               pattern step changes).
+  meaning:     ~6s rolling average of mbps_shaper_rate — the same MEASURED,
+               demand-gated throughput, smoothed over pattern-step changes
+               and bursts. Also a measurement, not a cap.
 
 mbps_transfer_rate
   type:        Float32
   units:       Mbps
   populated:   proxy
   meaning:     observed instantaneous throughput the proxy actually
-               served on this connection (different from the cap —
-               might be lower if the player wasn't requesting).
+               served on this connection (might be lower than any cap if
+               the player wasn't requesting). De-bursted: only emitted
+               when TC bytes change AND >=100ms since the previous report
+               (eliminates HTB burst aliasing).
+  gotchas:     one of FOUR measured-throughput fields, none of which is a
+               cap. transfer_rate = de-bursted instantaneous wire rate;
+               mbps_shaper_rate / _avg = backlog-active 1s / 6s-smoothed
+               rate; mbps_transfer_complete = last completed segment. The
+               caps are effective_rate_limit_mbps / nftables_bandwidth_mbps.
 
 mbps_transfer_complete
   type:        Float32
