@@ -160,6 +160,11 @@ const filters = ref<{
   // like "has http_404 AND has-not fault_rule_enabled".
   labels: string[];
   labelsExclude: string[];
+  // Tristate scenario facet filter (same shape as labels). Values are encoded
+  // `<fieldKey>=<value>` (e.g. `os=26.5`, `variant=ll`). AND across different
+  // keys, OR within one key; exclude = must-not-match.
+  scenario: string[];
+  scenarioExclude: string[];
   // 4-category facet (docs/EVENT_TAXONOMY.md). Empty = no constraint; else
   // OR-semantics: keep plays that contain ≥1 label in any selected category.
   categories: Category[];
@@ -169,6 +174,7 @@ const filters = ref<{
   harness: 'all',
   platform: '', test: '',
   labels: [], labelsExclude: [],
+  scenario: [], scenarioExclude: [],
   categories: [],
 });
 
@@ -550,6 +556,7 @@ function matches(r: SessionRow): boolean {
     && matchesClassification(r)
     && matchesHarness(r)
     && matchesCategories(r)
+    && matchesScenario(r)
     && matchesLabels(r);
 }
 
@@ -717,6 +724,124 @@ const labelFilterCount = computed(() =>
 // True iff any label is currently displayed (even an empty tier).
 const hasAnyLabels = computed(() => labelTiers.value.some((t) => t.total > 0));
 
+// --- Scenario facet filter (OS / device / segment / build / player / …) ------
+// The scenario object is populated from player metrics on ~every play, so these
+// dimensions filter manual + harness plays alike. platform/test keep their
+// dropdowns above; this hierarchical panel (same tristate as the label filter)
+// covers the rest.
+const SCENARIO_FACET_KEYS = ['os', 'device', 'variant', 'build', 'app', 'player', 'run'] as const;
+const SCENARIO_FACET_LABEL: Record<string, string> = {
+  os: 'OS', device: 'Device', variant: 'Segment', build: 'Build',
+  app: 'App', player: 'Player', run: 'Run',
+};
+function scenarioValueFor(r: SessionRow, key: string): string {
+  const fld = SCENARIO_FIELDS.find((f) => f.key === key);
+  if (!fld) return '';
+  const sc = r.scenario ?? scenarioFromRow(r);
+  let v = String(sc[fld.src] ?? '');
+  if (!v && fld.src === 'device_model') v = String(sc.device_class ?? '');
+  if (fld.src === 'run_id' && v) v = shortRunId(v);
+  return v;
+}
+interface ScenarioFacet { key: string; label: string; entries: { value: string; count: number }[]; total: number }
+const scenarioFacets = computed<ScenarioFacet[]>(() => {
+  const counts = new Map<string, Map<string, number>>();
+  for (const k of SCENARIO_FACET_KEYS) counts.set(k, new Map());
+  for (const r of rows.value) {
+    for (const k of SCENARIO_FACET_KEYS) {
+      const v = scenarioValueFor(r, k);
+      if (!v) continue;
+      const m = counts.get(k)!;
+      m.set(v, (m.get(v) ?? 0) + 1);
+    }
+  }
+  return SCENARIO_FACET_KEYS
+    .map((k) => {
+      const entries = [...counts.get(k)!.entries()]
+        .map(([value, count]) => ({ value, count }))
+        .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+      return { key: k, label: SCENARIO_FACET_LABEL[k], entries, total: entries.length };
+    })
+    .filter((g) => g.total > 0);
+});
+const hasAnyScenario = computed(() => scenarioFacets.value.length > 0);
+const expandedScenario = ref<Record<string, boolean>>({ os: true, device: true, variant: true });
+function toggleScenarioGroup(key: string) { expandedScenario.value[key] = !expandedScenario.value[key]; }
+function scenarioEnc(key: string, value: string): string { return `${key}=${value}`; }
+function scenarioState(key: string, value: string): LabelState {
+  const enc = scenarioEnc(key, value);
+  if (filters.value.scenario.includes(enc)) return 'include';
+  if (filters.value.scenarioExclude.includes(enc)) return 'exclude';
+  return 'none';
+}
+function cycleScenarioFilter(key: string, value: string) {
+  const enc = scenarioEnc(key, value);
+  const cur = scenarioState(key, value);
+  filters.value.scenario = filters.value.scenario.filter((v) => v !== enc);
+  filters.value.scenarioExclude = filters.value.scenarioExclude.filter((v) => v !== enc);
+  if (cur === 'none') filters.value.scenario = [...filters.value.scenario, enc];
+  else if (cur === 'include') filters.value.scenarioExclude = [...filters.value.scenarioExclude, enc];
+}
+function scenarioGroupState(key: string): TierState {
+  const g = scenarioFacets.value.find((x) => x.key === key);
+  if (!g || !g.entries.length) return 'none';
+  let inc = 0, exc = 0;
+  for (const e of g.entries) {
+    const s = scenarioState(key, e.value);
+    if (s === 'include') inc++; else if (s === 'exclude') exc++;
+  }
+  if (inc === g.entries.length) return 'all-include';
+  if (exc === g.entries.length) return 'all-exclude';
+  if (inc === 0 && exc === 0) return 'none';
+  return 'partial';
+}
+function toggleScenarioAll(key: string, e: MouseEvent) {
+  e.stopPropagation();
+  const g = scenarioFacets.value.find((x) => x.key === key);
+  if (!g || !g.entries.length) return;
+  const encs = g.entries.map((x) => scenarioEnc(key, x.value));
+  const state = scenarioGroupState(key);
+  const incOther = filters.value.scenario.filter((v) => !encs.includes(v));
+  const excOther = filters.value.scenarioExclude.filter((v) => !encs.includes(v));
+  if (state === 'none' || state === 'partial') {
+    filters.value.scenario = [...incOther, ...encs];
+    filters.value.scenarioExclude = excOther;
+  } else if (state === 'all-include') {
+    filters.value.scenario = incOther;
+    filters.value.scenarioExclude = [...excOther, ...encs];
+  } else {
+    filters.value.scenario = incOther;
+    filters.value.scenarioExclude = excOther;
+  }
+}
+const scenarioFilterCount = computed(() =>
+  filters.value.scenario.length + filters.value.scenarioExclude.length);
+function clearScenarioFilter() {
+  filters.value.scenario = [];
+  filters.value.scenarioExclude = [];
+}
+function matchesScenario(r: SessionRow): boolean {
+  const inc = filters.value.scenario;
+  const exc = filters.value.scenarioExclude;
+  if (inc.length) {
+    // AND across keys, OR within a key.
+    const byKey = new Map<string, string[]>();
+    for (const enc of inc) {
+      const i = enc.indexOf('='); if (i < 0) continue;
+      const k = enc.slice(0, i);
+      const arr = byKey.get(k) ?? []; arr.push(enc.slice(i + 1)); byKey.set(k, arr);
+    }
+    for (const [k, vals] of byKey) {
+      if (!vals.includes(scenarioValueFor(r, k))) return false;
+    }
+  }
+  for (const enc of exc) {
+    const i = enc.indexOf('='); if (i < 0) continue;
+    if (scenarioValueFor(r, enc.slice(0, i)) === enc.slice(i + 1)) return false;
+  }
+  return true;
+}
+
 const filtered = computed(() => rows.value.filter(matches));
 
 const sorted = computed(() => {
@@ -789,6 +914,8 @@ function clearFilters() {
   filters.value.test = '';
   filters.value.labels = [];
   filters.value.labelsExclude = [];
+  filters.value.scenario = [];
+  filters.value.scenarioExclude = [];
 }
 
 function onRangeChange() {
@@ -1514,6 +1641,81 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                accordion: severity tier headers → expand → distinct
                labels at that tier with click-to-toggle inclusion.
                Multi-select OR semantics. -->
+          <!-- Scenario facet filter (OS / device / segment / build / …). Same
+               tristate accordion as the label filter; values come from each
+               play's scenario object (player metrics), so it covers manual and
+               harness plays alike. -->
+          <div class="label-filter-accordion" v-if="hasAnyScenario">
+            <div class="label-filter-head">
+              <span class="ctrl-label-text">Filter by scenario:</span>
+              <button
+                v-if="scenarioFilterCount"
+                type="button"
+                class="btn btn-secondary label-clear"
+                @click="clearScenarioFilter"
+              >Clear ({{ scenarioFilterCount }})</button>
+            </div>
+            <div
+              v-for="g in scenarioFacets"
+              :key="g.key"
+              class="lf-tier"
+              :class="{ expanded: expandedScenario[g.key], 'tier-active': scenarioGroupState(g.key) !== 'none' }"
+              :style="{ '--tier-bg': '#f1f5f9', '--tier-border': '#cbd5e1', '--tier-color': '#334155' }"
+            >
+              <div class="lf-tier-head">
+                <button
+                  type="button"
+                  class="lf-chevron"
+                  @click="toggleScenarioGroup(g.key)"
+                  :title="expandedScenario[g.key] ? 'Collapse' : 'Expand'"
+                >{{ expandedScenario[g.key] ? '▾' : '▸' }}</button>
+                <button
+                  type="button"
+                  class="lf-tier-name"
+                  @click="toggleScenarioAll(g.key, $event)"
+                  :title="`Cycle ALL ${g.entries.length} ${g.label} values:  none → include → exclude → none`"
+                >
+                  <span class="lf-tier-dot" :class="'sel-' + scenarioGroupState(g.key)" aria-hidden="true" />
+                  <span class="lf-tier-text">{{ g.label }}</span>
+                  <span class="lf-tier-pill">{{ g.total }}</span>
+                </button>
+                <div class="lf-preview" v-if="!expandedScenario[g.key] && g.total">
+                  <button
+                    v-for="e in g.entries.slice(0, 5)"
+                    :key="e.value"
+                    type="button"
+                    class="lf-preview-chip"
+                    :class="'state-' + scenarioState(g.key, e.value)"
+                    @click.stop="cycleScenarioFilter(g.key, e.value)"
+                    :title="`${g.label}=${e.value}\nclick: none → include → exclude → none`"
+                  >{{ e.value }} · {{ e.count }}</button>
+                  <span v-if="g.entries.length > 5" class="lf-preview-more">
+                    +{{ g.entries.length - 5 }} more
+                  </span>
+                </div>
+              </div>
+              <div class="lf-tier-body" v-if="expandedScenario[g.key] && g.total">
+                <button
+                  v-for="e in g.entries"
+                  :key="e.value"
+                  type="button"
+                  class="lf-label-row"
+                  :class="'state-' + scenarioState(g.key, e.value)"
+                  @click="cycleScenarioFilter(g.key, e.value)"
+                  :title="`${g.label}=${e.value}\nclick: none → include → exclude → none`"
+                >
+                  <span class="lf-label-check">{{
+                    scenarioState(g.key, e.value) === 'include' ? '✓'
+                    : scenarioState(g.key, e.value) === 'exclude' ? '⊘'
+                    : '○'
+                  }}</span>
+                  <span class="lf-label-name">{{ e.value }}</span>
+                  <span class="lf-label-count">{{ e.count }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
           <div class="label-filter-accordion" v-if="hasAnyLabels">
             <div class="label-filter-head">
               <span class="ctrl-label-text">Filter by label:</span>
