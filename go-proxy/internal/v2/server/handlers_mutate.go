@@ -795,6 +795,9 @@ func applyShapePatch(srv *Server, s map[string]any, shape any) {
 func applyPatternPatch(s map[string]any, pat any) {
 	if pat == nil {
 		delete(s, "_v2_shape_pattern")
+		// Clear the template name too so a later custom/unnamed pattern isn't
+		// mislabeled with a stale template.
+		delete(s, "nftables_pattern_template_mode")
 		// Setting nftables_pattern_enabled=false here is harmless;
 		// applyShapePattern with empty steps will write the same
 		// keys via updateSessionsByPortWithControl. Keeping the
@@ -807,6 +810,16 @@ func applyPatternPatch(s map[string]any, pat any) {
 		return
 	}
 	s["_v2_shape_pattern"] = m
+	// Mirror the template NAME onto the session field the pattern_enabled control
+	// event reads (nftables_pattern_template_mode), so a named template
+	// (valley / ramp_up / …) is labeled `pattern_enabled_<name>` instead of
+	// falling back to a step-profile signature. Absent/empty template leaves it
+	// unset → the proxy's signature fallback names it `custom_<hash>`.
+	if t, ok := m["template"].(string); ok && t != "" && t != "sliders" {
+		s["nftables_pattern_template_mode"] = t
+	} else {
+		delete(s, "nftables_pattern_template_mode")
+	}
 }
 
 // extractPatternSteps reads the v2 pattern stash from the session map
