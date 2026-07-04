@@ -3937,6 +3937,20 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, np NetemParams) 
 	info := fmt.Sprintf(`{"mode":%q,"steps":%d,"rate_mbps_first":%.3f,"delay_ms":%d,"packet_loss":%.3f}`,
 		mode, stepCount, firstRate, delayMs, loss)
 	a.emitControlEventForPort(port, "proxy", "pattern_enabled", info)
+	// Co-locate a label_changed with pattern_enabled: the session's harness labels
+	// (sweep RunLabels — platform/mode/recipe/… — set on _v2_labels at bootstrap but
+	// never surfaced as a control event) now land on the play with the SAME
+	// attribution pattern_enabled just proved. This is where the play_id is present,
+	// unlike the too-early config-on-connect / reattach binds. Forwarder edge-dedups
+	// re-arms; no-label sessions skip it.
+	for _, ls := range a.sessionsView() { // #740 read-only: reads _v2_labels
+		if getString(ls, "x_forwarded_port") == strconv.Itoa(port) {
+			if lbls, ok := ls["_v2_labels"]; ok && lbls != nil {
+				a.emitControlEventForPort(port, "proxy", "label_changed", labelsInfoJSON(lbls))
+			}
+			break
+		}
+	}
 	go a.runShapePatternLoop(ctx, port, cleanSteps, np)
 	return nil
 }
