@@ -202,6 +202,15 @@ function sessionSource(r: SessionRow): SessionSource {
   if (findLabelTail(r, 'test_') !== null || rowRunId(r) !== '') return 'automated';
   return 'manual';
 }
+const SOURCE_LABEL: Record<SessionSource, string> = {
+  manual: '👤 manual', sweep: '🌙 sweep', automated: '🧪 automated',
+};
+// Click the Categories-cell source chip to drive the Source picker (toggle off
+// to 'all' if it's already the active origin).
+function filterBySource(r: SessionRow) {
+  const s = sessionSource(r);
+  filters.value.source = filters.value.source === s ? 'all' : s;
+}
 // #678 — scenario-aware accessors: prefer the server `scenario` object, fall
 // back to the testing= label tails. Used by the Platform/Test facets so they
 // agree with the Scenario cell regardless of which source populated it.
@@ -1942,6 +1951,12 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                     <div>{{ r.content_id || '' }}</div>
                   </td>
                   <td class="cell-scenario">
+                    <span
+                      class="scenario-chip scenario-source"
+                      :class="'source-' + sessionSource(r) + (filters.source === sessionSource(r) ? ' source-active' : '')"
+                      :title="`source=${sessionSource(r)}\nclick: filter to ${sessionSource(r)} plays (click again to clear)`"
+                      @click.stop="filterBySource(r)"
+                    ><span class="scenario-key">src</span>{{ SOURCE_LABEL[sessionSource(r)] }}</span>
                     <template v-if="scenario(r)">
                       <span
                         v-for="f in scenario(r)!.fields"
@@ -1952,7 +1967,6 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                         @click.stop="filterByCategory(f.key, f.value)"
                       ><span class="scenario-key">{{ f.label }}</span>{{ f.value }}</span>
                     </template>
-                    <span v-else class="dash">—</span>
                   </td>
                   <td class="cell-play-id">
                     <a v-if="r.play_id && r.player_id" :href="viewerHref(r)" class="play-id-link">{{ r.play_id }}</a>
@@ -2177,6 +2191,14 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   color: #ecfdf5;
 }
 .scenario-chip.chip-active .scenario-key { color: #d1fae5; opacity: 0.9; }
+/* Origin chip in the Categories cell — distinct tint per source. */
+.scenario-source.source-manual    { background: #f8fafc; border-color: #e2e8f0; color: #475569; }
+.scenario-source.source-manual .scenario-key    { color: #64748b; }
+.scenario-source.source-sweep     { background: #eef2ff; border-color: #c7d2fe; color: #3730a3; }
+.scenario-source.source-sweep .scenario-key     { color: #4f46e5; }
+.scenario-source.source-automated { background: #faf5ff; border-color: #e9d5ff; color: #6b21a8; }
+.scenario-source.source-automated .scenario-key { color: #9333ea; }
+.scenario-source.source-active { box-shadow: 0 0 0 2px currentColor inset; font-weight: 700; }
 /* Player cell — click to scope the list to one player_id. */
 .cell-player { max-width: 260px; }
 .player-filter {
