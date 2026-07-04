@@ -5703,6 +5703,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				if stripped := stripProxyArgs(r.URL.RawQuery); stripped != "" {
 					newURL = newURL + "?" + stripped
 				}
+				// The app's first request on the base port reattaches to its pre-configured
+				// session; that bind/sweep-bootstrap path set labels but emitted no
+				// label_changed, and this reattach is the actual play-start — surface the
+				// session labels now, attributed to the play (same per-port channel + timing
+				// that makes pattern_enabled land). Harmless on auto-recovery/loop re-hits
+				// (forwarder edge-dedups labels); no-label sessions skip it.
+				if lbls, ok := existing["_v2_labels"]; ok && lbls != nil {
+					if p, perr := strconv.Atoi(getString(existing, "x_forwarded_port")); perr == nil {
+						a.emitControlEventForPort(p, "proxy", "label_changed", labelsInfoJSON(lbls))
+					}
+				}
 				log.Printf("Redirecting to existing session URL: %s %s -> %s", newURL, externalPort, newPort)
 				http.Redirect(w, r, newURL, http.StatusFound)
 				return
