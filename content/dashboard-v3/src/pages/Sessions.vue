@@ -140,12 +140,11 @@ const filters = ref<{
   group_id: string;
   play_id: string;
   classification: 'all' | 'starred' | 'interesting' | 'other';
-  // Test-harness origin filter. 'all' = no constraint, 'only' = keep
-  // plays stamped by the characterization framework (have a
-  // testing=run_id_… label, or legacy info=run_id_… pre-#571), 'hide' = exclude them so manual sessions
-  // surface without test-noise. See Characterization.vue for how
-  // the framework stamps these labels at the start of each run.
-  harness: 'all' | 'only' | 'hide';
+  // Session origin filter. 'all' = no constraint; otherwise keep only plays of
+  // that origin — 'manual' (user-initiated, no harness markers), 'sweep' (sweep
+  // framework, testing=sweep_/exp_id_), or 'automated' (characterization runs,
+  // testing=test_/run_id_). See sessionSource().
+  source: 'all' | 'manual' | 'sweep' | 'automated';
   // Tristate label filter:
   //   - labels:        AND-required INCLUDES (row.labels must contain every entry)
   //   - labelsExclude: AND-required EXCLUDES (row.labels must contain NONE of these)
@@ -164,7 +163,7 @@ const filters = ref<{
 }>({
   player_id: '', group_id: '', play_id: '',
   classification: 'all',
-  harness: 'all',
+  source: 'all',
   labels: [], labelsExclude: [],
   scenario: [], scenarioExclude: [],
   categories: [],
@@ -194,7 +193,15 @@ function findLabelTail(r: SessionRow, key: string): string | null {
 function harnessRunId(r: SessionRow): string | null { return findLabelTail(r, 'run_id_'); }
 function harnessPlatform(r: SessionRow): string | null { return findLabelTail(r, 'platform_'); }
 function harnessTest(r: SessionRow): string | null { return findLabelTail(r, 'test_'); }
-function isHarnessRow(r: SessionRow): boolean { return rowRunId(r) !== ''; }
+// Session origin — how the play was initiated. Order matters: sweep plays carry
+// sweep_/exp_id_ but NO run_id, so check them first; characterization runs carry
+// test_/run_id_; anything with none of those is a user-initiated manual play.
+type SessionSource = 'manual' | 'sweep' | 'automated';
+function sessionSource(r: SessionRow): SessionSource {
+  if (findLabelTail(r, 'sweep_') !== null || findLabelTail(r, 'exp_id_') !== null) return 'sweep';
+  if (findLabelTail(r, 'test_') !== null || rowRunId(r) !== '') return 'automated';
+  return 'manual';
+}
 // #678 — scenario-aware accessors: prefer the server `scenario` object, fall
 // back to the testing= label tails. Used by the Platform/Test facets so they
 // agree with the Scenario cell regardless of which source populated it.
@@ -517,12 +524,9 @@ function matchesLabels(r: SessionRow): boolean {
   return true;
 }
 
-function matchesHarness(r: SessionRow): boolean {
-  switch (filters.value.harness) {
-    case 'all':  return true;
-    case 'only': return isHarnessRow(r);
-    case 'hide': return !isHarnessRow(r);
-  }
+function matchesSource(r: SessionRow): boolean {
+  const s = filters.value.source;
+  return s === 'all' || sessionSource(r) === s;
 }
 
 // Category facet — OR-semantics: with any category selected, keep plays
@@ -544,7 +548,7 @@ function matches(r: SessionRow): boolean {
     && (!f.group_id || r.group_id === f.group_id)
     && (!f.play_id || r.play_id === f.play_id)
     && matchesClassification(r)
-    && matchesHarness(r)
+    && matchesSource(r)
     && matchesCategories(r)
     && matchesScenario(r)
     && matchesLabels(r);
@@ -933,7 +937,7 @@ function clearFilters() {
   filters.value.group_id = '';
   filters.value.play_id = '';
   filters.value.classification = 'all';
-  filters.value.harness = 'all';
+  filters.value.source = 'all';
   filters.value.labels = [];
   filters.value.labelsExclude = [];
   filters.value.scenario = [];
@@ -1593,19 +1597,20 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
               >{{ c.label }}</button>
             </div>
 
-            <div class="class-chip-wrap" title="Filter by test-harness origin (plays stamped with testing=run_id_… by the characterization framework)">
-              <span class="ctrl-label-text">Harness:</span>
+            <div class="class-chip-wrap" title="Filter by session origin — Manual (user-initiated), Sweep (overnight sweep experiments, testing=sweep_/exp_id_), or Automated (characterization runs, testing=test_/run_id_).">
+              <span class="ctrl-label-text">Source:</span>
               <button
                 v-for="c in ([
-                  { value: 'all',  label: 'All' },
-                  { value: 'only', label: '🧪 Only' },
-                  { value: 'hide', label: 'Hide' }
+                  { value: 'all',       label: 'All' },
+                  { value: 'manual',    label: '👤 Manual' },
+                  { value: 'sweep',     label: '🌙 Sweep' },
+                  { value: 'automated', label: '🧪 Automated' }
                 ] as const)"
                 :key="c.value"
                 type="button"
                 class="class-chip"
-                :class="{ active: filters.harness === c.value }"
-                @click="filters.harness = c.value"
+                :class="{ active: filters.source === c.value }"
+                @click="filters.source = c.value"
               >{{ c.label }}</button>
             </div>
 
