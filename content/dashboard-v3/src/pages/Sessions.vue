@@ -1530,7 +1530,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
 
       <div class="panel">
         <div class="panel-header">
-          <div class="panel-title">Active Sessions <span v-if="loading" class="status-message">loading…</span></div>
+          <div class="panel-title">All Sessions <span v-if="loading" class="status-message">loading…</span></div>
         </div>
 
         <div class="picker-wrap">
