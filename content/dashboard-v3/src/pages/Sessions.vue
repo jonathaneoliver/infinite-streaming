@@ -138,7 +138,6 @@ function readStoredCustom(): { from: string; to: string } {
 const filters = ref<{
   player_id: string;
   group_id: string;
-  content_id: string;
   play_id: string;
   classification: 'all' | 'starred' | 'interesting' | 'other';
   // Test-harness origin filter. 'all' = no constraint, 'only' = keep
@@ -147,12 +146,6 @@ const filters = ref<{
   // surface without test-noise. See Characterization.vue for how
   // the framework stamps these labels at the start of each run.
   harness: 'all' | 'only' | 'hide';
-  // #673 — Scenario facets. platform/test are read from the testing= label
-  // tier (harnessPlatform / harnessTest); '' = no constraint. They sit
-  // alongside the harness tristate: Harness scopes "is this a test run at
-  // all", these narrow to a specific platform or test mode within that.
-  platform: string;
-  test: string;
   // Tristate label filter:
   //   - labels:        AND-required INCLUDES (row.labels must contain every entry)
   //   - labelsExclude: AND-required EXCLUDES (row.labels must contain NONE of these)
@@ -169,10 +162,9 @@ const filters = ref<{
   // OR-semantics: keep plays that contain ≥1 label in any selected category.
   categories: Category[];
 }>({
-  player_id: '', group_id: '', content_id: '', play_id: '',
+  player_id: '', group_id: '', play_id: '',
   classification: 'all',
   harness: 'all',
-  platform: '', test: '',
   labels: [], labelsExclude: [],
   scenario: [], scenarioExclude: [],
   categories: [],
@@ -245,6 +237,7 @@ const SCENARIO_FIELDS: { src: keyof Scenario; key: string; label: string }[] = [
   { src: 'platform',     key: 'platform', label: 'platform' },
   { src: 'device_model', key: 'device',   label: 'device' },
   { src: 'player_tech',  key: 'player',   label: 'player' },
+  { src: 'player_tech_version', key: 'player_ver', label: 'player ver' },
   { src: 'app_version',  key: 'app',      label: 'app' },
   { src: 'os_version',   key: 'os',       label: 'os' },
   { src: 'manifest_variant', key: 'variant', label: 'variant' }, // #679
@@ -549,10 +542,7 @@ function matches(r: SessionRow): boolean {
   const f = filters.value;
   return (!f.player_id || r.player_id === f.player_id)
     && (!f.group_id || r.group_id === f.group_id)
-    && (!f.content_id || r.content_id === f.content_id)
     && (!f.play_id || r.play_id === f.play_id)
-    && (!f.platform || rowPlatform(r) === f.platform)
-    && (!f.test || rowTest(r) === f.test)
     && matchesClassification(r)
     && matchesHarness(r)
     && matchesCategories(r)
@@ -561,16 +551,17 @@ function matches(r: SessionRow): boolean {
 }
 
 // Hierarchical label filter — mirrors the SessionDisplay event-filter
-// accordion. One tier per severity (error → critical → warning →
-// info → testing), each containing the distinct labels seen at that
-// tier with occurrence counts. Click a label chip to toggle inclusion;
-// click the tier header to toggle ALL labels in that tier. Issue
-// #474 follow-up.
-type Severity = 'error' | 'critical' | 'warning' | 'info' | 'testing';
+// accordion. One tier per severity (critical → error → warning →
+// info), each containing the distinct labels seen at that tier with
+// occurrence counts. Click a label chip to toggle inclusion; click the
+// tier header to toggle ALL labels in that tier. Issue #474 follow-up.
+// The test-harness `testing=` KV tier used to live here too; it moved
+// to the scenario/config panel — it's play *configuration* (platform /
+// mode / recipe / …), not a playback event. See HARNESS_FACET_KEYS.
+type Severity = 'error' | 'critical' | 'warning' | 'info';
 // User-facing ordering: Critical leads (the "🚨 something's actually
-// wrong" tier), then Error (player-error transitions), Warning, Info,
-// and finally Testing (test-harness KV metadata, #571 — recessive).
-const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info', 'testing'];
+// wrong" tier), then Error (player-error transitions), Warning, Info.
+const SEVERITY_ORDER: Severity[] = ['critical', 'error', 'warning', 'info'];
 const SEVERITY_META: Record<Severity, { label: string; bg: string; border: string; color: string }> = {
   // Critical wears red (worst-looking — user-visible playback
   // breakage); Error wears orange. Whole palette pair moves
@@ -580,9 +571,6 @@ const SEVERITY_META: Record<Severity, { label: string; bg: string; border: strin
   critical: { label: 'Critical', bg: '#fee2e2', border: '#fca5a5', color: '#7f1d1d' },
   warning:  { label: 'Warning',  bg: '#fef3c7', border: '#fcd34d', color: '#854d0e' },
   info:     { label: 'Info',     bg: '#f0fdf4', border: '#a7f3d0', color: '#1f2937' },
-  // Testing wears muted slate — recessive test-harness metadata, not
-  // playback signal (#571). Mirrors SessionDisplay.vue.
-  testing:  { label: 'Testing',  bg: '#f1f5f9', border: '#cbd5e1', color: '#475569' },
 };
 
 interface LabelEntry {
@@ -598,7 +586,7 @@ interface LabelTier {
 
 const labelTiers = computed<LabelTier[]>(() => {
   const acc: Record<Severity, Map<string, number>> = {
-    error: new Map(), critical: new Map(), warning: new Map(), info: new Map(), testing: new Map(),
+    error: new Map(), critical: new Map(), warning: new Map(), info: new Map(),
   };
   for (const r of rows.value) {
     const pairs = Array.isArray(r.labels) ? r.labels : [];
@@ -633,7 +621,7 @@ const labelTiers = computed<LabelTier[]>(() => {
 // info collapsed (matches SessionDisplay's expandedTiers initial
 // state — the user usually wants to scan the worst tiers first).
 const expandedLabelTiers = ref<Record<Severity, boolean>>({
-  error: true, critical: true, warning: false, info: false, testing: false,
+  error: true, critical: true, warning: false, info: false,
 });
 function toggleLabelTier(sev: Severity) {
   expandedLabelTiers.value[sev] = !expandedLabelTiers.value[sev];
@@ -729,12 +717,35 @@ const hasAnyLabels = computed(() => labelTiers.value.some((t) => t.total > 0));
 // dimensions filter manual + harness plays alike. platform/test keep their
 // dropdowns above; this hierarchical panel (same tristate as the label filter)
 // covers the rest.
-const SCENARIO_FACET_KEYS = ['os', 'device', 'variant', 'build', 'app', 'player', 'run'] as const;
+const SCENARIO_FACET_KEYS = ['platform', 'test', 'os', 'device', 'variant', 'build', 'app', 'player', 'player_ver', 'content', 'run'] as const;
 const SCENARIO_FACET_LABEL: Record<string, string> = {
-  os: 'OS', device: 'Device', variant: 'Segment', build: 'Build',
-  app: 'App', player: 'Player', run: 'Run',
+  platform: 'Platform', test: 'Test', os: 'OS', device: 'Device', variant: 'Segment',
+  build: 'Build', app: 'App', player: 'Player', player_ver: 'Player ver',
+  content: 'Content', run: 'Run',
 };
+// Test-harness config facets — the `testing=<key>_<value>` KV tier the
+// characterization / sweep framework stamps on the plays it runs. This is
+// play *configuration* (platform / mode / recipe / …), so it filters here in
+// the scenario/config panel rather than in the label (event) filter. Keys with
+// a dedicated control elsewhere are intentionally omitted: platform + test have
+// their own dropdowns, run_id is the 'run' scenario facet above. Each value is
+// the `testing=<key>_…` tail (findLabelTail); the underscore split is why the
+// keys must be enumerated here, not derived.
+const HARNESS_FACET_KEYS = ['mode', 'recipe', 'class', 'kind', 'arm', 'sweep', 'exp_id', 'group', 'verdict', 'why', 'protocol'] as const;
+const HARNESS_FACET_LABEL: Record<string, string> = {
+  mode: 'Mode', recipe: 'Recipe', class: 'Class', kind: 'Kind', arm: 'Arm',
+  sweep: 'Sweep', exp_id: 'Experiment', group: 'Group', verdict: 'Verdict',
+  why: 'Why', protocol: 'Protocol',
+};
+const HARNESS_FACET_SET: ReadonlySet<string> = new Set(HARNESS_FACET_KEYS);
 function scenarioValueFor(r: SessionRow, key: string): string {
+  // platform/test prefer the scenario object but fall back to the testing=
+  // tail (rowPlatform/rowTest); content reads the row's content_id (it has no
+  // scenario chip — the Content column owns it).
+  if (key === 'platform') return rowPlatform(r);
+  if (key === 'test') return rowTest(r);
+  if (key === 'content') return String(r.content_id ?? '');
+  if (HARNESS_FACET_SET.has(key)) return findLabelTail(r, `${key}_`) ?? '';
   const fld = SCENARIO_FIELDS.find((f) => f.key === key);
   if (!fld) return '';
   const sc = r.scenario ?? scenarioFromRow(r);
@@ -744,28 +755,37 @@ function scenarioValueFor(r: SessionRow, key: string): string {
   return v;
 }
 interface ScenarioFacet { key: string; label: string; entries: { value: string; count: number }[]; total: number }
-const scenarioFacets = computed<ScenarioFacet[]>(() => {
+function buildFacets(keys: readonly string[], labels: Record<string, string>): ScenarioFacet[] {
   const counts = new Map<string, Map<string, number>>();
-  for (const k of SCENARIO_FACET_KEYS) counts.set(k, new Map());
+  for (const k of keys) counts.set(k, new Map());
   for (const r of rows.value) {
-    for (const k of SCENARIO_FACET_KEYS) {
+    for (const k of keys) {
       const v = scenarioValueFor(r, k);
       if (!v) continue;
       const m = counts.get(k)!;
       m.set(v, (m.get(v) ?? 0) + 1);
     }
   }
-  return SCENARIO_FACET_KEYS
+  return keys
     .map((k) => {
       const entries = [...counts.get(k)!.entries()]
         .map(([value, count]) => ({ value, count }))
         .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
-      return { key: k, label: SCENARIO_FACET_LABEL[k], entries, total: entries.length };
+      return { key: k, label: labels[k], entries, total: entries.length };
     })
     .filter((g) => g.total > 0);
-});
-const hasAnyScenario = computed(() => scenarioFacets.value.length > 0);
-const expandedScenario = ref<Record<string, boolean>>({ os: true, device: true, variant: true });
+}
+const scenarioFacets = computed<ScenarioFacet[]>(() => buildFacets(SCENARIO_FACET_KEYS, SCENARIO_FACET_LABEL));
+const harnessFacets = computed<ScenarioFacet[]>(() => buildFacets(HARNESS_FACET_KEYS, HARNESS_FACET_LABEL));
+const hasAnyScenario = computed(() => scenarioFacets.value.length > 0 || harnessFacets.value.length > 0);
+const hasAnyHarness = computed(() => harnessFacets.value.length > 0);
+// Group lookups span both facet lists — scenario + harness share the same
+// `key=value` encoding and tristate machinery, so state helpers resolve a key
+// against either.
+function findFacet(key: string): ScenarioFacet | undefined {
+  return scenarioFacets.value.find((x) => x.key === key) ?? harnessFacets.value.find((x) => x.key === key);
+}
+const expandedScenario = ref<Record<string, boolean>>({ os: true, device: true, variant: true, mode: true, recipe: true });
 function toggleScenarioGroup(key: string) { expandedScenario.value[key] = !expandedScenario.value[key]; }
 function scenarioEnc(key: string, value: string): string { return `${key}=${value}`; }
 function scenarioState(key: string, value: string): LabelState {
@@ -783,7 +803,7 @@ function cycleScenarioFilter(key: string, value: string) {
   else if (cur === 'include') filters.value.scenarioExclude = [...filters.value.scenarioExclude, enc];
 }
 function scenarioGroupState(key: string): TierState {
-  const g = scenarioFacets.value.find((x) => x.key === key);
+  const g = findFacet(key);
   if (!g || !g.entries.length) return 'none';
   let inc = 0, exc = 0;
   for (const e of g.entries) {
@@ -797,7 +817,7 @@ function scenarioGroupState(key: string): TierState {
 }
 function toggleScenarioAll(key: string, e: MouseEvent) {
   e.stopPropagation();
-  const g = scenarioFacets.value.find((x) => x.key === key);
+  const g = findFacet(key);
   if (!g || !g.entries.length) return;
   const encs = g.entries.map((x) => scenarioEnc(key, x.value));
   const state = scenarioGroupState(key);
@@ -819,6 +839,25 @@ const scenarioFilterCount = computed(() =>
 function clearScenarioFilter() {
   filters.value.scenario = [];
   filters.value.scenarioExclude = [];
+}
+// Click-to-filter from the table cells. A left click on the Player cell scopes
+// the list to that player_id (toggle off if already scoped). A left click on a
+// Categories chip sets that dimension's filter — platform/test drive their own
+// string fields; every other key is a scenario/harness facet (toggle include).
+function filterByPlayer(pid: string) {
+  if (!pid) return;
+  filters.value.player_id = filters.value.player_id === pid ? '' : pid;
+}
+function filterByCategory(key: string, value: string) {
+  if (!value) return;
+  const enc = scenarioEnc(key, value);
+  const wasInc = filters.value.scenario.includes(enc);
+  filters.value.scenario = filters.value.scenario.filter((v) => v !== enc);
+  filters.value.scenarioExclude = filters.value.scenarioExclude.filter((v) => v !== enc);
+  if (!wasInc) filters.value.scenario = [...filters.value.scenario, enc];
+}
+function isCategoryActive(key: string, value: string): boolean {
+  return filters.value.scenario.includes(scenarioEnc(key, value));
 }
 function matchesScenario(r: SessionRow): boolean {
   const inc = filters.value.scenario;
@@ -866,16 +905,13 @@ const sorted = computed(() => {
 
 // Cascading distinct-values for the four selects: each select's
 // option set is filtered by the SELECTIONS to its left.
-function distinctFor(key: 'player_id' | 'group_id' | 'content_id' | 'play_id'): string[] {
+function distinctFor(key: 'player_id' | 'group_id' | 'play_id'): string[] {
   const f = filters.value;
   const pool = rows.value.filter((r) => {
     if (key === 'player_id') return true;
     if (!f.player_id || r.player_id === f.player_id) {
       if (key === 'group_id') return true;
-      if (!f.group_id || r.group_id === f.group_id) {
-        if (key === 'content_id') return true;
-        return !f.content_id || r.content_id === f.content_id;
-      }
+      return !f.group_id || r.group_id === f.group_id;
     }
     return false;
   });
@@ -883,35 +919,21 @@ function distinctFor(key: 'player_id' | 'group_id' | 'content_id' | 'play_id'): 
 }
 const playerOptions = computed(() => distinctFor('player_id'));
 const groupOptions = computed(() => distinctFor('group_id'));
-const contentOptions = computed(() => distinctFor('content_id'));
 const playOptions = computed(() => distinctFor('play_id'));
-// #673 — Scenario facet option sets. Derived (not row keys), so distinctFor
-// can't build them; map each row through the harness label-tail readers and
-// dedupe. Independent of the four id selects — a platform spans many plays.
-const platformOptions = computed(() =>
-  Array.from(new Set(rows.value.map((r) => rowPlatform(r)).filter(Boolean))).sort());
-const testOptions = computed(() =>
-  Array.from(new Set(rows.value.map((r) => rowTest(r)).filter(Boolean))).sort());
 
 // When a parent filter narrows enough that the current value is no
 // longer in the visible set, clear it. Mirrors `fillSelect` in the
 // legacy code.
 watch(playerOptions, (opts) => { if (filters.value.player_id && !opts.includes(filters.value.player_id)) filters.value.player_id = ''; });
 watch(groupOptions, (opts) => { if (filters.value.group_id && !opts.includes(filters.value.group_id)) filters.value.group_id = ''; });
-watch(contentOptions, (opts) => { if (filters.value.content_id && !opts.includes(filters.value.content_id)) filters.value.content_id = ''; });
 watch(playOptions, (opts) => { if (filters.value.play_id && !opts.includes(filters.value.play_id)) filters.value.play_id = ''; });
-watch(platformOptions, (opts) => { if (filters.value.platform && !opts.includes(filters.value.platform)) filters.value.platform = ''; });
-watch(testOptions, (opts) => { if (filters.value.test && !opts.includes(filters.value.test)) filters.value.test = ''; });
 
 function clearFilters() {
   filters.value.player_id = '';
   filters.value.group_id = '';
-  filters.value.content_id = '';
   filters.value.play_id = '';
   filters.value.classification = 'all';
   filters.value.harness = 'all';
-  filters.value.platform = '';
-  filters.value.test = '';
   filters.value.labels = [];
   filters.value.labelsExclude = [];
   filters.value.scenario = [];
@@ -1339,7 +1361,7 @@ const COLUMNS = [
   { key: 'duration_ms',      label: 'Duration',   type: 'number' as const,  sortable: true },
   { key: 'player_id',        label: 'Player',     type: 'string' as const,  sortable: true },
   { key: 'content_id',       label: 'Content',    type: 'string' as const,  sortable: true },
-  { key: 'scenario',         label: 'Scenario',   type: 'string' as const,  sortable: false },
+  { key: 'scenario',         label: 'Categories', type: 'string' as const,  sortable: false },
   { key: 'play_id',          label: 'Play ID',    type: 'string' as const,  sortable: true },
   { key: 'group_id',         label: 'Group',      type: 'string' as const,  sortable: true },
   { key: 'last_state',       label: 'State',      type: 'string' as const,  sortable: true },
@@ -1547,13 +1569,6 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
               </select>
             </label>
             <label class="ctrl-label">
-              <span>Content:</span>
-              <select v-model="filters.content_id" class="ctrl-input">
-                <option value="">all ({{ contentOptions.length }})</option>
-                <option v-for="v in contentOptions" :key="v" :value="v">{{ v }}</option>
-              </select>
-            </label>
-            <label class="ctrl-label">
               <span>Play:</span>
               <select v-model="filters.play_id" class="ctrl-input">
                 <option value="">all ({{ playOptions.length }})</option>
@@ -1607,23 +1622,8 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
               >{{ CATEGORY_TAG[cat].tag }}</button>
             </div>
 
-            <!-- #673 — Scenario facets. Only rendered when the current rows
-                 carry harness-stamped platform/test metadata, so manual-only
-                 views aren't cluttered with empty selects. -->
-            <label v-if="platformOptions.length" class="ctrl-label">
-              <span>Platform:</span>
-              <select v-model="filters.platform" class="ctrl-input">
-                <option value="">all ({{ platformOptions.length }})</option>
-                <option v-for="v in platformOptions" :key="v" :value="v">{{ v }}</option>
-              </select>
-            </label>
-            <label v-if="testOptions.length" class="ctrl-label">
-              <span>Test:</span>
-              <select v-model="filters.test" class="ctrl-input">
-                <option value="">all ({{ testOptions.length }})</option>
-                <option v-for="v in testOptions" :key="v" :value="v">{{ v }}</option>
-              </select>
-            </label>
+            <!-- #673 — platform / test / content are now facets in the
+                 Categorical filter panel below (folded out of these dropdowns). -->
 
             <button type="button" class="btn btn-secondary" @click="clearFilters">Clear filters</button>
             <span class="match-count">{{ matchCount }}</span>
@@ -1647,7 +1647,7 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                harness plays alike. -->
           <div class="label-filter-accordion" v-if="hasAnyScenario">
             <div class="label-filter-head">
-              <span class="ctrl-label-text">Filter by scenario:</span>
+              <span class="ctrl-label-text">Categorical filter:</span>
               <button
                 v-if="scenarioFilterCount"
                 type="button"
@@ -1714,11 +1714,71 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                 </button>
               </div>
             </div>
+            <div class="lf-subhead" v-if="hasAnyHarness">Test config <span class="lf-subhead-hint">(harness-run plays)</span></div>
+            <div
+              v-for="g in harnessFacets"
+              :key="g.key"
+              class="lf-tier"
+              :class="{ expanded: expandedScenario[g.key], 'tier-active': scenarioGroupState(g.key) !== 'none' }"
+              :style="{ '--tier-bg': '#eef2ff', '--tier-border': '#c7d2fe', '--tier-color': '#3730a3' }"
+            >
+              <div class="lf-tier-head">
+                <button
+                  type="button"
+                  class="lf-chevron"
+                  @click="toggleScenarioGroup(g.key)"
+                  :title="expandedScenario[g.key] ? 'Collapse' : 'Expand'"
+                >{{ expandedScenario[g.key] ? '▾' : '▸' }}</button>
+                <button
+                  type="button"
+                  class="lf-tier-name"
+                  @click="toggleScenarioAll(g.key, $event)"
+                  :title="`Cycle ALL ${g.entries.length} ${g.label} values:  none → include → exclude → none`"
+                >
+                  <span class="lf-tier-dot" :class="'sel-' + scenarioGroupState(g.key)" aria-hidden="true" />
+                  <span class="lf-tier-text">{{ g.label }}</span>
+                  <span class="lf-tier-pill">{{ g.total }}</span>
+                </button>
+                <div class="lf-preview" v-if="!expandedScenario[g.key] && g.total">
+                  <button
+                    v-for="e in g.entries.slice(0, 5)"
+                    :key="e.value"
+                    type="button"
+                    class="lf-preview-chip"
+                    :class="'state-' + scenarioState(g.key, e.value)"
+                    @click.stop="cycleScenarioFilter(g.key, e.value)"
+                    :title="`${g.label}=${e.value}\nclick: none → include → exclude → none`"
+                  >{{ e.value }} · {{ e.count }}</button>
+                  <span v-if="g.entries.length > 5" class="lf-preview-more">
+                    +{{ g.entries.length - 5 }} more
+                  </span>
+                </div>
+              </div>
+              <div class="lf-tier-body" v-if="expandedScenario[g.key] && g.total">
+                <button
+                  v-for="e in g.entries"
+                  :key="e.value"
+                  type="button"
+                  class="lf-label-row"
+                  :class="'state-' + scenarioState(g.key, e.value)"
+                  @click="cycleScenarioFilter(g.key, e.value)"
+                  :title="`${g.label}=${e.value}\nclick: none → include → exclude → none`"
+                >
+                  <span class="lf-label-check">{{
+                    scenarioState(g.key, e.value) === 'include' ? '✓'
+                    : scenarioState(g.key, e.value) === 'exclude' ? '⊘'
+                    : '○'
+                  }}</span>
+                  <span class="lf-label-name">{{ e.value }}</span>
+                  <span class="lf-label-count">{{ e.count }}</span>
+                </button>
+              </div>
+            </div>
           </div>
 
           <div class="label-filter-accordion" v-if="hasAnyLabels">
             <div class="label-filter-head">
-              <span class="ctrl-label-text">Filter by label:</span>
+              <span class="ctrl-label-text">Results filter:</span>
               <button
                 v-if="labelFilterCount"
                 type="button"
@@ -1864,7 +1924,15 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                     </span>
                   </td>
                   <td>{{ fmtDur(r.duration_ms) }}</td>
-                  <td>{{ r.player_id || '' }}</td>
+                  <td class="cell-player">
+                    <span
+                      v-if="r.player_id"
+                      class="player-filter"
+                      :class="{ 'filter-active': filters.player_id === r.player_id }"
+                      :title="filters.player_id === r.player_id ? 'Filtering to this player — click to clear' : 'Click to filter the list to this player_id'"
+                      @click.stop="filterByPlayer(r.player_id)"
+                    >{{ r.player_id }}</span>
+                  </td>
                   <td>
                     <div>{{ r.content_id || '' }}</div>
                   </td>
@@ -1874,8 +1942,9 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                         v-for="f in scenario(r)!.fields"
                         :key="f.key"
                         class="scenario-chip"
-                        :class="'scenario-' + f.key"
-                        :title="scenario(r)!.tooltip"
+                        :class="['scenario-' + f.key, { 'chip-active': isCategoryActive(f.key, f.value) }]"
+                        :title="`${f.label}=${f.value}\nclick: filter to this ${f.label} (click again to clear)`"
+                        @click.stop="filterByCategory(f.key, f.value)"
                       ><span class="scenario-key">{{ f.label }}</span>{{ f.value }}</span>
                     </template>
                     <span v-else class="dash">—</span>
@@ -2094,6 +2163,27 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   color: #065f46;
   font: 500 10px ui-monospace, SFMono-Regular, monospace;
   white-space: nowrap;
+  cursor: pointer;
+}
+.scenario-chip:hover { filter: brightness(0.96); box-shadow: 0 0 0 1px #6ee7b7; }
+.scenario-chip.chip-active {
+  background: #059669;
+  border-color: #047857;
+  color: #ecfdf5;
+}
+.scenario-chip.chip-active .scenario-key { color: #d1fae5; opacity: 0.9; }
+/* Player cell — click to scope the list to one player_id. */
+.cell-player { max-width: 260px; }
+.player-filter {
+  cursor: pointer;
+  font: 500 11px ui-monospace, SFMono-Regular, monospace;
+  border-bottom: 1px dotted #94a3b8;
+}
+.player-filter:hover { color: #2563eb; border-bottom-color: #2563eb; }
+.player-filter.filter-active {
+  color: #1d4ed8;
+  font-weight: 700;
+  border-bottom: 1px solid #1d4ed8;
 }
 .scenario-key {
   font-weight: 700;
@@ -2313,6 +2403,20 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
   border-radius: 8px;
   background: var(--tier-bg);
   padding: 4px 6px;
+}
+.lf-subhead {
+  margin: 6px 2px 2px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+.lf-subhead-hint {
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #94a3b8;
 }
 .lf-tier.dim { opacity: 0.45; }
 .lf-tier.tier-active { box-shadow: 0 0 0 1.5px var(--tier-color) inset; }
