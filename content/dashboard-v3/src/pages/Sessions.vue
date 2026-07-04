@@ -1609,8 +1609,8 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
               >{{ c.label }}</button>
             </div>
 
-            <div class="class-chip-wrap" title="Filter by event category (docs/EVENT_TAXONOMY.md). Multi-select; keeps plays containing ≥1 label in any selected category.">
-              <span class="ctrl-label-text">Category:</span>
+            <div class="class-chip-wrap" title="Filter by event kind (docs/EVENT_TAXONOMY.md): act=actions, inj=injected faults, cond=conditions/results, rxn=player reactions. Multi-select; keeps plays with ≥1 label in any selected kind.">
+              <span class="ctrl-label-text">Event kind:</span>
               <button
                 v-for="cat in CATEGORY_ORDER"
                 :key="cat"
