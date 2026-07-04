@@ -3951,6 +3951,20 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, np NetemParams) 
 	info := fmt.Sprintf(`{"mode":%q,"steps":%d,"rate_mbps_first":%.3f,"delay_ms":%d,"packet_loss":%.3f}`,
 		mode, stepCount, firstRate, delayMs, loss)
 	a.emitControlEventForPort(port, "proxy", "pattern_enabled", info)
+	// Co-locate a label_changed with pattern_enabled: the session's harness labels
+	// (sweep RunLabels — platform/mode/recipe/… — set on _v2_labels at bootstrap but
+	// never surfaced as a control event) now land on the play with the SAME
+	// attribution pattern_enabled just proved. This is where the play_id is present,
+	// unlike the too-early config-on-connect / reattach binds. Forwarder edge-dedups
+	// re-arms; no-label sessions skip it.
+	for _, ls := range a.sessionsView() { // #740 read-only: reads _v2_labels
+		if getString(ls, "x_forwarded_port") == strconv.Itoa(port) {
+			if lbls, ok := ls["_v2_labels"]; ok && lbls != nil {
+				a.emitControlEventForPort(port, "proxy", "label_changed", labelsInfoJSON(lbls))
+			}
+			break
+		}
+	}
 	go a.runShapePatternLoop(ctx, port, cleanSteps, np)
 	return nil
 }
@@ -5717,6 +5731,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				if stripped := stripProxyArgs(r.URL.RawQuery); stripped != "" {
 					newURL = newURL + "?" + stripped
 				}
+				// The app's first request on the base port reattaches to its pre-configured
+				// session; that bind/sweep-bootstrap path set labels but emitted no
+				// label_changed, and this reattach is the actual play-start — surface the
+				// session labels now, attributed to the play (same per-port channel + timing
+				// that makes pattern_enabled land). Harmless on auto-recovery/loop re-hits
+				// (forwarder edge-dedups labels); no-label sessions skip it.
+				if lbls, ok := existing["_v2_labels"]; ok && lbls != nil {
+					if p, perr := strconv.Atoi(getString(existing, "x_forwarded_port")); perr == nil {
+						a.emitControlEventForPort(p, "proxy", "label_changed", labelsInfoJSON(lbls))
+					}
+				}
 				log.Printf("Redirecting to existing session URL: %s %s -> %s", newURL, externalPort, newPort)
 				http.Redirect(w, r, newURL, http.StatusFound)
 				return
@@ -6073,6 +6098,21 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			manifestURL = manifestURL + "?" + r.URL.RawQuery
 		}
 		a.recordSessionStart(sessionData, manifestURL)
+		// Config-on-connect materialized labels onto the session (harness
+		// RunLabels: sweep/exp_id/platform/mode/recipe/… ) but — unlike the PATCH
+		// API — never surfaced them as a `label_changed` control event, so they
+		// never reached the forwarder's `testing=` tier and sweep plays were
+		// unattributable in the Sessions Test/Platform facets. Emit it here, right
+		// after session_start, so config-on-connect plays carry the same testing=
+		// metadata PATCH-stamped plays do. Mirrors the pattern_enabled emit, which
+		// already lands on these plays via the same per-port control channel.
+		if hasConfig {
+			if lbls, ok := configPatch["labels"]; ok && lbls != nil {
+				if p, perr := strconv.Atoi(assignedInternalPort); perr == nil {
+					a.emitControlEventForPort(p, "proxy", "label_changed", labelsInfoJSON(lbls))
+				}
+			}
+		}
 		host := hostWithoutPort(r.Host)
 		scheme := requestScheme(r)
 		newURL := fmt.Sprintf("%s://%s:%s/%s", scheme, host, assignedExternalPort, escapedPath)
