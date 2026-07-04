@@ -140,11 +140,6 @@ const filters = ref<{
   group_id: string;
   play_id: string;
   classification: 'all' | 'starred' | 'interesting' | 'other';
-  // Session origin filter. 'all' = no constraint; otherwise keep only plays of
-  // that origin — 'manual' (user-initiated, no harness markers), 'sweep' (sweep
-  // framework, testing=sweep_/exp_id_), or 'automated' (characterization runs,
-  // testing=test_/run_id_). See sessionSource().
-  source: 'all' | 'manual' | 'sweep' | 'automated';
   // Tristate label filter:
   //   - labels:        AND-required INCLUDES (row.labels must contain every entry)
   //   - labelsExclude: AND-required EXCLUDES (row.labels must contain NONE of these)
@@ -163,7 +158,6 @@ const filters = ref<{
 }>({
   player_id: '', group_id: '', play_id: '',
   classification: 'all',
-  source: 'all',
   labels: [], labelsExclude: [],
   scenario: [], scenarioExclude: [],
   categories: [],
@@ -205,12 +199,6 @@ function sessionSource(r: SessionRow): SessionSource {
 const SOURCE_LABEL: Record<SessionSource, string> = {
   manual: '👤 manual', sweep: '🌙 sweep', automated: '🧪 automated',
 };
-// Click the Categories-cell source chip to drive the Source picker (toggle off
-// to 'all' if it's already the active origin).
-function filterBySource(r: SessionRow) {
-  const s = sessionSource(r);
-  filters.value.source = filters.value.source === s ? 'all' : s;
-}
 // #678 — scenario-aware accessors: prefer the server `scenario` object, fall
 // back to the testing= label tails. Used by the Platform/Test facets so they
 // agree with the Scenario cell regardless of which source populated it.
@@ -533,10 +521,6 @@ function matchesLabels(r: SessionRow): boolean {
   return true;
 }
 
-function matchesSource(r: SessionRow): boolean {
-  const s = filters.value.source;
-  return s === 'all' || sessionSource(r) === s;
-}
 
 // Category facet — OR-semantics: with any category selected, keep plays
 // that contain ≥1 label in any of them. Empty selection = no constraint.
@@ -557,7 +541,6 @@ function matches(r: SessionRow): boolean {
     && (!f.group_id || r.group_id === f.group_id)
     && (!f.play_id || r.play_id === f.play_id)
     && matchesClassification(r)
-    && matchesSource(r)
     && matchesCategories(r)
     && matchesScenario(r)
     && matchesLabels(r);
@@ -730,11 +713,11 @@ const hasAnyLabels = computed(() => labelTiers.value.some((t) => t.total > 0));
 // dimensions filter manual + harness plays alike. platform/test keep their
 // dropdowns above; this hierarchical panel (same tristate as the label filter)
 // covers the rest.
-const SCENARIO_FACET_KEYS = ['platform', 'test', 'os', 'device', 'variant', 'build', 'app', 'player', 'player_ver', 'content', 'run'] as const;
+const SCENARIO_FACET_KEYS = ['source', 'platform', 'test', 'os', 'device', 'variant', 'build', 'app', 'player', 'player_ver', 'content', 'run'] as const;
 const SCENARIO_FACET_LABEL: Record<string, string> = {
-  platform: 'Platform', test: 'Test', os: 'OS', device: 'Device', variant: 'Segment',
-  build: 'Build', app: 'App', player: 'Player', player_ver: 'Player ver',
-  content: 'Content', run: 'Run',
+  source: 'Source', platform: 'Platform', test: 'Test', os: 'OS', device: 'Device',
+  variant: 'Segment', build: 'Build', app: 'App', player: 'Player',
+  player_ver: 'Player ver', content: 'Content', run: 'Run',
 };
 // Test-harness config facets — the `testing=<key>_<value>` KV tier the
 // characterization / sweep framework stamps on the plays it runs. This is
@@ -752,9 +735,11 @@ const HARNESS_FACET_LABEL: Record<string, string> = {
 };
 const HARNESS_FACET_SET: ReadonlySet<string> = new Set(HARNESS_FACET_KEYS);
 function scenarioValueFor(r: SessionRow, key: string): string {
-  // platform/test prefer the scenario object but fall back to the testing=
-  // tail (rowPlatform/rowTest); content reads the row's content_id (it has no
-  // scenario chip — the Content column owns it).
+  // source is derived (manual/sweep/automated); platform/test prefer the
+  // scenario object but fall back to the testing= tail (rowPlatform/rowTest);
+  // content reads the row's content_id (it has no scenario chip — the Content
+  // column owns it).
+  if (key === 'source') return sessionSource(r);
   if (key === 'platform') return rowPlatform(r);
   if (key === 'test') return rowTest(r);
   if (key === 'content') return String(r.content_id ?? '');
@@ -798,7 +783,7 @@ const hasAnyHarness = computed(() => harnessFacets.value.length > 0);
 function findFacet(key: string): ScenarioFacet | undefined {
   return scenarioFacets.value.find((x) => x.key === key) ?? harnessFacets.value.find((x) => x.key === key);
 }
-const expandedScenario = ref<Record<string, boolean>>({ os: true, device: true, variant: true, mode: true, recipe: true });
+const expandedScenario = ref<Record<string, boolean>>({ source: true, os: true, device: true, variant: true, mode: true, recipe: true });
 function toggleScenarioGroup(key: string) { expandedScenario.value[key] = !expandedScenario.value[key]; }
 function scenarioEnc(key: string, value: string): string { return `${key}=${value}`; }
 function scenarioState(key: string, value: string): LabelState {
@@ -946,7 +931,6 @@ function clearFilters() {
   filters.value.group_id = '';
   filters.value.play_id = '';
   filters.value.classification = 'all';
-  filters.value.source = 'all';
   filters.value.labels = [];
   filters.value.labelsExclude = [];
   filters.value.scenario = [];
@@ -1606,23 +1590,6 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
               >{{ c.label }}</button>
             </div>
 
-            <div class="class-chip-wrap" title="Filter by session origin — Manual (user-initiated), Sweep (overnight sweep experiments, testing=sweep_/exp_id_), or Automated (characterization runs, testing=test_/run_id_).">
-              <span class="ctrl-label-text">Source:</span>
-              <button
-                v-for="c in ([
-                  { value: 'all',       label: 'All' },
-                  { value: 'manual',    label: '👤 Manual' },
-                  { value: 'sweep',     label: '🌙 Sweep' },
-                  { value: 'automated', label: '🧪 Automated' }
-                ] as const)"
-                :key="c.value"
-                type="button"
-                class="class-chip"
-                :class="{ active: filters.source === c.value }"
-                @click="filters.source = c.value"
-              >{{ c.label }}</button>
-            </div>
-
             <div class="class-chip-wrap" title="Filter by event kind (docs/EVENT_TAXONOMY.md): act=actions, inj=injected faults, cond=conditions/results, rxn=player reactions. Multi-select; keeps plays with ≥1 label in any selected kind.">
               <span class="ctrl-label-text">Event kind:</span>
               <button
@@ -1953,9 +1920,9 @@ const showCustomInputs = computed(() => activeRangeId.value === 'custom');
                   <td class="cell-scenario">
                     <span
                       class="scenario-chip scenario-source"
-                      :class="'source-' + sessionSource(r) + (filters.source === sessionSource(r) ? ' source-active' : '')"
+                      :class="'source-' + sessionSource(r) + (isCategoryActive('source', sessionSource(r)) ? ' source-active' : '')"
                       :title="`source=${sessionSource(r)}\nclick: filter to ${sessionSource(r)} plays (click again to clear)`"
-                      @click.stop="filterBySource(r)"
+                      @click.stop="filterByCategory('source', sessionSource(r))"
                     ><span class="scenario-key">src</span>{{ SOURCE_LABEL[sessionSource(r)] }}</span>
                     <template v-if="scenario(r)">
                       <span
