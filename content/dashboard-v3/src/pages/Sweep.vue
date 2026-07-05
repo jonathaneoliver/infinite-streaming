@@ -175,6 +175,32 @@ async function toggleScope(dim: string, val: string) {
   loadScope();
 }
 
+// ── Delete / clear (soft-delete via /api/v2/sweep/delete — tombstone) ─────────
+const busy = ref(false);
+async function postDelete(expId: string) {
+  const resp = await fetch('/analytics/api/v2/sweep/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ exp_id: expId }),
+  });
+  if (!resp.ok) throw new Error(`delete ${expId}: HTTP ${resp.status}`);
+  experiments.value = experiments.value.filter((e) => e.exp_id !== expId); // optimistic
+}
+async function deleteExperiment(expId: string) {
+  if (!window.confirm(`Delete experiment\n  ${expId}\n?  (soft-delete / tombstone — a seed can be re-added later)`)) return;
+  busy.value = true;
+  try { await postDelete(expId); } catch (e) { error.value = e instanceof Error ? e.message : String(e); }
+  finally { busy.value = false; load(); }
+}
+async function clearStatus(s: string) {
+  const ids = byStatus.value[s].map((e) => e.exp_id);
+  if (!ids.length) return;
+  if (!window.confirm(`Delete all ${ids.length} '${STATUS_LABEL[s] || s}' experiment(s)?\nThis tombstones them (seeds can be re-added with 'sweep seed').`)) return;
+  busy.value = true;
+  try { for (const id of ids) await postDelete(id); } catch (e) { error.value = e instanceof Error ? e.message : String(e); }
+  finally { busy.value = false; load(); }
+}
+
 const disabledCount = computed(() =>
   Object.values(scope.value).reduce(
     (n, vs) => n + Object.values(vs).filter((en) => en === false).length, 0),
@@ -419,6 +445,14 @@ watch(viewMode, () => { if (viewMode.value === 'history') loadHistory(); });
           <h2>
             {{ STATUS_LABEL[s] }}
             <span class="count">{{ byStatus[s].length }}</span>
+            <button
+              v-if="byStatus[s].length"
+              type="button"
+              class="col-clear"
+              :disabled="busy"
+              :title="`Delete all ${byStatus[s].length} '${STATUS_LABEL[s]}' experiments (tombstone)`"
+              @click="clearStatus(s)"
+            >clear</button>
           </h2>
           <div class="cards">
             <article
@@ -455,6 +489,13 @@ watch(viewMode, () => { if (viewMode.value === 'history') loadHistory(); });
                   @click.stop
                 >{{ s === 'running' ? '▶ watch live' : '↗ viewer' }}</a>
                 <span v-else-if="s === 'running'" class="starting" title="session not bootstrapped yet">⏳ starting…</span>
+                <button
+                  type="button"
+                  class="del"
+                  :disabled="busy"
+                  title="Delete this experiment (soft-delete / tombstone)"
+                  @click.stop="deleteExperiment(e.exp_id)"
+                >🗑</button>
               </div>
             </article>
           </div>
@@ -505,8 +546,14 @@ watch(viewMode, () => { if (viewMode.value === 'history') loadHistory(); });
 .lft-block { margin: 0 0 1rem; }
 .board { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .8rem; align-items: start; }
 .col { background: var(--surface, #f8f9fa); border: 1px solid var(--border, #dadce0); border-radius: 8px; padding: .5rem; }
-.col h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary, #5f6368); margin: .2rem .2rem .6rem; display: flex; justify-content: space-between; }
-.count { background: var(--primary-blue-light, #e8f0fe); color: var(--primary-blue, #1a73e8); border-radius: 10px; padding: 0 .5rem; font-size: .75rem; }
+.col h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary, #5f6368); margin: .2rem .2rem .6rem; display: flex; align-items: center; gap: .4rem; }
+.count { margin-left: auto; background: var(--primary-blue-light, #e8f0fe); color: var(--primary-blue, #1a73e8); border-radius: 10px; padding: 0 .5rem; font-size: .75rem; }
+.col-clear { border: 1px solid var(--border, #dadce0); background: transparent; color: var(--text-secondary, #5f6368); border-radius: 6px; font-size: .68rem; padding: 1px 6px; cursor: pointer; text-transform: none; letter-spacing: 0; }
+.col-clear:hover:not(:disabled) { border-color: #d93025; color: #d93025; background: #fce8e6; }
+.col-clear:disabled { opacity: .5; cursor: default; }
+.del { border: 0; background: transparent; cursor: pointer; font-size: .8rem; line-height: 1; padding: 1px 3px; border-radius: 5px; opacity: .5; }
+.del:hover:not(:disabled) { opacity: 1; background: #fce8e6; }
+.del:disabled { opacity: .3; cursor: default; }
 .cards { display: flex; flex-direction: column; gap: .5rem; }
 .card { background: var(--background, #fff); border: 1px solid var(--border-light, #e8eaed); border-left: 3px solid var(--primary-blue, #1a73e8); border-radius: 6px; padding: .5rem .6rem; font-size: .82rem; cursor: pointer; }
 .card:hover { border-color: var(--border, #dadce0); }
