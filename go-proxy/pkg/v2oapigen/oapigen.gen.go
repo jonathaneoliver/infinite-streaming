@@ -971,6 +971,9 @@ type NetworkLogEntry struct {
 	ConnectMs   *float32 `json:"connect_ms,omitempty"`
 	ContentType *string  `json:"content_type,omitempty"`
 
+	// DeliveryRateMbps Kernel-measured shaped delivery rate (tcpi_delivery_rate, Mbps) sampled at end of transfer. Honest cross-check for bytes_out/transfer_ms, which over-reports on sub-buffer transfers (#850). Connection-level; 0/absent when not sampled (non-Linux build).
+	DeliveryRateMbps *float32 `json:"delivery_rate_mbps,omitempty"`
+
 	// DnsMs Upstream DNS resolution time.
 	DnsMs         *float32            `json:"dns_ms,omitempty"`
 	FaultAction   *string             `json:"fault_action,omitempty"`

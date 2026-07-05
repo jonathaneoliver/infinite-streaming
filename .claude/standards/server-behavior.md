@@ -551,7 +551,7 @@ compare the server's implied rate. Asserts (a) client full-segment rate ≈ cap
 while #850 is open; `REPORTED_RATE_STRICT=1` enforces ratio ≤ 3 at every size
 — the acceptance switch once `delivery_rate_mbps` ships.
 
-**Calibration data (2026-07-05, test-dev, HTTPS; cap 20 Mbps, 3 reps/size): PASS.**
+**Calibration data — pre-#850-fix (2026-07-05, test-dev, HTTPS; cap 20 Mbps, 3 reps/size): PASS.**
 
 | transfer size | client med Mbps | reported med Mbps | reported/client | verdict |
 |---|---|---|---|---|
@@ -562,12 +562,36 @@ while #850 is open; `REPORTED_RATE_STRICT=1` enforces ratio ≤ 3 at every size
 | 4 MB | 19.24 | 28.68 | 1.49× | recorded |
 | full segment (4.5 MB) | 19.17 | 30.09 | 1.57× | PASS |
 
-**Findings:** the #850 over-read is fully reproduced and quantified — up to
-~4900× at init-segment sizes, collapsing through a knee between 256 KB and
-1 MB (the kernel send-buffer size), settling to ~1.5× for multi-MB transfers
-(the residual = the buffered tail excluded from `transfer_ms`). Anything
-below ~1 MB in the network log's rate column is not a throughput measurement;
-use `mbps_transfer_rate` / (future) `delivery_rate_mbps`.
+**Calibration data — with `delivery_rate_mbps` deployed (2026-07-05, same setup): PASS.**
+
+| transfer size | cap | client (http_get) | reported (bytes/transfer_ms) | reported/client | delivery_rate | delivery/client |
+|---|---|---|---|---|---|---|
+| 1 KB | 20 | 0.08 | 264.26 | 3310.67× | 80.26 | 1005.49× |
+| 64 KB | 20 | 21.16 | 2774.01 | 131.10× | 58.80 | 2.78× |
+| 256 KB | 20 | 20.20 | 104.56 | 5.18× | **20.10** | **0.99×** |
+| 1 MB | 20 | 19.63 | 57.33 | 2.92× | **19.55** | **1.00×** |
+| 4 MB | 20 | 19.37 | 29.39 | 1.52× | **19.13** | **0.99×** |
+| full segment (4.4 MB) | 20 | 19.21 | 29.08 | 1.51× | **19.13** | **1.00×** |
+
+**Findings:**
+- The legacy over-read is fully reproduced and quantified — up to ~4900× at
+  init-segment sizes, collapsing through a knee between 256 KB and 1 MB (the
+  kernel send-buffer size), settling to ~1.5× for multi-MB transfers (the
+  residual = the buffered tail excluded from `transfer_ms`). Anything below
+  ~1 MB in the network log's *implied* rate column is not a throughput
+  measurement.
+- `delivery_rate_mbps` (kernel `tcpi_delivery_rate`, shipped for #850) reads
+  **0.99–1.00× the client-measured truth for every transfer ≥ 256 KB** —
+  honest at sizes where the implied figure is 3–255× off. The test now
+  ASSERTS delivery/client ∈ [0.5, 1.5] for ≥ 256 KB sizes.
+- Below ~64 KB the kernel hasn't delivered enough of *this* transfer for an
+  estimate, so `delivery_rate_mbps` reflects the connection's recent history
+  (it's socket-level) — still 4–5× closer than the implied figure, but treat
+  sub-64 KB per-request rates as unmeasurable server-side.
+- Plumbed end-to-end: proxy network log → forwarder → ClickHouse
+  `network_requests.delivery_rate_mbps` → `/api/v2/network_requests` +
+  session-bundle network stream. Dashboard chart/tooltip is the remaining
+  #850 follow-up.
 
 ---
 

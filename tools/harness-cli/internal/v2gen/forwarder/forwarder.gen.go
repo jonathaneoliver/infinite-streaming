@@ -873,6 +873,9 @@ type NetworkRequestRow struct {
 	ConnectMs   *float32 `json:"connect_ms,omitempty"`
 	ContentType *string  `json:"content_type,omitempty"`
 
+	// DeliveryRateMbps Kernel-measured shaped delivery rate (tcpi_delivery_rate, Mbps) sampled at end of transfer. Honest cross-check for bytes_out/transfer_ms, which over-reports on sub-buffer transfers (#850). Connection-level; 0/absent when not sampled (non-Linux build).
+	DeliveryRateMbps *float32 `json:"delivery_rate_mbps,omitempty"`
+
 	// DnsMs Upstream DNS resolution time.
 	DnsMs         *float32            `json:"dns_ms,omitempty"`
 	FaultAction   *string             `json:"fault_action,omitempty"`
@@ -921,6 +924,7 @@ type NetworkRow struct {
 	BytesIn              *int                     `json:"bytes_in,omitempty"`
 	BytesOut             *int                     `json:"bytes_out,omitempty"`
 	ClientWaitMs         *float32                 `json:"client_wait_ms,omitempty"`
+	DeliveryRateMbps     *float32                 `json:"delivery_rate_mbps,omitempty"`
 	EntryFingerprint     string                   `json:"entry_fingerprint"`
 	FaultAction          *string                  `json:"fault_action,omitempty"`
 	FaultCategory        *NetworkRowFaultCategory `json:"fault_category,omitempty"`
@@ -2100,6 +2104,14 @@ func (a *NetworkRow) UnmarshalJSON(b []byte) error {
 		delete(object, "client_wait_ms")
 	}
 
+	if raw, found := object["delivery_rate_mbps"]; found {
+		err = json.Unmarshal(raw, &a.DeliveryRateMbps)
+		if err != nil {
+			return fmt.Errorf("error reading 'delivery_rate_mbps': %w", err)
+		}
+		delete(object, "delivery_rate_mbps")
+	}
+
 	if raw, found := object["entry_fingerprint"]; found {
 		err = json.Unmarshal(raw, &a.EntryFingerprint)
 		if err != nil {
@@ -2273,6 +2285,13 @@ func (a NetworkRow) MarshalJSON() ([]byte, error) {
 		object["client_wait_ms"], err = json.Marshal(a.ClientWaitMs)
 		if err != nil {
 			return nil, fmt.Errorf("error marshaling 'client_wait_ms': %w", err)
+		}
+	}
+
+	if a.DeliveryRateMbps != nil {
+		object["delivery_rate_mbps"], err = json.Marshal(a.DeliveryRateMbps)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'delivery_rate_mbps': %w", err)
 		}
 	}
 

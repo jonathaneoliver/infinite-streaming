@@ -137,11 +137,11 @@ func TestServerReportedRate(t *testing.T) {
 			if e.RequestKind != "segment" {
 				continue
 			}
-			if size > 0 {
-				if e.RequestRange != wantRange {
-					continue
-				}
-			} else if e.RequestRange != "" || e.BytesOut <= 4*1024*1024 {
+			// The network log is session-scoped and the only segment
+			// requests this test makes are its own, so RequestRange
+			// alone tells ranged sweeps and full pulls apart (live-edge
+			// segment sizes vary run to run — don't gate on bytes).
+			if e.RequestRange != wantRange {
 				continue
 			}
 			if e.DeliveryRateMbps > 0 {
@@ -189,10 +189,21 @@ func TestServerReportedRate(t *testing.T) {
 			verdict = "FAIL (strict)"
 			t.Errorf("size %d: reported %.2f Mbps vs client %.2f (ratio %.2f > 3) — #850 over-read still present under REPORTED_RATE_STRICT", r.size, reportedMed, clientMed, ratio)
 		}
-		sizeLabel := fmt.Sprintf("%d B", r.size)
-		if isFull {
-			sizeLabel = fmt.Sprintf("full segment (%d B)", r.clientBytes)
+		// delivery_rate_mbps (#850's fix) must stay honest wherever the
+		// kernel has enough delivered data for a real estimate — ≥256 KB
+		// under a 20 Mbps cap in calibration. Below that it's a
+		// connection-level residue of earlier traffic (documented, not
+		// asserted).
+		if r.size == 0 || r.size >= 256*1024 {
+			if deliveryMed == 0 {
+				verdict = "no delivery rate"
+				t.Errorf("size %s: delivery_rate_mbps absent — the #850 sampling regressed (or a pre-#850 proxy is deployed)", sizeLabelFor(r.size, r.clientBytes))
+			} else if deliveryRatio > 1.5 || deliveryRatio < 0.5 {
+				verdict = "delivery dishonest"
+				t.Errorf("size %s: delivery_rate %.2f Mbps vs client-measured %.2f (ratio %.2f outside [0.5,1.5]) — the honest signal is no longer honest", sizeLabelFor(r.size, r.clientBytes), deliveryMed, clientMed, deliveryRatio)
+			}
 		}
+		sizeLabel := sizeLabelFor(r.size, r.clientBytes)
 		ratioLabel, deliveryLabel, deliveryRatioLabel := "—", "—", "—"
 		if ratio > 0 {
 			ratioLabel = fmt.Sprintf("%.2f×", ratio)
@@ -218,6 +229,13 @@ func TestServerReportedRate(t *testing.T) {
 	p.postServerReport(t, "server_reported_rate",
 		fmt.Sprintf("%d sizes × %d reps at %d Mbps", len(sizes), reps, capMbps),
 		startedAt, !t.Failed(), sm)
+}
+
+func sizeLabelFor(size, fullBytes int64) string {
+	if size == 0 {
+		return fmt.Sprintf("full segment (%d B)", fullBytes)
+	}
+	return fmt.Sprintf("%d B", size)
 }
 
 // median of a small float slice; 0 when empty.
