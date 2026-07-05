@@ -113,25 +113,26 @@ func TestServerReportedRate(t *testing.T) {
 	}
 	var logResp struct {
 		Entries []struct {
-			RequestKind  string  `json:"request_kind"`
-			BytesOut     int64   `json:"bytes_out"`
-			TransferMs   float64 `json:"transfer_ms"`
-			RequestRange string  `json:"request_range"`
+			RequestKind      string  `json:"request_kind"`
+			BytesOut         int64   `json:"bytes_out"`
+			TransferMs       float64 `json:"transfer_ms"`
+			RequestRange     string  `json:"request_range"`
+			DeliveryRateMbps float64 `json:"delivery_rate_mbps"` // kernel tcpi_delivery_rate (#850); 0 pre-fix / not sampled
 		} `json:"entries"`
 	}
 	if err := json.Unmarshal(body, &logResp); err != nil {
 		t.Fatalf("network log parse: %v", err)
 	}
 
-	// Reported rate per size, matched by the Range header we sent (full
-	// pulls have none — match segment entries bigger than the largest
-	// ranged size).
-	reportedFor := func(size int64) (medianMbps float64, matched int) {
+	// Reported + kernel delivery rate per size, matched by the Range
+	// header we sent (full pulls have none — match segment entries bigger
+	// than the largest ranged size).
+	reportedFor := func(size int64) (reportedMed, deliveryMed float64, matched int) {
 		wantRange := ""
 		if size > 0 {
 			wantRange = fmt.Sprintf("bytes=0-%d", size-1)
 		}
-		var rates []float64
+		var rates, deliveries []float64
 		for _, e := range logResp.Entries {
 			if e.RequestKind != "segment" {
 				continue
@@ -143,22 +144,29 @@ func TestServerReportedRate(t *testing.T) {
 			} else if e.RequestRange != "" || e.BytesOut <= 4*1024*1024 {
 				continue
 			}
+			if e.DeliveryRateMbps > 0 {
+				deliveries = append(deliveries, e.DeliveryRateMbps)
+			}
 			if e.TransferMs <= 0 {
 				continue // sub-ms flush; rate would be ~infinite — count but can't quantify
 			}
 			rates = append(rates, float64(e.BytesOut)*8/1e6/(e.TransferMs/1000))
 		}
-		return median(rates), len(rates)
+		return median(rates), median(deliveries), len(rates)
 	}
 
 	// --- assertions + matrix -------------------------------------------
 	sm := serverMatrix{
 		Title:   fmt.Sprintf("Per-request reported rate vs client-measured (cap %d Mbps)", capMbps),
-		Columns: []string{"transfer_size", "reps", "client_med_mbps", "reported_med_mbps", "reported/client", "log_entries", "verdict"},
+		Columns: []string{"transfer_size", "reps", "cap_mbps", "client_http_get_mbps", "reported_med_mbps", "reported/client", "delivery_rate_med_mbps", "delivery/client", "log_entries", "verdict"},
 	}
 	for _, r := range results {
 		clientMed := median(r.clientMbps)
-		reportedMed, matched := reportedFor(r.size)
+		reportedMed, deliveryMed, matched := reportedFor(r.size)
+		deliveryRatio := 0.0
+		if clientMed > 0 && deliveryMed > 0 {
+			deliveryRatio = deliveryMed / clientMed
+		}
 		ratio := 0.0
 		if clientMed > 0 && reportedMed > 0 {
 			ratio = reportedMed / clientMed
@@ -185,16 +193,23 @@ func TestServerReportedRate(t *testing.T) {
 		if isFull {
 			sizeLabel = fmt.Sprintf("full segment (%d B)", r.clientBytes)
 		}
-		ratioLabel := "—"
+		ratioLabel, deliveryLabel, deliveryRatioLabel := "—", "—", "—"
 		if ratio > 0 {
 			ratioLabel = fmt.Sprintf("%.2f×", ratio)
 		}
-		t.Logf("%-24s client=%.2f reported=%.2f ratio=%s entries=%d %s",
-			sizeLabel, clientMed, reportedMed, ratioLabel, matched, verdict)
+		if deliveryMed > 0 {
+			deliveryLabel = fmt.Sprintf("%.2f", deliveryMed)
+		}
+		if deliveryRatio > 0 {
+			deliveryRatioLabel = fmt.Sprintf("%.2f×", deliveryRatio)
+		}
+		t.Logf("%-24s cap=%d client=%.2f reported=%.2f ratio=%s delivery=%s d_ratio=%s entries=%d %s",
+			sizeLabel, capMbps, clientMed, reportedMed, ratioLabel, deliveryLabel, deliveryRatioLabel, matched, verdict)
 		sm.Rows = append(sm.Rows, []string{
 			sizeLabel, strconv.Itoa(len(r.clientMbps)),
+			strconv.Itoa(capMbps),
 			fmt.Sprintf("%.2f", clientMed), fmt.Sprintf("%.2f", reportedMed),
-			ratioLabel, strconv.Itoa(matched), verdict,
+			ratioLabel, deliveryLabel, deliveryRatioLabel, strconv.Itoa(matched), verdict,
 		})
 	}
 	if !strict {

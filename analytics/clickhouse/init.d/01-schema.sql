@@ -691,6 +691,10 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.network_requests
     transfer_ms              Float32                CODEC(ZSTD(1)),
     total_ms                 Float32                CODEC(ZSTD(1)),
     client_wait_ms           Float32                CODEC(ZSTD(1)),
+    -- Kernel-measured shaped delivery rate (tcpi_delivery_rate, Mbps).
+    -- Honest cross-check for bytes_out/transfer_ms, which over-reports
+    -- ~1000x on sub-buffer transfers (#850). 0 = not sampled.
+    delivery_rate_mbps       Float32                CODEC(ZSTD(1)),
     faulted                  UInt8                  DEFAULT 0,
     fault_type               LowCardinality(String) CODEC(ZSTD(1)),
     fault_action             LowCardinality(String) CODEC(ZSTD(1)),
