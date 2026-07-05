@@ -1912,7 +1912,7 @@ function skipToEnd() {
         </label>
       </div>
       <div class="chart-stack">
-        <BandwidthChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" :lifecycle-markers="lifecycleMarkers" :event-markers="eventMarkers" />
+        <BandwidthChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :avmetrics-stream="timeseries.avmetrics" :network-stream="timeseries.network" :lifecycle-markers="lifecycleMarkers" :event-markers="eventMarkers" />
         <BufferChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :lifecycle-markers="lifecycleMarkers" :event-markers="eventMarkers" />
         <RTTChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :lifecycle-markers="lifecycleMarkers" :event-markers="eventMarkers" />
         <FPSChart :player-id="archivePlayerId" :coord-id="coordId" :events-stream="timeseries.events" :lifecycle-markers="lifecycleMarkers" :event-markers="eventMarkers" />

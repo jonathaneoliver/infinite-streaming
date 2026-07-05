@@ -153,6 +153,7 @@ function chRowToEntry(raw: Record<string, unknown>): NetworkLogEntry {
     tls_ms: toNum(raw.tls_ms),
     transfer_ms: toNum(raw.transfer_ms),
     client_wait_ms: toNum(raw.client_wait_ms),
+    delivery_rate_mbps: toNum(raw.delivery_rate_mbps),
     faulted: !!raw.faulted && raw.faulted !== 0,
     fault_type: (raw.fault_type as string) ?? '',
     fault_action: (raw.fault_action as string) ?? '',
@@ -181,6 +182,17 @@ interface Row {
 function num(v: unknown): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
+}
+
+/** Displayed per-request rate. Prefers the kernel-measured
+ *  delivery_rate_mbps (#850 — honest under tc shaping, where the implied
+ *  bytes_out/transfer_ms figure over-reads up to ~5000× on sub-buffer
+ *  transfers) and falls back to the implied figure only for rows that
+ *  predate the field (old archives, non-Linux dev proxy). */
+function rowMbps(r: Row): number {
+  const kernel = num(r.entry.delivery_rate_mbps);
+  if (kernel > 0) return kernel;
+  return r.transfer > 0 ? (num(r.entry.bytes_out) * 8) / (r.transfer * 1000) : 0;
 }
 
 function buildRow(e: NetworkLogEntry, labels: string[], token: string): Row | null {
@@ -312,7 +324,7 @@ function sortValue(r: Row, c: SortCol): number | string {
     case 'method': return r.entry.method ?? '';
     case 'path': return r.entry.path ?? r.entry.url ?? '';
     case 'bytes': return num(r.entry.bytes_out);
-    case 'mbps': return r.transfer > 0 ? (num(r.entry.bytes_out) * 8) / (r.transfer * 1000) : 0;
+    case 'mbps': return rowMbps(r);
     case 'duration': return r.duration;
     case 'status': return num(r.entry.status);
   }
@@ -379,9 +391,8 @@ function fmtKB(n: number): string {
 }
 
 function fmtMbps(r: Row): string {
-  if (r.transfer <= 0) return '—';
-  const v = (num(r.entry.bytes_out) * 8) / (r.transfer * 1000);
-  if (!Number.isFinite(v)) return '—';
+  const v = rowMbps(r);
+  if (!Number.isFinite(v) || v <= 0) return '—';
   if (v < 1) return v.toFixed(2);
   if (v < 100) return v.toFixed(1);
   return v.toFixed(0);
@@ -440,6 +451,11 @@ function tooltipFor(r: Row): string {
   if (r.tls) lines.push(`TLS ${r.tls.toFixed(0)} ms`);
   if (r.wait) lines.push(`wait ${r.wait.toFixed(0)} ms`);
   if (r.transfer) lines.push(`transfer ${r.transfer.toFixed(0)} ms`);
+  const kernelMbps = num(r.entry.delivery_rate_mbps);
+  if (kernelMbps > 0) lines.push(`delivery rate ${kernelMbps.toFixed(2)} Mbps (kernel)`);
+  if (r.transfer > 0 && num(r.entry.bytes_out) > 0) {
+    lines.push(`implied ${((num(r.entry.bytes_out) * 8) / (r.transfer * 1000)).toFixed(2)} Mbps (bytes/transfer)`);
+  }
   if (r.entry.content_type) lines.push(`type: ${r.entry.content_type}`);
   if (r.entry.bytes_out) lines.push(`bytes out: ${r.entry.bytes_out}`);
   if (r.entry.bytes_in) lines.push(`bytes in: ${r.entry.bytes_in}`);
@@ -632,13 +648,15 @@ function onRowsWheel(e: WheelEvent) {
     </div>
 
     <p class="warning">
-      Transfer timings and derived Mbps are approximate, measured
-      <strong>downstream</strong> — from when go-proxy starts writing the
-      response back to the client device until the last byte is flushed
-      (proxy → player). They do <strong>not</strong> include the upstream
-      fetch from go-proxy to go-live. Numbers are most reliable when the
-      network is slow and transfers are large (especially video segments);
-      short responses transfer in &lt;1 ms and round to noise.
+      The Mbps column shows the <strong>kernel-measured delivery rate</strong>
+      (tcpi_delivery_rate, #850) when available — the rate bytes actually
+      drained onto the wire under tc shaping. Rows predating the field fall
+      back to the implied bytes/transfer figure, which times only the
+      write into the socket send buffer and over-reads badly on small
+      transfers. Both rates appear in the row tooltip. Even the kernel rate
+      is connection-level: below ~64&nbsp;KB it reflects the socket's recent
+      history, not that one request. Transfer timings remain downstream-only
+      (proxy → player) and exclude the upstream go-live fetch.
     </p>
 
     <div v-if="!sortedRows.length" class="empty">No requests to plot yet.</div>

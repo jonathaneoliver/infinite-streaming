@@ -939,6 +939,7 @@ func NetworkEntryFromV1(row map[string]any) oapigen.NetworkLogEntry {
 		{"tls_ms", &out.TlsMs},
 		{"transfer_ms", &out.TransferMs},
 		{"client_wait_ms", &out.ClientWaitMs},
+		{"delivery_rate_mbps", &out.DeliveryRateMbps},
 	} {
 		if v, ok := numericFloatTranslate(row[m.key]); ok {
 			f := float32(v)

@@ -501,6 +501,7 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		  method, url, upstream_url, request_kind, content_type,
 		  status, bytes_in, bytes_out,
 		  ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,
+		  delivery_rate_mbps,
 		  faulted, fault_type, fault_action, fault_category,
 		  arrayConcat(labels, dl_arr) AS labels, token
 		FROM (
@@ -512,6 +513,7 @@ func v2NetworkRequestsHandler(w http.ResponseWriter, r *http.Request, cfg config
 		      method, url, upstream_url, request_kind, content_type,
 		      status, bytes_in, bytes_out,
 		      ttfb_ms, total_ms, dns_ms, connect_ms, tls_ms, transfer_ms, client_wait_ms,
+		      delivery_rate_mbps,
 		      faulted, fault_type, fault_action, fault_category, labels
 		    FROM %s.network_requests
 		    WHERE %s

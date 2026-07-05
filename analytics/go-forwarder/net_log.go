@@ -49,6 +49,11 @@ type netRow struct {
 	TransferMs           float32 `json:"transfer_ms"`
 	TotalMs              float32 `json:"total_ms"`
 	ClientWaitMs         float32 `json:"client_wait_ms"`
+	// Kernel-measured shaped delivery rate (tcpi_delivery_rate, Mbps).
+	// Honest cross-check for bytes_out/transfer_ms, which over-reports
+	// ~1000× on sub-buffer transfers. 0 when the proxy couldn't sample
+	// (non-Linux build, torn-down conn). Issue #850.
+	DeliveryRateMbps     float32 `json:"delivery_rate_mbps"`
 	Faulted              uint8   `json:"faulted"`
 	FaultType            string  `json:"fault_type"`
 	FaultAction          string  `json:"fault_action"`
@@ -95,6 +100,7 @@ type netEntry struct {
 	TransferMs           float64       `json:"transfer_ms"`
 	TotalMs              float64       `json:"total_ms"`
 	ClientWaitMs         float64       `json:"client_wait_ms"`
+	DeliveryRateMbps     float64       `json:"delivery_rate_mbps"`
 	Faulted              bool          `json:"faulted"`
 	FaultType            string        `json:"fault_type"`
 	FaultAction          string        `json:"fault_action"`
@@ -281,6 +287,7 @@ func entryToRow(sessionID, playerID string, e *netEntry) netRow {
 		TransferMs:           float32(e.TransferMs),
 		TotalMs:              float32(e.TotalMs),
 		ClientWaitMs:         float32(e.ClientWaitMs),
+		DeliveryRateMbps:     float32(e.DeliveryRateMbps),
 		Faulted:              faulted,
 		FaultType:            e.FaultType,
 		FaultAction:          e.FaultAction,
