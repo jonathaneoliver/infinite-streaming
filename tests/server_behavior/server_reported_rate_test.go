@@ -15,6 +15,14 @@
 // requests (matched by their Range header) and compares the server's
 // implied rate against the client's measured one.
 //
+// It also asserts delivery_rate_mbps (#850) is honest — but ONLY for
+// transfers that were genuinely wire-metered (≥1 MB and transfer_ms
+// ≥5 ms). delivery_rate is connection-level, so a buffer-absorbed
+// transfer (write returns before the wire drains) reads stale residue
+// of the connection's recent history (53–179 Mbps under a 20 Mbps cap
+// observed). Same gate the dashboard chart uses; see §1.14. Smaller /
+// absorbed sizes are recorded, not asserted.
+//
 // Asserted (always):
 //   - the client-measured full-segment rate ≈ the cap (sanity: shaping on);
 //   - the full-segment reported/client ratio stays within a generous
@@ -43,6 +51,16 @@ import (
 	"strconv"
 	"testing"
 	"time"
+)
+
+// Gates for asserting delivery_rate honesty — the transfer must be a real
+// per-segment wire measurement, not a buffer-absorbed one where
+// delivery_rate is stale connection residue. Same thresholds as the
+// dashboard chart's extractDeliveryMarkers (see §1.14): ≥1 MB and the
+// write took ≥5 ms (not instantly absorbed into the socket send buffer).
+const (
+	deliveryHonestMinBytes      = 1 << 20 // 1 MB
+	deliveryHonestMinTransferMs = 5.0
 )
 
 func TestServerReportedRate(t *testing.T) {
@@ -113,21 +131,40 @@ func TestServerReportedRate(t *testing.T) {
 	}
 	var logResp struct {
 		Entries []struct {
-			RequestKind      string  `json:"request_kind"`
-			BytesOut         int64   `json:"bytes_out"`
-			TransferMs       float64 `json:"transfer_ms"`
-			RequestRange     string  `json:"request_range"`
-			DeliveryRateMbps float64 `json:"delivery_rate_mbps"` // kernel tcpi_delivery_rate (#850); 0 pre-fix / not sampled
+			Timestamp        time.Time `json:"timestamp"`
+			RequestKind      string    `json:"request_kind"`
+			BytesOut         int64     `json:"bytes_out"`
+			TransferMs       float64   `json:"transfer_ms"`
+			RequestRange     string    `json:"request_range"`
+			DeliveryRateMbps float64   `json:"delivery_rate_mbps"` // kernel tcpi_delivery_rate (#850); 0 pre-fix / not sampled
 		} `json:"entries"`
 	}
 	if err := json.Unmarshal(body, &logResp); err != nil {
 		t.Fatalf("network log parse: %v", err)
 	}
+	// The proxy's per-session network ring buffer is keyed by the numeric
+	// port slot, which is RECYCLED across runs — so it carries STALE
+	// entries from earlier plays on the same slot (especially the
+	// empty-Range full-segment match, which would otherwise scoop up every
+	// prior run's absorbed full fetches and poison the median). Scope every
+	// match to entries produced during THIS run.
+	runStart := startedAt.Add(-2 * time.Second) // small skew guard
 
 	// Reported + kernel delivery rate per size, matched by the Range
 	// header we sent (full pulls have none — match segment entries bigger
 	// than the largest ranged size).
-	reportedFor := func(size int64) (reportedMed, deliveryMed float64, matched int) {
+	//
+	// delivery_rate_mbps is CONNECTION-level (tcpi_delivery_rate): it only
+	// meters THIS transfer when the write was actually drained over the
+	// wire, not absorbed whole into the socket send buffer. A buffer-
+	// absorbed transfer (transfer_ms below the metered floor) returns
+	// instantly and delivery_rate is stale residue of the connection's
+	// recent history — 53–179 Mbps observed under a 20 Mbps cap. So the
+	// delivery median is taken ONLY from metered entries; `meteredN` /
+	// `deliveryN` let the caller tell "all absorbed → can't verify" apart
+	// from "metered but delivery missing → regression". Mirrors the
+	// dashboard chart's extractDeliveryMarkers gate and §1.14.
+	reportedFor := func(size int64) (reportedMed, deliveryMed float64, impliedN, meteredN, deliveryN int) {
 		wantRange := ""
 		if size > 0 {
 			wantRange = fmt.Sprintf("bytes=0-%d", size-1)
@@ -137,22 +174,29 @@ func TestServerReportedRate(t *testing.T) {
 			if e.RequestKind != "segment" {
 				continue
 			}
-			// The network log is session-scoped and the only segment
-			// requests this test makes are its own, so RequestRange
-			// alone tells ranged sweeps and full pulls apart (live-edge
-			// segment sizes vary run to run — don't gate on bytes).
+			if !e.Timestamp.IsZero() && e.Timestamp.Before(runStart) {
+				continue // stale entry from a prior run on this recycled slot
+			}
+			// Within this run the only segment requests are the test's own,
+			// so RequestRange alone tells ranged sweeps and full pulls apart
+			// (live-edge segment sizes vary run to run — don't gate on bytes).
 			if e.RequestRange != wantRange {
 				continue
 			}
-			if e.DeliveryRateMbps > 0 {
-				deliveries = append(deliveries, e.DeliveryRateMbps)
+			metered := e.TransferMs >= deliveryHonestMinTransferMs
+			if metered {
+				meteredN++
+				if e.DeliveryRateMbps > 0 {
+					deliveries = append(deliveries, e.DeliveryRateMbps)
+					deliveryN++
+				}
 			}
 			if e.TransferMs <= 0 {
-				continue // sub-ms flush; rate would be ~infinite — count but can't quantify
+				continue // sub-ms flush; implied rate would be ~infinite — can't quantify
 			}
 			rates = append(rates, float64(e.BytesOut)*8/1e6/(e.TransferMs/1000))
 		}
-		return median(rates), median(deliveries), len(rates)
+		return median(rates), median(deliveries), len(rates), meteredN, deliveryN
 	}
 
 	// --- assertions + matrix -------------------------------------------
@@ -162,7 +206,7 @@ func TestServerReportedRate(t *testing.T) {
 	}
 	for _, r := range results {
 		clientMed := median(r.clientMbps)
-		reportedMed, deliveryMed, matched := reportedFor(r.size)
+		reportedMed, deliveryMed, matched, meteredN, deliveryN := reportedFor(r.size)
 		deliveryRatio := 0.0
 		if clientMed > 0 && deliveryMed > 0 {
 			deliveryRatio = deliveryMed / clientMed
@@ -189,18 +233,20 @@ func TestServerReportedRate(t *testing.T) {
 			verdict = "FAIL (strict)"
 			t.Errorf("size %d: reported %.2f Mbps vs client %.2f (ratio %.2f > 3) — #850 over-read still present under REPORTED_RATE_STRICT", r.size, reportedMed, clientMed, ratio)
 		}
-		// delivery_rate_mbps (#850's fix) must stay honest wherever the
-		// kernel has enough delivered data for a real estimate — ≥256 KB
-		// under a 20 Mbps cap in calibration. Below that it's a
-		// connection-level residue of earlier traffic (documented, not
-		// asserted).
-		if r.size == 0 || r.size >= 256*1024 {
-			if deliveryMed == 0 {
+		// delivery_rate_mbps (#850's fix) is asserted honest only where it's
+		// a real per-segment wire measurement: transfers ≥1 MB that were
+		// actually metered (not buffer-absorbed). This is the same gate the
+		// dashboard chart uses; the §1.14 256 KB floor held only under
+		// continuous pulling. Buffer-absorbed transfers (all sizes ≤256 KB
+		// here, and any larger one the send buffer swallowed) are recorded,
+		// not asserted — delivery there is connection residue.
+		if (r.size == 0 || r.size >= deliveryHonestMinBytes) && meteredN > 0 {
+			if deliveryN == 0 {
 				verdict = "no delivery rate"
-				t.Errorf("size %s: delivery_rate_mbps absent — the #850 sampling regressed (or a pre-#850 proxy is deployed)", sizeLabelFor(r.size, r.clientBytes))
+				t.Errorf("size %s: %d metered transfers but delivery_rate_mbps absent on all — the #850 sampling regressed (or a pre-#850 proxy is deployed)", sizeLabelFor(r.size, r.clientBytes), meteredN)
 			} else if deliveryRatio > 1.5 || deliveryRatio < 0.5 {
 				verdict = "delivery dishonest"
-				t.Errorf("size %s: delivery_rate %.2f Mbps vs client-measured %.2f (ratio %.2f outside [0.5,1.5]) — the honest signal is no longer honest", sizeLabelFor(r.size, r.clientBytes), deliveryMed, clientMed, deliveryRatio)
+				t.Errorf("size %s: metered delivery_rate %.2f Mbps vs client-measured %.2f (ratio %.2f outside [0.5,1.5]) — the honest signal is no longer honest", sizeLabelFor(r.size, r.clientBytes), deliveryMed, clientMed, deliveryRatio)
 			}
 		}
 		sizeLabel := sizeLabelFor(r.size, r.clientBytes)
