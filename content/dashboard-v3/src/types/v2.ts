@@ -2408,6 +2408,11 @@ export interface components {
              * @description Server-perceived wait between request received and first response byte sent.
              */
             client_wait_ms?: number;
+            /**
+             * Format: float
+             * @description Kernel-measured shaped delivery rate (tcpi_delivery_rate, Mbps) sampled at end of transfer. Honest cross-check for bytes_out/transfer_ms, which over-reports on sub-buffer transfers (#850). Connection-level; 0/absent when not sampled (non-Linux build).
+             */
+            delivery_rate_mbps?: number;
             faulted?: boolean;
             fault_type?: string;
             fault_action?: string;

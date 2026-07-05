@@ -734,7 +734,8 @@ Read via:
 ```
 [hot]        ts, player_id, play_id, method, url, request_kind, status,
              content_type, bytes_out, ttfb_ms, transfer_ms, total_ms,
-             client_wait_ms, faulted, fault_type, classification
+             client_wait_ms, delivery_rate_mbps, faulted, fault_type,
+             classification
 
 [forensics]  fault_action, fault_category, status (when >=400),
              request_range, response_content_range
@@ -913,9 +914,32 @@ client_wait_ms
                number — closest thing to "how long did the player feel
                this took". When the cap is throttling, this rises while
                total_ms stays sub-ms.
+
+delivery_rate_mbps
+  type:        Float32
+  units:       Mbps (decimal: bytes/s × 8 ÷ 1e6)
+  populated:   proxy (Linux only; 0 on the macOS dev build / pre-#850 rows)
+  meaning:     the kernel's own wire-delivery estimate
+               (getsockopt(TCP_INFO).tcpi_delivery_rate) sampled at end
+               of transfer — the HONEST per-request throughput under tc
+               shaping. The implied bytes_out/transfer_ms figure times
+               only the write into the socket send buffer and over-reads
+               up to ~4900× on sub-buffer transfers; delivery_rate reads
+               0.99–1.00× the client-measured truth for transfers
+               ≥ 256 KB (calibration: server-behavior.md §1.14). The
+               dashboard's network-log Mbps column and the bandwidth
+               chart's "Delivery rate (kernel)" dots read this field.
+  gotchas:     connection-level, not per-stream — under HTTP/2 it
+               reflects the whole socket, and below ~64 KB it reflects
+               the socket's RECENT HISTORY rather than this request
+               (a 1 KB fetch can read ~80 Mbps of residue). Treat
+               sub-64 KB per-request rates as unmeasurable server-side;
+               the chart overlay filters to ≥ 256 KB for this reason.
 ```
 
 **Rule of thumb for "how long did the player wait":** `client_wait_ms` (time to first response byte) + `transfer_ms` (downstream write+flush) covers the request end-to-end from the player's side; the final kernel-buffer flush can still trail the last write, so for exact wire time under heavy shaping use (ts of THIS request - ts of NEXT same-variant segment request) under steady fetch cadence.
+
+**Rule of thumb for "how fast did this request move":** `delivery_rate_mbps` for transfers ≥ 256 KB; nothing in this table for smaller ones (both delivery_rate and the implied figure are unreliable there — fall back to `session_events.mbps_transfer_complete` for the per-segment wire rate).
 
 ### 2.e Fault injection
 

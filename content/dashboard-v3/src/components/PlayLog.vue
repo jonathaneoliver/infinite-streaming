@@ -257,7 +257,13 @@ function buildNetworkRow(raw: Record<string, unknown>): Row | null {
   const durMs = totalMs > 0 ? totalMs : summed;
   const enriched: Record<string, unknown> = { ...raw };
   if (bytesOut > 0) enriched.KB = (bytesOut / 1024);
-  if (transferMs > 0 && bytesOut > 0) {
+  // Prefer the kernel-measured delivery rate (#850 — honest under tc
+  // shaping); the implied bytes/transfer figure is the fallback for rows
+  // that predate the field.
+  const kernelMbps = numOrZero(raw.delivery_rate_mbps);
+  if (kernelMbps > 0) {
+    enriched.Mbps = kernelMbps;
+  } else if (transferMs > 0 && bytesOut > 0) {
     enriched.Mbps = (bytesOut * 8) / (transferMs * 1000);
   }
   if (durMs > 0) enriched.duration = fmtMs(durMs);
