@@ -588,10 +588,24 @@ while #850 is open; `REPORTED_RATE_STRICT=1` enforces ratio ≤ 3 at every size
   estimate, so `delivery_rate_mbps` reflects the connection's recent history
   (it's socket-level) — still 4–5× closer than the implied figure, but treat
   sub-64 KB per-request rates as unmeasurable server-side.
-- Plumbed end-to-end: proxy network log → forwarder → ClickHouse
+- **This 256 KB floor holds only under CONTINUOUS pulling (the probe's
+  back-to-back Range GETs).** Real player traffic arrives with idle gaps, so
+  segments up to ~1 MB are fully absorbed into the socket send buffer: the
+  proxy's write returns before the wire drains and `delivery_rate_mbps` is
+  stale connection residue (accurate in steady state, wrong right after a
+  rate change). Measured on test-dev over live sessions: 256 KB–1 MB rows are
+  ~90% buffer-absorbed and even the metered ones read ~4× off; ≥ 1 MB is
+  96%+ genuinely wire-metered, ≥ 4 MB is 100%. **The dashboard bandwidth
+  chart therefore plots delivery dots only for segments ≥ 1 MB AND
+  `transfer_ms` ≥ 5 ms** (not buffer-absorbed) — see `extractDeliveryMarkers`
+  in `BandwidthChart.vue`. The per-request calibration above (fixed cap,
+  continuous pull) and the chart's live-traffic floor are answering different
+  questions; don't reconcile them to one number.
+- Plumbed + surfaced end-to-end: proxy network log → forwarder → ClickHouse
   `network_requests.delivery_rate_mbps` → `/api/v2/network_requests` +
-  session-bundle network stream. Dashboard chart/tooltip is the remaining
-  #850 follow-up.
+  session-bundle network stream → dashboard network-log Mbps column (with the
+  implied figure as fallback + both in the row tooltip) and the bandwidth
+  chart's "Delivery rate (kernel)" dots.
 
 ---
 

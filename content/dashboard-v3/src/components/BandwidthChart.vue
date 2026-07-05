@@ -307,16 +307,32 @@ const segmentMarkersLabel = computed(() => {
 });
 
 /** Kernel-measured delivery-rate dots (#850): one dot per SEGMENT request
- *  with a sampled tcpi_delivery_rate. Server-side sibling of the iOS
- *  avmetrics dots above — honest under tc shaping, where the implied
- *  bytes_out/transfer_ms figure over-reads up to ~5000× on sub-buffer
- *  transfers. Rows under 256 KB are skipped: delivery_rate is
- *  connection-level, and below that size it reflects the socket's recent
- *  history rather than this transfer (calibrated in
- *  .claude/standards/server-behavior.md §1.14). Active session only —
- *  compare siblings don't ship a network stream. */
+ *  large enough that the kernel actually metered its wire delivery.
+ *  Server-side sibling of the iOS avmetrics dots above — honest under tc
+ *  shaping, where the implied bytes_out/transfer_ms figure over-reads up
+ *  to ~5000× on sub-buffer transfers. Active session only — compare
+ *  siblings don't ship a network stream.
+ *
+ *  Two guards, both about the same failure mode: delivery_rate is
+ *  CONNECTION-level (tcpi_delivery_rate), so it only reflects THIS
+ *  segment if the segment was genuinely drained over the wire. When a
+ *  transfer fits in the socket send buffer, the proxy's write returns
+ *  before the wire drains, and delivery_rate is stale residue of the
+ *  connection's recent history — accurate in steady state, but wrong
+ *  right after a rate change (the "high dot during a low-throughput
+ *  ramp" artefact). We therefore skip:
+ *    - bytes < 1 MB — real player segments below this get absorbed into
+ *      the send buffer; measured on test-dev, 256 KB–1 MB rows are
+ *      ~90% buffer-absorbed and even the metered ones read 4× off. The
+ *      §1.14 calibration's 256 KB floor held only under CONTINUOUS
+ *      pulling; live traffic arrives with idle gaps, so the real-world
+ *      floor is higher.
+ *    - transfer_ms < 5 ms — the write returned instantly (buffer-
+ *      absorbed), so delivery_rate never metered this segment. Catches
+ *      the rare ≥1 MB segment that still fit the buffer. */
 const DELIVERY_COLOR = '#10b981'; // emerald — distinct from the slate/sky avmetrics dots
-const DELIVERY_MIN_BYTES = 256 * 1024;
+const DELIVERY_MIN_BYTES = 1024 * 1024;
+const DELIVERY_MIN_TRANSFER_MS = 5;
 function extractDeliveryMarkers(
   stream: Stream<Record<string, unknown>> | undefined,
 ): Array<{ x: number; y: number; color?: string; label?: string; tag?: string }> {
@@ -330,6 +346,8 @@ function extractDeliveryMarkers(
     if (!Number.isFinite(mbps) || mbps <= 0) continue;
     const bytes = Number(row.bytes_out);
     if (!Number.isFinite(bytes) || bytes < DELIVERY_MIN_BYTES) continue;
+    const transferMs = Number(row.transfer_ms);
+    if (!Number.isFinite(transferMs) || transferMs < DELIVERY_MIN_TRANSFER_MS) continue;
     const tsRaw = row.ts ?? row.timestamp;
     let ts = NaN;
     if (typeof tsRaw === 'number') {
@@ -344,7 +362,6 @@ function extractDeliveryMarkers(
     if (!Number.isFinite(ts) || ts <= 0) continue;
     const url = String(row.url ?? row.path ?? '');
     const filename = url ? (url.split('?')[0].split('/').pop() ?? '') : '';
-    const transferMs = Number(row.transfer_ms);
     const implied = Number.isFinite(transferMs) && transferMs > 0
       ? (bytes * 8) / (transferMs * 1000)
       : NaN;
