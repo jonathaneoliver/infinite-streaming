@@ -933,12 +933,16 @@ characterize-web:
 	./tests/characterization/overnight.sh web
 
 # Server control-surface checks (rate/delay/loss/pattern/fault/transfer/
-# socket/scope/content). Runs against test-dev and posts results to the
-# Automated Testing page as platform=server (the server_* tiles).
+# socket/scope/content/config-on-connect/transport/isolation/reported-rate).
+# Runs against test-dev and posts results to the Automated Testing page as
+# platform=server (the server_* tiles). No -run filter: every suite test
+# joins automatically; opt-in tests must self-skip (TestRestartPersistence
+# skips unless RESTART_CMD is set). The old 'TestServer' filter silently
+# excluded TestTransportFaults and TestConfigOnConnect_*.
 # Override the target with THROUGHPUT_HOST / THROUGHPUT_API_PORT.
 characterize-server:
 	cd tests/server_behavior && THROUGHPUT_HOST=$(TEST_HOST) THROUGHPUT_API_PORT=21000 \
-		go test -run 'TestServer' -timeout 40m -v ./...
+		go test -timeout 40m -v ./...
 
 # One-shot Automated Testing run: server checks first, then the iPad
 # simulator player characterization — populates the whole Automated Testing
