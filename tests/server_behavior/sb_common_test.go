@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -387,3 +388,138 @@ func (p *probe) postServerReport(t *testing.T, testName, headline string, starte
 // kernel applies the rule + the tc/nftables verifier settles before we
 // start measuring. Matches the 1.5s used by TestRateSweep.
 const settleKernel = 1500 * time.Millisecond
+
+func envFloat(key string, fallback float64) float64 {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return fallback
+}
+
+// deleteSession DELETEs /api/session/{id} — the same teardown the
+// dashboard's close button drives. The isolation test uses it as one of
+// its lifecycle trigger events (teardown must not touch other sessions'
+// shaping).
+func deleteSession(c *http.Client, apiBase, sessionID string) error {
+	u := fmt.Sprintf("https://%s/api/session/%s", apiBase, url.PathEscape(sessionID))
+	req, err := http.NewRequest(http.MethodDelete, u, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("delete session %s: %d", sessionID, resp.StatusCode)
+	}
+	return nil
+}
+
+// --- per-fetch sampled pulling (isolation / restart / canary) -------------
+
+// instSample is one bounded fetch's client-measured instantaneous
+// throughput, timestamped so a breach can be correlated with the
+// lifecycle event that caused it.
+type instSample struct {
+	at    time.Time
+	mbps  float64
+	bytes int64
+}
+
+// firstSegment fetches variantURL and returns its first segment URL.
+// t-free (unlike probe.pullOnce) so the suite-level canary, which has no
+// *testing.T, can share it.
+func firstSegment(c *http.Client, variantURL string) (string, error) {
+	body, final, err := httpGet(c, variantURL)
+	if err != nil {
+		return "", err
+	}
+	segs, err := parseMediaPlaylist(body, final)
+	if err != nil {
+		return "", err
+	}
+	if len(segs) == 0 {
+		return "", fmt.Errorf("no segments in %s", variantURL)
+	}
+	return segs[0], nil
+}
+
+// sampledPull continuously range-pulls chunks sized to ~2s of data at
+// capMbps until stop is closed, and returns one instSample per fetch.
+// It's runRateWindow's pull strategy, but (a) it keeps the raw per-fetch
+// samples instead of aggregates — the isolation contract is about the
+// worst TRANSIENT, which averages hide — and (b) it's t-free so the
+// canary can run it outside a test. hb (optional) is called at most once
+// a second with the latest rate for dashboard heartbeats.
+func sampledPull(c *http.Client, variantURL string, capMbps int, hb func(mbps float64), logf func(string, ...any), stop <-chan struct{}) []instSample {
+	perFetch := int64(capMbps) * 1_000_000 / 8 * 2
+	if perFetch < 256*1024 {
+		perFetch = 256 * 1024
+	}
+	var samples []instSample
+	segURL := ""
+	var lastHB time.Time
+	for {
+		select {
+		case <-stop:
+			return samples
+		default:
+		}
+		if segURL == "" {
+			s, err := firstSegment(c, variantURL)
+			if err != nil {
+				logf("segment refresh: %v", err)
+				time.Sleep(300 * time.Millisecond)
+				continue
+			}
+			segURL = s
+		}
+		t0 := time.Now()
+		n, err := rangeGet(c, segURL, perFetch, 30*time.Second)
+		dt := time.Since(t0).Seconds()
+		if err != nil {
+			logf("bounded pull: %v (refetching segment)", err)
+			segURL = "" // rolled off the live window; pick a fresh one
+			continue
+		}
+		if dt > 0 && n > 0 {
+			s := instSample{at: t0, mbps: float64(n) * 8 / 1e6 / dt, bytes: n}
+			samples = append(samples, s)
+			if hb != nil && time.Since(lastHB) >= time.Second {
+				hb(s.mbps)
+				lastHB = time.Now()
+			}
+		}
+	}
+}
+
+// sampleStats aggregates the samples whose fetch started in [from, to):
+// busy-time average (total bytes over summed fetch durations — gaps
+// between fetches excluded, so it's directly comparable to the cap) plus
+// the single worst fetch.
+func sampleStats(samples []instSample, from, to time.Time) (avgMbps, maxMbps float64, n int) {
+	var totalBytes int64
+	var busySec float64
+	for _, s := range samples {
+		if s.at.Before(from) || !s.at.Before(to) {
+			continue
+		}
+		n++
+		totalBytes += s.bytes
+		if s.mbps > 0 {
+			busySec += float64(s.bytes) * 8 / 1e6 / s.mbps
+		}
+		if s.mbps > maxMbps {
+			maxMbps = s.mbps
+		}
+	}
+	if busySec > 0 {
+		avgMbps = float64(totalBytes) * 8 / 1e6 / busySec
+	}
+	return avgMbps, maxMbps, n
+}
