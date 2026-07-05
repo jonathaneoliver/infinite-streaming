@@ -196,6 +196,14 @@ type Experiment struct {
 	Content             string               `json:"content"`               // fixed to insane_new for now
 	Segment             string               `json:"segment,omitempty"`     // master variant the probe requests via -is.segment: s2 | s6 | ll. Empty = app default (s6). Drives the segment×live-offset matrix (#793).
 	Muted               *bool                `json:"muted,omitempty"`       // #838 mute audio; nil = app default-mutes. Rides config-on-connect (bootstrap app_config.muted) so the per-arm value reaches the client off GET /api/sessions.
+	// Client-only launch knobs, now queue-carriable (#906). Previously refused by
+	// DroppedClientKnobs; delivered as -is.* launch args by the probe — singleton:
+	// qe-offhours.sh exports CHAR_SWEEP_*; fan: ArmFromExperiment → ProbeLaunchArgs.
+	// raw_json carries them, so no ClickHouse column / forwarder change is needed.
+	Codec               string               `json:"codec,omitempty"`                // is.codec — h264 | hevc | av1
+	AppLiveOffset       *float64             `json:"app_live_offset,omitempty"`      // is.live_offset — app-side seek to liveEdge−N (distinct from ContentManipulation.LiveOffset, the manifest lever)
+	PeakBitrateMbps     int                  `json:"peak_bitrate_mbps,omitempty"`    // is.peak_bitrate_mbps — startup peak-bitrate clamp
+	StartsFirstVariant  *bool                `json:"starts_first_variant,omitempty"` // is.starts_first_variant — join on first manifest rung vs let ABR pick
 	Mode                string               `json:"mode"`                  // steps | pyramid | downshift_severity | …
 	DurationS           int                  `json:"duration_s,omitempty"`
 	Fault               *Fault               `json:"fault,omitempty"` // fault-class only

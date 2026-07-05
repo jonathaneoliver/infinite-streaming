@@ -6,13 +6,13 @@ package charmatrix
 // Arm — and a whole runnable Spec — from queue Experiments (the export
 // direction), plus the YAML emitter and the silent-drop guard.
 //
-// Lossless intent: every recipe knob BOTH models carry (Class/Platform/Protocol/
-// Segment/Mode/Shape/Fault/ContentManipulation/TransferTimeouts + Group/Role +
-// Muted/Reps/DurationS) round-trips. The knobs that exist ONLY on the client Arm
-// (is.codec / is.peak_bitrate_mbps / is.live_offset / is.starts_first_variant)
-// have no field on sweep.Experiment, so ToExperiment necessarily drops them —
-// DroppedClientKnobs surfaces that so `import` can refuse loudly rather than lose
-// them silently (the LabelPlay silent-drop trap).
+// Lossless intent: every recipe knob BOTH models carry round-trips — including
+// the former client-only launch knobs (is.codec / is.peak_bitrate_mbps /
+// is.live_offset / is.starts_first_variant), which now have fields on
+// sweep.Experiment (#906) and are delivered as -is.* launch args by the probe.
+// DroppedClientKnobs stays as a guard for any FUTURE Arm knob the Experiment
+// can't carry, so `import` can still refuse loudly rather than lose it silently
+// (the LabelPlay silent-drop trap).
 
 import (
 	"bytes"
@@ -24,25 +24,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// DroppedClientKnobs lists the client-only is.* knobs this arm sets that
-// ToExperiment cannot carry onto a sweep.Experiment. Non-empty ⇒ importing the
-// arm into the queue would silently lose them; the caller must refuse or warn.
-// (Muted is NOT here — ToExperiment carries it onto Experiment.Muted.)
+// DroppedClientKnobs lists any Arm knob ToExperiment cannot carry onto a
+// sweep.Experiment. Non-empty ⇒ importing the arm would silently lose it; the
+// caller refuses or warns. As of #906 ALL client is.* knobs (codec / live_offset
+// / peak_bitrate / starts_first_variant, plus segment/protocol/muted) round-trip,
+// so nothing is dropped today — this guard remains for any future Arm-only knob.
 func (a *Arm) DroppedClientKnobs() []string {
-	var dropped []string
-	if a.Codec != "" {
-		dropped = append(dropped, "is.codec")
-	}
-	if a.AppLiveOffset != nil {
-		dropped = append(dropped, "is.live_offset")
-	}
-	if a.PeakBitrateMbps != 0 {
-		dropped = append(dropped, "is.peak_bitrate_mbps")
-	}
-	if a.StartsFirstVariant != nil {
-		dropped = append(dropped, "is.starts_first_variant")
-	}
-	return dropped
+	return nil
 }
 
 // ArmFromExperiment is the export inverse of ToExperiment: it reconstructs the
@@ -69,6 +57,10 @@ func ArmFromExperiment(e *sweep.Experiment) *Arm {
 		Segment:             e.Segment,
 		Protocol:            e.Protocol,
 		Muted:               cloneBool(e.Muted),
+		Codec:               e.Codec,
+		AppLiveOffset:       cloneFloat64(e.AppLiveOffset),
+		PeakBitrateMbps:     e.PeakBitrateMbps,
+		StartsFirstVariant:  cloneBool(e.StartsFirstVariant),
 		Shape:               cloneShape(e.Shape),
 		Fault:               cloneFault(e.Fault),
 		ContentManipulation: cloneCM(e.ContentManipulation),
@@ -181,5 +173,13 @@ func cloneBool(b *bool) *bool {
 		return nil
 	}
 	v := *b
+	return &v
+}
+
+func cloneFloat64(f *float64) *float64 {
+	if f == nil {
+		return nil
+	}
+	v := *f
 	return &v
 }

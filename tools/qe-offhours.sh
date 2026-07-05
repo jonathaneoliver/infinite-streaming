@@ -132,6 +132,12 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
   step=$(printf '%s' "$recipe_json" | jq -r '.shape.step_seconds // 12' 2>/dev/null)
   margin=$(printf '%s' "$recipe_json" | jq -r '.shape.margin_pct // 5' 2>/dev/null)
   segment=$(printf '%s' "$recipe_json" | jq -r '.segment // empty' 2>/dev/null)  # s2|s6|ll → master variant (#793 live-offset matrix)
+  # #906 client launch knobs now carried on the queue Experiment — deliver as
+  # -is.* launch args so the singleton honours them like the fan (ProbeLaunchArgs).
+  codec=$(printf '%s' "$recipe_json" | jq -r '.codec // empty' 2>/dev/null)
+  peak=$(printf '%s' "$recipe_json" | jq -r '.peak_bitrate_mbps // empty' 2>/dev/null)
+  first_variant=$(printf '%s' "$recipe_json" | jq -r 'if .starts_first_variant==null then empty else (.starts_first_variant|tostring) end' 2>/dev/null)
+  app_offset=$(printf '%s' "$recipe_json" | jq -r '.app_live_offset // empty' 2>/dev/null)
 
   # Launch mode is an instruction carried on the item (seed/triage stamp
   # launch_mode=appium); appium is the only mode TestSweepProbe supports and it
@@ -172,6 +178,10 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
       CHAR_CONTENT="$CONTENT" CHAR_SWEEP_DURATION_S="$DURATION" CHARACTERIZATION_DEVICE_UDID="$device" \
       ${segment:+CHAR_SWEEP_SEGMENT="$segment"} \
       ${pattern:+CHAR_SWEEP_PATTERN="$pattern" CHAR_SWEEP_STEP_S="$step" CHAR_SWEEP_MARGIN="$margin"} \
+      ${codec:+CHAR_SWEEP_CODEC="$codec"} \
+      ${peak:+CHAR_SWEEP_PEAK_BITRATE="$peak"} \
+      ${first_variant:+CHAR_SWEEP_FIRST_VARIANT="$first_variant"} \
+      ${app_offset:+CHAR_SWEEP_LIVE_OFFSET="$app_offset"} \
       go test ./tests/characterization/modes -run TestSweepProbe -count=1 -v -timeout 8m >"$log" 2>&1
   play_id=$(grep -oE 'play_id: +[0-9a-fA-F-]+' "$log" | head -1 | awk '{print $2}')
   rm -f "$log"
