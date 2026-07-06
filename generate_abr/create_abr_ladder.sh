@@ -47,12 +47,17 @@ Optional Arguments:
                           Relative paths are resolved from where you run the script
   --resume-package-from <path> Resume from existing temp dir with encoded files
                          (expects files like h264_360p.mp4/hevc_360p.mp4 and optional audio.mp4)
-  --ladder <legacy|apple>  Encoding ladder (default: legacy).
+  --ladder <legacy|apple|apple-uniq>  Encoding ladder (default: legacy).
                          legacy = the repo's tuned 1.5x ladder (unchanged).
                          apple  = faithful Apple HLS Authoring Spec bitrates:
                                   H.264 capped at 1080p (9 rungs), HEVC to 2160p
                                   (12 rungs), AV1 mirrors HEVC. Multi-rung per
                                   resolution. See issue #868.
+                         apple-uniq = same Apple bitrates, but same-resolution
+                                  rungs are given unique (stepped-down) 16:9
+                                  resolutions so each rung is distinguishable by
+                                  decoded frame size. Res is always <= apple's;
+                                  removes apple's same-res quality steps. #871.
   --codec <hevc|h264|av1|both|all> Codec selection (default: both)
   --no-hevc              Skip HEVC encoding (same as --codec h264)
   --no-h264              Skip H.264 encoding (same as --codec hevc)
@@ -213,9 +218,12 @@ FRAGMENT_PARSER_SCRIPT="" # Auto-detected path to parse_fmp4_fragments.py
 # consumed them (go-live serves the inline #EXT-X-PART, its authoritative
 # source); --byteranges retains them as the fallback for direct-sidecar readers.
 EMIT_BYTERANGES=false
-# Encoding ladder selection (#868): `legacy` = the repo's tuned 1.5x ladder
-# (ALL_RESOLUTION_TIERS, default, unchanged); `apple` = a faithful reproduction
-# of Apple's HLS Authoring Spec bitrates (per-codec, multi-rung).
+# Encoding ladder selection (#868/#871): `legacy` = the repo's tuned 1.5x
+# ladder (ALL_RESOLUTION_TIERS, default, unchanged); `apple` = a faithful
+# reproduction of Apple's HLS Authoring Spec bitrates (per-codec, multi-rung);
+# `apple-uniq` = Apple's bitrates with same-res rungs stepped to unique 16:9
+# resolutions (<= apple's) so each rung is distinguishable by decoded frame
+# size — see the APPLE_LADDER_*_UNIQ arrays for the rationale + trade-off.
 LADDER="legacy"
 
 while [[ $# -gt 0 ]]; do
@@ -345,9 +353,9 @@ done
 
 # Validate ladder selection (#868)
 case "$LADDER" in
-    legacy|apple) ;;
+    legacy|apple|apple-uniq) ;;
     *)
-        echo "Error: --ladder must be 'legacy' or 'apple' (got '$LADDER')"
+        echo "Error: --ladder must be 'legacy', 'apple' or 'apple-uniq' (got '$LADDER')"
         usage
         exit 1
         ;;
@@ -592,6 +600,53 @@ declare -a APPLE_LADDER_HEVC=(
 # AV1 mirrors the HEVC targets (see note above).
 declare -a APPLE_LADDER_AV1=("${APPLE_LADDER_HEVC[@]}")
 
+# Apple-uniq ladder (#868/#871): Apple's EXACT bitrates, but every rung is
+# given a UNIQUE resolution per codec so a same-bitrate-different-quality rung
+# is distinguishable downstream by decoded frame size alone (AVPlayer's
+# `presentationSize` / player_metrics `video_resolution` are resolution-only,
+# so the plain `apple` ladder's 3x540p etc. collapse to one indistinguishable
+# lane on the dashboard's displayed-variant chart, timeline and iOS tile).
+# Disambiguation rule:
+#   - Bitrates are byte-identical to APPLE_LADDER_* above. ABR selection is
+#     bandwidth-driven, so throughput-vs-rung behaviour is unchanged.
+#   - Within each duplicate-resolution group the HIGHEST-bitrate rung keeps
+#     Apple's exact resolution; the redundant lower rungs step DOWN in clean
+#     16:9 increments (>=36px height, clearing the ~16px coded-vs-display /
+#     mod-16 decode-noise floor). Every proposed resolution is therefore <=
+#     Apple's original for that rung, so the selectable set at any viewport is
+#     a superset-or-equal of Apple's — never more restrictive.
+#   - Result: both ladders are strictly monotonic in bitrate AND resolution.
+# Trade-off: this REMOVES Apple's same-resolution quality steps (e.g. HEVC
+# 540p@600/900/1600 becomes 468p/504p/540p), so every upshift now also crosses
+# a resolution boundary. Use `--ladder apple` when same-res laddering is the
+# behaviour under study; `--ladder apple-uniq` when per-rung telemetry matters.
+declare -a APPLE_LADDER_H264_UNIQ=(
+    "416:234:145:medium:16:12:8:8:24"
+    "640:360:365:medium:20:16:10:10:30"
+    "704:396:730:medium:22:18:10:10:32"
+    "768:432:1100:medium:22:18:10:10:32"
+    "960:540:2000:medium:24:20:10:10:34"
+    "1216:684:3000:medium:28:24:10:10:38"
+    "1280:720:4500:medium:28:24:10:10:38"
+    "1856:1044:6000:medium:36:32:10:10:45"
+    "1920:1080:7800:medium:36:32:10:10:45"
+)
+declare -a APPLE_LADDER_HEVC_UNIQ=(
+    "640:360:145:medium:20:16:10:10:30"
+    "768:432:300:medium:22:18:10:10:32"
+    "832:468:600:medium:24:20:10:10:34"
+    "896:504:900:medium:24:20:10:10:34"
+    "960:540:1600:medium:24:20:10:10:34"
+    "1216:684:2400:medium:28:24:10:10:38"
+    "1280:720:3400:medium:28:24:10:10:38"
+    "1856:1044:4500:medium:36:32:10:10:45"
+    "1920:1080:5800:medium:36:32:10:10:45"
+    "2560:1440:8100:medium:42:36:10:10:52"
+    "3776:2124:11600:medium:54:48:10:10:64"
+    "3840:2160:16800:medium:54:48:10:10:64"
+)
+declare -a APPLE_LADDER_AV1_UNIQ=("${APPLE_LADDER_HEVC_UNIQ[@]}")
+
 # Per-codec encoding variant lists — the SINGLE source of truth for both the
 # encode and packaging phases, populated after source detection. Each row
 # carries a UNIQUE `label` that doubles as the temp-file stem, output
@@ -644,12 +699,15 @@ enumerate_codec_rungs() {
 
     # Gather source rungs as width:height:bitrate:preset:ftc:flbl:x:ytc:ylbl
     local -a src=()
-    if [[ "$LADDER" == "apple" ]]; then
+    if [[ "$LADDER" == apple* ]]; then
+        # apple -> APPLE_LADDER_*, apple-uniq -> APPLE_LADDER_*_UNIQ (#868/#871)
+        local apple_suffix=""
+        [[ "$LADDER" == "apple-uniq" ]] && apple_suffix="_UNIQ"
         local apple_arr=""
         case "$codec" in
-            hevc) apple_arr="APPLE_LADDER_HEVC" ;;
-            h264) apple_arr="APPLE_LADDER_H264" ;;
-            av1)  apple_arr="APPLE_LADDER_AV1" ;;
+            hevc) apple_arr="APPLE_LADDER_HEVC${apple_suffix}" ;;
+            h264) apple_arr="APPLE_LADDER_H264${apple_suffix}" ;;
+            av1)  apple_arr="APPLE_LADDER_AV1${apple_suffix}" ;;
         esac
         local -n _al="$apple_arr"
         src=("${_al[@]}")
@@ -851,6 +909,13 @@ get_resolution_name() {
         1600) echo "900p" ;;
         2304) echo "1296p" ;;
         3200) echo "1800p" ;;
+        # apple-uniq stepped-down rungs (#868/#871): unique 16:9 widths.
+        704)  echo "396p" ;;
+        832)  echo "468p" ;;
+        896)  echo "504p" ;;
+        1216) echo "684p" ;;
+        1856) echo "1044p" ;;
+        3776) echo "2124p" ;;
         *)    echo "${width}p" ;;
     esac
 }
@@ -860,15 +925,21 @@ get_resolution_height() {
     case "$res_name" in
         "234p") echo "234" ;;
         "360p") echo "360" ;;
+        "396p") echo "396" ;;
         "432p") echo "432" ;;
+        "468p") echo "468" ;;
+        "504p") echo "504" ;;
         "540p") echo "540" ;;
         "648p") echo "648" ;;
+        "684p") echo "684" ;;
         "720p") echo "720" ;;
         "900p") echo "900" ;;
+        "1044p") echo "1044" ;;
         "1080p") echo "1080" ;;
         "1296p") echo "1296" ;;
         "1440p") echo "1440" ;;
         "1800p") echo "1800" ;;
+        "2124p") echo "2124" ;;
         "2160p") echo "2160" ;;
         *) echo "0" ;;
     esac
@@ -3732,11 +3803,17 @@ get_resolution_dimensions() {
     res_name="${res_name%_[0-9]*}"   # strip apple multi-rung ordinal (#868): 1080p_2 -> 1080p
     case "$res_name" in
         "2160p") echo "3840×2160" ;;
+        "2124p") echo "3776×2124" ;;
         "1440p") echo "2560×1440" ;;
         "1080p") echo "1920×1080" ;;
+        "1044p") echo "1856×1044" ;;
         "720p") echo "1280×720" ;;
+        "684p") echo "1216×684" ;;
         "540p") echo "960×540" ;;
+        "504p") echo "896×504" ;;
+        "468p") echo "832×468" ;;
         "432p") echo "768×432" ;;
+        "396p") echo "704×396" ;;
         "360p") echo "640×360" ;;
         "234p") echo "416×234" ;;
         *) echo "Unknown" ;;
