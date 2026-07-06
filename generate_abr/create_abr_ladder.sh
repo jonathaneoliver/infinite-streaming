@@ -2933,10 +2933,17 @@ package_dash() {
     cmd="$cmd --mpd_output manifest.mpd"
     cmd="$cmd --generate_static_live_mpd"  # This helps with SegmentList generation
     
-    # Execute in output directory
+    # Execute in output directory. Shaka Packager writes manifest.mpd via an
+    # atomic tmpfile+rename; when that tmpfile lands on a DIFFERENT filesystem
+    # than $output_dir (system $TMPDIR on the boot disk vs output on an external
+    # volume like $ENCODE_STAGING_DIR) the rename fails with EXDEV and no MPD is
+    # produced (#868/#908). Point the packager temp at a dir on the OUTPUT
+    # volume so the rename stays intra-device.
+    local pkg_tmp="$output_dir/.packager_tmp"
+    mkdir -p "$pkg_tmp"
     cd "$output_dir"
-    eval $cmd 2>&1 | tee -a "$LOG_FILE"
-    local packager_exit_code=$?
+    ( export TMPDIR="$pkg_tmp"; eval $cmd ) 2>&1 | tee -a "$LOG_FILE"
+    local packager_exit_code=${PIPESTATUS[0]}
     cd "$SCRIPT_DIR"
     
     # Check if manifest.mpd was created successfully
@@ -2944,10 +2951,11 @@ package_dash() {
     if [[ ! -f "$output_dir/manifest.mpd" ]]; then
         log_warn "manifest.mpd not found - checking for Shaka Packager temp files..."
         
-        # Look for the largest packager temp file created after this encode started
-        # (largest = most complete, as partial manifests are smaller)
+        # Look for the largest packager temp file (largest = most complete).
+        # Search the output-volume temp first, then the system temp; recover by
+        # COPYING (cp is cross-device-safe where the atomic rename was not).
         local temp_matches
-        temp_matches=$(find "${TEMP_BASE}/encoding" -name "packager-tempfile-*" -type f -newer "$output_dir" 2>/dev/null)
+        temp_matches=$(find "$pkg_tmp" "${TEMP_BASE}" -maxdepth 1 -name "packager-tempfile-*" -type f 2>/dev/null)
         local temp_manifest=""
         if [[ -n "$temp_matches" ]]; then
             temp_manifest=$(printf '%s\n' "$temp_matches" | xargs ls -S 2>/dev/null | head -1)
@@ -2958,10 +2966,12 @@ package_dash() {
             cp "$temp_manifest" "$output_dir/manifest.mpd"
             log_success "Recovered manifest.mpd from temp file"
         else
+            rm -rf "$pkg_tmp" 2>/dev/null
             log_error "Failed to create manifest.mpd and no temp file found"
             return 1
         fi
     fi
+    rm -rf "$pkg_tmp" 2>/dev/null
     
     # Convert SegmentTemplate to SegmentList
     convert_to_segmentlist "$output_dir"
