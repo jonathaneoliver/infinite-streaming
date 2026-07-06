@@ -55,6 +55,13 @@ func TestSweepProbe(t *testing.T) {
 	if !isAppium {
 		t.Skipf("sweep probe requires -launch-mode=appium (got %s)", mode)
 	}
+	// #906 — delete the appium session + release the device-farm lock on
+	// teardown. Without this the session lingers for newCommandTimeout (2h,
+	// appium.go) holding the device busy, so a second back-to-back probe on the
+	// same device fails `create session: context deadline exceeded` — the wedge
+	// that forced farm-reset-per-batch (iOS, 4 sims) / per-arm (androidtv, 1
+	// device). Registered first → runs last, after the proxy-session cleanup.
+	t.Cleanup(func() { _ = appium.Close() })
 
 	setupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
