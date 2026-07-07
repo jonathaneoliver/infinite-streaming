@@ -54,6 +54,9 @@ type netRow struct {
 	// ~1000× on sub-buffer transfers. 0 when the proxy couldn't sample
 	// (non-Linux build, torn-down conn). Issue #850.
 	DeliveryRateMbps     float32 `json:"delivery_rate_mbps"`
+	// tcpi_delivery_rate_app_limited for the sample above (1 = app-limited
+	// / unreliable). Consumers trust delivery_rate_mbps only when 0.
+	DeliveryRateAppLimited uint8 `json:"delivery_rate_app_limited"`
 	Faulted              uint8   `json:"faulted"`
 	FaultType            string  `json:"fault_type"`
 	FaultAction          string  `json:"fault_action"`
@@ -101,6 +104,7 @@ type netEntry struct {
 	TotalMs              float64       `json:"total_ms"`
 	ClientWaitMs         float64       `json:"client_wait_ms"`
 	DeliveryRateMbps     float64       `json:"delivery_rate_mbps"`
+	DeliveryRateAppLimited bool        `json:"delivery_rate_app_limited"`
 	Faulted              bool          `json:"faulted"`
 	FaultType            string        `json:"fault_type"`
 	FaultAction          string        `json:"fault_action"`
@@ -257,6 +261,10 @@ func entryToRow(sessionID, playerID string, e *netEntry) netRow {
 	if e.Faulted {
 		faulted = 1
 	}
+	deliveryAppLimited := uint8(0)
+	if e.DeliveryRateAppLimited {
+		deliveryAppLimited = 1
+	}
 	// Canonicalise — see canonicalV2ID()'s doc on case-sensitivity.
 	// `playerID` already came in canonicalised via sessionToPlayerID,
 	// but `e.PlayID` lands raw off the proxy SSE entry — historically
@@ -288,6 +296,7 @@ func entryToRow(sessionID, playerID string, e *netEntry) netRow {
 		TotalMs:              float32(e.TotalMs),
 		ClientWaitMs:         float32(e.ClientWaitMs),
 		DeliveryRateMbps:     float32(e.DeliveryRateMbps),
+		DeliveryRateAppLimited: deliveryAppLimited,
 		Faulted:              faulted,
 		FaultType:            e.FaultType,
 		FaultAction:          e.FaultAction,

@@ -213,6 +213,9 @@ func networkEntryToMap(e NetworkLogEntry) map[string]any {
 		// over-reports on sub-buffer transfers. Linux only; 0/omitted
 		// on the dev build.
 		"delivery_rate_mbps": e.DeliveryRateMbps,
+		// Kernel app-limited flag for the rate above: true = the sample
+		// was starved (app didn't fill the pipe) and is unreliable.
+		"delivery_rate_app_limited": e.DeliveryRateAppLimited,
 		// Fault metadata — flagged on rows where the proxy injected one.
 		"faulted":        e.Faulted,
 		"fault_type":     e.FaultType,
