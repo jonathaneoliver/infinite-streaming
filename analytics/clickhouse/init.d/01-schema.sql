@@ -695,6 +695,10 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.network_requests
     -- Honest cross-check for bytes_out/transfer_ms, which over-reports
     -- ~1000x on sub-buffer transfers (#850). 0 = not sampled.
     delivery_rate_mbps       Float32                CODEC(ZSTD(1)),
+    -- tcpi_delivery_rate_app_limited for the sample above: 1 = the sender
+    -- was app-limited, so delivery_rate_mbps is noisy (starved low or burst
+    -- high); trust it only when 0 (network-limited). 0 when not sampled.
+    delivery_rate_app_limited UInt8                 DEFAULT 0 CODEC(ZSTD(1)),
     faulted                  UInt8                  DEFAULT 0,
     fault_type               LowCardinality(String) CODEC(ZSTD(1)),
     fault_action             LowCardinality(String) CODEC(ZSTD(1)),

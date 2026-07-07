@@ -173,6 +173,15 @@ type NetworkLogEntry struct {
 	// only; unset on the macOS dev build.
 	DeliveryRateMbps float64 `json:"delivery_rate_mbps,omitempty"`
 
+	// DeliveryRateAppLimited is the kernel's tcpi_delivery_rate_app_limited
+	// flag for the sample above: true when the sender ran out of data to
+	// push, so DeliveryRateMbps reflects the app's pace rather than the
+	// link and reads noisily (starved low OR burst high). Consumers should
+	// trust the rate only when this is false (a network-limited sample).
+	// omitempty: present only when flagged, and only meaningful when
+	// DeliveryRateMbps is non-zero. Linux only.
+	DeliveryRateAppLimited bool `json:"delivery_rate_app_limited,omitempty"`
+
 	// ClientWaitMs is the time from when the proxy received the request
 	// to when it sent the first response byte back to the client. It IS
 	// what the player perceived as `wait` (HAR's TTFB), modulo the

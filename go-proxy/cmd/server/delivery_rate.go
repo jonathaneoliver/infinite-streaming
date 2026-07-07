@@ -23,7 +23,10 @@ func stampDeliveryRate(conn *net.TCPConn, entry *NetworkLogEntry) {
 	if conn == nil || entry == nil {
 		return
 	}
-	if bps, err := readDeliveryRateBps(conn); err == nil && bps > 0 {
+	if bps, appLimited, err := readDeliveryRate(conn); err == nil && bps > 0 {
 		entry.DeliveryRateMbps = float64(bps) * 8 / 1e6
+		// Only meaningful alongside a non-zero rate: it flags whether that
+		// sample was network-limited (trustworthy) or app-limited (noisy).
+		entry.DeliveryRateAppLimited = appLimited
 	}
 }

@@ -882,6 +882,26 @@ func numericFloatTranslate(v any) (float64, bool) {
 	return 0, false
 }
 
+// truthy coerces a v1-row value to a boolean. The proxy SSE path carries
+// JSON booleans; the ClickHouse read path carries UInt8 columns as 0/1
+// numbers (and, under a UseNumber decoder, json.Number). Anything that
+// parses to a non-zero number, or a literal true/"true"/"1", is true.
+func truthy(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return x == "1" || strings.EqualFold(x, "true")
+	case json.Number:
+		f, _ := x.Float64()
+		return f != 0
+	}
+	if f, ok := numericFloatTranslate(v); ok {
+		return f != 0
+	}
+	return false
+}
+
 // NetworkEntryFromV1 projects a v1 network ring-buffer row into a v2
 // NetworkLogEntry. The v1 row is itself a map produced by the network
 // log subsystem; only HAR-shaped fields are copied through.
@@ -945,6 +965,14 @@ func NetworkEntryFromV1(row map[string]any) oapigen.NetworkLogEntry {
 			f := float32(v)
 			*m.dst = &f
 		}
+	}
+	// Kernel app-limited flag for the delivery_rate_mbps sample — surfaced
+	// only when true (the sample is unreliable), mirroring faulted. Coerce
+	// robustly: the live proxy SSE sends a JSON bool, the ClickHouse read
+	// path (UInt8) sends 0/1 as a number, so accept both.
+	if truthy(row["delivery_rate_app_limited"]) {
+		t := true
+		out.DeliveryRateAppLimited = &t
 	}
 	// Fault metadata — flagged on rows where the proxy injected a fault.
 	if v, ok := row["faulted"].(bool); ok && v {

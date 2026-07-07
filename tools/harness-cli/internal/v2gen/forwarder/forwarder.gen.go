@@ -149,6 +149,24 @@ func (e MetaEventStreams) Valid() bool {
 	}
 }
 
+// Defines values for NetworkRowDeliveryRateAppLimited.
+const (
+	NetworkRowDeliveryRateAppLimitedN0 NetworkRowDeliveryRateAppLimited = 0
+	NetworkRowDeliveryRateAppLimitedN1 NetworkRowDeliveryRateAppLimited = 1
+)
+
+// Valid indicates whether the value is a known member of the NetworkRowDeliveryRateAppLimited enum.
+func (e NetworkRowDeliveryRateAppLimited) Valid() bool {
+	switch e {
+	case NetworkRowDeliveryRateAppLimitedN0:
+		return true
+	case NetworkRowDeliveryRateAppLimitedN1:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for NetworkRowFaultCategory.
 const (
 	NetworkRowFaultCategoryClientDisconnect NetworkRowFaultCategory = "client_disconnect"
@@ -181,16 +199,16 @@ func (e NetworkRowFaultCategory) Valid() bool {
 
 // Defines values for NetworkRowFaulted.
 const (
-	N0 NetworkRowFaulted = 0
-	N1 NetworkRowFaulted = 1
+	NetworkRowFaultedN0 NetworkRowFaulted = 0
+	NetworkRowFaultedN1 NetworkRowFaulted = 1
 )
 
 // Valid indicates whether the value is a known member of the NetworkRowFaulted enum.
 func (e NetworkRowFaulted) Valid() bool {
 	switch e {
-	case N0:
+	case NetworkRowFaultedN0:
 		return true
-	case N1:
+	case NetworkRowFaultedN1:
 		return true
 	default:
 		return false
@@ -873,6 +891,9 @@ type NetworkRequestRow struct {
 	ConnectMs   *float32 `json:"connect_ms,omitempty"`
 	ContentType *string  `json:"content_type,omitempty"`
 
+	// DeliveryRateAppLimited Kernel tcpi_delivery_rate_app_limited flag for the delivery_rate_mbps sample. true = the sender was starved (app-limited), so the rate reflects the app not the link and reads noisily (starved low or burst high); trust delivery_rate_mbps only when false (network-limited). Only meaningful when delivery_rate_mbps is non-zero. Linux only.
+	DeliveryRateAppLimited *bool `json:"delivery_rate_app_limited,omitempty"`
+
 	// DeliveryRateMbps Kernel-measured shaped delivery rate (tcpi_delivery_rate, Mbps) sampled at end of transfer. Honest cross-check for bytes_out/transfer_ms, which over-reports on sub-buffer transfers (#850). Connection-level; 0/absent when not sampled (non-Linux build).
 	DeliveryRateMbps *float32 `json:"delivery_rate_mbps,omitempty"`
 
@@ -921,29 +942,33 @@ type NetworkRequestsPage struct {
 //
 // SSE wire shape: `event: network\nid: <entry_fingerprint>\ndata: <this object>\n\n`.
 type NetworkRow struct {
-	BytesIn              *int                     `json:"bytes_in,omitempty"`
-	BytesOut             *int                     `json:"bytes_out,omitempty"`
-	ClientWaitMs         *float32                 `json:"client_wait_ms,omitempty"`
-	DeliveryRateMbps     *float32                 `json:"delivery_rate_mbps,omitempty"`
-	EntryFingerprint     string                   `json:"entry_fingerprint"`
-	FaultAction          *string                  `json:"fault_action,omitempty"`
-	FaultCategory        *NetworkRowFaultCategory `json:"fault_category,omitempty"`
-	FaultType            *string                  `json:"fault_type,omitempty"`
-	Faulted              *NetworkRowFaulted       `json:"faulted,omitempty"`
-	Method               *NetworkRowMethod        `json:"method,omitempty"`
-	Path                 *string                  `json:"path,omitempty"`
-	PlayId               string                   `json:"play_id"`
-	PlayerId             string                   `json:"player_id"`
-	RequestKind          *NetworkRowRequestKind   `json:"request_kind,omitempty"`
-	SessionId            string                   `json:"session_id"`
-	Status               *int                     `json:"status,omitempty"`
-	TotalMs              *float32                 `json:"total_ms,omitempty"`
-	TransferMs           *float32                 `json:"transfer_ms,omitempty"`
-	Ts                   time.Time                `json:"ts"`
-	TtfbMs               *float32                 `json:"ttfb_ms,omitempty"`
-	Url                  *string                  `json:"url,omitempty"`
-	AdditionalProperties map[string]interface{}   `json:"-"`
+	BytesIn                *int                              `json:"bytes_in,omitempty"`
+	BytesOut               *int                              `json:"bytes_out,omitempty"`
+	ClientWaitMs           *float32                          `json:"client_wait_ms,omitempty"`
+	DeliveryRateAppLimited *NetworkRowDeliveryRateAppLimited `json:"delivery_rate_app_limited,omitempty"`
+	DeliveryRateMbps       *float32                          `json:"delivery_rate_mbps,omitempty"`
+	EntryFingerprint       string                            `json:"entry_fingerprint"`
+	FaultAction            *string                           `json:"fault_action,omitempty"`
+	FaultCategory          *NetworkRowFaultCategory          `json:"fault_category,omitempty"`
+	FaultType              *string                           `json:"fault_type,omitempty"`
+	Faulted                *NetworkRowFaulted                `json:"faulted,omitempty"`
+	Method                 *NetworkRowMethod                 `json:"method,omitempty"`
+	Path                   *string                           `json:"path,omitempty"`
+	PlayId                 string                            `json:"play_id"`
+	PlayerId               string                            `json:"player_id"`
+	RequestKind            *NetworkRowRequestKind            `json:"request_kind,omitempty"`
+	SessionId              string                            `json:"session_id"`
+	Status                 *int                              `json:"status,omitempty"`
+	TotalMs                *float32                          `json:"total_ms,omitempty"`
+	TransferMs             *float32                          `json:"transfer_ms,omitempty"`
+	Ts                     time.Time                         `json:"ts"`
+	TtfbMs                 *float32                          `json:"ttfb_ms,omitempty"`
+	Url                    *string                           `json:"url,omitempty"`
+	AdditionalProperties   map[string]interface{}            `json:"-"`
 }
+
+// NetworkRowDeliveryRateAppLimited defines model for NetworkRow.DeliveryRateAppLimited.
+type NetworkRowDeliveryRateAppLimited int
 
 // NetworkRowFaultCategory defines model for NetworkRow.FaultCategory.
 type NetworkRowFaultCategory string
@@ -2104,6 +2129,14 @@ func (a *NetworkRow) UnmarshalJSON(b []byte) error {
 		delete(object, "client_wait_ms")
 	}
 
+	if raw, found := object["delivery_rate_app_limited"]; found {
+		err = json.Unmarshal(raw, &a.DeliveryRateAppLimited)
+		if err != nil {
+			return fmt.Errorf("error reading 'delivery_rate_app_limited': %w", err)
+		}
+		delete(object, "delivery_rate_app_limited")
+	}
+
 	if raw, found := object["delivery_rate_mbps"]; found {
 		err = json.Unmarshal(raw, &a.DeliveryRateMbps)
 		if err != nil {
@@ -2285,6 +2318,13 @@ func (a NetworkRow) MarshalJSON() ([]byte, error) {
 		object["client_wait_ms"], err = json.Marshal(a.ClientWaitMs)
 		if err != nil {
 			return nil, fmt.Errorf("error marshaling 'client_wait_ms': %w", err)
+		}
+	}
+
+	if a.DeliveryRateAppLimited != nil {
+		object["delivery_rate_app_limited"], err = json.Marshal(a.DeliveryRateAppLimited)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'delivery_rate_app_limited': %w", err)
 		}
 	}
 

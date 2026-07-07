@@ -283,7 +283,8 @@ const segmentMarkers = computed(() => sessionMarkerSets.value.flatMap((s) => s.d
  *  Single-session mode also switches to group chips when BOTH marker
  *  families are present (iOS segment dots + kernel delivery dots), so each
  *  family gets its own named chip; a lone family keeps the flat
- *  `segmentMarkersLabel` chip. All chips share one visibility toggle. */
+ *  `segmentMarkersLabel` chip. Each chip toggles independently (per-tag
+ *  visibility in MetricsLineChart) — Video and Delivery are not lockstep. */
 const segmentMarkerGroups = computed<Array<{ tag: string; label: string; color: string }>>(() => {
   if (compareSelf.value) {
     return sessionMarkerSets.value
@@ -307,32 +308,30 @@ const segmentMarkersLabel = computed(() => {
 });
 
 /** Kernel-measured delivery-rate dots (#850): one dot per SEGMENT request
- *  large enough that the kernel actually metered its wire delivery.
- *  Server-side sibling of the iOS avmetrics dots above — honest under tc
- *  shaping, where the implied bytes_out/transfer_ms figure over-reads up
- *  to ~5000× on sub-buffer transfers. Active session only — compare
- *  siblings don't ship a network stream.
+ *  whose wire delivery the kernel actually metered. Server-side sibling
+ *  of the iOS avmetrics dots above — honest under tc shaping, where the
+ *  implied bytes_out/transfer_ms figure over-reads up to ~5000× on
+ *  sub-buffer transfers. Active session only — compare siblings don't
+ *  ship a network stream.
  *
- *  Two guards, both about the same failure mode: delivery_rate is
- *  CONNECTION-level (tcpi_delivery_rate), so it only reflects THIS
- *  segment if the segment was genuinely drained over the wire. When a
- *  transfer fits in the socket send buffer, the proxy's write returns
- *  before the wire drains, and delivery_rate is stale residue of the
- *  connection's recent history — accurate in steady state, but wrong
- *  right after a rate change (the "high dot during a low-throughput
- *  ramp" artefact). We therefore skip:
- *    - bytes < 1 MB — real player segments below this get absorbed into
- *      the send buffer; measured on test-dev, 256 KB–1 MB rows are
- *      ~90% buffer-absorbed and even the metered ones read 4× off. The
- *      §1.14 calibration's 256 KB floor held only under CONTINUOUS
- *      pulling; live traffic arrives with idle gaps, so the real-world
- *      floor is higher.
- *    - transfer_ms < 5 ms — the write returned instantly (buffer-
- *      absorbed), so delivery_rate never metered this segment. Catches
- *      the rare ≥1 MB segment that still fit the buffer. */
+ *  Reliability gate — delivery_rate is only trustworthy when the kernel
+ *  observed the link at full tilt. We drop a dot only when:
+ *    - NOT app-limited (`delivery_rate_app_limited` falsy). This is the
+ *      kernel's own reliability signal (tcpi_delivery_rate_app_limited):
+ *      when the sender ran out of data to push, the sample reflects the
+ *      app's pace, not the link, and reads noisily — starved LOW or,
+ *      caught mid token-bucket burst, HIGH. Replaces the old ≥5 ms
+ *      transfer_ms heuristic, which couldn't tell a throttled small
+ *      segment from a buffer-absorbed one.
+ *    - bytes ≥ 256 KB — a burst backstop. `app_limited` guards the
+ *      false-LOW (starved) case but not every false-HIGH: a tiny
+ *      segment can be network-limited yet delivered entirely inside the
+ *      HTB burst allowance, over-reading the average cap. This modest
+ *      floor (was 1 MB) excludes the burst-prone tiddlers while showing
+ *      far more of the low-throttle valley than before. Tunable — see
+ *      §1.14 calibration. */
 const DELIVERY_COLOR = '#10b981'; // emerald — distinct from the slate/sky avmetrics dots
-const DELIVERY_MIN_BYTES = 1024 * 1024;
-const DELIVERY_MIN_TRANSFER_MS = 5;
+const DELIVERY_MIN_BYTES = 1024 * 256;
 function extractDeliveryMarkers(
   stream: Stream<Record<string, unknown>> | undefined,
 ): Array<{ x: number; y: number; color?: string; label?: string; tag?: string }> {
@@ -344,10 +343,13 @@ function extractDeliveryMarkers(
     if (String(row.request_kind ?? '') !== 'segment') continue;
     const mbps = Number(row.delivery_rate_mbps);
     if (!Number.isFinite(mbps) || mbps <= 0) continue;
+    // Kernel says the sample was app-limited → unreliable, skip. The flag
+    // arrives as a JSON bool (live proxy SSE) or 0/1 number (ClickHouse
+    // UInt8 read path), so accept both.
+    const appLimited = row.delivery_rate_app_limited;
+    if (appLimited === true || appLimited === 1 || appLimited === '1') continue;
     const bytes = Number(row.bytes_out);
     if (!Number.isFinite(bytes) || bytes < DELIVERY_MIN_BYTES) continue;
-    const transferMs = Number(row.transfer_ms);
-    if (!Number.isFinite(transferMs) || transferMs < DELIVERY_MIN_TRANSFER_MS) continue;
     const tsRaw = row.ts ?? row.timestamp;
     let ts = NaN;
     if (typeof tsRaw === 'number') {
@@ -362,6 +364,10 @@ function extractDeliveryMarkers(
     if (!Number.isFinite(ts) || ts <= 0) continue;
     const url = String(row.url ?? row.path ?? '');
     const filename = url ? (url.split('?')[0].split('/').pop() ?? '') : '';
+    // transfer_ms no longer gates the dot (app_limited does), but the
+    // implied bytes/transfer figure is still handy in the tooltip as the
+    // (over-reading) contrast to the honest kernel rate.
+    const transferMs = Number(row.transfer_ms);
     const implied = Number.isFinite(transferMs) && transferMs > 0
       ? (bytes * 8) / (transferMs * 1000)
       : NaN;

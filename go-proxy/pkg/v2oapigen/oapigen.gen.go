@@ -971,6 +971,9 @@ type NetworkLogEntry struct {
 	ConnectMs   *float32 `json:"connect_ms,omitempty"`
 	ContentType *string  `json:"content_type,omitempty"`
 
+	// DeliveryRateAppLimited Kernel tcpi_delivery_rate_app_limited flag for the delivery_rate_mbps sample. true = the sender was starved (app-limited), so the rate reflects the app not the link and reads noisily (starved low or burst high); trust delivery_rate_mbps only when false (network-limited). Only meaningful when delivery_rate_mbps is non-zero. Linux only.
+	DeliveryRateAppLimited *bool `json:"delivery_rate_app_limited,omitempty"`
+
 	// DeliveryRateMbps Kernel-measured shaped delivery rate (tcpi_delivery_rate, Mbps) sampled at end of transfer. Honest cross-check for bytes_out/transfer_ms, which over-reports on sub-buffer transfers (#850). Connection-level; 0/absent when not sampled (non-Linux build).
 	DeliveryRateMbps *float32 `json:"delivery_rate_mbps,omitempty"`
 
