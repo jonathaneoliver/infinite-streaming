@@ -3,6 +3,8 @@
 **Date:** 2026-07-05 · **Platform:** iPhone 15 simulator (ipad-sim), AVPlayer, HLS-LL
 **Signal:** `wall_offset = seekable_end_s − position_s` (the app seek's achieved offset behind the available live edge). `live_offset_s` / `true_offset_s` over-read (they include the HOLD-BACK + encode/deliver latency).
 
+> **Followed up 2026-07-07** with a three-platform sweep (real iPhone + sim + Android TV) on `insane_newer` — real iPhone ≈ this sim data, and Android/ExoPlayer applies the offset as a native `targetLiveOffset` (much closer to live). See `.claude/findings/user-live-offset-crossplatform-2026-07-07.md`.
+
 ## TL;DR
 
 The user (app) live-offset lever — `is.flag.live_offset_s`, a.k.a. **Settings → Advanced → Live Offset**, a seek to `liveEdge − N` — **is honored above a shallow, segment-scaled threshold and ignored/clamped below it.** The threshold is **~1–2 segment durations**, NOT the 3×-segment HOLD-BACK it was hypothesised to obey.

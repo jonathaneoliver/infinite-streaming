@@ -1,5 +1,12 @@
 # Live-offset is currently untestable on Android TV — 2026-06-15
 
+> **⚠️ SUPERSEDED 2026-07-07.** The Android client lever (action item below / #793 step 4) is now
+> plumbed — `MainActivity.kt` parses `is.flag.live_offset_s` → `LiveConfiguration.setTargetOffsetMs`.
+> A 14-arm Android TV sweep confirms the app lever **works and overrides the manifest holdback**
+> (`recommended_offset_s = N`, `true_offset_s ≈ N` on s6). Android TV is **no longer untestable**.
+> See `.claude/findings/user-live-offset-crossplatform-2026-07-07.md` for the three-platform data.
+> The rest of this doc is retained for the 2026-06-15 state (no client lever, manifest-only).
+
 ## Summary
 A config-class sweep that sets `content_manipulation.live_offset` does **not** move the achieved
 offset on Android TV (ExoPlayer): the recipe asked for 6 s, the player ran at ~21.5 s the whole play.
