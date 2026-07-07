@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-07 · **Platforms:** real iPhone 15 (AVPlayer), iPhone 15 sim (AVPlayer), Google TV Streamer (ExoPlayer/Media3) · HLS-LL, content `insane_newer_p200_h264`
 **Levers:** app live-offset (`is.flag.live_offset_s` — Settings → Advanced → Live Offset). iOS applies it as a **seek** to `liveEdge − N`; Android applies it as ExoPlayer's native **`LiveConfiguration.targetOffsetMs`**.
-**Metrics (per play):** `wall = seekable_end_s − position_s` (distance to the last-advertised segment) · `true_offset_s = now − PROGRAM-DATE-TIME` (glass-to-glass, the sports-fan number) · `buffer_depth_s` (loaded − position) · `recommended_offset_s` (what the player targets).
+**Metrics (per play):** `true_offset_s = now − PROGRAM-DATE-TIME` — **this is the wall-clock offset** (`= now − playhead_wallclock_ms`, where `playhead_wallclock_ms = AVPlayerItem.currentDate()`; `PlayerViewModel.swift:3472`). Glass-to-glass latency behind the live broadcast — the sports-fan number, and the one to trust. · `buffer_depth_s` (loaded − position) · `recommended_offset_s` (what the player targets). *We dropped what an earlier draft mislabeled `wall`: it was really `edge_gap = seekable_end − position` (seek-headroom to the last **advertised** segment). It is **not** a wall-clock number — the wall-clock offset is `true_offset_s`. `edge_gap` excludes the hold-back (exactly where the platforms differ), its reference is player-specific + jumps per-segment, so it's noisy and not cross-platform comparable (negative at N=0 on iOS, non-monotonic on Android, a startup-join artifact on the sim).*
 
 ## TL;DR
 
@@ -15,33 +15,33 @@
 - **Buffer trade:** iOS carries a **deep buffer that scales with N**; Android runs a **lean, ~flat LL buffer** (~2× less on s1/s2).
 - **Precedence (both levers set):** app lever wins the playhead on both. On iOS the manifest holdback still shows in `recommended_offset_s`; on Android the app target fully overrides it.
 
-## Data — steady-state, all `insane_newer` (median `wall` / median `true` / **mean** `buf` / median `recomm`)
+## Data — steady-state, all `insane_newer` (median `true_off` / **mean** `buf` / median `recomm`)
 
 ### s6 (6s segment · holdback 21)
 | N | iPhone (real) | iPhone (sim) | Android TV |
 |---|---|---|---|
-| 0 | −0.5 / 28.8 / 20.1 / 21 | 97.3 / 124.9 / 50.4 / 21 *(startup-join artifact)* | 17.9 / 24.8 / 16.8 / 23.3 |
-| 6 | 3.1 / 31.9 / 23.4 / 21 | 8.5 / 36.6 / 28.4 / 21 | 7.6 / **10.0** / 6.0 / 6 |
-| 12 | 11.2 / 40.1 / 31.3 / 21 | 13.5 / 40.6 / 33.5 / 21 | 5.8 / **13.9** / 9.1 / 12 |
-| 18 | 17.7 / 43.4 / 37.6 / 21 | 17.2 / 40.5 / 36.2 / 21 | 11.0 / **18.1** / 9.5 / 18 |
-| 24 | 22.1 / 53.0 / 42.4 / 21 | 28.5 / 55.9 / 48.1 / 21 | 16.2 / **24.0** / 14.4 / 24 |
-| 30 | 29.0 / 58.0 / 49.1 / 21 | 29.7 / 57.5 / 49.1 / 21 | 27.7 / **30.1** / 26.5 / 30 |
-| UX (24 + proxy 30) | 22.2 / 62.8 / 51.2 / **30** | 27.0 / 63.0 / 51.9 / **30** | 21.8 / **24.1** / 20.1 / **24** |
+| 0 | 28.8 / 20.1 / 21 | 124.9 / 50.4 / 21 *(startup-join artifact)* | 24.8 / 16.8 / 23.3 |
+| 6 | 31.9 / 23.4 / 21 | 36.6 / 28.4 / 21 | **10.0** / 6.0 / 6 |
+| 12 | 40.1 / 31.3 / 21 | 40.6 / 33.5 / 21 | **13.9** / 9.1 / 12 |
+| 18 | 43.4 / 37.6 / 21 | 40.5 / 36.2 / 21 | **18.1** / 9.5 / 18 |
+| 24 | 53.0 / 42.4 / 21 | 55.9 / 48.1 / 21 | **24.0** / 14.4 / 24 |
+| 30 | 58.0 / 49.1 / 21 | 57.5 / 49.1 / 21 | **30.1** / 26.5 / 30 |
+| UX (24 + proxy 30) | 62.8 / 51.2 / **30** | 63.0 / 51.9 / **30** | **24.1** / 20.1 / **24** |
 
 ### s2 (2s segment · holdback 9)
 | N | iPhone (real) | iPhone (sim) | Android TV |
 |---|---|---|---|
-| 2 | 1.0 / 13.3 / 9.1 / 9 | 1.7 / 13.6 / 10.5 / 9 | 5.0 / 7.6 / 3.6 / 4.1 |
-| 4 | 4.5 / 16.3 / 12.5 / 9 | 3.0 / 15.1 / 12.1 / 9 | 4.3 / 7.2 / 3.5 / 4.0 |
-| 6 | 5.9 / 17.8 / 13.9 / 9 | 6.7 / 18.2 / 14.8 / 9 | 6.0 / 8.5 / 4.5 / 6 |
-| 12 | 11.1 / 23.3 / 19.2 / 9 | 11.5 / 23.6 / 20.4 / 9 | 9.7 / 12.1 / 8.8 / 12 |
+| 2 | 13.3 / 9.1 / 9 | 13.6 / 10.5 / 9 | 7.6 / 3.6 / 4.1 |
+| 4 | 16.3 / 12.5 / 9 | 15.1 / 12.1 / 9 | 7.2 / 3.5 / 4.0 |
+| 6 | 17.8 / 13.9 / 9 | 18.2 / 14.8 / 9 | 8.5 / 4.5 / 6 |
+| 12 | 23.3 / 19.2 / 9 | 23.6 / 20.4 / 9 | 12.1 / 8.8 / 12 |
 
 ### s1 (1s LL segment · holdback 6)
 | N | iPhone (real) | iPhone (sim) | Android TV |
 |---|---|---|---|
-| 2 | 3.0 / 10.5 / 8.2 / 6 | 2.7 / 10.9 / 8.6 / 6 | 5.0 / 12.7 / 7.3 / 5.1 |
-| 4 | 5.0 / 12.8 / 10.4 / 6 | 4.2 / 12.1 / 10.0 / 6 | 6.1 / 13.6 / 4.6 / 6.2 |
-| 6 | 5.7 / 13.3 / 10.7 / 6 | 6.2 / 14.6 / 12.1 / 6 | 6.2 / 15.0 / 5.2 / 6 |
+| 2 | 10.5 / 8.2 / 6 | 10.9 / 8.6 / 6 | 12.7 / 7.3 / 5.1 |
+| 4 | 12.8 / 10.4 / 6 | 12.1 / 10.0 / 6 | 13.6 / 4.6 / 6.2 |
+| 6 | 13.3 / 10.7 / 6 | 14.6 / 12.1 / 6 | 15.0 / 5.2 / 6 |
 
 ## Reading the numbers
 
