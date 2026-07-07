@@ -488,7 +488,7 @@ SEGMENT_DURATION="${SEGMENT_DURATION:-6}"    # Target segment duration in second
 PARTIAL_DURATION="${PARTIAL_DURATION:-0.2}"  # Partial fragment duration in seconds
 GOP_DURATION="${GOP_DURATION:-1.0}"          # GOP/keyframe duration in seconds
 MAXRATE_PERCENT="${MAXRATE_PERCENT:-124}"    # Peak cap percentage of target bitrate (<125% guidance)
-BUFSIZE_MULT="${BUFSIZE_MULT:-1}"            # VBV bufsize = this × target kbps. 1× ≈ ~1s window → tight per-segment peaks so each 2s chunk hugs target (was 2×, which let 2s chunks burst ~1.5× target).
+BUFSIZE_MULT="${BUFSIZE_MULT:-0.25}"         # VBV bufsize = this × target kbps. The peak a window of length T can reach is maxrate + bufsize/T, so a large buffer lets SHORT segments burst well above maxrate (1× → a 1s window could hit ~2.2× target, a 6s window ~1.4×). 0.25× keeps the peak within ~1.5× at 1s and ~1.28× at 6s, so avg/peak stay far more consistent across 1s/2s/6s segment sizes (#868). History: 2× → 1× (#829, June) → 0.25×. Trade-off: a tighter buffer gives the encoder less room to spend bits on hard/high-motion scenes (watch VMAF on the very low rungs, where 0.25× can drop below a single I-frame). May be fractional; computed via awk below since bash $(()) is integer-only.
 MULTI_DURATION_LCM=12           # LCM of 2s/4s/6s for multi-duration support
 PADDING_THRESHOLD=0.1           # Minimum remainder to trigger padding (seconds)
 PADDING_WARNING_RATIO=50        # Warn if padding exceeds this % of total duration
@@ -2320,7 +2320,13 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
     fi
     
     START_TIME=$(date +%s)
-    
+
+    # VBV buffer size in kbits. BUFSIZE_MULT may be fractional (e.g. 0.25), which
+    # bash $(()) cannot multiply — compute with awk (rounded). Used by every
+    # encoder branch below in place of the old integer $((bitrate_kbps*MULT)).
+    local bufsize_kbps
+    bufsize_kbps=$(awk -v b="$bitrate_kbps" -v m="$BUFSIZE_MULT" 'BEGIN{printf "%d", (b*m)+0.5}')
+
     # Execute encoding with encoder-specific commands
     if [ "$codec" = "hevc" ]; then
         if [ "$encoder_type" = "hardware" ]; then
@@ -2331,7 +2337,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -allow_sw 1 \
                    -b:v "${bitrate_kbps}k" \
                    -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-                   -bufsize "$((bitrate_kbps * BUFSIZE_MULT))k" \
+                   -bufsize "${bufsize_kbps}k" \
                    -g "$KEYINT" \
                    -force_key_frames "expr:gte(n,n_forced*$KEYINT)" \
                    -tag:v hvc1 \
@@ -2347,7 +2353,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -c:v libx265 \
                    -b:v "${bitrate_kbps}k" \
                    -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-                   -bufsize "$((bitrate_kbps * BUFSIZE_MULT))k" \
+                   -bufsize "${bufsize_kbps}k" \
                    -preset "$preset" \
                    -threads 0 \
                    -x265-params "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0:pools=+:frame-threads=0" \
@@ -2367,7 +2373,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -allow_sw 1 \
                    -b:v "${bitrate_kbps}k" \
                    -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-                   -bufsize "$((bitrate_kbps * BUFSIZE_MULT))k" \
+                   -bufsize "${bufsize_kbps}k" \
                    -g "$KEYINT" \
                    -force_key_frames "expr:gte(n,n_forced*$KEYINT)" \
                    -tag:v avc1 \
@@ -2383,7 +2389,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -c:v libx264 \
                    -b:v "${bitrate_kbps}k" \
                    -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-                   -bufsize "$((bitrate_kbps * BUFSIZE_MULT))k" \
+                   -bufsize "${bufsize_kbps}k" \
                    -preset "$preset" \
                    -threads 0 \
                    -x264-params "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0" \
@@ -2402,7 +2408,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                -preset 8 \
                -b:v "${bitrate_kbps}k" \
                -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-               -bufsize "$((bitrate_kbps * BUFSIZE_MULT))k" \
+               -bufsize "${bufsize_kbps}k" \
                -g "$KEYINT" \
                -force_key_frames "expr:gte(n,n_forced*$KEYINT)" \
                -svtav1-params "keyint=${KEYINT}:scd=0" \
