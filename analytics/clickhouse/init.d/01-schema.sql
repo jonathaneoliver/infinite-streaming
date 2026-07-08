@@ -648,11 +648,30 @@ ALTER TABLE infinite_streaming.session_events
 -- so step 2's IF EXISTS is a no-op (nothing to drop) and step 3 is
 -- a no-op (nothing to rename — control_revision_str was never added
 -- because step 1 above is IF NOT EXISTS).
-ALTER TABLE infinite_streaming.session_events
-    DROP COLUMN IF EXISTS control_revision;
+-- NOTE (fix): the DROP + RENAME dance that used to live here was a one-time
+-- UInt64→String migration for clusters that predated the canonical String
+-- column. It was actively HARMFUL on a fresh install: init.d runs ONLY on first
+-- DB creation, where the CREATE TABLE above already declares control_revision as
+-- String — so `DROP COLUMN IF EXISTS control_revision` dropped that good column,
+-- and the RENAME (of a control_revision_str that was NEVER actually added — the
+-- "already done above" was aspirational) couldn't restore it. Result: every
+-- clean install had session_events missing control_revision, which errored the
+-- events timeseries query and broke the dashboard's network/events panels.
+-- Existing clusters already migrated by hand and init.d never re-runs on them,
+-- so removing the migration loses nothing.
 
+-- Fresh-install completeness: guarantee every column the dashboard's timeseries
+-- SELECTs exists on a clean CREATE — including ones that were historically only
+-- applied to the primary via `make analytics-migrate` and never backported
+-- (session_events.labels + the app_* client fields). Idempotent on every host.
 ALTER TABLE infinite_streaming.session_events
-    RENAME COLUMN IF EXISTS control_revision_str TO control_revision;
+    ADD COLUMN IF NOT EXISTS control_revision      String                        DEFAULT '' CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS labels                Array(LowCardinality(String)) DEFAULT [] CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS app_live_offset_s     Float32,
+    ADD COLUMN IF NOT EXISTS app_muted             UInt8                         DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS app_peak_bitrate_mbps UInt32,
+    ADD COLUMN IF NOT EXISTS app_protocol          LowCardinality(String),
+    ADD COLUMN IF NOT EXISTS app_segment           LowCardinality(String);
 
 -- Per-request HAR-style log so the session-viewer's network log fold
 -- can replay archived sessions whose go-proxy buffer is gone. Forwarder

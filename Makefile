@@ -660,6 +660,12 @@ analytics-migrate:
 	  done < /tmp/.analytics-migrate.sql; \
 	  rm -f /tmp/.analytics-migrate.sql; \
 	  exit $$rc'
+	@echo ""
+	@echo "⚠  This ALTER ran ONLY on the live primary. Fresh installs and the"
+	@echo "   ClickHouse self-heal both build from analytics/clickhouse/init.d/01-schema.sql —"
+	@echo "   add the SAME change there (idempotent: CREATE/ADD COLUMN ... IF [NOT] EXISTS)"
+	@echo "   or it silently won't reach new/rebuilt stacks. Un-backported migrations are"
+	@echo "   exactly what blanked the dashboard before."
 
 test-clean-dev:
 	ssh $(TEST_SSH) 'docker rm -f test-dev-server 2>/dev/null'
@@ -736,6 +742,15 @@ test-deploy-oobe:
 		"$(TEST_OOBE_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(TEST_HOST)" "$(TEST_HOST)" > ~/test-oobe/.env'
 	scp tests/deploy/override-oobe.yml $(TEST_SSH):~/test-oobe/docker-compose.override.yml
 	ssh $(TEST_SSH) 'cd ~/test-oobe && VERSION=$$(cat VERSION) docker compose -p test-oobe build && docker compose -p test-oobe up -d'
+	@# Smoke test: a fresh install boots green even with a broken analytics
+	@# schema — the failure only shows when the dashboard queries the events/
+	@# network timeseries (a missing session_events column errors the backfill,
+	@# blanking the Network Log + PlayLog). Exercise that exact query with a
+	@# dummy player (needs no data — CH validates columns at analysis time) so a
+	@# broken clean install FAILS this deploy instead of shipping a dead dashboard.
+	@echo "=== OOBE smoke: dashboard timeseries schema-drift guard ==="
+	scp tests/deploy/oobe-smoke.sh $(TEST_SSH):~/test-oobe/oobe-smoke.sh
+	ssh $(TEST_SSH) 'bash ~/test-oobe/oobe-smoke.sh https://localhost:26000'
 
 test-clean-oobe:
 	@case "$(TEST_OOBE_MEDIA_DIR)" in \
