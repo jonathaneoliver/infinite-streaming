@@ -131,6 +131,16 @@ type NetworkLogEntry struct {
 	// events (user-reload, auto-recovery). Issue #280.
 	PlayID string `json:"play_id,omitempty"`
 
+	// PlayerID identifies the player that made this request, stamped from
+	// the request's `?player_id=` query param (raw/uppercase off iOS) so the
+	// attribution rides the request itself and does NOT depend on the session
+	// having been associated with a player_id yet. Without it, the forwarder's
+	// session→player_id map is cold for a burst of early requests on a fresh
+	// stack and those rows land with an empty player_id — invisible to the
+	// dashboard's player-filtered Network Log. The forwarder canonicalises it
+	// (lowercase) and also learns the session→player mapping from it. Issue #911.
+	PlayerID string `json:"player_id,omitempty"`
+
 	// AttemptID identifies which playback attempt within a play this
 	// request belongs to. The player initialises it to 1 on every
 	// new play and increments by 1 at every `restart` event
@@ -5666,6 +5676,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// NetworkLogEntry created in this handler via the logEntry closure
 	// below.
 	playID := strings.TrimSpace(r.URL.Query().Get("play_id"))
+	// #911: hoisted above the logEntry closure so it can stamp entry.PlayerID
+	// off the request (warm from request #1), independent of session association.
+	playerID := strings.TrimSpace(r.URL.Query().Get("player_id"))
 	attemptIDStr := strings.TrimSpace(r.URL.Query().Get("attempt_id"))
 	// Client-supplied, play-scoped start (#587). Rotates with play_id;
 	// the proxy just carries it through to the session map so it reaches
@@ -5680,6 +5693,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	logEntry := func(sessionID string, entry NetworkLogEntry) {
 		if entry.PlayID == "" {
 			entry.PlayID = playID
+		}
+		if entry.PlayerID == "" {
+			entry.PlayerID = playerID // #911: attribute off the request itself
 		}
 		if entry.AttemptID == 0 {
 			entry.AttemptID = attemptID
@@ -5721,7 +5737,8 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	a.removeInactiveSessions()
 	sessionList := a.getSessionList()
 	sessionNumber := thirdFromLastDigit(externalPort)
-	playerID := r.URL.Query().Get("player_id")
+	// playerID hoisted above the logEntry closure (#911); keep it as the
+	// primary player-id source here for the rest of the handler.
 	playerHeader := r.Header.Get("player_id")
 	playerHeaderAlt := r.Header.Get("Player-ID")
 	playbackSessionHeader := r.Header.Get("X-Playback-Session-Id")
@@ -7816,6 +7833,11 @@ func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 	}
 	if entry.PlayID == "" {
 		entry.PlayID = a.sessionStickyPlayID(sessionID)
+	}
+	if entry.PlayerID == "" {
+		// #911: sticky fallback for entries that didn't carry a player_id on the
+		// request (some sub-requests) — warms once the session is associated.
+		entry.PlayerID = a.sessionStickyPlayerID(sessionID)
 	}
 	if entry.AttemptID == 0 {
 		entry.AttemptID = a.sessionStickyAttemptID(sessionID)

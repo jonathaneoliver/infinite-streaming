@@ -200,6 +200,8 @@ func networkEntryToMap(e NetworkLogEntry) map[string]any {
 		"bytes_out":    e.BytesOut,
 		"content_type": e.ContentType,
 		"play_id":      e.PlayID,
+		"player_id":    e.PlayerID, // #911
+
 		// Phase timings — surfaced when httptrace populated them.
 		"dns_ms":         e.DNSMs,
 		"connect_ms":     e.ConnectMs,
