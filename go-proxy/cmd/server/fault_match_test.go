@@ -154,19 +154,22 @@ func TestMatchFaultRule_FirstMatchWins(t *testing.T) {
 	}
 }
 
-func TestMatchFaultRule_NoneShadows(t *testing.T) {
-	// A leading type:none rule scoped to rung 0 shadows the catch-all for rung 0
-	// only — first-match-wins returns the none rule (caller = no fault), while
-	// other rungs still fall through to the 500.
+func TestMatchFaultRule_NoneIsSkippedNotShadow(t *testing.T) {
+	// A leading type:none rule is DISABLED — it must NOT shadow a later active
+	// rule, even when its filter matches. This is the dashboard's real shape: an
+	// "All" surface left at none (with a non-audio request_kind filter) sitting
+	// before an active segment fault must let the segment fault through.
 	rules := []any{
-		rule("shield", "none", map[string]any{"variant": map[string]any{"rung_indexes": []any{float64(0)}}}),
-		rule("all", "500", nil),
+		rule("v1-all", "none", map[string]any{"request_kind": []any{"segment", "manifest", "master_manifest"}}),
+		rule("v1-segment", "404", map[string]any{"request_kind": []any{"segment"}}),
 	}
-	if mf, ok := matchFaultRule(rules, video(0, "640x360", 800_000)); !ok || mf.Type != "none" {
-		t.Errorf("rung 0 should hit the none shield; got %+v %v", mf, ok)
+	mf, ok := matchFaultRule(rules, video(2, "960x540", 2_200_000))
+	if !ok || mf.RuleID != "v1-segment" || mf.Type != "404" {
+		t.Errorf("segment should hit the active 404 rule, not the none shield; got %+v %v", mf, ok)
 	}
-	if mf, ok := matchFaultRule(rules, video(3, "1280x720", 4_000_000)); !ok || mf.Type != "500" {
-		t.Errorf("rung 3 should fall through to 500; got %+v %v", mf, ok)
+	// With only a none rule, nothing matches.
+	if _, ok := matchFaultRule(rules[:1], video(2, "960x540", 2_200_000)); ok {
+		t.Error("a lone none rule must not match")
 	}
 }
 

@@ -17,17 +17,21 @@ type MatchedFault struct {
 }
 
 // matchFaultRule walks the v2 fault_rules array first-match-wins and returns
-// the first rule whose FaultFilter matches rc. ok=false when no rule matches.
+// the first ACTIVE rule whose FaultFilter matches rc. ok=false when none match.
 //
-// A matching rule with Type "none" is still returned (and stops the walk) —
-// `none` disables a rule "without removing it", so a leading none-rule can
-// deliberately shadow later rules for a subset of requests. The caller treats
-// Type "none" as no-fault.
+// A rule with Type "none" is DISABLED ("`none` disables this rule without
+// removing it") — it is skipped, never matched, so it can't shadow a later
+// active rule. This is what the dashboard's per-surface model relies on: an
+// "All" surface left at none must not shield a segment fault behind it, and it
+// mirrors the old v1 engine where a none all-rule was inert.
 func matchFaultRule(rules []any, rc RequestClass) (MatchedFault, bool) {
 	for _, raw := range rules {
 		rule, ok := raw.(map[string]any)
 		if !ok {
 			continue
+		}
+		if t := ruleString(rule["type"]); t == "" || t == "none" {
+			continue // disabled rule — skip, don't shadow
 		}
 		if !faultFilterMatches(rule["filter"], rc) {
 			continue
