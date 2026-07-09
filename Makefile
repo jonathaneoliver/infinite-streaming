@@ -588,6 +588,50 @@ test-deploy-dev-http:
 	scp tests/deploy/override-dev-http.yml $(TEST_SSH):~/test-dev-http/docker-compose.override.yml
 	ssh $(TEST_SSH) 'cd ~/test-dev-http && VERSION=$$(cat VERSION) docker compose build && docker compose up -d'
 
+# test-deploy-dev-degraded (#910) — a SECOND full stack on the 28xxx band that
+# emulates a host with NO NET_ADMIN: the go-proxy boot probe is forced to
+# http-only (SHAPING_FORCE_DEGRADED in override-dev-degraded.yml), so
+# rate/delay/loss + transport faults report unavailable and the dashboard shows
+# the degraded UX. Runs alongside the real test-dev (:21000, kernel) so you can
+# A/B kernel vs no-TC. TLS off + shared content library, same as the HTTP mirror.
+TEST_DEGRADED_MEDIA_DIR ?= /home/$(shell echo $(TEST_SSH) | cut -d@ -f1)/test-dev-degraded-media
+# Advertise on the SAME public hostname as test-dev (dev.jeoliver.com — the only
+# SAN on the mounted cert), just a different port, so devices trust the cert and
+# fetch the catalogue (a .local host would cert-mismatch → empty catalogue).
+INFINITE_STREAM_ANNOUNCE_URL_DEGRADED ?= https://dev.jeoliver.com:28000
+test-deploy-dev-degraded:
+	@echo "=== Dev (DEGRADED / no-TC): local working tree (port 28000) ==="
+	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev-degraded'
+	@echo "Syncing local working tree (excluding .git and .gitignore matches)..."
+	rsync -az --delete \
+		--filter=':- .gitignore' \
+		--exclude='.git/' \
+		--exclude='.env' \
+		--exclude='certs/' \
+		./ $(TEST_SSH):~/test-dev-degraded/
+	@if [ -f content/dashboard-v3/package.json ]; then \
+		echo "Building & pushing dashboard-v3 (Vue)..."; \
+		(cd content/dashboard-v3 && npm run --silent build) && \
+		ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev-degraded/content/dashboard/v3' && \
+		rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev-degraded/content/dashboard/v3/; \
+	else \
+		echo "dashboard-v3 not present, skipping Vue build"; \
+	fi
+	ssh -n $(TEST_SSH) 'printf "COMPOSE_PROJECT_NAME=test-dev-degraded\nCONTENT_DIR=%s\nSHARED_CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=%s\nINFINITE_STREAM_ANNOUNCE_LABEL=test-dev-degraded\nINFINITE_STREAM_BASE_URL=%s\nINFINITE_STREAM_TLS=\nINFINITE_STREAM_TLS_SAN=\n" "$(TEST_DEGRADED_MEDIA_DIR)" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(INFINITE_STREAM_ANNOUNCE_URL_DEGRADED)" "$(INFINITE_STREAM_ANNOUNCE_URL_DEGRADED)" > ~/test-dev-degraded/.env'
+	@# TLS on (HTTPS, same as test-dev). rsync excludes certs/, so seed this
+	@# stack's mkcert certs from test-dev's (per-hostname, valid on :28000).
+	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev-degraded/certs && cp ~/test-dev/certs/localhost.pem ~/test-dev/certs/localhost-key.pem ~/test-dev-degraded/certs/'
+	scp tests/deploy/override-dev-degraded.yml $(TEST_SSH):~/test-dev-degraded/docker-compose.override.yml
+	@# Only the core services — the LLM/label sidecars (token-deriver,
+	@# label-{deriver,scorer,trainer}) use FIXED container names shared across
+	@# stacks, so a second copy conflicts with test-dev's. This stack doesn't
+	@# need them (it's for exercising the degraded shaping UX).
+	ssh $(TEST_SSH) 'cd ~/test-dev-degraded && VERSION=$$(cat VERSION) docker compose build go-server forwarder clickhouse grafana && docker compose up -d go-server forwarder clickhouse grafana'
+	@# NOTE: no schema step here — the ClickHouse container self-heals its
+	@# analytics schema on every boot (see analytics/clickhouse/self-heal.sh +
+	@# the clickhouse entrypoint in docker-compose.yml), so it create-or-upgrades
+	@# in place whether this stack's volume is empty or from an earlier version.
+
 # Iterate on Grafana provisioning (dashboards / datasources) without
 # touching go-server. Sessions keep flowing live; Grafana auto-reloads
 # the dashboard JSON within 30s, but we --force-recreate to pick it up
