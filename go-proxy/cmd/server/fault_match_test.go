@@ -116,6 +116,28 @@ func TestMatchFaultRule_VariantResolutionAndBandwidth(t *testing.T) {
 	}
 }
 
+// TestMatchFaultRule_EmptyResolutionsMatchesNothing: unchecking ALL variants in
+// the UI sends variant.resolutions=[] — an explicit "zero variants in scope".
+// That must match NOTHING, not everything. An ABSENT resolutions key (no
+// variant narrowing) still matches all video — the two are distinct.
+func TestMatchFaultRule_EmptyResolutionsMatchesNothing(t *testing.T) {
+	emptyRule := []any{rule("r", "503", map[string]any{"variant": map[string]any{"resolutions": []any{}}})}
+	for _, rc := range []RequestClass{
+		video(0, "640x360", 800_000),
+		video(4, "1920x1080", 8_000_000),
+		video(8, "3840x2160", 33_000_000),
+	} {
+		if _, ok := matchFaultRule(emptyRule, rc); ok {
+			t.Errorf("resolutions=[] must match NOTHING, but matched %s", rc.Resolution)
+		}
+	}
+	// Sanity: an ABSENT variant filter still matches all video (unchanged).
+	openRule := []any{rule("r", "503", map[string]any{})}
+	if _, ok := matchFaultRule(openRule, video(4, "1920x1080", 8_000_000)); !ok {
+		t.Error("no variant filter should still match video")
+	}
+}
+
 func TestMatchFaultRule_UrlMatchModes(t *testing.T) {
 	rc := RequestClass{Kind: "segment", RungIndex: 0, LadderSize: 5, Path: "/go-live/c/720p/segment_00017.m4s"}
 	cases := []struct {

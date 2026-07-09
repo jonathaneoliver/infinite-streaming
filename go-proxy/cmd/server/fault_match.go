@@ -99,9 +99,16 @@ func variantPredicateMatches(vAny any, rc RequestClass) bool {
 			return false
 		}
 	}
-	if res, ok := v["resolutions"].([]any); ok && len(res) > 0 {
-		if rc.Resolution == "" || !containsStringFold(res, rc.Resolution) {
-			return false
+	if raw, present := v["resolutions"]; present {
+		if res, ok := raw.([]any); ok {
+			// A present but EMPTY resolutions list means the operator narrowed
+			// the scope to ZERO video variants (the UI's "all unchecked" state)
+			// → match nothing. This is distinct from an ABSENT key, which
+			// imposes no resolution constraint. A malformed (non-list) value is
+			// left lenient, matching faultFilterMatches' "never a silent 500".
+			if len(res) == 0 || rc.Resolution == "" || !containsStringFold(res, rc.Resolution) {
+				return false
+			}
 		}
 	}
 	if raw, ok := v["bandwidth_above"]; ok && raw != nil {

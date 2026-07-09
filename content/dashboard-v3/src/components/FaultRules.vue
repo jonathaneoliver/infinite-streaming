@@ -305,11 +305,9 @@ function typeChoicesFor(surface: Surface): FaultTypeChoice[] {
 // Full ladder — fault injection targets any available variant, even ones thinned
 // out of the player's current manifest by allowed_variants (not just the allowed
 // subset). Bandwidth chart uses the thinned `variants`; this needs them all.
-const { variantsAll: rawManifestVariants } = useManifestVariants(toRef(props, 'playerId'));
-// Legacy sorts descending by bandwidth (highest rung first).
-const manifestVariants = computed(() => {
-  return rawManifestVariants.value.slice().sort((a, b) => (b.bandwidth ?? 0) - (a.bandwidth ?? 0));
-});
+// useManifestVariants already collapses duplicate rungs and sorts descending
+// by bandwidth (highest rung first), so the scope list is display-ready.
+const { variantsAll: manifestVariants } = useManifestVariants(toRef(props, 'playerId'));
 
 // Non-audio request kinds we enumerate on the "All" tab when audio
 // needs to be excluded explicitly (otherwise the All-tab rule has no
@@ -457,6 +455,19 @@ function consLabel(surface: Surface): string {
   if (surface === 'transport') return 'Consecutive (secs)';
   return 'Consecutive';
 }
+
+// Plain-language readout of what the current (consecutive, frequency) pair
+// actually does — the freq=0 edges are non-obvious. Only the request-fault
+// surfaces run the native cadence engine these describe; transport uses a
+// separate path, so it gets no hint.
+function cadenceHint(surface: Surface): string {
+  if (surface === 'transport') return '';
+  const cons = getCons(surface);
+  const freq = getFreq(surface);
+  if (cons === 0 && freq === 0) return '0 / 0 → faults every request until cancelled';
+  if (freq === 0 && cons > 0) return `frequency 0 → one-shot: ${cons} then stops`;
+  return '';
+}
 </script>
 
 <template>
@@ -595,6 +606,10 @@ function consLabel(surface: Surface): string {
           @input="onFreqInput(activeTab, $event)"
         />
         <span class="val">{{ getFreq(activeTab) }}</span>
+      </div>
+
+      <div v-if="cadenceHint(activeTab)" class="row cadence-hint">
+        <span class="muted">{{ cadenceHint(activeTab) }}</span>
       </div>
 
       <!-- Transport-only readouts: live State + Fault Counters tile. -->
@@ -744,6 +759,14 @@ function consLabel(surface: Surface): string {
   font-size: 13px;
   color: #111827;
   text-align: right;
+}
+
+/* Cadence readout sits under the sliders, aligned with the slider column. */
+.cadence-hint {
+  margin-top: -6px;
+}
+.cadence-hint .muted {
+  grid-column: 2 / -1;
 }
 
 .scope { grid-template-columns: 120px 1fr; }

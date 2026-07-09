@@ -62,6 +62,54 @@ func TestParseDASHManifest(t *testing.T) {
 	}
 }
 
+// A looping live MPD carries one <Period> per loop over the live window, each
+// repeating the SAME Representation ladder. parseDASHManifest must collapse the
+// video ladder to its DISTINCT rungs (a ladder is a set), not emit one variant
+// per Period — otherwise the dashboard's scope/config pickers show each rung ×N.
+const sampleMPDMultiPeriod = `<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic">
+  <Period id="loop_3" start="PT1003S">
+    <AdaptationSet id="0" contentType="video">
+      <Representation id="0" bandwidth="775917" mimeType="video/mp4" width="640" height="360">
+        <SegmentList><Initialization sourceURL="360p/init.mp4"/><SegmentURL media="360p/segment_00038.m4s"/></SegmentList>
+      </Representation>
+      <Representation id="3" bandwidth="3561627" mimeType="video/mp4" width="1280" height="720">
+        <SegmentList><Initialization sourceURL="720p/init.mp4"/><SegmentURL media="720p/segment_00038.m4s"/></SegmentList>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+  <Period id="loop_4" start="PT1503S">
+    <AdaptationSet id="0" contentType="video">
+      <Representation id="0" bandwidth="775917" mimeType="video/mp4" width="640" height="360">
+        <SegmentList><Initialization sourceURL="360p/init.mp4"/><SegmentURL media="360p/segment_00058.m4s"/></SegmentList>
+      </Representation>
+      <Representation id="3" bandwidth="3561627" mimeType="video/mp4" width="1280" height="720">
+        <SegmentList><Initialization sourceURL="720p/init.mp4"/><SegmentURL media="720p/segment_00058.m4s"/></SegmentList>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`
+
+func TestParseDASHManifestMultiPeriodDedup(t *testing.T) {
+	variants, renditions := parseDASHManifest([]byte(sampleMPDMultiPeriod))
+	// Two Periods × two rungs = four raw Representations, but the ladder is the
+	// two DISTINCT rungs.
+	if len(variants) != 2 {
+		t.Fatalf("video variants = %d, want 2 (deduped across Periods); got %v", len(variants), variants)
+	}
+	seen := map[string]bool{}
+	for _, v := range variants {
+		if seen[v.URL] {
+			t.Errorf("duplicate rung %q in deduped ladder", v.URL)
+		}
+		seen[v.URL] = true
+	}
+	// Rungs re-index over the DISTINCT set: 360p=0, 720p=1.
+	if renditions["360p"].Rung != 0 || renditions["720p"].Rung != 1 {
+		t.Errorf("rungs after dedup: 360p=%d 720p=%d, want 0/1", renditions["360p"].Rung, renditions["720p"].Rung)
+	}
+}
+
 // TestDASHClassificationEndToEnd: parse the MPD → merge onto the session → DASH
 // segments (same CMAF dirs) classify with authoritative resolution/rung/audio,
 // and a resolution-scoped fault matches the right rung only.

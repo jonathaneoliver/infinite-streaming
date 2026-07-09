@@ -66,6 +66,11 @@ func failureHandlerFromMatch(mf MatchedFault, st *ruleCadenceState) *FailureHand
 	if consecutive <= 0 {
 		consecutive = 1 // schema default; also what makes the cadence engine act
 	}
+	// consecutive=0 AND frequency=0 → continuous: fault every matching request
+	// until the rule is cleared, instead of the one-shot single failure the
+	// cadence math would otherwise produce. This is the intuitive meaning of
+	// the UI's default (0,0) — "on until I cancel it".
+	continuous := mf.Consecutive == 0 && mf.Frequency == 0
 	return &FailureHandler{
 		failureType:      normalizeRequestFailureType(mf.Type),
 		consecutiveUnits: consecutiveUnits,
@@ -74,6 +79,7 @@ func failureHandlerFromMatch(mf MatchedFault, st *ruleCadenceState) *FailureHand
 		consecutive:      consecutive,
 		failureAt:        st.failureAt,
 		failureRecoverAt: st.failureRecoverAt,
+		continuous:       continuous,
 	}
 }
 

@@ -75,6 +75,28 @@ func TestNativeOneShot(t *testing.T) {
 	}
 }
 
+// TestNativeContinuous: consecutive=0 AND frequency=0 means "fault every
+// matching request until cleared" — NOT a one-shot. This is the UI default
+// (0,0), which previously clamped to consec=1/freq=0 and fired exactly once.
+func TestNativeContinuous(t *testing.T) {
+	const seg = "/go-live/c/720p/segment_%d.m4s"
+	now := time.Unix(1_700_000_000, 0)
+	for _, mode := range []string{"requests", "failures_per_seconds", "seconds"} {
+		s := seedSegmentFaultV2("503", 0, 0, mode)
+		fires := 0
+		for i := 1; i <= 25; i++ {
+			// advance wall-clock too, so a time-mode cadence couldn't hide behind
+			// a single window — continuous must fault regardless.
+			if runNativeSegment(s, fmt.Sprintf(seg, i), now.Add(time.Duration(i)*time.Second)) == "503" {
+				fires++
+			}
+		}
+		if fires != 25 {
+			t.Errorf("mode=%s continuous(0,0): fired %d/25, want 25 (every request)", mode, fires)
+		}
+	}
+}
+
 // TestNativeReArmResetsWindow is the #643 guard for the native engine: after a
 // one-shot half-fires, clearing _faultrule_state (what translateFaultRules does
 // on a re-arm PATCH) must deliver a FRESH full window, not resume the old one.
