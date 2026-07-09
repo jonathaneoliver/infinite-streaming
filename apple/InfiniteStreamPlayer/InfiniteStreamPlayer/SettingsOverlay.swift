@@ -310,8 +310,13 @@ private struct PickerList: View {
             }
         case .proto:
             ForEach(Array(StreamProtocol.allCases.enumerated()), id: \.element.id) { idx, p in
+                // DASH is greyed out on iOS: AVPlayer (AVURLAsset) can't play an
+                // MPEG-DASH .mpd — it just probes and fails. HLS only here; the
+                // Android/ExoPlayer app is where DASH plays.
                 PickerItem(label: p.label, selected: p == vm.streamProtocol, compact: compact,
-                           axID: "proto-\(p.rawValue)") {
+                           axID: "proto-\(p.rawValue)",
+                           disabled: p == .dash,
+                           disabledNote: p == .dash ? "not supported by AVPlayer" : nil) {
                     vm.setProtocol(p); onBack()
                 }
                 .focused($itemIdx, equals: idx)
@@ -400,14 +405,24 @@ private struct PickerItem: View {
     // item carries no identifier (SwiftUI default) — only the pickers a test
     // needs to drive set one.
     var axID: String? = nil
+    // Greyed-out, non-selectable option (e.g. DASH on iOS: AVPlayer can't play
+    // a .mpd). `disabledNote` shows why, inline.
+    var disabled: Bool = false
+    var disabledNote: String? = nil
     let onTap: () -> Void
 
     var body: some View {
-        HStack {
+        HStack(spacing: Space.s2) {
             Text(label)
                 .font(compact ? AppType.body(size: 15) : AppType.body())
                 .foregroundColor(Tokens.fg)
                 .lineLimit(1)
+            if disabled, let note = disabledNote {
+                Text(note)
+                    .font(AppType.body(size: 12))
+                    .foregroundColor(Tokens.fg)
+                    .lineLimit(1)
+            }
             Spacer()
             if selected {
                 Image(systemName: "checkmark")
@@ -420,7 +435,9 @@ private struct PickerItem: View {
         .clipShape(RoundedRectangle(cornerRadius: Radius.row, style: .continuous))
         .cinematicFocus(cornerRadius: Radius.row)
         .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
+        .onTapGesture { if !disabled { onTap() } }
+        .opacity(disabled ? 0.4 : 1)
+        .allowsHitTesting(!disabled)
         .accessibilityIdentifier(axID ?? "")
     }
 }
