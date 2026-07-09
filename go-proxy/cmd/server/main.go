@@ -10796,6 +10796,12 @@ type FailureHandler struct {
 	failureAt        interface{}
 	failureRecoverAt interface{}
 	resetFailureType interface{}
+	// continuous faults EVERY matching request until the rule is cleared —
+	// the "on until I cancel it" mode. Set when both consecutive and
+	// frequency are 0 (see failureHandlerFromMatch). Short-circuits the
+	// cadence math so the rule never schedules a recovery window and never
+	// one-shot self-clears.
+	continuous bool
 }
 
 // refreshFailureStateFromLatest copies the fault-decision-relevant
@@ -10831,6 +10837,13 @@ func (h *FailureHandler) HandleFailure(count int, now time.Time) string {
 	}
 	if h.failureType == "none" {
 		return "none"
+	}
+	// Continuous mode: fault every matching request, no recovery window, no
+	// one-shot self-clear. The rule stays armed until the operator changes or
+	// clears it. This is what consecutive=0 & frequency=0 means (the UI's
+	// default) — "keep failing until I cancel it".
+	if h.continuous {
+		return h.failureType
 	}
 	if h.frequencyUnits == "seconds" {
 		h.handleFailureTime(count, now)
