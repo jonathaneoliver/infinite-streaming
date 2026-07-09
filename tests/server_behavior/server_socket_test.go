@@ -195,10 +195,10 @@ func TestServerSocketFaults(t *testing.T) {
 			// Arm as a segment fault. A short consecutive burst (consec=5,
 			// freq=1) biases toward an immediate fire; the retry loop covers
 			// the slots where the engine's cycle skips a request.
-			if err := patchSession(p.c, p.apiBase, p.sess.SessionID, faultSet("segment", tc.faultType, 1, 5)); err != nil {
+			if err := setFaultsV2(p, faultRuleV2("segment", tc.faultType, 1, 5)); err != nil {
 				t.Fatalf("arm %s: %v", tc.faultType, err)
 			}
-			defer patchSession(p.c, p.apiBase, p.sess.SessionID, faultClear("segment"))
+			defer clearFaultsV2(p)
 			time.Sleep(settleKernel)
 
 			var obs socketObs

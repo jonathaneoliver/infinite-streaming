@@ -6424,88 +6424,29 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// instead of the server-side derivation.
 		playID := r.URL.Query().Get("play_id")
 		sessionData := SessionData{
-			"session_number":                 fmt.Sprintf("%d", allocated),
-			"sid":                            fmt.Sprintf("%d", allocated),
-			"session_id":                     fmt.Sprintf("%d", allocated),
-			"player_id":                      playerID,
-			"play_id":                        playID,
-			"group_id":                       groupID,
-			"group_broadcast":                groupBroadcast,
-			"control_revision":               newControlRevision(),
-			"headers_player_id":              playerHeader,
-			"headers_player-ID":              playerHeaderAlt,
-			"headers_x_playback_session_id":  playbackSessionHeader,
-			"manifest_requests_count":        0,
-			"master_manifest_requests_count": 0,
-			"segments_count":                 0,
-			"all_requests_count":             0,
-			"last_request":                   createdAt,
-			"first_request_time":             createdAt,
-			"session_start_time":             createdAt,
-			// Segment / manifest / master_manifest fault config —
-			// initialise mode + units explicitly so both server
-			// (NewFailureHandler) and dashboard (Mode dropdown) read
-			// the same value from a single source of truth instead
-			// of falling back to duplicated hard-coded defaults.
-			// "failures_per_seconds" mode → consecutive=requests,
-			// frequency=seconds, matching the dashboard's visible
-			// default Mode for a fresh session.
-			"segment_failure_type":                 "none",
-			"segment_failure_frequency":            0,
-			"segment_consecutive_failures":         0,
-			"segment_failure_units":                "requests",
-			"segment_consecutive_units":            "requests",
-			"segment_frequency_units":              "seconds",
-			"segment_failure_mode":                 "failures_per_seconds",
-			"manifest_failure_type":                "none",
-			"manifest_failure_frequency":           0,
-			"manifest_failure_units":               "requests",
-			"manifest_consecutive_units":           "requests",
-			"manifest_frequency_units":             "seconds",
-			"manifest_failure_mode":                "failures_per_seconds",
-			"manifest_consecutive_failures":        0,
-			"master_manifest_failure_type":         "none",
-			"master_manifest_failure_frequency":    0,
-			"master_manifest_failure_units":        "requests",
-			"master_manifest_consecutive_units":    "requests",
-			"master_manifest_frequency_units":      "seconds",
-			"master_manifest_failure_mode":         "failures_per_seconds",
-			"master_manifest_consecutive_failures": 0,
-			// "All" fault override — when all_failure_type != "none",
-			// HandleRequest uses this rule for every HTTP request and
-			// ignores the per-kind tabs above. Same control shape as
-			// segment, plus all_failure_urls for variant scoping.
-			"all_failure_type":            "none",
-			"all_failure_frequency":       0,
-			"all_consecutive_failures":    0,
-			"all_failure_units":           "requests",
-			"all_consecutive_units":       "requests",
-			"all_frequency_units":         "seconds",
-			"all_failure_mode":            "failures_per_seconds",
-			"current_failures":            0,
-			"consecutive_failures_count":  0,
-			"player_ip":                   requesterIP,
-			"user_agent":                  "",
-			"origination_ip":              requesterIP,
-			"origination_time":            createdAt,
-			"is_external_ip":              isExternalIP(requesterIP),
-			"manifest_failure_at":         nil,
-			"manifest_failure_recover_at": nil,
-			// nil (not []string{}) so the dashboard can tell "fresh
-			// session, default to all-URLs filter" from "user
-			// explicitly cleared the list" — both serialize to JSON
-			// the same when both are []string{}, which made unchecking
-			// "All" silently snap back via the empty-defaults-to-all
-			// rule on the dashboard (#409).
-			"manifest_failure_urls":                    nil,
-			"segment_failure_urls":                     nil,
-			"segment_failure_at":                       nil,
-			"segment_failure_recover_at":               nil,
-			"master_manifest_failure_at":               nil,
-			"master_manifest_failure_recover_at":       nil,
-			"all_failure_at":                           nil,
-			"all_failure_recover_at":                   nil,
-			"all_failure_urls":                         nil,
+			"session_number":                           fmt.Sprintf("%d", allocated),
+			"sid":                                      fmt.Sprintf("%d", allocated),
+			"session_id":                               fmt.Sprintf("%d", allocated),
+			"player_id":                                playerID,
+			"play_id":                                  playID,
+			"group_id":                                 groupID,
+			"group_broadcast":                          groupBroadcast,
+			"control_revision":                         newControlRevision(),
+			"headers_player_id":                        playerHeader,
+			"headers_player-ID":                        playerHeaderAlt,
+			"headers_x_playback_session_id":            playbackSessionHeader,
+			"manifest_requests_count":                  0,
+			"master_manifest_requests_count":           0,
+			"segments_count":                           0,
+			"all_requests_count":                       0,
+			"last_request":                             createdAt,
+			"first_request_time":                       createdAt,
+			"session_start_time":                       createdAt,
+			"player_ip":                                requesterIP,
+			"user_agent":                               "",
+			"origination_ip":                           requesterIP,
+			"origination_time":                         createdAt,
+			"is_external_ip":                           isExternalIP(requesterIP),
 			"transport_failure_type":                   "none",
 			"transport_failure_frequency":              0,
 			"transport_consecutive_failures":           1,
@@ -6823,8 +6764,14 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamURL := fmt.Sprintf("http://%s:%s/%s", a.upstreamHost, a.upstreamPort, escapedPath)
-	contentType, isMasterManifest, isManifest, isSegment, playlistInfo := a.getContentType(upstreamURL)
+	contentType, isMasterManifest, isManifest, isSegment, playlistInfo, audioURIs := a.getContentType(upstreamURL)
 	requestKind := requestKindLabel(isSegment, isManifest, isMasterManifest)
+	// #919 Tier 1: cache the manifest-declared audio rendition URIs so the fault
+	// classifier can identify audio playlists structurally. Only the master
+	// parse yields these; preserve the prior list on non-master requests.
+	if len(audioURIs) > 0 {
+		sessionData["manifest_audio_uris"] = audioURIs
+	}
 	segmentTransferStartedAt := time.Time{}
 	segmentTransferStartBytes := int64(0)
 	var flightPortNum int
@@ -6865,15 +6812,23 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		a.observeServerSegmentLoop(sessionData, filename)
 	}
 
-	handler := NewRequestHandler(isSegment, isManifest, isMasterManifest, sessionData)
+	// #919: native v2 fault evaluation. classifyRequest maps the request to
+	// its v2 request_kind + variant (read-only over the cached manifest, like
+	// inferServerVideoRendition above); evaluateFaultRules then matches it
+	// first-rule-wins against fault_rules and runs the cadence engine. This
+	// replaces the v1 surface-prefix RequestHandler dispatch — a rule's
+	// FaultFilter decides what it applies to, so audio/init/variant scope work
+	// (#917/#918) with no translation to v1's fixed surfaces.
+	reqClass := classifyRequest(sessionData, filename, isSegment, isManifest, isMasterManifest)
 	// Serialise the failure-decision read-modify-write so video+audio
 	// requests arriving in the same millisecond don't both pass the
 	// "1 per N seconds" filter and double-fire.
 	//
 	// The full atomic sequence is:
 	//   1. Refresh dedup state from the latest snap (defeats stale
-	//      clones).
-	//   2. Run HandleRequest (decides + writes to local clone).
+	//      clones) — includes _faultrule_state, the native per-rule
+	//      cadence state.
+	//   2. Run evaluateFaultRules (decides + writes to local clone).
 	//   3. Save back to the snap BEFORE unlocking, so the next
 	//      goroutine to take the lock sees this goroutine's writes
 	//      when it refreshes.
@@ -6883,7 +6838,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// and the rule fires twice.
 	sessionStateMu.Lock()
 	refreshFailureStateFromLatest(a, sessionData, sessionNumber)
-	failureType := handler.HandleRequest(filename)
+	failureType := evaluateFaultRules(sessionData, reqClass, time.Now())
 	a.saveSessionByID(sessionNumber, sessionData)
 	sessionStateMu.Unlock()
 
@@ -7968,24 +7923,29 @@ func (a *App) applyShapeIfChanged(port int, rate float64, np NetemParams) error 
 	return nil
 }
 
-func (a *App) getContentType(target string) (string, bool, bool, bool, []PlaylistInfo) {
+// getContentType HEAD/GET-probes an upstream URL to classify it (master /
+// media manifest / segment) and, for a master, parses out the video variant
+// ladder (EXT-X-STREAM-INF) plus the audio rendition URIs (EXT-X-MEDIA
+// TYPE=AUDIO). The audio URIs are the structure-driven signal the fault
+// classifier uses to identify audio playlists — replacing filename guessing.
+func (a *App) getContentType(target string) (string, bool, bool, bool, []PlaylistInfo, []string) {
 	parsed, err := url.Parse(target)
 	if err != nil {
-		return "", false, false, false, nil
+		return "", false, false, false, nil, nil
 	}
 	if parsed.Hostname() != "" {
 		parsed.Host = fmt.Sprintf("%s:%s", parsed.Hostname(), a.upstreamPort)
 	}
 	headReq, err := http.NewRequest(http.MethodHead, parsed.String(), nil)
 	if err != nil {
-		return "", false, false, false, nil
+		return "", false, false, false, nil, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	headReq = headReq.WithContext(ctx)
 	resp, err := a.client.Do(headReq)
 	if err != nil {
-		return "", false, false, false, nil
+		return "", false, false, false, nil, nil
 	}
 	contentType := resp.Header.Get("Content-Type")
 	resp.Body.Close()
@@ -8007,11 +7967,11 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 		getReq = getReq.WithContext(ctxGet)
 		getResp, err := a.client.Do(getReq)
 		if err != nil {
-			return contentType, false, true, false, nil
+			return contentType, false, true, false, nil, nil
 		}
 		defer getResp.Body.Close()
 		if getResp.StatusCode >= 400 {
-			return contentType, false, true, false, nil
+			return contentType, false, true, false, nil, nil
 		}
 		contentType = getResp.Header.Get("Content-Type")
 		body, _ := io.ReadAll(getResp.Body)
@@ -8034,18 +7994,53 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 							Resolution:       resolution,
 						})
 					}
-					return contentType, true, false, false, infos
+					// Structure-driven audio: EXT-X-MEDIA renditions hang off each
+					// variant's Alternatives. Collect the TYPE=AUDIO URIs so the
+					// fault classifier can identify audio playlists by manifest
+					// declaration instead of filename spelling. Dedup across variants
+					// (all video variants reference the same audio GROUP-ID).
+					audioURIs := extractAudioURIs(master)
+					return contentType, true, false, false, infos, audioURIs
 				case m3u8.MEDIA:
-					return contentType, false, true, false, nil
+					return contentType, false, true, false, nil, nil
 				}
 			}
 		}
-		return contentType, false, true, false, nil
+		return contentType, false, true, false, nil, nil
 	}
 	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
-		return contentType, false, true, false, nil
+		return contentType, false, true, false, nil, nil
 	}
-	return contentType, false, false, true, nil
+	return contentType, false, false, true, nil, nil
+}
+
+// extractAudioURIs collects the EXT-X-MEDIA TYPE=AUDIO rendition URIs declared
+// in a master playlist, deduped. grafov/m3u8 hangs the EXT-X-MEDIA renditions
+// off each variant's Alternatives, and every video variant references the same
+// audio GROUP-ID, so the raw list is highly duplicated. This is the
+// structure-driven audio signal the fault classifier consumes (#919 Tier 1) —
+// what the manifest DECLARES as audio, not what a filename spells.
+func extractAudioURIs(master *m3u8.MasterPlaylist) []string {
+	if master == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var uris []string
+	for _, variant := range master.Variants {
+		if variant == nil {
+			continue
+		}
+		for _, alt := range variant.Alternatives {
+			if alt == nil || !strings.EqualFold(alt.Type, "AUDIO") || alt.URI == "" {
+				continue
+			}
+			if !seen[alt.URI] {
+				seen[alt.URI] = true
+				uris = append(uris, alt.URI)
+			}
+		}
+	}
+	return uris
 }
 
 func (a *App) trackPortThroughput() {
@@ -10755,62 +10750,14 @@ func refreshFailureStateFromLatest(a *App, dst SessionData, sessionID string) {
 		if getString(s, "session_id") != sessionID {
 			continue
 		}
-		// Counters and timestamps that gate the dedup. Order matters
-		// only in the sense that all of these need to come from the
-		// same snapshot.
-		for _, k := range []string{
-			"segments_count", "manifest_requests_count", "master_manifest_requests_count",
-			"all_requests_count",
-			"segment_failure_at", "segment_failure_recover_at",
-			"manifest_failure_at", "manifest_failure_recover_at",
-			"master_manifest_failure_at", "master_manifest_failure_recover_at",
-			"all_failure_at", "all_failure_recover_at",
-		} {
-			if v, ok := s[k]; ok {
-				dst[k] = v
-			}
+		// The native per-rule cadence state gates the fault dedup: copied
+		// wholesale so the evaluator's read-modify-write sees the latest
+		// per-rule count / schedule and can't double-fire concurrent requests
+		// (#919). The v1 surface cursors it used to also copy are gone (#925).
+		if v, ok := s["_faultrule_state"]; ok {
+			dst["_faultrule_state"] = v
 		}
 		return
-	}
-}
-
-func NewFailureHandler(prefix string, session SessionData) *FailureHandler {
-	failureUnits := getString(session, prefix+"_failure_units")
-	consecutiveUnits := getString(session, prefix+"_consecutive_units")
-	frequencyUnits := getString(session, prefix+"_frequency_units")
-	if consecutiveUnits == "" {
-		consecutiveUnits = failureUnits
-	}
-	if frequencyUnits == "" {
-		frequencyUnits = failureUnits
-	}
-	// Defaults match the dashboard's visible default Mode
-	// ("Failures / Seconds"), which maps to consecutiveUnits=requests
-	// and frequencyUnits=seconds. The dashboard only PATCHes Mode
-	// when the user actively changes it, so a session whose
-	// `<prefix>_failure_mode` field was never set still has empty
-	// units here. Defaulting to the same shape as the visible Mode
-	// avoids "rate limit doesn't fire as expected" on first use.
-	if consecutiveUnits == "" {
-		consecutiveUnits = "requests"
-	}
-	if frequencyUnits == "" {
-		frequencyUnits = "seconds"
-	}
-	resetFailureType := session[prefix+"_reset_failure_type"]
-	if resetString, ok := resetFailureType.(string); ok {
-		resetFailureType = normalizeRequestFailureType(resetString)
-	}
-	return &FailureHandler{
-		failureType:      normalizeRequestFailureType(getString(session, prefix+"_failure_type")),
-		failureUnits:     failureUnits,
-		consecutiveUnits: consecutiveUnits,
-		frequencyUnits:   frequencyUnits,
-		failureFrequency: getInt(session, prefix+"_failure_frequency"),
-		consecutive:      getInt(session, prefix+"_consecutive_failures"),
-		failureAt:        session[prefix+"_failure_at"],
-		failureRecoverAt: session[prefix+"_failure_recover_at"],
-		resetFailureType: resetFailureType,
 	}
 }
 
@@ -11097,214 +11044,6 @@ func (a *App) updateSessionGroup(groupID string, updates map[string]interface{})
 		}
 		return sessions, changed
 	})
-}
-
-type RequestHandler struct {
-	mode       string
-	session    SessionData
-	failureKey string
-}
-
-func NewRequestHandler(isSegment, isUpdateManifest, isMasterManifest bool, session SessionData) *RequestHandler {
-	if isSegment {
-		return &RequestHandler{mode: "segment", session: session}
-	}
-	if isMasterManifest {
-		return &RequestHandler{mode: "master_manifest", session: session}
-	}
-	if isUpdateManifest {
-		return &RequestHandler{mode: "manifest", session: session}
-	}
-	return &RequestHandler{mode: "unknown", session: session}
-}
-
-func (h *RequestHandler) HandleRequest(filename string) string {
-	// "All" override — when set, every HTTP request runs through the
-	// single all-rule and the per-kind tabs (segment/manifest/master)
-	// are bypassed. The dashboard reflects this by disabling those
-	// tabs and showing an "All override active" banner.
-	if getString(h.session, "all_failure_type") != "" &&
-		getString(h.session, "all_failure_type") != "none" {
-		return h.handleAllFailure(filename)
-	}
-	switch h.mode {
-	case "segment":
-		return h.handleSegmentFailure(filename)
-	case "manifest":
-		return h.handleManifestFailure(filename)
-	case "master_manifest":
-		return h.handleFailure("master_manifest", "master_manifest_requests_count")
-	default:
-		return "none"
-	}
-}
-
-func (h *RequestHandler) handleAllFailure(filename string) string {
-	h.session["all_requests_count"] = getInt(h.session, "all_requests_count") + 1
-	allURLs := getStringSlice(h.session, "all_failure_urls")
-	if len(allURLs) > 0 {
-		if !shouldApplyFailure(allURLs, filename, pathParent(filename)) {
-			return "none"
-		}
-	}
-	preFailureAt := h.session["all_failure_at"]
-	preFailureRecoverAt := h.session["all_failure_recover_at"]
-	failure := NewFailureHandler("all", h.session)
-	count := getInt(h.session, "all_requests_count")
-	failureType := failure.HandleFailure(count, time.Now())
-	log.Printf(
-		"ALL FAILURE DEBUG count=%d type_in=%s type_out=%s units=%s consecutiveUnits=%s frequencyUnits=%s freq=%d consecutive=%d preFailureAt=%v preFailureRecoverAt=%v postFailureAt=%v postFailureRecoverAt=%v file=%s",
-		count,
-		getString(h.session, "all_failure_type"),
-		failureType,
-		failure.failureUnits,
-		failure.consecutiveUnits,
-		failure.frequencyUnits,
-		failure.failureFrequency,
-		failure.consecutive,
-		preFailureAt,
-		preFailureRecoverAt,
-		failure.failureAt,
-		failure.failureRecoverAt,
-		filename,
-	)
-	h.session["all_failure_at"] = failure.failureAt
-	h.session["all_failure_recover_at"] = failure.failureRecoverAt
-	if failure.resetFailureType != nil {
-		h.session["all_failure_type"] = failure.resetFailureType
-		h.session["all_reset_failure_type"] = nil
-		h.session["control_revision"] = newControlRevision()
-	}
-	return failureType
-}
-
-func (h *RequestHandler) handleFailure(prefix, countKey string) string {
-	count := getInt(h.session, countKey) + 1
-	h.session[countKey] = count
-	failure := NewFailureHandler(prefix, h.session)
-	failureType := failure.HandleFailure(count, time.Now())
-	if prefix == "segment" {
-		log.Printf(
-			"SEGMENT FAILURE DEBUG count=%d type=%s units=%s consecutiveUnits=%s frequencyUnits=%s freq=%d consecutive=%d failureAt=%v recoverAt=%v resetType=%v",
-			count,
-			failure.failureType,
-			failure.failureUnits,
-			failure.consecutiveUnits,
-			failure.frequencyUnits,
-			failure.failureFrequency,
-			failure.consecutive,
-			failure.failureAt,
-			failure.failureRecoverAt,
-			failure.resetFailureType,
-		)
-	}
-	h.session[prefix+"_failure_at"] = failure.failureAt
-	h.session[prefix+"_failure_recover_at"] = failure.failureRecoverAt
-	if failure.resetFailureType != nil {
-		h.session[prefix+"_failure_type"] = failure.resetFailureType
-		h.session[prefix+"_reset_failure_type"] = nil
-		h.session["control_revision"] = newControlRevision()
-	}
-	return failureType
-}
-
-func (h *RequestHandler) handleManifestFailure(filename string) string {
-	h.session["manifest_requests_count"] = getInt(h.session, "manifest_requests_count") + 1
-	manifestURLs := getStringSlice(h.session, "manifest_failure_urls")
-	match := shouldApplyFailure(manifestURLs, filename, pathParent(filename))
-	if !match {
-		return "none"
-	}
-	failure := NewFailureHandler("manifest", h.session)
-	failureType := failure.HandleFailure(getInt(h.session, "manifest_requests_count"), time.Now())
-	h.session["manifest_failure_at"] = failure.failureAt
-	h.session["manifest_failure_recover_at"] = failure.failureRecoverAt
-	if failure.resetFailureType != nil {
-		h.session["manifest_failure_type"] = failure.resetFailureType
-		h.session["manifest_reset_failure_type"] = nil
-		h.session["control_revision"] = newControlRevision()
-	}
-	return failureType
-}
-
-func (h *RequestHandler) handleSegmentFailure(filename string) string {
-	h.session["segments_count"] = getInt(h.session, "segments_count") + 1
-	segmentURLs := getStringSlice(h.session, "segment_failure_urls")
-	match := shouldApplyFailure(segmentURLs, filename, pathParent(filename))
-	if !match {
-		return "none"
-	}
-	failure := NewFailureHandler("segment", h.session)
-	failureType := failure.HandleFailure(getInt(h.session, "segments_count"), time.Now())
-	log.Printf(
-		"SEGMENT FAILURE DEBUG count=%d type=%s units=%s consecutiveUnits=%s frequencyUnits=%s freq=%d consecutive=%d failureAt=%v recoverAt=%v resetType=%v",
-		getInt(h.session, "segments_count"),
-		failure.failureType,
-		failure.failureUnits,
-		failure.consecutiveUnits,
-		failure.frequencyUnits,
-		failure.failureFrequency,
-		failure.consecutive,
-		failure.failureAt,
-		failure.failureRecoverAt,
-		failure.resetFailureType,
-	)
-	h.session["segment_failure_at"] = failure.failureAt
-	h.session["segment_failure_recover_at"] = failure.failureRecoverAt
-	if failure.resetFailureType != nil {
-		h.session["segment_failure_type"] = failure.resetFailureType
-		h.session["segment_reset_failure_type"] = nil
-		h.session["control_revision"] = newControlRevision()
-	}
-	return failureType
-}
-
-func shouldApplyFailure(entries []string, filename, variant string) bool {
-	if len(entries) == 0 {
-		return false
-	}
-	decodedFilename := filename
-	if unescaped, err := url.PathUnescape(filename); err == nil {
-		decodedFilename = unescaped
-	}
-	base := pathBase(decodedFilename)
-	decodedVariant := variant
-	if unescaped, err := url.PathUnescape(variant); err == nil {
-		decodedVariant = unescaped
-	}
-	for _, entry := range entries {
-		if entry == "" {
-			continue
-		}
-		decodedEntry := entry
-		if unescaped, err := url.PathUnescape(entry); err == nil {
-			decodedEntry = unescaped
-		}
-		entryBase := pathBase(decodedEntry)
-		if entryBase == "All" || decodedEntry == "All" {
-			return true
-		}
-		if decodedEntry == decodedVariant || entry == variant {
-			return true
-		}
-		if decodedEntry == base || entry == base {
-			return true
-		}
-		if strings.Contains(decodedFilename, decodedEntry) || strings.Contains(filename, entry) {
-			return true
-		}
-		if strings.Contains(entryBase, "playlist_") {
-			trimmed := strings.TrimSuffix(entryBase, ".m3u8")
-			parts := strings.Split(trimmed, "_")
-			if len(parts) > 0 {
-				candidate := parts[len(parts)-1]
-				if candidate != "" && strings.Contains(decodedFilename, "/"+candidate+"/") {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 func updateSessionTraffic(session SessionData, bytesIn, bytesOut int64) {

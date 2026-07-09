@@ -60,30 +60,9 @@ func faultStatusForType(faultType string) int {
 	}
 }
 
-// faultSet builds the session-map keys that arm a count-based 1-in-freq
-// fault for one request kind. Notes from the proxy's HandleRequest:
-//   - units=requests on every axis forces the deterministic count path
-//     (the proxy defaults frequency units to "seconds", the time engine).
-//   - segment/manifest faults are gated by shouldApplyFailure(<prefix>_failure_urls,…),
-//     which returns false for an empty list — the "All" sentinel (or a
-//     matching URL) is required or nothing fires. master_manifest skips
-//     that check; the all-rule skips it only when the list is empty.
-//     Setting ["All"] everywhere matches all requests uniformly.
-func faultSet(prefix, status string, freq, consec int) map[string]any {
-	return map[string]any{
-		prefix + "_failure_type":         status,
-		prefix + "_failure_frequency":    freq,
-		prefix + "_consecutive_failures": consec,
-		prefix + "_failure_units":        "requests",
-		prefix + "_frequency_units":      "requests",
-		prefix + "_consecutive_units":    "requests",
-		prefix + "_failure_urls":         []string{"All"},
-	}
-}
-
-func faultClear(prefix string) map[string]any {
-	return map[string]any{prefix + "_failure_type": "none"}
-}
+// Faults are configured through the v2 fault_rules API (setFaultsV2 /
+// faultRuleV2 / clearFaultsV2 in sb_common_test.go) — the v1 surface fields
+// (faultSet/faultClear) were retired in #924.
 
 // pullStatuses fetches up to `samples` requests from the URL supplier and
 // returns a status-code histogram. urlFn returns a (possibly refreshing)
@@ -172,10 +151,10 @@ func TestServerFault(t *testing.T) {
 		for _, fk := range kinds {
 			fk, consec := fk, consec
 			t.Run(fmt.Sprintf("%s_%din%d", fk.name, consec, freq), func(t *testing.T) {
-				if err := patchSession(p.c, p.apiBase, p.sess.SessionID, faultSet(fk.name, status, freq, consec)); err != nil {
+				if err := setFaultsV2(p, faultRuleV2(fk.name, status, freq, consec)); err != nil {
 					t.Fatalf("arm %s fault: %v", fk.name, err)
 				}
-				defer patchSession(p.c, p.apiBase, p.sess.SessionID, faultClear(fk.name))
+				defer clearFaultsV2(p)
 				time.Sleep(settleKernel)
 
 				hist := p.pullStatuses(t, fk.urls, samples)
@@ -213,10 +192,10 @@ func TestServerFault(t *testing.T) {
 
 	// "all" rule overrides per-kind and faults every request kind at once.
 	t.Run("all", func(t *testing.T) {
-		if err := patchSession(p.c, p.apiBase, p.sess.SessionID, faultSet("all", status, freq, 1)); err != nil {
+		if err := setFaultsV2(p, faultRuleV2("all", status, freq, 1)); err != nil {
 			t.Fatalf("arm all fault: %v", err)
 		}
-		defer patchSession(p.c, p.apiBase, p.sess.SessionID, faultClear("all"))
+		defer clearFaultsV2(p)
 		time.Sleep(settleKernel)
 
 		expected := float64(samples) / float64(freq)
@@ -253,11 +232,11 @@ func TestServerFault(t *testing.T) {
 			want := faultStatusForType(ft)
 			// consec=5/freq=1 → bursts of faults, so the type fires within a
 			// few samples regardless of where the engine's cycle sits.
-			if err := patchSession(p.c, p.apiBase, p.sess.SessionID, faultSet("segment", ft, 1, 5)); err != nil {
+			if err := setFaultsV2(p, faultRuleV2("segment", ft, 1, 5)); err != nil {
 				t.Fatalf("arm type %s: %v", ft, err)
 			}
 			hist := p.pullStatuses(t, func() []string { return p.pullOnce(t) }, coverSamples)
-			patchSession(p.c, p.apiBase, p.sess.SessionID, faultClear("segment"))
+			_ = clearFaultsV2(p)
 			got := hist[want]
 			t.Logf("type %-20s want_status=%d hist=%v hits=%d", ft, want, hist, got)
 			if got < 1 {

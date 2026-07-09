@@ -724,7 +724,90 @@ func faultRuleFromMap(rule map[string]any) oapigen.FaultRule {
 				f.RequestKind = &rk
 			}
 		}
+		// #919: variant + url_match must round-trip too. Before the native
+		// engine these filters were rejected at PATCH time so they never
+		// reached here; now they persist, and dropping them on read makes the
+		// dashboard's scope selector snap back (optimistic update reverts to a
+		// filter-less rule).
+		if variant, ok := filter["variant"].(map[string]any); ok && len(variant) > 0 {
+			f.Variant = variantPredicateFromMap(variant)
+		}
+		if um, ok := filter["url_match"].(map[string]any); ok && len(um) > 0 {
+			if mode, ok := um["mode"].(string); ok && mode != "" {
+				patterns := stringSliceFromAny(um["patterns"])
+				if len(patterns) > 0 {
+					f.UrlMatch = &oapigen.UrlMatch{Mode: oapigen.UrlMatchMode(mode), Patterns: patterns}
+				}
+			}
+		}
 		out.Filter = &f
+	}
+	return out
+}
+
+// variantPredicateFromMap reconstructs a v2 VariantPredicate from its stored
+// map form so a variant-scoped fault rule round-trips intact on read (#919).
+func variantPredicateFromMap(v map[string]any) *oapigen.VariantPredicate {
+	vp := &oapigen.VariantPredicate{}
+	// Preserve arrays that are PRESENT even when empty: `resolutions: []`
+	// means "match no video variant" (the scope-selector OFF state) and is
+	// semantically distinct from an absent resolutions ("all in scope").
+	// Dropping the empty array collapses OFF back to ON — the dashboard
+	// scope changes silently revert. (#919)
+	if raw, ok := v["rung_indexes"].([]any); ok {
+		idxs := intSliceFromAny(raw)
+		vp.RungIndexes = &idxs
+	}
+	if raw, ok := v["rung_positions"].([]any); ok {
+		pos := stringSliceFromAny(raw)
+		rp := make([]oapigen.VariantPredicateRungPositions, 0, len(pos))
+		for _, p := range pos {
+			rp = append(rp, oapigen.VariantPredicateRungPositions(p))
+		}
+		vp.RungPositions = &rp
+	}
+	if raw, ok := v["resolutions"].([]any); ok {
+		res := stringSliceFromAny(raw)
+		vp.Resolutions = &res
+	}
+	if f, ok := numericFloatTranslate(v["bandwidth_above"]); ok {
+		n := int(f)
+		vp.BandwidthAbove = &n
+	}
+	if f, ok := numericFloatTranslate(v["bandwidth_below"]); ok {
+		n := int(f)
+		vp.BandwidthBelow = &n
+	}
+	if cp, ok := v["codec_prefix"].(string); ok && cp != "" {
+		vp.CodecPrefix = &cp
+	}
+	return vp
+}
+
+func stringSliceFromAny(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, x := range arr {
+		if s, ok := x.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func intSliceFromAny(v any) []int {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]int, 0, len(arr))
+	for _, x := range arr {
+		if f, ok := numericFloatTranslate(x); ok {
+			out = append(out, int(f))
+		}
 	}
 	return out
 }

@@ -197,10 +197,10 @@ func TestServerContent(t *testing.T) {
 			t.Fatalf("baseline segment fetch: status=%d len=%d err=%v", st1, len(real), err)
 		}
 		// corrupted is a segment fault; freq=1/consec=1 → every fetch corrupted.
-		if err := patchSession(p.c, p.apiBase, p.sess.SessionID, faultSet("segment", "corrupted", 1, 1)); err != nil {
+		if err := setFaultsV2(p, faultRuleV2("segment", "corrupted", 1, 1)); err != nil {
 			t.Fatalf("enable corruption: %v", err)
 		}
-		defer patchSession(p.c, p.apiBase, p.sess.SessionID, faultClear("segment"))
+		defer clearFaultsV2(p)
 		time.Sleep(settleKernel)
 
 		corrupt, _, err := getBytes(p.c, segURL)

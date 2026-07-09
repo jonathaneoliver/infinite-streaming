@@ -2,22 +2,21 @@ package server
 
 import "testing"
 
-// #643 — the v2 fault_rules translator must clear the failure engine's
-// persisted window cursor (<surface>_failure_at / _failure_recover_at)
-// on every re-translation, or a re-armed rule resumes the previous
-// arm's half-consumed window and silently under-delivers faults. This
-// is the path the harness CLI arms through; the v1 PATCH path has the
-// matching resetFailureWindowState (cmd/server/main.go).
-func TestTranslateFaultRulesClearsWindowCursor(t *testing.T) {
+// #643 — re-arming a fault must open a FRESH cadence window, not resume the
+// previous arm's half-consumed one. Under the native engine (#925) the window
+// cursors live in `_faultrule_state`, so translateFaultRules must clear that on
+// every re-translation. (Pre-#925 this cleared the v1 <surface>_failure_at
+// fields; same intent, native storage.)
+func TestTranslateFaultRulesClearsRuleState(t *testing.T) {
 	s := map[string]any{
-		// Cursor state left behind by a previous arm's request handling.
-		"master_manifest_failure_at":         8,
-		"master_manifest_failure_recover_at": 18,
-		"all_failure_at":                     2,
-		"all_failure_recover_at":             12,
+		// Cadence state left behind by a previous arm.
+		"_faultrule_state": map[string]any{
+			"sb-master_manifest": map[string]any{"count": 4, "failure_recover_at": 11, "done": false},
+		},
 	}
 	rules := []any{
 		map[string]any{
+			"id":          "sb-master_manifest",
 			"type":        "404",
 			"frequency":   float64(0),
 			"consecutive": float64(10),
@@ -28,12 +27,10 @@ func TestTranslateFaultRulesClearsWindowCursor(t *testing.T) {
 	if err := translateFaultRules(s, rules); err != nil {
 		t.Fatalf("translateFaultRules: %v", err)
 	}
-	for _, key := range []string{
-		"master_manifest_failure_at", "master_manifest_failure_recover_at",
-		"all_failure_at", "all_failure_recover_at",
-	} {
-		if _, ok := s[key]; ok {
-			t.Errorf("%s survived re-arm — stale window would resume", key)
-		}
+	if _, ok := s["_faultrule_state"]; ok {
+		t.Error("_faultrule_state survived re-arm — the stale window would resume (#643)")
+	}
+	if _, ok := s["_v2_fault_rules"].([]any); !ok {
+		t.Error("_v2_fault_rules not stored")
 	}
 }
