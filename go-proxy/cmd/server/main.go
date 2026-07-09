@@ -6764,7 +6764,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamURL := fmt.Sprintf("http://%s:%s/%s", a.upstreamHost, a.upstreamPort, escapedPath)
-	contentType, isMasterManifest, isManifest, isSegment, playlistInfo, audioURIs, renditionDir := a.getContentType(upstreamURL)
+	contentType, isMasterManifest, isManifest, isSegment, playlistInfo, audioURIs, renditionDir := a.getContentType(upstreamURL, sessionData)
 	requestKind := requestKindLabel(isSegment, isManifest, isMasterManifest)
 	// #919 Tier 1: cache the manifest-declared audio rendition URIs so the fault
 	// classifier can identify audio playlists structurally. Only the master
@@ -7935,7 +7935,7 @@ func (a *App) applyShapeIfChanged(port int, rate float64, np NetemParams) error 
 // ladder (EXT-X-STREAM-INF) plus the audio rendition URIs (EXT-X-MEDIA
 // TYPE=AUDIO). The audio URIs are the structure-driven signal the fault
 // classifier uses to identify audio playlists — replacing filename guessing.
-func (a *App) getContentType(target string) (string, bool, bool, bool, []PlaylistInfo, []string, string) {
+func (a *App) getContentType(target string, session SessionData) (string, bool, bool, bool, []PlaylistInfo, []string, string) {
 	parsed, err := url.Parse(target)
 	if err != nil {
 		return "", false, false, false, nil, nil, ""
@@ -8021,6 +8021,24 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 		return contentType, false, true, false, nil, nil, ""
 	}
 	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
+		// #926: parse the MPD to build the video ladder + segmentDir→rendition
+		// map. go-live's DASH is CMAF — the same segment dirs as HLS — so once
+		// the map is populated the classifier scopes DASH segments unchanged.
+		if getReq, err := http.NewRequest(http.MethodGet, parsed.String(), nil); err == nil {
+			ctxGet, cancelGet := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelGet()
+			getReq = getReq.WithContext(ctxGet)
+			if getResp, derr := a.client.Do(getReq); derr == nil {
+				defer getResp.Body.Close()
+				if getResp.StatusCode < 400 {
+					body, _ := io.ReadAll(io.LimitReader(getResp.Body, 8<<20))
+					if variants, renditions := parseDASHManifest(body); len(renditions) > 0 {
+						mergeRenditionMap(session, renditions)
+						return contentType, false, true, false, variants, nil, ""
+					}
+				}
+			}
+		}
 		return contentType, false, true, false, nil, nil, ""
 	}
 	return contentType, false, false, true, nil, nil, ""
