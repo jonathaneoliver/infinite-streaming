@@ -617,16 +617,49 @@ func TestPatch_ShapePatternDisarm(t *testing.T) {
 	}
 }
 
-func TestPatch_FaultRules_UnsupportedFilter_501(t *testing.T) {
+// TestPatch_FaultRules_RichFilterAccepted is the #919 reversal: variant / audio
+// / init / regex filters used to 501 (v1 couldn't express them). Now the native
+// engine evaluates fault_rules directly, so these must be ACCEPTED (200) and
+// round-trip on `_v2_fault_rules` — this is what lets the dashboard's scope line
+// actually save a scoped fault.
+func TestPatch_FaultRules_RichFilterAccepted(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	bodies := []string{
+		`{"fault_rules":[{"id":"r1","type":"500","filter":{"variant":{"rung_positions":["top"]}}}]}`,
+		`{"fault_rules":[{"id":"r2","type":"404","filter":{"request_kind":["audio_segment"]}}]}`,
+		`{"fault_rules":[{"id":"r3","type":"404","filter":{"request_kind":["init"]}}]}`,
+		`{"fault_rules":[{"id":"r4","type":"500","filter":{"url_match":{"mode":"regex","patterns":["seg_\\d+"]}}}]}`,
+	}
+	for _, body := range bodies {
+		pid := uuid.New().String()
+		initialRev := "2020-01-01T00:00:00.000000000Z"
+		a.addPlayer(pid, initialRev, nil)
+		status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+			map[string]string{"If-Match": `"` + initialRev + `"`})
+		if status != http.StatusOK {
+			t.Errorf("status %d, want 200 (rich filters must be accepted post-#919); body=%s", status, respBody)
+			continue
+		}
+		stored, _ := a.SessionByPlayerID(pid)
+		if rules, ok := stored["_v2_fault_rules"].([]any); !ok || len(rules) != 1 {
+			t.Errorf("rule not stored on _v2_fault_rules; body=%s stored=%v", body, stored["_v2_fault_rules"])
+		}
+	}
+}
+
+// TestPatch_FaultRules_MalformedStill400or501 keeps the genuine-input-error
+// rejections: a malformed filter / empty url patterns are client errors
+// regardless of engine.
+func TestPatch_FaultRules_MalformedStill400or501(t *testing.T) {
 	a, _, ts := newTestServer(t)
 	pid := uuid.New().String()
 	initialRev := "2020-01-01T00:00:00.000000000Z"
 	a.addPlayer(pid, initialRev, nil)
-	body := `{"fault_rules":[{"id":"r1","type":"500","filter":{"variant":{"rung_positions":["top"]}}}]}`
+	body := `{"fault_rules":[{"id":"r1","type":"500","filter":{"url_match":{"mode":"substring","patterns":[]}}}]}`
 	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
 		map[string]string{"If-Match": `"` + initialRev + `"`})
-	if status != http.StatusNotImplemented {
-		t.Errorf("status %d, want 501; body=%s", status, respBody)
+	if status == http.StatusOK {
+		t.Errorf("empty url_match.patterns should be rejected, got 200; body=%s", respBody)
 	}
 }
 

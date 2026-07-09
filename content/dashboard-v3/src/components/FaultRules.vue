@@ -131,6 +131,22 @@ function ruleFor(s: Surface) {
   return masterRule.value;
 }
 
+// Expand a (possibly partial / undefined) filter into an explicit shape so the
+// per-rule JSON Merge Patch DELETES removed keys instead of retaining stale
+// ones. Merge Patch only removes a key when its value is `null`; an ABSENT key
+// means "leave unchanged". So turning a scope constraint OFF (e.g. removing
+// `variant` when all rungs are back in scope, or `request_kind` when audio
+// re-enters) requires sending that key as `null`, not omitting it. undefined /
+// empty filter → `null` (remove the whole filter). #919 scope-selector revert.
+function fullFilterForPatch(f: any): any {
+  if (!f || (typeof f === 'object' && Object.keys(f).length === 0)) return null;
+  return {
+    request_kind: f.request_kind ?? null,
+    variant: f.variant ?? null,
+    url_match: f.url_match ?? null,
+  };
+}
+
 function patchSurface(surface: Exclude<Surface, 'transport'>, partial: Partial<FaultRule>) {
   const current = findRule(surface);
   const base: FaultRule = current
@@ -149,6 +165,12 @@ function patchSurface(surface: Exclude<Surface, 'transport'>, partial: Partial<F
         filter: surface === 'all' ? undefined : { request_kind: [surface as any] },
         ...partial,
       } as FaultRule);
+  // Only a filter-changing patch needs the explicit-null expansion; type /
+  // frequency / consecutive edits re-send the current filter unchanged (a
+  // recursive merge of identical keys is a no-op, so stale keys stay correct).
+  if ('filter' in partial) {
+    (base as any).filter = fullFilterForPatch(partial.filter);
+  }
   upsertFaultRule(base);
 }
 

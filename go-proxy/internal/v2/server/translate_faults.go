@@ -166,10 +166,15 @@ func applyOneFaultRule(s map[string]any, rule map[string]any, used map[string]bo
 			return &unsupportedFaultRuleError{RuleID: id, Reason: "filter must be an object"}
 		}
 		if _, has := f["variant"]; has {
-			return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.variant requires v1 variant tracking (not yet wired)"}
+			// #919: variant-scoped rules are evaluated natively from
+			// `_v2_fault_rules` (already stashed above). v1 surfaces can't
+			// express variant scope, so skip the now-vestigial v1 projection
+			// instead of rejecting the PATCH — the rule is honoured by the
+			// native engine.
+			return nil
 		}
 		if _, has := f["codec"]; has {
-			return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.codec requires v1 variant tracking (not yet wired)"}
+			return nil // #919: native engine handles codec scope; skip v1 projection.
 		}
 		if um, has := f["url_match"]; has && um != nil {
 			umMap, ok := um.(map[string]any)
@@ -184,7 +189,7 @@ func applyOneFaultRule(s map[string]any, rule map[string]any, used map[string]bo
 				// modes collapse to the same v1 behaviour. mode="" is
 				// the schema's effective default (also substring).
 			case "regex":
-				return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.url_match.mode=regex is not yet wired (v1's matcher is substring-only)"}
+				return nil // #919: native matcher supports regex url_match; skip v1 projection.
 			default:
 				return &unsupportedFaultRuleError{RuleID: id, Reason: fmt.Sprintf("filter.url_match.mode=%q is not recognised", umMode)}
 			}
@@ -242,10 +247,11 @@ func applyOneFaultRule(s map[string]any, rule map[string]any, used map[string]bo
 				}
 				surface, ok := v1SurfaceForRequestKind(kindStr)
 				if !ok {
-					return &unsupportedFaultRuleError{
-						RuleID: id,
-						Reason: fmt.Sprintf("request_kind %q has no v1 surface (init / audio_* not yet wired)", kindStr),
-					}
+					// #919: init / audio_* / partial are native-only kinds —
+					// no v1 surface to project onto, but fully honoured by the
+					// native engine from `_v2_fault_rules`. Skip this kind for
+					// the vestigial v1 projection.
+					continue
 				}
 				if !seen[surface] {
 					seen[surface] = true
@@ -253,7 +259,9 @@ func applyOneFaultRule(s map[string]any, rule map[string]any, used map[string]bo
 				}
 			}
 			if len(targets) == 0 {
-				targets = []string{"all"}
+				// Every requested kind is native-only (audio/init) — nothing to
+				// project onto v1 surfaces. The rule lives on _v2_fault_rules.
+				return nil
 			}
 		}
 	}

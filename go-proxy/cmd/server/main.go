@@ -6823,8 +6823,14 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamURL := fmt.Sprintf("http://%s:%s/%s", a.upstreamHost, a.upstreamPort, escapedPath)
-	contentType, isMasterManifest, isManifest, isSegment, playlistInfo := a.getContentType(upstreamURL)
+	contentType, isMasterManifest, isManifest, isSegment, playlistInfo, audioURIs := a.getContentType(upstreamURL)
 	requestKind := requestKindLabel(isSegment, isManifest, isMasterManifest)
+	// #919 Tier 1: cache the manifest-declared audio rendition URIs so the fault
+	// classifier can identify audio playlists structurally. Only the master
+	// parse yields these; preserve the prior list on non-master requests.
+	if len(audioURIs) > 0 {
+		sessionData["manifest_audio_uris"] = audioURIs
+	}
 	segmentTransferStartedAt := time.Time{}
 	segmentTransferStartBytes := int64(0)
 	var flightPortNum int
@@ -6865,15 +6871,23 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		a.observeServerSegmentLoop(sessionData, filename)
 	}
 
-	handler := NewRequestHandler(isSegment, isManifest, isMasterManifest, sessionData)
+	// #919: native v2 fault evaluation. classifyRequest maps the request to
+	// its v2 request_kind + variant (read-only over the cached manifest, like
+	// inferServerVideoRendition above); evaluateFaultRules then matches it
+	// first-rule-wins against fault_rules and runs the cadence engine. This
+	// replaces the v1 surface-prefix RequestHandler dispatch — a rule's
+	// FaultFilter decides what it applies to, so audio/init/variant scope work
+	// (#917/#918) with no translation to v1's fixed surfaces.
+	reqClass := classifyRequest(sessionData, filename, isSegment, isManifest, isMasterManifest)
 	// Serialise the failure-decision read-modify-write so video+audio
 	// requests arriving in the same millisecond don't both pass the
 	// "1 per N seconds" filter and double-fire.
 	//
 	// The full atomic sequence is:
 	//   1. Refresh dedup state from the latest snap (defeats stale
-	//      clones).
-	//   2. Run HandleRequest (decides + writes to local clone).
+	//      clones) — includes _faultrule_state, the native per-rule
+	//      cadence state.
+	//   2. Run evaluateFaultRules (decides + writes to local clone).
 	//   3. Save back to the snap BEFORE unlocking, so the next
 	//      goroutine to take the lock sees this goroutine's writes
 	//      when it refreshes.
@@ -6883,7 +6897,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// and the rule fires twice.
 	sessionStateMu.Lock()
 	refreshFailureStateFromLatest(a, sessionData, sessionNumber)
-	failureType := handler.HandleRequest(filename)
+	failureType := evaluateFaultRules(sessionData, reqClass, time.Now())
 	a.saveSessionByID(sessionNumber, sessionData)
 	sessionStateMu.Unlock()
 
@@ -7968,24 +7982,29 @@ func (a *App) applyShapeIfChanged(port int, rate float64, np NetemParams) error 
 	return nil
 }
 
-func (a *App) getContentType(target string) (string, bool, bool, bool, []PlaylistInfo) {
+// getContentType HEAD/GET-probes an upstream URL to classify it (master /
+// media manifest / segment) and, for a master, parses out the video variant
+// ladder (EXT-X-STREAM-INF) plus the audio rendition URIs (EXT-X-MEDIA
+// TYPE=AUDIO). The audio URIs are the structure-driven signal the fault
+// classifier uses to identify audio playlists — replacing filename guessing.
+func (a *App) getContentType(target string) (string, bool, bool, bool, []PlaylistInfo, []string) {
 	parsed, err := url.Parse(target)
 	if err != nil {
-		return "", false, false, false, nil
+		return "", false, false, false, nil, nil
 	}
 	if parsed.Hostname() != "" {
 		parsed.Host = fmt.Sprintf("%s:%s", parsed.Hostname(), a.upstreamPort)
 	}
 	headReq, err := http.NewRequest(http.MethodHead, parsed.String(), nil)
 	if err != nil {
-		return "", false, false, false, nil
+		return "", false, false, false, nil, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	headReq = headReq.WithContext(ctx)
 	resp, err := a.client.Do(headReq)
 	if err != nil {
-		return "", false, false, false, nil
+		return "", false, false, false, nil, nil
 	}
 	contentType := resp.Header.Get("Content-Type")
 	resp.Body.Close()
@@ -8007,11 +8026,11 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 		getReq = getReq.WithContext(ctxGet)
 		getResp, err := a.client.Do(getReq)
 		if err != nil {
-			return contentType, false, true, false, nil
+			return contentType, false, true, false, nil, nil
 		}
 		defer getResp.Body.Close()
 		if getResp.StatusCode >= 400 {
-			return contentType, false, true, false, nil
+			return contentType, false, true, false, nil, nil
 		}
 		contentType = getResp.Header.Get("Content-Type")
 		body, _ := io.ReadAll(getResp.Body)
@@ -8034,18 +8053,53 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 							Resolution:       resolution,
 						})
 					}
-					return contentType, true, false, false, infos
+					// Structure-driven audio: EXT-X-MEDIA renditions hang off each
+					// variant's Alternatives. Collect the TYPE=AUDIO URIs so the
+					// fault classifier can identify audio playlists by manifest
+					// declaration instead of filename spelling. Dedup across variants
+					// (all video variants reference the same audio GROUP-ID).
+					audioURIs := extractAudioURIs(master)
+					return contentType, true, false, false, infos, audioURIs
 				case m3u8.MEDIA:
-					return contentType, false, true, false, nil
+					return contentType, false, true, false, nil, nil
 				}
 			}
 		}
-		return contentType, false, true, false, nil
+		return contentType, false, true, false, nil, nil
 	}
 	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
-		return contentType, false, true, false, nil
+		return contentType, false, true, false, nil, nil
 	}
-	return contentType, false, false, true, nil
+	return contentType, false, false, true, nil, nil
+}
+
+// extractAudioURIs collects the EXT-X-MEDIA TYPE=AUDIO rendition URIs declared
+// in a master playlist, deduped. grafov/m3u8 hangs the EXT-X-MEDIA renditions
+// off each variant's Alternatives, and every video variant references the same
+// audio GROUP-ID, so the raw list is highly duplicated. This is the
+// structure-driven audio signal the fault classifier consumes (#919 Tier 1) —
+// what the manifest DECLARES as audio, not what a filename spells.
+func extractAudioURIs(master *m3u8.MasterPlaylist) []string {
+	if master == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var uris []string
+	for _, variant := range master.Variants {
+		if variant == nil {
+			continue
+		}
+		for _, alt := range variant.Alternatives {
+			if alt == nil || !strings.EqualFold(alt.Type, "AUDIO") || alt.URI == "" {
+				continue
+			}
+			if !seen[alt.URI] {
+				seen[alt.URI] = true
+				uris = append(uris, alt.URI)
+			}
+		}
+	}
+	return uris
 }
 
 func (a *App) trackPortThroughput() {
@@ -10765,6 +10819,10 @@ func refreshFailureStateFromLatest(a *App, dst SessionData, sessionID string) {
 			"manifest_failure_at", "manifest_failure_recover_at",
 			"master_manifest_failure_at", "master_manifest_failure_recover_at",
 			"all_failure_at", "all_failure_recover_at",
+			// #919: native per-rule cadence state. Copied wholesale so the
+			// evaluator's read-modify-write sees the latest per-rule count /
+			// schedule and can't double-fire concurrent requests.
+			"_faultrule_state",
 		} {
 			if v, ok := s[k]; ok {
 				dst[k] = v
