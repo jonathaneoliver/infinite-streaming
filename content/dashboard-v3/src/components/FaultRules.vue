@@ -23,6 +23,7 @@
 import { computed, ref, toRef, watch } from 'vue';
 import { usePlayer } from '@/composables/usePlayer';
 import { useManifestVariants } from '@/composables/useManifestVariants';
+import { useSessionShaping } from '@/composables/useSessionShaping';
 import type { FaultRule } from '@/repo/v2-repo';
 
 type Surface = 'segment' | 'manifest' | 'master_manifest' | 'all' | 'transport';
@@ -90,6 +91,16 @@ const {
 } = usePlayer(toRef(props, 'playerId'));
 
 const activeTab = ref<Surface>('all');
+
+// #910: transport faults (DROP/REJECT) need nftables — the ONLY fault surface
+// that isn't portable. In a degraded (http-only) session the Transport tab
+// collapses to an "unavailable" notice; the HTTP surfaces stay live (they're
+// proxy-userspace and work on any host). Sourced from the shared session-shaping
+// model so this can't drift from the Network Shaping fold.
+const { degraded, effMode } = useSessionShaping(toRef(props, 'playerId'));
+const transportDisabled = computed(
+  () => activeTab.value === 'transport' && degraded.value,
+);
 
 function findRule(surface: Exclude<Surface, 'transport'>): FaultRule | null {
   const rules = player.value?.fault_rules ?? [];
@@ -432,7 +443,8 @@ function consLabel(surface: Surface): string {
       <button
         v-for="s in SURFACES"
         :key="s.key"
-        :class="{ active: activeTab === s.key }"
+        :class="{ active: activeTab === s.key, unavailable: s.key === 'transport' && degraded }"
+        :title="s.key === 'transport' && degraded ? `Transport faults need nftables — unavailable in ${effMode} mode` : ''"
         @click="activeTab = s.key"
       >
         {{ s.label }}
@@ -445,7 +457,11 @@ function consLabel(surface: Surface): string {
     </div>
 
     <div class="panel">
-      <p v-if="activeTab === 'all'" class="note">
+      <p v-if="transportDisabled" class="shaping-unavailable">
+        Transport faults are unavailable in <strong>{{ effMode }}</strong> mode.
+        This feature requires NET_ADMIN access.
+      </p>
+      <p v-else-if="activeTab === 'all'" class="note">
         Faults configured here apply to <strong>every</strong> request. They
         override per-surface rules on the same player when both would match.
       </p>
@@ -454,6 +470,10 @@ function consLabel(surface: Surface): string {
         before this surface-specific rule on most requests.
       </p>
 
+      <!-- #910: in a degraded (Faults-only) session the Transport surface has no
+           controls at all — just the notice above. The HTTP surfaces render
+           normally. -->
+      <template v-if="!transportDisabled">
       <div class="row">
         <label>Failure Type</label>
         <div class="radio-group">
@@ -575,6 +595,7 @@ function consLabel(surface: Surface): string {
           </div>
         </div>
       </div>
+      </template>
 
     </div>
   </div>
@@ -607,6 +628,17 @@ function consLabel(surface: Surface): string {
   color: #2563eb;
   border-bottom-color: #2563eb;
 }
+/* #910 — Transport tab when the host / session can't do nftables. Greyed so it
+   reads as "not available here"; still clickable so the operator can open it
+   and see the explanatory notice + disabled controls. */
+.tabs button.unavailable {
+  color: #b91c1c;
+  opacity: 0.6;
+}
+.tabs button.unavailable.active {
+  color: #b91c1c;
+  border-bottom-color: #fca5a5;
+}
 .dot {
   display: inline-block;
   width: 6px;
@@ -634,6 +666,18 @@ function consLabel(surface: Surface): string {
   padding: 8px 10px;
   border-radius: 6px;
   margin: 0;
+}
+/* #910 — matches NetworkShaping.vue's .ns-unavailable so the degraded-mode
+   "unavailable" notices read as one consistent (red) treatment. */
+.shaping-unavailable {
+  margin: 0;
+  font-size: 13px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  padding: 12px 14px;
+  border-radius: 8px;
+  line-height: 1.5;
 }
 
 .row {

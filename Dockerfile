@@ -34,10 +34,19 @@ RUN cd /build/go-proxy && \
 
 FROM alpine:3.24
 
+# KERNEL_SHAPING=1 (default) installs the NET_ADMIN traffic-shaping binaries:
+# iproute2 (tc/ip) + nftables (nft). Build with --build-arg KERNEL_SHAPING=0 for
+# a degraded / no-NET_ADMIN image (Cloud Run / Fargate / PaaS) — those binaries
+# are omitted entirely and nothing calls them in http-only mode
+# (SHAPING_FORCE_DEGRADED short-circuits the boot probe; runtime shaping is gated
+# off via kernelRateOn/kernelNetemOn). See #910.
+ARG KERNEL_SHAPING=1
+
 # Install dependencies first (expensive, rarely changes - gets cached)
 RUN \
   apk update && \
-  apk add iproute2 iperf nftables openssl && \
+  if [ "$KERNEL_SHAPING" = "1" ]; then apk add iproute2 nftables; fi && \
+  apk add iperf openssl && \
   apk add nginx && \
   apk add ffmpeg && \
   apk add python3 py3-pip && \

@@ -138,6 +138,38 @@ type V1Adapter interface {
 	// (and any PATCH that requests "no override," i.e. rate_mbps=0 or
 	// null) get this cap. See issue #480.
 	DefaultRateMbps() int
+
+	// ShapingCapabilities reports the per-control kernel availability and
+	// the resolved shaping mode detected once at boot. The dashboard reads
+	// this to disable/annotate the network-shaping controls that would
+	// otherwise show a phantom cap on a host without tc/netem/nftables.
+	// Issue #910.
+	ShapingCapabilities() ShapingCapabilities
+}
+
+// ShapingCapabilities reports, per network-shaping control, whether the
+// kernel facility that backs it actually applies on this host, plus the
+// resolved shaping mode. Probed once at boot (detectShapingCapabilities in
+// package main). The per-control booleans are authoritative for the UI; Mode
+// is a coarse banner label. Issue #910.
+type ShapingCapabilities struct {
+	// Per-control kernel availability. Rate is tc HTB; Delay/Loss are tc
+	// netem; TransportFault is nftables. A false here means the control is
+	// unavailable on this host and must NOT be presented as an active cap.
+	Rate           bool `json:"rate"`
+	Delay          bool `json:"delay"`
+	Loss           bool `json:"loss"`
+	TransportFault bool `json:"transport_fault"`
+	// Mode is the resolved shaping backend: "kernel" (tc/netem present) or
+	// "http-only" (no kernel shaping — only the portable HTTP-fault surface
+	// works).
+	Mode string `json:"mode"`
+	// Forced is true when SHAPING_FORCE_DEGRADED overrode the live probe,
+	// used to exercise degraded mode on a host that DOES have NET_ADMIN.
+	Forced bool `json:"forced"`
+	// Reason is a short human string for the banner + startup log (e.g.
+	// "no sch_netem/sch_htb" or "forced via SHAPING_FORCE_DEGRADED").
+	Reason string `json:"reason"`
 }
 
 // ShapePatternStep is the v1-shaped step the adapter expects. Mirrors

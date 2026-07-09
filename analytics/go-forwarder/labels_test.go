@@ -891,3 +891,35 @@ func TestNetFailureSignatureInheritsErrorSeverity(t *testing.T) {
 		t.Fatalf("timeout signature should inherit error severity: want %q in %v", want, got)
 	}
 }
+
+// TestShapingDegradedControlLabels pins the #910 degraded-shaping labels:
+// a warning-tier synthesized `shaping_degraded` plus a per-mode label parsed
+// from the proxy `info` string (space-separated, hyphen→underscore).
+func TestShapingDegradedControlLabels(t *testing.T) {
+	got := computeControlLabels(&ctrlRow{
+		Event: "shaping_degraded",
+		Info:  "mode=http-only forced=true unavailable=rate;delay;loss;transport_fault",
+	})
+	for _, want := range []string{
+		SevWarning + "=" + synthMark + "shaping_degraded",
+		SevWarning + "=" + synthMark + "shaping_http_only",
+	} {
+		if !hasLabel(got, want) {
+			t.Fatalf("missing %q in %v", want, got)
+		}
+	}
+}
+
+func TestShapingModeFromInfo(t *testing.T) {
+	cases := map[string]string{
+		"mode=http-only forced=true unavailable=rate": "http_only",
+		"mode=kernel":  "kernel",
+		"forced=false": "",
+		"":             "",
+	}
+	for in, want := range cases {
+		if got := shapingModeFromInfo(in); got != want {
+			t.Fatalf("shapingModeFromInfo(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
