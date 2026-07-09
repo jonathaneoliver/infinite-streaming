@@ -62,6 +62,11 @@ func parseDASHManifest(body []byte) (videoVariants []PlaylistInfo, renditions ma
 		return nil, nil
 	}
 	renditions = map[string]renditionInfo{}
+	// A looping live MPD accumulates one <Period> per loop over the live window,
+	// each carrying the SAME Representation ladder. The variant ladder is the
+	// SET of distinct renditions, not one entry per Period — so dedup by segment
+	// dir (the CMAF rendition key) and keep the first occurrence of each rung.
+	seenVideo := map[string]bool{}
 	for _, period := range mpd.Periods {
 		for _, as := range period.AdaptationSets {
 			for _, rep := range as.Representations {
@@ -73,6 +78,10 @@ func parseDASHManifest(body []byte) (videoVariants []PlaylistInfo, renditions ma
 					renditions[dir] = renditionInfo{Kind: "audio"}
 					continue
 				}
+				if seenVideo[dir] {
+					continue
+				}
+				seenVideo[dir] = true
 				res := ""
 				if rep.Width > 0 && rep.Height > 0 {
 					res = fmt.Sprintf("%dx%d", rep.Width, rep.Height)

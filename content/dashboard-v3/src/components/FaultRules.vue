@@ -305,11 +305,9 @@ function typeChoicesFor(surface: Surface): FaultTypeChoice[] {
 // Full ladder — fault injection targets any available variant, even ones thinned
 // out of the player's current manifest by allowed_variants (not just the allowed
 // subset). Bandwidth chart uses the thinned `variants`; this needs them all.
-const { variantsAll: rawManifestVariants } = useManifestVariants(toRef(props, 'playerId'));
-// Legacy sorts descending by bandwidth (highest rung first).
-const manifestVariants = computed(() => {
-  return rawManifestVariants.value.slice().sort((a, b) => (b.bandwidth ?? 0) - (a.bandwidth ?? 0));
-});
+// useManifestVariants already collapses duplicate rungs and sorts descending
+// by bandwidth (highest rung first), so the scope list is display-ready.
+const { variantsAll: manifestVariants } = useManifestVariants(toRef(props, 'playerId'));
 
 // Non-audio request kinds we enumerate on the "All" tab when audio
 // needs to be excluded explicitly (otherwise the All-tab rule has no
