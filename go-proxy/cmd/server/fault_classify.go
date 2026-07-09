@@ -85,6 +85,86 @@ func matchesAudioURI(audioURIs []string, decodedPath, base string) bool {
 	return false
 }
 
+// renditionInfo describes the rendition a segment directory belongs to, learned
+// from the media playlist that lists that dir's segments (#922 Tier 2).
+type renditionInfo struct {
+	Kind         string // "video" | "audio"
+	Resolution   string
+	BandwidthBps int
+	Rung         int
+}
+
+// recordRenditionDir maps a rendition directory (e.g. "720p", "audio") to the
+// rendition the just-parsed media playlist represents: video resolution/rung
+// resolved from the master's variant ladder, or audio. Stored on the session
+// under _rendition_map for classifyRequest to consult. The playlist filename is
+// matched against the master's declared variant / audio URIs — structure, not
+// spelling.
+func recordRenditionDir(session SessionData, playlistFilename, dir string) {
+	if dir == "" {
+		return
+	}
+	base := pathBase(playlistFilename)
+	variants := getManifestVariants(session)
+	for idx, v := range variants {
+		if renditionPlaylistMatches(v.URL, base, playlistFilename) {
+			setRenditionDir(session, dir, renditionInfo{
+				Kind: "video", Resolution: v.Resolution, BandwidthBps: v.Bandwidth, Rung: rungIndexOf(variants, idx),
+			})
+			return
+		}
+	}
+	for _, u := range getStringSlice(session, "manifest_audio_uris") {
+		if renditionPlaylistMatches(u, base, playlistFilename) {
+			setRenditionDir(session, dir, renditionInfo{Kind: "audio"})
+			return
+		}
+	}
+}
+
+// renditionPlaylistMatches reports whether a request for playlistPath (basename
+// requestBase) is the media playlist declared in the master as declaredURL.
+func renditionPlaylistMatches(declaredURL, requestBase, requestPath string) bool {
+	if declaredURL == "" {
+		return false
+	}
+	return pathBase(declaredURL) == requestBase || strings.HasSuffix(requestPath, declaredURL)
+}
+
+func setRenditionDir(session SessionData, dir string, info renditionInfo) {
+	m, _ := session["_rendition_map"].(map[string]any)
+	if m == nil {
+		m = map[string]any{}
+		session["_rendition_map"] = m
+	}
+	m[dir] = map[string]any{
+		"kind":       info.Kind,
+		"resolution": info.Resolution,
+		"bandwidth":  info.BandwidthBps,
+		"rung":       info.Rung,
+	}
+}
+
+// getRenditionDir looks up the rendition a segment directory belongs to.
+func getRenditionDir(session SessionData, dir string) (renditionInfo, bool) {
+	m, _ := session["_rendition_map"].(map[string]any)
+	if m == nil {
+		return renditionInfo{}, false
+	}
+	raw, _ := m[dir].(map[string]any)
+	if raw == nil {
+		return renditionInfo{}, false
+	}
+	res, _ := raw["resolution"].(string)
+	kind, _ := raw["kind"].(string)
+	return renditionInfo{
+		Kind:         kind,
+		Resolution:   res,
+		BandwidthBps: intFromInterface(raw["bandwidth"]),
+		Rung:         intFromInterface(raw["rung"]),
+	}, true
+}
+
 // isAudioPlaylistName reports whether a media-playlist basename is the audio
 // rendition. Audio SEGMENTS live under an `/audio/` directory (caught by
 // pathParent), but the audio media PLAYLIST sits in the content root named
@@ -117,6 +197,15 @@ func classifyRequest(session SessionData, filename string, isSegment, isManifest
 	base := pathBase(decoded)
 	parent := strings.ToLower(pathParent(decoded))
 	isAudio := audioParentTokens[parent]
+	// #922 Tier 2: for a segment/init, the rendition map (built from the media
+	// playlist that authoritatively lists this directory's segments) is the
+	// structure-driven signal — it overrides the dir-name heuristic for audio
+	// and carries the real resolution/rung. Falls back to the heuristics below
+	// until that dir's playlist has transited.
+	rmInfo, rmOK := getRenditionDir(session, parent)
+	if rmOK && isSegment {
+		isAudio = rmInfo.Kind == "audio"
+	}
 	// Audio media playlists sit in the content root (not under /audio/), so the
 	// pathParent check misses them. Prefer the STRUCTURE-DRIVEN signal: the
 	// EXT-X-MEDIA audio URIs parsed from the master (manifest_audio_uris). Only
@@ -165,7 +254,13 @@ func classifyRequest(session SessionData, filename string, isSegment, isManifest
 	// (segment / partial). init keeps RungIndex -1 — an init fetch is
 	// per-rendition but carries no ABR-decision semantics of its own.
 	if !isAudio && !rc.IsInit {
-		if idx, info, ok := matchVariantIndex(variants, decoded); ok {
+		if rmOK && rmInfo.Kind == "video" {
+			// #922 Tier 2: authoritative resolution/rung from the parsed media
+			// playlist — no URL-token scoring guesswork.
+			rc.RungIndex = rmInfo.Rung
+			rc.Resolution = rmInfo.Resolution
+			rc.BandwidthBps = rmInfo.BandwidthBps
+		} else if idx, info, ok := matchVariantIndex(variants, decoded); ok {
 			rc.RungIndex = idx
 			rc.Resolution = info.Resolution
 			rc.BandwidthBps = info.Bandwidth

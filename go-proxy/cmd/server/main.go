@@ -6764,13 +6764,20 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamURL := fmt.Sprintf("http://%s:%s/%s", a.upstreamHost, a.upstreamPort, escapedPath)
-	contentType, isMasterManifest, isManifest, isSegment, playlistInfo, audioURIs := a.getContentType(upstreamURL)
+	contentType, isMasterManifest, isManifest, isSegment, playlistInfo, audioURIs, renditionDir := a.getContentType(upstreamURL)
 	requestKind := requestKindLabel(isSegment, isManifest, isMasterManifest)
 	// #919 Tier 1: cache the manifest-declared audio rendition URIs so the fault
 	// classifier can identify audio playlists structurally. Only the master
 	// parse yields these; preserve the prior list on non-master requests.
 	if len(audioURIs) > 0 {
 		sessionData["manifest_audio_uris"] = audioURIs
+	}
+	// #922 Tier 2: when a media playlist transits, record the rendition its
+	// segment directory belongs to (video resolution/rung or audio) — parsed
+	// from the playlist's own segment list, so segment classification is
+	// authoritative instead of URL-token guessing.
+	if isManifest && renditionDir != "" {
+		recordRenditionDir(sessionData, filename, renditionDir)
 	}
 	segmentTransferStartedAt := time.Time{}
 	segmentTransferStartBytes := int64(0)
@@ -7928,24 +7935,24 @@ func (a *App) applyShapeIfChanged(port int, rate float64, np NetemParams) error 
 // ladder (EXT-X-STREAM-INF) plus the audio rendition URIs (EXT-X-MEDIA
 // TYPE=AUDIO). The audio URIs are the structure-driven signal the fault
 // classifier uses to identify audio playlists — replacing filename guessing.
-func (a *App) getContentType(target string) (string, bool, bool, bool, []PlaylistInfo, []string) {
+func (a *App) getContentType(target string) (string, bool, bool, bool, []PlaylistInfo, []string, string) {
 	parsed, err := url.Parse(target)
 	if err != nil {
-		return "", false, false, false, nil, nil
+		return "", false, false, false, nil, nil, ""
 	}
 	if parsed.Hostname() != "" {
 		parsed.Host = fmt.Sprintf("%s:%s", parsed.Hostname(), a.upstreamPort)
 	}
 	headReq, err := http.NewRequest(http.MethodHead, parsed.String(), nil)
 	if err != nil {
-		return "", false, false, false, nil, nil
+		return "", false, false, false, nil, nil, ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	headReq = headReq.WithContext(ctx)
 	resp, err := a.client.Do(headReq)
 	if err != nil {
-		return "", false, false, false, nil, nil
+		return "", false, false, false, nil, nil, ""
 	}
 	contentType := resp.Header.Get("Content-Type")
 	resp.Body.Close()
@@ -7967,11 +7974,11 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 		getReq = getReq.WithContext(ctxGet)
 		getResp, err := a.client.Do(getReq)
 		if err != nil {
-			return contentType, false, true, false, nil, nil
+			return contentType, false, true, false, nil, nil, ""
 		}
 		defer getResp.Body.Close()
 		if getResp.StatusCode >= 400 {
-			return contentType, false, true, false, nil, nil
+			return contentType, false, true, false, nil, nil, ""
 		}
 		contentType = getResp.Header.Get("Content-Type")
 		body, _ := io.ReadAll(getResp.Body)
@@ -8000,18 +8007,23 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 					// declaration instead of filename spelling. Dedup across variants
 					// (all video variants reference the same audio GROUP-ID).
 					audioURIs := extractAudioURIs(master)
-					return contentType, true, false, false, infos, audioURIs
+					return contentType, true, false, false, infos, audioURIs, ""
 				case m3u8.MEDIA:
-					return contentType, false, true, false, nil, nil
+					// #922 Tier 2: the media playlist authoritatively lists its
+					// segment (and EXT-X-MAP init) paths, so the rendition dir it
+					// belongs to is unambiguous — the caller maps that dir to this
+					// playlist's rendition (video resolution/rung or audio).
+					media := playlist.(*m3u8.MediaPlaylist)
+					return contentType, false, true, false, nil, nil, mediaRenditionDir(media)
 				}
 			}
 		}
-		return contentType, false, true, false, nil, nil
+		return contentType, false, true, false, nil, nil, ""
 	}
 	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
-		return contentType, false, true, false, nil, nil
+		return contentType, false, true, false, nil, nil, ""
 	}
-	return contentType, false, false, true, nil, nil
+	return contentType, false, false, true, nil, nil, ""
 }
 
 // extractAudioURIs collects the EXT-X-MEDIA TYPE=AUDIO rendition URIs declared
@@ -8041,6 +8053,40 @@ func extractAudioURIs(master *m3u8.MasterPlaylist) []string {
 		}
 	}
 	return uris
+}
+
+// mediaRenditionDir returns the directory a media playlist's segments live under
+// — the stable, STRUCTURE-DRIVEN rendition identifier (#922 Tier 2). The
+// playlist lists its segment + EXT-X-MAP init paths authoritatively, so the dir
+// is unambiguous no matter how the playlist file itself is named. "" if the
+// playlist carries no segment/map to key off.
+func mediaRenditionDir(media *m3u8.MediaPlaylist) string {
+	if media == nil {
+		return ""
+	}
+	for _, seg := range media.Segments {
+		if seg == nil {
+			continue
+		}
+		if seg.Map != nil && seg.Map.URI != "" {
+			return renditionDirOf(seg.Map.URI)
+		}
+		if seg.URI != "" {
+			return renditionDirOf(seg.URI)
+		}
+	}
+	return ""
+}
+
+// renditionDirOf extracts the rendition directory token (lowercased) from a
+// segment/init path or URL — the last path element before the file. e.g.
+// "/go-live/c/720p/segment_00047.m4s" → "720p"; "audio/init.mp4" → "audio".
+func renditionDirOf(uri string) string {
+	u := uri
+	if parsed, err := url.Parse(uri); err == nil && parsed.Path != "" {
+		u = parsed.Path
+	}
+	return strings.ToLower(pathParent(strings.TrimPrefix(u, "/")))
 }
 
 func (a *App) trackPortThroughput() {
