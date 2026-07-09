@@ -318,11 +318,24 @@ function fmtBytesShort(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+/** Drop the "/go-live/<content>/" prefix — identical for every request on a
+ *  play — so the column shows just the resource within the content. Falls back
+ *  to the raw value for non-go-live requests (e.g. /api/...). Mirrors
+ *  PlayLog.vue's pathTail(). */
+function shortResource(raw: string): string {
+  if (!raw) return '';
+  const idx = raw.indexOf('/go-live/');
+  if (idx < 0) return raw;
+  const after = raw.slice(idx + '/go-live/'.length);
+  const slash = after.indexOf('/');
+  return slash >= 0 ? after.slice(slash + 1) : after;
+}
+
 function sortValue(r: Row, c: SortCol): number | string {
   switch (c) {
     case 'time': return r.ts;
     case 'method': return r.entry.method ?? '';
-    case 'path': return r.entry.path ?? r.entry.url ?? '';
+    case 'path': return shortResource(r.entry.path || r.entry.url || '');
     case 'bytes': return num(r.entry.bytes_out);
     case 'mbps': return rowMbps(r);
     case 'duration': return r.duration;
@@ -667,7 +680,7 @@ function onRowsWheel(e: WheelEvent) {
         <div class="cell c-labels">Labels</div>
         <div class="cell c-token">Token</div>
         <div class="cell c-method sortable" @click="clickSort('method')">M<span class="arr">{{ arrow('method') }}</span></div>
-        <div class="cell c-path sortable" @click="clickSort('path')">Path<span class="arr">{{ arrow('path') }}</span></div>
+        <div class="cell c-path sortable" @click="clickSort('path')">Resource<span class="arr">{{ arrow('path') }}</span></div>
         <div class="cell c-bytes sortable" @click="clickSort('bytes')">KB<span class="arr">{{ arrow('bytes') }}</span></div>
         <div class="cell c-mbps sortable" @click="clickSort('mbps')">Mbps<span class="arr">{{ arrow('mbps') }}</span></div>
         <div class="cell c-dur sortable" @click="clickSort('duration')">Dur<span class="arr">{{ arrow('duration') }}</span></div>
@@ -701,7 +714,7 @@ function onRowsWheel(e: WheelEvent) {
           </div>
           <div class="cell c-method">{{ r.entry.method ?? '?' }}</div>
           <div class="cell c-path" :title="r.entry.url ?? r.entry.path ?? ''">
-            {{ r.entry.path || r.entry.url || '—' }}
+            {{ shortResource(r.entry.path || r.entry.url || '') || '—' }}
           </div>
           <div class="cell c-bytes">{{ fmtKB(num(r.entry.bytes_out)) }}</div>
           <div class="cell c-mbps">{{ fmtMbps(r) }}</div>
