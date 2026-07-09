@@ -184,6 +184,24 @@ func (a *v2Adapter) DefaultRateMbps() int {
 	return a.app.defaultRateMbps
 }
 
+// ShapingCapabilities maps the package-main boot-time probe result across the
+// v1/v2 boundary. Issue #910.
+func (a *v2Adapter) ShapingCapabilities() server.ShapingCapabilities {
+	if a == nil || a.app == nil {
+		return server.ShapingCapabilities{Mode: "http-only", Reason: "proxy not initialised"}
+	}
+	c := a.app.shaping
+	return server.ShapingCapabilities{
+		Rate:           c.rate,
+		Delay:          c.delay,
+		Loss:           c.loss,
+		TransportFault: c.transportFault,
+		Mode:           c.mode,
+		Forced:         c.forced,
+		Reason:         c.reason,
+	}
+}
+
 // networkEntryToMap converts a typed v1 ring-buffer entry into the
 // loosely-typed map shape v2's translator consumes. Mirrors the keys
 // in NetworkLogEntry.

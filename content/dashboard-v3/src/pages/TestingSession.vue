@@ -10,8 +10,8 @@
 import { computed } from 'vue';
 import { useUrlSearchParams } from '@vueuse/core';
 import { usePlayer } from '@/composables/usePlayer';
-import ShapeSliders from '@/components/ShapeSliders.vue';
-import NetworkShapingPattern from '@/components/NetworkShapingPattern.vue';
+import NetworkShaping from '@/components/NetworkShaping.vue';
+import ShapingModeControl from '@/components/ShapingModeControl.vue';
 import TransferTimeouts from '@/components/TransferTimeouts.vue';
 import ContentManipulation from '@/components/ContentManipulation.vue';
 import FaultRules from '@/components/FaultRules.vue';
@@ -187,6 +187,14 @@ const chatScope = computed<ChatScope>(() => ({
 
         <h3 class="session-controls-heading">Session Controls</h3>
 
+        <!-- #910 per-session shaping mode. Governs MORE than the Network
+             Shaping fold: a degraded mode also disables the Transport fault
+             tab + the Pattern engine below, while the portable HTTP-fault
+             surface stays live. Hidden on a kernel-capable host in normal use
+             (see useSessionShaping) — only shown in developer mode or when the
+             host can't kernel-shape. -->
+        <ShapingModeControl :player-id="playerId" />
+
         <!-- Control panels — order mirrors legacy testing-session.html.
              These mutate server state and so are LIVE-only; the
              archive session-viewer omits them. -->
@@ -203,9 +211,7 @@ const chatScope = computed<ChatScope>(() => ({
         </CollapsibleSection>
 
         <CollapsibleSection title="Network Shaping" :open="true" persist-key="network-shaping">
-          <ShapeSliders :player-id="playerId" />
-          <h3 class="subhead">Pattern</h3>
-          <NetworkShapingPattern :player-id="playerId" />
+          <NetworkShaping :player-id="playerId" />
         </CollapsibleSection>
 
         <h3 class="session-controls-heading">Session Display</h3>

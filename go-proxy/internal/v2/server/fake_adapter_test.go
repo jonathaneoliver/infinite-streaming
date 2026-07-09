@@ -15,6 +15,7 @@ import (
 // store's sessionsMu single-mutex contract).
 type fakeAdapter struct {
 	defaultRateMbps int
+	shaping         ShapingCapabilities
 	mu              sync.Mutex
 	sessions        []map[string]any
 
@@ -202,6 +203,13 @@ type fakeTransportFaultCall struct {
 // baseline can set a.defaultRateMbps via a helper.
 func (a *fakeAdapter) DefaultRateMbps() int {
 	return a.defaultRateMbps
+}
+
+// ShapingCapabilities test stub — returns the zero value (all controls
+// unavailable, mode "") unless a test sets a.shaping to exercise a specific
+// mode. Issue #910.
+func (a *fakeAdapter) ShapingCapabilities() ShapingCapabilities {
+	return a.shaping
 }
 
 // ApplyPatternToPlayer test stub — records the call for assertions.

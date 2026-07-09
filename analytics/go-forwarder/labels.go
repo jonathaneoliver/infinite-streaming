@@ -824,6 +824,18 @@ func computeControlLabels(r *ctrlRow) []string {
 		return []string{SevInfo + "=" + synthMark + "session_start"}
 	case "session_end":
 		return []string{SevInfo + "=" + synthMark + "session_end"}
+	case "shaping_degraded":
+		// #910: the session ran without full kernel shaping (http-only, whether
+		// probed or forced). Warning severity — a configured cap may not be
+		// active, so an operator must not read the play as if it were. A
+		// per-mode label rides alongside so `--label-has shaping_http_only`
+		// works. Mode comes off the proxy `info` string
+		// ("mode=<m> forced=<b> unavailable=<...>").
+		out := []string{SevWarning + "=" + synthMark + "shaping_degraded"}
+		if mode := shapingModeFromInfo(r.Info); mode != "" {
+			out = append(out, SevWarning+"="+synthMark+"shaping_"+mode)
+		}
+		return out
 	// Generic fallback when the changed field isn't yet enumerated.
 	case "control_change":
 		return []string{SevInfo + "=" + synthMark + "control_change"}
@@ -916,6 +928,34 @@ func patternModeFromInfo(info string) string {
 		}
 	}
 	return string(b)
+}
+
+// shapingModeFromInfo pulls the shaping mode out of a shaping_degraded
+// control_event's `info` string ("mode=<m> forced=<b> unavailable=<...>",
+// space-separated — NOT JSON) and sanitises it into a label-safe token
+// (hyphens → underscore; e.g. "http-only" → "http_only"). Returns "" when no
+// mode token is present. Issue #910.
+func shapingModeFromInfo(info string) string {
+	for _, tok := range strings.Fields(info) {
+		rest, ok := strings.CutPrefix(tok, "mode=")
+		if !ok {
+			continue
+		}
+		b := make([]byte, 0, len(rest))
+		for i := 0; i < len(rest); i++ {
+			c := rest[i]
+			switch {
+			case c >= 'A' && c <= 'Z',
+				c >= 'a' && c <= 'z',
+				c >= '0' && c <= '9':
+				b = append(b, c)
+			case c == '-', c == '_':
+				b = append(b, '_')
+			}
+		}
+		return string(b)
+	}
+	return ""
 }
 
 // isSegmentPath matches HLS / DASH media segment extensions.
