@@ -300,15 +300,20 @@ func TestConfigOnConnect_MaterializeEndToEnd(t *testing.T) {
 	if !getBool(sess, "content_strip_resolution") {
 		t.Errorf("content_strip_resolution = false, want true")
 	}
-	// fault_rules[segment] → segment_*
-	if got := getString(sess, "segment_failure_type"); got != "corrupted" {
-		t.Errorf("segment_failure_type = %q, want corrupted", got)
+	// fault_rules → _v2_fault_rules (native engine; no v1 surface projection since #925)
+	rules, _ := sess["_v2_fault_rules"].([]any)
+	if len(rules) != 1 {
+		t.Fatalf("_v2_fault_rules = %v, want one rule", sess["_v2_fault_rules"])
 	}
-	if got := getInt(sess, "segment_failure_frequency"); got != 3 {
-		t.Errorf("segment_failure_frequency = %v, want 3", got)
+	rule, _ := rules[0].(map[string]any)
+	if rule["type"] != "corrupted" {
+		t.Errorf("rule.type = %v, want corrupted", rule["type"])
 	}
-	if got := getString(sess, "segment_failure_mode"); got != "requests" {
-		t.Errorf("segment_failure_mode = %q, want requests", got)
+	if got := intFromInterface(rule["frequency"]); got != 3 {
+		t.Errorf("rule.frequency = %v, want 3", rule["frequency"])
+	}
+	if rule["mode"] != "requests" {
+		t.Errorf("rule.mode = %v, want requests", rule["mode"])
 	}
 	// labels → _v2_labels
 	labels, ok := sess["_v2_labels"].(map[string]any)

@@ -675,12 +675,18 @@ func TestPatch_FaultRules_RoundTrip(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status %d body=%s", status, respBody)
 	}
+	// #925: faults persist ONLY on _v2_fault_rules (no v1 surface projection).
 	stored, _ := a.SessionByPlayerID(pid)
-	if stored["segment_failure_type"] != "500" {
-		t.Errorf("segment_failure_type = %v, want 500", stored["segment_failure_type"])
+	rules, ok := stored["_v2_fault_rules"].([]any)
+	if !ok || len(rules) != 1 {
+		t.Fatalf("_v2_fault_rules = %v, want one rule", stored["_v2_fault_rules"])
 	}
-	if stored["segment_failure_frequency"] != 5 {
-		t.Errorf("segment_failure_frequency = %v, want 5", stored["segment_failure_frequency"])
+	rule, _ := rules[0].(map[string]any)
+	if rule["type"] != "500" {
+		t.Errorf("rule.type = %v, want 500", rule["type"])
+	}
+	if f, _ := numericFloat(rule["frequency"]); f != 5 {
+		t.Errorf("rule.frequency = %v, want 5", rule["frequency"])
 	}
 }
 
@@ -697,8 +703,12 @@ func TestPost_FaultRule_AppendOne(t *testing.T) {
 		t.Fatalf("status %d body=%s", status, respBody)
 	}
 	stored, _ := a.SessionByPlayerID(pid)
-	if stored["segment_failure_type"] != "500" {
-		t.Errorf("segment_failure_type = %v, want 500", stored["segment_failure_type"])
+	rules, _ := stored["_v2_fault_rules"].([]any)
+	if len(rules) != 1 {
+		t.Fatalf("_v2_fault_rules = %v, want one appended rule", stored["_v2_fault_rules"])
+	}
+	if rule, _ := rules[0].(map[string]any); rule["type"] != "500" {
+		t.Errorf("rule.type = %v, want 500", rules[0])
 	}
 }
 
@@ -722,9 +732,9 @@ func TestDelete_FaultRule(t *testing.T) {
 		t.Fatalf("status %d", status)
 	}
 	stored, _ = a.SessionByPlayerID(pid)
-	// segment surface should be cleared after the delete.
-	if stored["segment_failure_type"] != "none" {
-		t.Errorf("segment_failure_type after delete = %v, want none", stored["segment_failure_type"])
+	// The rule is gone from the array after delete.
+	if rules, _ := stored["_v2_fault_rules"].([]any); len(rules) != 0 {
+		t.Errorf("_v2_fault_rules after delete = %v, want empty", stored["_v2_fault_rules"])
 	}
 }
 
@@ -1334,8 +1344,8 @@ func TestPost_PlayFaultRule_Append(t *testing.T) {
 		t.Fatalf("status %d body=%s", status, respBody)
 	}
 	stored, _ = a.SessionByPlayerID(pid)
-	if stored["segment_failure_type"] != "500" {
-		t.Errorf("segment_failure_type = %v, want 500", stored["segment_failure_type"])
+	if rules, _ := stored["_v2_fault_rules"].([]any); len(rules) == 0 {
+		t.Errorf("_v2_fault_rules = %v, want the appended play rule", stored["_v2_fault_rules"])
 	}
 }
 
