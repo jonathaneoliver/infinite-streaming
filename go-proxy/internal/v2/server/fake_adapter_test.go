@@ -21,9 +21,10 @@ type fakeAdapter struct {
 
 	// Test-side observation hooks for kernel-apply calls. Real adapter
 	// drives v1's nftables / tc helpers; the fake just records.
-	shapeApplyCalls     []string
-	transportFaultCalls []fakeTransportFaultCall
-	patternApplyCalls   []fakePatternCall
+	shapeApplyCalls       []string
+	shapingModeApplyCalls []string
+	transportFaultCalls   []fakeTransportFaultCall
+	patternApplyCalls     []fakePatternCall
 
 	// SubscribeSessions delivers snapshots whenever sessionsChanged
 	// fires; pretests can call it directly to drive the diff.
@@ -173,6 +174,13 @@ func labelsMapEqual(a, b map[string]any) bool {
 func (a *fakeAdapter) ApplyShapeToPlayer(playerID string) error {
 	a.mu.Lock()
 	a.shapeApplyCalls = append(a.shapeApplyCalls, playerID)
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *fakeAdapter) ApplyShapingModeToPlayer(playerID string) error {
+	a.mu.Lock()
+	a.shapingModeApplyCalls = append(a.shapingModeApplyCalls, playerID)
 	a.mu.Unlock()
 	return nil
 }

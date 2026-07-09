@@ -334,6 +334,16 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 			_ = s.v1.ApplyShapeToPlayer(p)
 		}
 	}
+	// #910 degrade reconcile runs AFTER the rate/delay/loss push so a combined
+	// {rate, mode:http_only} patch ends degraded (gate closed tears the rate
+	// back down); a {mode:kernel} clear re-opens the gate and re-applies the
+	// stored shape inside ApplyShapingModeToPlayer.
+	if shapingModeTouched(paths) {
+		_ = s.v1.ApplyShapingModeToPlayer(pidStr)
+		for _, p := range broadcastTouched {
+			_ = s.v1.ApplyShapingModeToPlayer(p)
+		}
+	}
 	if transportFaultTouched(paths) {
 		applyTransportFaultFromSession(s, post, pidStr)
 		for _, p := range broadcastTouched {
@@ -385,6 +395,7 @@ func unsupportedPaths(paths []string) []string {
 		case p == "shape.jitter_correlation_pct": // #826
 		case p == "shape.transport_fault", strings.HasPrefix(p, "shape.transport_fault."):
 		case p == "shape.pattern", strings.HasPrefix(p, "shape.pattern."):
+		case p == "shape.mode": // #910 per-session degraded mode
 		case p == "shape":
 		case p == "fault_rules":
 		case p == "transfer_timeouts", strings.HasPrefix(p, "transfer_timeouts."):
@@ -405,6 +416,20 @@ func shapeFieldsTouched(paths []string) bool {
 		switch p {
 		case "shape", "shape.rate_mbps", "shape.delay_ms", "shape.loss_pct",
 			"shape.jitter_ms", "shape.loss_correlation_pct", "shape.jitter_correlation_pct": // #826
+			return true
+		}
+	}
+	return false
+}
+
+// shapingModeTouched reports whether the patch touches the #910 per-session
+// degraded mode (`shape.mode`). Used to decide whether to invoke
+// ApplyShapingModeToPlayer after a successful PATCH — the mode change has to
+// reconcile the kernel gate (tear down / re-apply shaping) separately from the
+// rate/delay/loss push that ApplyShapeToPlayer does.
+func shapingModeTouched(paths []string) bool {
+	for _, p := range paths {
+		if p == "shape" || p == "shape.mode" {
 			return true
 		}
 	}
@@ -729,6 +754,9 @@ func applyShapePatch(srv *Server, s map[string]any, shape any) {
 		s["transport_failure_frequency"] = 0
 		s["transport_consecutive_failures"] = 1
 		s["transport_failure_mode"] = "failures_per_seconds"
+		// Wholesale wipe also clears the #910 degrade back to kernel (inherit
+		// host caps) — `shape: null` is "operator cleared all shaping intent."
+		s["shaping_forced_mode"] = ""
 		return
 	}
 	shapeMap, ok := shape.(map[string]any)
@@ -779,12 +807,30 @@ func applyShapePatch(srv *Server, s map[string]any, shape any) {
 			s["nftables_jitter_correlation_pct"] = f
 		}
 	}
+	if v, present := shapeMap["mode"]; present {
+		// #910 per-session degraded mode. v2 `http_only` → v1
+		// `shaping_forced_mode="http-only"`; anything else (incl. "kernel"
+		// or null) clears to "" = inherit host caps. The kernel/gate
+		// reconcile runs post-PATCH via ApplyShapingModeToPlayer.
+		s["shaping_forced_mode"] = v1ShapingForcedMode(v)
+	}
 	if tf, present := shapeMap["transport_fault"]; present {
 		applyTransportFaultPatch(s, tf)
 	}
 	if pat, present := shapeMap["pattern"]; present {
 		applyPatternPatch(s, pat)
 	}
+}
+
+// v1ShapingForcedMode maps a v2 `shape.mode` value to the v1
+// `shaping_forced_mode` storage string. Only `http_only` names a degraded
+// mode; "kernel", null, and anything unrecognised clear to "" (inherit host
+// caps). Mirrors normalizeShapingMode in package main. Issue #910.
+func v1ShapingForcedMode(v any) string {
+	if s, ok := v.(string); ok && s == "http_only" {
+		return "http-only"
+	}
+	return ""
 }
 
 // applyPatternPatch stashes the v2 pattern shape on `_v2_shape_pattern`

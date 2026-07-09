@@ -752,12 +752,21 @@ func shapeFromSession(s map[string]any) *oapigen.Shape {
 	tfType, _ := s["transport_failure_type"].(string)
 	pattern, _ := s["_v2_shape_pattern"].(map[string]any)
 	drivenBy, _ := s["nftables_pattern_driven_by"].(string)
+	// #910 per-session degraded mode. "http-only" is a shape-bearing state on
+	// its own — a session forced degraded with no rate/delay/loss must still
+	// surface `shape.mode` so the dashboard's mode control reflects it.
+	forcedMode, _ := s["shaping_forced_mode"].(string)
+	degraded := forcedMode == "http-only"
 
 	if rate == 0 && delay == 0 && loss == 0 && jitter == 0 && lossCorr == 0 && jitterCorr == 0 &&
-		(tfType == "" || tfType == "none") && pattern == nil && drivenBy == "" {
+		(tfType == "" || tfType == "none") && pattern == nil && drivenBy == "" && !degraded {
 		return nil
 	}
 	out := &oapigen.Shape{}
+	if degraded {
+		m := oapigen.HttpOnly
+		out.Mode = &m
+	}
 	if rate > 0 {
 		r := float32(rate)
 		out.RateMbps = &r

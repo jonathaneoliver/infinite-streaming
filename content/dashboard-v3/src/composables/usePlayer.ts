@@ -322,8 +322,13 @@ export function usePlayer(playerId: Ref<string>) {
     error: query.error,
     sseState: sse.state,
 
-    // Shape (rate / delay / loss / pattern / transport_fault)
+    // Shape (rate / delay / loss / pattern / transport_fault / mode)
     setShape: (partial: Partial<Shape>) => patchShape.mutate(partial),
+    // Awaitable variant — resolves on success, rejects with the HTTP error
+    // (err.status) on failure. Used where the caller needs to surface a
+    // per-error message (e.g. the #910 shaping-mode control's 404 "start
+    // playback first"). Optimistic update + rollback still apply.
+    setShapeAsync: (partial: Partial<Shape>) => patchShape.mutateAsync(partial),
     // setRate disarms any active throughput pattern — the rate slider and
     // the pattern are mutually exclusive sources-of-truth for the kernel
     // cap. Delay and loss are orthogonal axes that can coexist with a

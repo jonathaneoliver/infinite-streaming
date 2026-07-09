@@ -23,9 +23,9 @@
  *     actually do it; on a NET_ADMIN-less host it shows disabled.
  */
 import { computed, ref, type Ref } from 'vue';
-import { useQueryClient } from '@tanstack/vue-query';
 import { usePlayer } from '@/composables/usePlayer';
 import { useShapingCapabilities } from '@/composables/useBaselineRate';
+import type { Shape } from '@/repo/v2-repo';
 
 // id === '' is the kernel (full-shaping) mode; the API takes 'off' for it.
 // The only degraded mode is http-only: no network shaping, HTTP faults still
@@ -37,9 +37,8 @@ export const SHAPING_MODES: Array<{ id: string; label: string }> = [
 ];
 
 export function useSessionShaping(playerId: Ref<string>) {
-  const { player } = usePlayer(playerId);
+  const { player, setShapeAsync } = usePlayer(playerId);
   const { shaping } = useShapingCapabilities();
-  const qc = useQueryClient();
 
   // `?developer=1` — the shared convention (SessionDetails, ShellLayout, Grid).
   const developerMode = computed(
@@ -70,8 +69,12 @@ export function useSessionShaping(playerId: Ref<string>) {
   const settingMode = ref(false);
   const modeError = ref('');
 
-  // Drives the per-session degrade endpoint (by player_id) and refreshes the
-  // player so raw_session.shaping_forced_mode + all gating recompute.
+  // Drives the per-session degrade via a v2 `shape.mode` PATCH (#920 — the
+  // legacy POST /api/nftables/shaping-mode is retired here). usePlayer's
+  // optimistic patchShape carries the If-Match/control_revision handshake and
+  // refetches authoritative state on success/conflict, so raw_session
+  // .shaping_forced_mode + all gating recompute. The internal ids are '' /
+  // 'http-only'; the v2 enum is 'kernel' / 'http_only'.
   async function setShapingMode(mode: string) {
     if (settingMode.value || mode === forcedMode.value) return;
     // Can't pick the kernel path on a host that can't do it.
@@ -79,21 +82,14 @@ export function useSessionShaping(playerId: Ref<string>) {
     settingMode.value = true;
     modeError.value = '';
     try {
-      const res = await fetch('/api/nftables/shaping-mode', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ player_id: playerId.value, mode: mode || 'off' }),
-      });
-      if (!res.ok) {
-        modeError.value =
-          res.status === 404
-            ? 'No active proxy session for this player — start playback first.'
-            : `Couldn't set shaping mode (HTTP ${res.status}).`;
-      }
+      await setShapeAsync({ mode: mode === 'http-only' ? 'http_only' : 'kernel' } as Partial<Shape>);
     } catch (e) {
-      modeError.value = `Couldn't set shaping mode: ${e instanceof Error ? e.message : String(e)}`;
+      const status = (e as { status?: number })?.status;
+      modeError.value =
+        status === 404
+          ? 'No active proxy session for this player — start playback first.'
+          : `Couldn't set shaping mode${status ? ` (HTTP ${status})` : `: ${e instanceof Error ? e.message : String(e)}`}.`;
     } finally {
-      await qc.invalidateQueries({ queryKey: ['player', playerId.value] });
       settingMode.value = false;
     }
   }

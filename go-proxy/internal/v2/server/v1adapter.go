@@ -117,6 +117,14 @@ type V1Adapter interface {
 	// non-Linux or has no traffic manager.
 	ApplyShapeToPlayer(playerID string) error
 
+	// ApplyShapingModeToPlayer reconciles the #910 per-session degraded gate
+	// on the player's bound port after `shaping_forced_mode` changed: degrading
+	// tears down any kernel shaping and closes the apply gate (HTTP faults
+	// still fire); clearing re-opens the gate and re-applies the session's
+	// stored shape. No-op when the proxy is non-Linux or has no traffic
+	// manager. Reads the mode from the session — no argument needed.
+	ApplyShapingModeToPlayer(playerID string) error
+
 	// ApplyTransportFaultToPlayer arms the transport-fault loop on the
 	// player's bound port with the supplied type/cadence. type="none"
 	// disarms.

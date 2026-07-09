@@ -620,6 +620,32 @@ func (a *v2Adapter) ApplyShapeToPlayer(playerID string) error {
 	return nil
 }
 
+// ApplyShapingModeToPlayer reconciles the #910 per-session degraded gate on
+// the player's bound port after a v2 PATCH changed `shaping_forced_mode`.
+// Delegates to applyForcedShapingModeForPort, the same reconcile the v1
+// /api/nftables/shaping-mode endpoint runs.
+func (a *v2Adapter) ApplyShapingModeToPlayer(playerID string) error {
+	if a == nil || a.app == nil {
+		return nil
+	}
+	for _, s := range a.app.sessionsView() { // #740 read-only: matches player, reads port
+		if !matchesPlayerID(getString(s, "player_id"), playerID) {
+			continue
+		}
+		portStr := getString(s, "x_forwarded_port")
+		if portStr == "" {
+			return nil
+		}
+		port, perr := strconv.Atoi(portStr)
+		if perr != nil {
+			return nil
+		}
+		a.app.applyForcedShapingModeForPort(port)
+		return nil
+	}
+	return nil
+}
+
 // ApplyPatternToPlayer drives v1's pattern step-engine on the player's
 // bound port via applyShapePattern. Empty steps disarm the loop.
 func (a *v2Adapter) ApplyPatternToPlayer(playerID string, steps []server.ShapePatternStep, imp server.LinkImpairment) error {

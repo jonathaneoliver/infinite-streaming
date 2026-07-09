@@ -785,6 +785,65 @@ func TestPatch_ImpairmentKnobsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPatch_ShapingMode_DegradeAndClear is the #920 parity guard: a v2
+// `shape.mode` PATCH must drive v1's `shaping_forced_mode` and fire the kernel
+// gate reconcile (ApplyShapingModeToPlayer) — the same effect the legacy
+// POST /api/nftables/shaping-mode endpoint had. This is the field that
+// unblocks the #919 native-evaluator refactor.
+func TestPatch_ShapingMode_DegradeAndClear(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	// Degrade: shape.mode=http_only → v1 shaping_forced_mode="http-only".
+	body := `{"shape":{"mode":"http_only"}}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("degrade status %d body=%s (shape.mode must be a supported path, not 501)", status, respBody)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	if stored["shaping_forced_mode"] != "http-only" {
+		t.Errorf("shaping_forced_mode = %v, want %q", stored["shaping_forced_mode"], "http-only")
+	}
+	// Response shape must round-trip the mode so the dashboard control reflects it.
+	if !strings.Contains(string(respBody), `"mode":"http_only"`) {
+		t.Errorf("PATCH response did not round-trip shape.mode; body=%s", respBody)
+	}
+	// The kernel gate reconcile must have fired.
+	a.mu.Lock()
+	degradeCalls := append([]string{}, a.shapingModeApplyCalls...)
+	a.mu.Unlock()
+	if !containsString(degradeCalls, pid) {
+		t.Errorf("ApplyShapingModeToPlayer not called on degrade for %s; calls=%v", pid, degradeCalls)
+	}
+
+	// Clear: shape.mode=kernel → v1 shaping_forced_mode="" (inherit host caps).
+	rev2, _ := stored["control_revision"].(string)
+	if rev2 == "" {
+		t.Fatalf("no control_revision after degrade PATCH; stored=%v", stored["control_revision"])
+	}
+	status2, respBody2, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, `{"shape":{"mode":"kernel"}}`,
+		map[string]string{"If-Match": `"` + rev2 + `"`})
+	if status2 != http.StatusOK {
+		t.Fatalf("clear status %d body=%s", status2, respBody2)
+	}
+	stored2, _ := a.SessionByPlayerID(pid)
+	if stored2["shaping_forced_mode"] != "" {
+		t.Errorf("shaping_forced_mode after clear = %v, want empty", stored2["shaping_forced_mode"])
+	}
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
 func TestPatch_TransportFault_ArmsKernel(t *testing.T) {
 	a, _, ts := newTestServer(t)
 	pid := uuid.New().String()

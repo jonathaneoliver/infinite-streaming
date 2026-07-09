@@ -1470,6 +1470,22 @@ components:
         jitter_correlation_pct: { type: number, format: float, minimum: 0, maximum: 100, description: 'Correlation for the delay distribution (~25% ≈ real link). Only meaningful with `jitter_ms` > 0.' }
         pattern:          { $ref: '#/components/schemas/Pattern' }
         transport_fault:  { $ref: '#/components/schemas/TransportFault' }
+        mode:
+          type: string
+          enum: [kernel, http_only]
+          default: kernel
+          description: >
+            Per-session degraded shaping mode (#910). `http_only` forces this
+            ONE session onto the HTTP-only path: kernel rate / delay / loss /
+            netem AND transport faults are gated OFF, while HTTP faults still
+            fire. `kernel` (default) = inherit the host's shaping capability
+            (full kernel shaping when the box has NET_ADMIN + tc + nftables).
+            A session can only be MORE degraded than the host, never less — on
+            a NET_ADMIN-less host every session is effectively `http_only`
+            regardless of this field. Maps to v1 `shaping_forced_mode`
+            (`http_only`↔`"http-only"`, `kernel`↔`""`). The server-wide boot
+            override is `SHAPING_FORCE_DEGRADED` (env), independent of this
+            per-session control. *Broadcasts to group on PATCH.*
         # Pattern runtime telemetry — read-only mirror of which step in
         # `pattern.steps` the kernel is currently enforcing. The
         # dashboard reads these to draw the live target line on the

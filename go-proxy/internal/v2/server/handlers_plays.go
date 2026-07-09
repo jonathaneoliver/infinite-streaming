@@ -342,6 +342,9 @@ func (s *Server) PatchApiV2PlaysPlayId(w http.ResponseWriter, r *http.Request, p
 	} else if shapeFieldsTouched(paths) {
 		_ = s.v1.ApplyShapeToPlayer(playerID)
 	}
+	if shapingModeTouched(paths) {
+		_ = s.v1.ApplyShapingModeToPlayer(playerID)
+	}
 	if transportFaultTouched(paths) {
 		applyTransportFaultFromSession(s, post, playerID)
 	}
