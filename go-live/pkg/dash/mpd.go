@@ -484,8 +484,17 @@ func parseSegmentTimeline(segTimeline *etree.Element, timescale int) (*timelineD
 	}, nil
 }
 
+// usesVirtualSegments reports whether a variant duration is synthesized by
+// regrouping the base (6s) fmp4 fragments into shorter segments via their
+// .byteranges sidecars, rather than served from the base SegmentList directly.
+// The 1s and 2s variants are both sub-base regroupings; LL and 6s use the base
+// segments as-is (LL just exposes them with partial-segment availability).
+func usesVirtualSegments(duration int) bool {
+	return duration == 1 || duration == 2
+}
+
 func ensureVirtualSegments(data *MPDData, duration int) (int, float64) {
-	if duration != 2 {
+	if !usesVirtualSegments(duration) {
 		return data.SegmentCount, data.SegmentDuration
 	}
 	if data.VirtualSegmentsByDur[duration] == nil {
@@ -652,7 +661,7 @@ func GenerateLiveMPD(data *MPDData, timeNow time.Time, streamName string, durati
 	fmt.Fprintf(os.Stderr, "[GO-LIVE:DASH] Base MPD: totalDuration=%.3f segmentDuration=%.3f segmentCount=%d\n",
 		totalDuration, segmentDuration, segmentCount)
 
-	if duration == 2 {
+	if usesVirtualSegments(duration) {
 		virtualCount, virtualDuration := ensureVirtualSegments(data, duration)
 		if virtualCount > 0 {
 			segmentCount = virtualCount
@@ -687,7 +696,7 @@ func GenerateLiveMPD(data *MPDData, timeNow time.Time, streamName string, durati
 	elapsedTime := timeOffset
 	availabilityOffset := segmentDuration
 	if llMode {
-		if duration == 2 {
+		if usesVirtualSegments(duration) {
 			availabilityOffset = detectPartialDuration(data, duration, baseSegmentDuration)
 		} else {
 			availabilityOffset = detectPartialDuration(data, duration, segmentDuration)
@@ -982,7 +991,7 @@ func buildExplicitSegmentList(representation *etree.Element, data *MPDData, wind
 	virtualSegments := []virtualSegment{}
 	usePartials := llMode
 
-	if duration == 2 {
+	if usesVirtualSegments(duration) {
 		if byDur, ok := data.VirtualSegmentsByDur[duration]; ok {
 			virtualSegments = byDur[repID]
 			if len(virtualSegments) > 0 {
@@ -1006,7 +1015,7 @@ func buildExplicitSegmentList(representation *etree.Element, data *MPDData, wind
 		segList.CreateAttr("timescale", segMeta.timescale)
 	}
 	if segMeta.initialization != nil {
-		if duration == 2 || duration == 4 {
+		if usesVirtualSegments(duration) || duration == 4 {
 			initURL := segMeta.initialization.SelectAttrValue("sourceURL", "")
 			if initURL != "" {
 				segMeta.initialization.RemoveAttr("sourceURL")
@@ -1062,7 +1071,7 @@ func buildExplicitSegmentList(representation *etree.Element, data *MPDData, wind
 		}
 
 		segmentBasePath := baseMediaPath
-		if duration == 2 {
+		if usesVirtualSegments(duration) {
 			segmentBasePath = prefixDashPath(data.Rel, segmentBasePath)
 		}
 
