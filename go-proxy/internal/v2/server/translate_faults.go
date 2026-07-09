@@ -1,6 +1,18 @@
 package server
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
+
+// isNumericHTTPStatus reports whether s is a bare 4xx/5xx status code (e.g.
+// "502", "429"). The v1 fault engine honours any numeric 400-599 code directly
+// (faultStatusForType), so the v2 model accepts them too — the enum in the spec
+// lists only the common ones for the dashboard's radios, not an exhaustive set.
+func isNumericHTTPStatus(s string) bool {
+	code, err := strconv.Atoi(s)
+	return err == nil && code >= 400 && code <= 599
+}
 
 // Translation between v2's `fault_rules` array model and v1's
 // 5-surface storage model.
@@ -207,10 +219,10 @@ func applyOneFaultRule(s map[string]any, rule map[string]any, used map[string]bo
 	}
 
 	faultType, _ := rule["type"].(string)
-	if !supportedFaultTypes[faultType] {
+	if !supportedFaultTypes[faultType] && !isNumericHTTPStatus(faultType) {
 		return &unsupportedFaultRuleError{
 			RuleID: id,
-			Reason: "unsupported fault type — v1 surface model accepts none / 404 / 500 / 503 / timeout / corrupted",
+			Reason: "unsupported fault type — expects none / a socket fault / a numeric 4xx-5xx status",
 		}
 	}
 
