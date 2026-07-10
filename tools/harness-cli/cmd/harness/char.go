@@ -273,6 +273,14 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 		ac := a.ToArmConfig(playerID, clip, rl, i == patternMaster)
 		ac.BootstrapCfgB64 = cfgB64 // probe GETs this after reserving a device (#937)
 		ac.GroupID = groupID
+		// Per-arm server (#942): explicit `server:` wins; else default to the run's
+		// base URL so EVERY arm pins a server via -is.server_url (no sim inherits a
+		// stale saved server). Threads to both the app launch arg and the deferred
+		// config-on-connect bootstrap, so a per-arm server bootstraps+streams as one.
+		ac.ServerURL = strings.TrimSpace(a.Server)
+		if ac.ServerURL == "" {
+			ac.ServerURL = client.BaseURL
+		}
 		planArms[i] = ac
 		bootMu.Lock()
 		bootstrapped = append(bootstrapped, playerID)

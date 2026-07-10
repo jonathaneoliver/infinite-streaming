@@ -466,6 +466,7 @@ final class PlayerViewModel: ObservableObject {
         // selection, and Advanced flag state.
         Self.migrateLegacyDefaults()
         loadServers()
+        applyServerURLOverride() // #942 — -is.server_url launch arg pins the server for this launch
         loadAdvancedFlags()
         attachLifecycleObservers()
         attachPlayerItemObservers()
@@ -2340,6 +2341,35 @@ final class PlayerViewModel: ObservableObject {
         } else {
             activeServerID = servers.first?.id
         }
+    }
+
+    /// #942 — per-launch server override. `-is.server_url <dashboard-url>` (an
+    /// NSArgumentDomain launch arg, highest precedence — mirrors `-is.player_id`)
+    /// pins the streaming server for THIS launch, overriding the saved active
+    /// server. So concurrent sessions (e.g. a fleet's arms) can each target a
+    /// different backend, and no launch silently inherits a stale saved server.
+    /// Optional `-is.server_label` names it. Upserts by contentURL (idempotent —
+    /// no duplicate pileup on re-launch) and activates; the normal Home load
+    /// fetches the catalogue, so we deliberately do NOT fetch here at init time.
+    private func applyServerURLOverride() {
+        let d = UserDefaults.standard
+        guard let raw = d.string(forKey: "is.server_url")?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return }
+        let label = d.string(forKey: "is.server_label")
+        guard let profile = ServerProfile.fromDashboardURL(raw, label: label) else {
+            print("[VM-INIT] is.server_url \(raw) is not a valid dashboard URL — ignoring")
+            return
+        }
+        let key = profile.contentURL.lowercased()
+        if let existing = servers.first(where: { $0.contentURL.lowercased() == key }) {
+            activeServerID = existing.id
+        } else {
+            servers.append(profile)
+            activeServerID = profile.id
+        }
+        persistServers()
+        print("[VM-INIT] is.server_url override → active server \(profile.contentURL)")
     }
 
     private func persistServers() {

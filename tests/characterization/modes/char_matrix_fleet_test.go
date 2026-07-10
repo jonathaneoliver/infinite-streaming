@@ -200,7 +200,14 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 	// path) — skip. A GET failure after a device is reserved is fatal for this arm;
 	// t.Cleanup frees the device + session.
 	if cfg.BootstrapCfgB64 != "" {
-		if berr := runner.ConfigureOnConnectCfg(setupCtx, plan.BaseURL, cfg.Content, cfg.PlayerID, cfg.GroupID, cfg.BootstrapCfgB64); berr != nil {
+		// Bootstrap on the arm's OWN server (#942) so a per-arm server materialises
+		// its config-on-connect session where that arm actually streams; falls back
+		// to the run's base URL for arms with no explicit server.
+		bootBase := cfg.ServerURL
+		if bootBase == "" {
+			bootBase = plan.BaseURL
+		}
+		if berr := runner.ConfigureOnConnectCfg(setupCtx, bootBase, cfg.Content, cfg.PlayerID, cfg.GroupID, cfg.BootstrapCfgB64); berr != nil {
 			t.Fatalf("deferred config-on-connect (arm %d, player_id=%s): %v", dev.FleetIndex, cfg.PlayerID, berr)
 		}
 		t.Logf("arm %d: config-on-connect materialised (deferred, post-reserve)", dev.FleetIndex)

@@ -39,6 +39,7 @@ var objectAxisKeys = map[string]bool{
 var axisKeys = map[string]bool{
 	"platform":                  true,
 	"content":                   true,
+	"server":                    true,
 	"mode":                      true,
 	"class":                     true,
 	"duration_s":                true,

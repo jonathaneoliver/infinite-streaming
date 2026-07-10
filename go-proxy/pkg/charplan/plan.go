@@ -59,6 +59,14 @@ type ArmConfig struct {
 	Platform string `json:"platform,omitempty"` // per-arm platform capability (mixed fleets)
 	Content  string `json:"content,omitempty"`  // resolved clip (the CLI already applied its default)
 
+	// Per-arm streaming server (#942). Dashboard/content origin (e.g.
+	// https://dev.jeoliver.com:21000); the app derives its playback origin as
+	// port+81. Threaded to BOTH the client (launch-arg -is.server_url override, so
+	// each arm can target a different backend) AND the deferred config-on-connect
+	// bootstrap (so an arm bootstraps + streams on the same server). Empty => the
+	// producer fills it with RunPlan.BaseURL, so every arm is always explicit.
+	ServerURL string `json:"server_url,omitempty"`
+
 	// deferred config-on-connect (#937): the CLI COMPUTES the recipe but hands the
 	// probe the ready-to-GET blob instead of GETting it up front, so the session is
 	// materialised only AFTER a farm device is reserved — bounding live proxy
