@@ -13,6 +13,7 @@ type PlayFilter struct {
 	PlayID         string
 	AttemptID      string
 	SessionID      string
+	GroupID        string // born-group id; prefix-matched via startsWith(group_id, …)
 	From           string // CH datetime string; parsed via parseDateTime64BestEffort
 	To             string
 	Classification string // "interesting" | "other" | "favourite" — validated
