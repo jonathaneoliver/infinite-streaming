@@ -92,7 +92,12 @@ func TestSweepProbe(t *testing.T) {
 	// combination matrix (#793). The arg construction is shared with the
 	// `harness char matrix` runner via runner.ProbeLaunchArgs (#811).
 	args := runner.ProbeLaunchArgs(runner.ProbeConfig{
-		PlayerID:           playerID,
+		PlayerID: playerID,
+		// Pin the server on startup via -is.server_url (#942) when provided, so the
+		// probe never depends on the sim's saved server (fragile: an unseeded sim
+		// hits the picker; a plist-seed can be clobbered by cfprefsd). NSArgumentDomain
+		// outranks UserDefaults, so this wins regardless of the sim's state.
+		ServerURL:          strings.TrimSpace(os.Getenv("CHAR_SWEEP_SERVER_URL")),
 		Content:            strings.TrimSpace(os.Getenv("CHAR_CONTENT")),
 		Segment:            strings.TrimSpace(os.Getenv("CHAR_SWEEP_SEGMENT")),
 		LiveOffsetS:        strings.TrimSpace(os.Getenv("CHAR_SWEEP_LIVE_OFFSET")),

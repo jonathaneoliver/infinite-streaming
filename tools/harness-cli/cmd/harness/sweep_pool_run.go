@@ -218,6 +218,10 @@ func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Ex
 		"CHAR_PLAYER_ID="+playerID,
 		"CHARACTERIZATION_DEVICE_UDID="+udid,
 		"CHAR_SWEEP_PLATFORM="+probePlatform,
+		// Pin the app to THIS run's server on startup (-is.server_url, #942) so the
+		// probe doesn't depend on the sim's saved server — an unseeded sim otherwise
+		// hits the picker and never streams.
+		"CHAR_SWEEP_SERVER_URL="+base,
 		"CHAR_SWEEP_DURATION_S="+strconv.Itoa(durationS),
 		"CHAR_SWEEP_SEGMENT="+a.Segment,
 		"CHAR_SWEEP_LIVE_OFFSET="+a.ClientLiveOffsetS(),

@@ -90,6 +90,7 @@ if [ "${QE_SELFTEST:-0}" = 1 ]; then
   if [ -n "$pid" ]; then
     log=$(mktemp)
     env CHAR_PLAYER_ID="$pid" HARNESS_BASE_URL="$HARNESS_BASE_URL" LAUNCH_MODE=appium \
+        CHAR_SWEEP_SERVER_URL="$HARNESS_BASE_URL" \
         CHAR_CONTENT="$CONTENT" CHAR_SWEEP_DURATION_S="$DURATION" CHARACTERIZATION_DEVICE_UDID="$SIM_UDID" \
         go test ./tests/characterization/modes -run TestSweepProbe -count=1 -v -timeout 6m >"$log" 2>&1
     grep -E "playing for|SWEEP PROBE|play_id:|session-viewer:|PASS|FAIL" "$log"
@@ -168,7 +169,7 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
   # drive the probe (mechanical; no model call)
   log=$(mktemp)
   env CHAR_PLAYER_ID="$player_id" HARNESS_BASE_URL="$HARNESS_BASE_URL" LAUNCH_MODE="$launch" \
-      CHAR_SWEEP_PLATFORM="$platform" \
+      CHAR_SWEEP_PLATFORM="$platform" CHAR_SWEEP_SERVER_URL="$HARNESS_BASE_URL" \
       CHAR_CONTENT="$CONTENT" CHAR_SWEEP_DURATION_S="$DURATION" CHARACTERIZATION_DEVICE_UDID="$device" \
       ${segment:+CHAR_SWEEP_SEGMENT="$segment"} \
       ${pattern:+CHAR_SWEEP_PATTERN="$pattern" CHAR_SWEEP_STEP_S="$step" CHAR_SWEEP_MARGIN="$margin"} \
