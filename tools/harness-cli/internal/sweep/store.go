@@ -217,8 +217,16 @@ func (s *Store) Counts() (map[Status]int, error) {
 // owner (server-side concurrency-safe claim). Returns (nil, nil) when the
 // backlog is empty / fully scope-gated. The returned Experiment is already
 // marked running in CH with owner + claim time stamped.
-func (s *Store) ClaimNext(owner string) (*Experiment, error) {
-	body, _ := json.Marshal(map[string]string{"owner": owner})
+//
+// serviceable is the set of platform tokens the caller can run right now (#949);
+// when non-empty, the server only returns work whose platform is in the set, so
+// an experiment needing an absent device is never claimed. Nil/empty ⇒ no gate.
+func (s *Store) ClaimNext(owner string, serviceable ...string) (*Experiment, error) {
+	req := map[string]any{"owner": owner}
+	if len(serviceable) > 0 {
+		req["serviceable"] = serviceable
+	}
+	body, _ := json.Marshal(req)
 	out, err := s.do(context.Background(), http.MethodPost, "/claim", body)
 	if err != nil {
 		return nil, err

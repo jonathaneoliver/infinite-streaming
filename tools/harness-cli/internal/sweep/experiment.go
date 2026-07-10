@@ -189,14 +189,25 @@ type Experiment struct {
 	Status    Status `json:"status,omitempty"` // lifecycle bucket; authoritative on the CH column, stamped onto the struct by Store.List
 
 	// --- the recipe (matrix axes) ---
-	Class               Class                `json:"class,omitempty"`       // config (default) | fault — the sweep tier
-	Platform            string               `json:"platform"`              // ipad-sim | iphone | appletv | androidtv | web
-	LaunchMode          string               `json:"launch_mode,omitempty"` // how the probe launches the app: appium (the only mode TestSweepProbe supports). Stamped at creation; the runner passes it as LAUNCH_MODE.
-	Protocol            string               `json:"protocol"`              // hls | dash
-	Content             string               `json:"content"`               // fixed to insane_new for now
-	Segment             string               `json:"segment,omitempty"`     // master variant the probe requests via -is.segment: s2 | s6 | ll. Empty = app default (s6). Drives the segment×live-offset matrix (#793).
-	Muted               *bool                `json:"muted,omitempty"`       // #838 mute audio; nil = app default-mutes. Rides config-on-connect (bootstrap app_config.muted) so the per-arm value reaches the client off GET /api/sessions.
-	Mode                string               `json:"mode"`                  // steps | pyramid | downshift_severity | …
+	Class      Class  `json:"class,omitempty"`       // config (default) | fault — the sweep tier
+	Platform   string `json:"platform"`              // ipad-sim | iphone | appletv | androidtv | web
+	LaunchMode string `json:"launch_mode,omitempty"` // how the probe launches the app: appium (the only mode TestSweepProbe supports). Stamped at creation; the runner passes it as LAUNCH_MODE.
+
+	// --- device requirement beyond platform (#949) ---
+	// The dispatcher matches these against the live farm roster (#948) to decide
+	// serviceability (scenario 3's availability gate). Platform is the coarse gate
+	// (the server-side --serviceable claim filter is platform-level); these refine
+	// it. RequireReal: nil = either sim or hardware, true = hardware only, false =
+	// simulator only. DeviceUDID / DeviceAlias pin a specific device — e.g. a real
+	// "jonathans-iphone" — so the arm runs on THAT device or waits in backlog.
+	RequireReal         *bool                `json:"require_real,omitempty"`
+	DeviceUDID          string               `json:"device_udid,omitempty"`
+	DeviceAlias         string               `json:"device_alias,omitempty"`
+	Protocol            string               `json:"protocol"`          // hls | dash
+	Content             string               `json:"content"`           // fixed to insane_new for now
+	Segment             string               `json:"segment,omitempty"` // master variant the probe requests via -is.segment: s2 | s6 | ll. Empty = app default (s6). Drives the segment×live-offset matrix (#793).
+	Muted               *bool                `json:"muted,omitempty"`   // #838 mute audio; nil = app default-mutes. Rides config-on-connect (bootstrap app_config.muted) so the per-arm value reaches the client off GET /api/sessions.
+	Mode                string               `json:"mode"`              // steps | pyramid | downshift_severity | …
 	DurationS           int                  `json:"duration_s,omitempty"`
 	Fault               *Fault               `json:"fault,omitempty"` // fault-class only
 	Shape               *Shape               `json:"shape,omitempty"`

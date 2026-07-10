@@ -70,13 +70,21 @@ type Arm struct {
 	Role  string `json:"role,omitempty"`  // control | variant — maps to sweep.Experiment.Arm
 
 	// --- run-level (un-namespaced: not a client/server knob) ---
-	Platform  string `json:"platform,omitempty"`   // ipad-sim | iphone | appletv | androidtv | web
-	Content   string `json:"content,omitempty"`    // catalogue name to resume
-	Server    string `json:"server,omitempty"`     // per-arm streaming server URL (#942); empty = the run's default (HARNESS_BASE_URL). As a compare axis, runs arms against different backends.
-	Mode      string `json:"mode,omitempty"`       // steps | pyramid | … (recorded on the experiment)
-	Class     string `json:"class,omitempty"`      // config | fault (overrides the spec default)
-	DurationS int    `json:"duration_s,omitempty"` // play window (overrides the spec default)
-	Reps      int    `json:"reps,omitempty"`       // confirmation reps (overrides the spec default)
+	Platform string `json:"platform,omitempty"` // ipad-sim | iphone | appletv | androidtv | web
+	// Device requirement beyond platform (#949): the dispatcher matches these
+	// against the live farm roster (#948) to decide serviceability. Real: nil =
+	// either, true = hardware only, false = simulator only. DeviceUDID/DeviceAlias
+	// pin a specific device (e.g. a real iPhone) — the arm runs on THAT device or
+	// waits in backlog.
+	Real        *bool  `json:"real,omitempty"`
+	DeviceUDID  string `json:"device_udid,omitempty"`
+	DeviceAlias string `json:"device_alias,omitempty"`
+	Content     string `json:"content,omitempty"`    // catalogue name to resume
+	Server      string `json:"server,omitempty"`     // per-arm streaming server URL (#942); empty = the run's default (HARNESS_BASE_URL). As a compare axis, runs arms against different backends.
+	Mode        string `json:"mode,omitempty"`       // steps | pyramid | … (recorded on the experiment)
+	Class       string `json:"class,omitempty"`      // config | fault (overrides the spec default)
+	DurationS   int    `json:"duration_s,omitempty"` // play window (overrides the spec default)
+	Reps        int    `json:"reps,omitempty"`       // confirmation reps (overrides the spec default)
 
 	// --- client knobs (is.* — launch arg, cold relaunch on change) ---
 	Segment            string   `json:"is.segment,omitempty"`              // s1 | s2 | s6 | ll (empty = app default s6)

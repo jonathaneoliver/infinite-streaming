@@ -700,6 +700,7 @@ func cmdSweepNext(client *api.Client, args []string, asJSON bool) error {
 	depthFirst := fs.Bool("depth-first", true, "prefer non-seed work (peek only; --claim uses server score order)")
 	claim := fs.Bool("claim", false, "atomically claim the top eligible experiment (server-side)")
 	owner := fs.String("owner", "", "owner id to stamp on claim")
+	serviceable := fs.String("serviceable", "", "comma-separated platform tokens the caller can run now (e.g. ipad-sim,iphone); with --claim, the server only returns work whose platform is serviceable — an experiment needing an absent device is never claimed (#949)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -716,7 +717,7 @@ func cmdSweepNext(client *api.Client, args []string, asJSON bool) error {
 		if *owner == "" {
 			return errors.New("--claim requires --owner")
 		}
-		if pick, err = s.ClaimNext(*owner); err != nil {
+		if pick, err = s.ClaimNext(*owner, splitCSV(*serviceable)...); err != nil {
 			return fmt.Errorf("claim: %w", err)
 		}
 	} else {
