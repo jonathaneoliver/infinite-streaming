@@ -168,6 +168,12 @@ func runStreamingPool(ctx context.Context, claimer poolClaimer, devices []Device
 		if len(tokens) == 0 {
 			continue // unmappable, or nothing this device can run is in the allow-list
 		}
+		// Each worker claims under a UNIQUE owner (base + device). The server-side
+		// claim arbitrates by owner (argMin(owner,…) → winner==owner); if two
+		// workers shared an owner, both would see winner==owner and both promote the
+		// SAME experiment — a double-claim (observed live: 3 sims ran one exp id).
+		// A per-device owner makes the arbitration pick exactly one winner.
+		workerOwner := owner + "-" + shortUDID(dev.UDID)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -180,7 +186,7 @@ func runStreamingPool(ctx context.Context, claimer poolClaimer, devices []Device
 				if maxExperiments > 0 && atomic.AddInt32(&claimed, 1) > int32(maxExperiments) {
 					return
 				}
-				e, err := claimer.ClaimNext(owner, tokens...)
+				e, err := claimer.ClaimNext(workerOwner, tokens...)
 				if err != nil {
 					record(poolOutcome{Device: dev.UDID, Err: err})
 					return // a claim transport error stops this worker (don't hot-loop)
