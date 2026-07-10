@@ -68,6 +68,9 @@ Operator/CLI:
   procedure soak|abr-sweep|fault-soak <target>
                                multi-step composed test procedures
   sweep seed|status|ls|next    automated fault-sweep queue (#772)
+  devices [--free]             list the live Appium device-farm roster —
+                               capability + availability (--free = only
+                               allocatable right now; #948)
   char matrix <spec.yaml>      run a declarative YAML characterization
                                matrix: axes → cartesian arms, per-arm
                                config-on-connect + probe + offset table
@@ -174,6 +177,8 @@ func main() {
 		exit(cmdSweep(client, args[1:], g.asJSON))
 	case "char":
 		exit(cmdChar(client, args[1:], g.asJSON))
+	case "devices":
+		exit(cmdDevices(args[1:], g.asJSON))
 	case "post":
 		exit(cmdPost(client, args[1:], g.asJSON))
 	case "help", "--help", "-h":
