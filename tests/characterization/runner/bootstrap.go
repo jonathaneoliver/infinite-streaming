@@ -125,6 +125,81 @@ func ConfigureOnConnect(ctx context.Context, playerID, groupID string, groupBroa
 	return nil
 }
 
+// ConfigureOnConnectCfg materialises a session from a full base64 proxy.cfg blob
+// (the merge-patch escape hatch) instead of flat proxy.* keys. The fleet char-matrix
+// probe uses it to DEFER its config-on-connect GET until AFTER a farm device is
+// reserved (#937): the CLI builds the blob (it needs the API client to resolve the
+// patch) and stows it in the RunPlan; the probe GETs it here, so pool slots are
+// bounded by reserved devices, not arm count. baseURL falls back to HARNESS_BASE_URL
+// when empty; clip falls back to a discovered one. The group is mirrored
+// (broadcast) — matching the up-front shaperBootstrapURL the matrix used before.
+func ConfigureOnConnectCfg(ctx context.Context, baseURL, clip, playerID, groupID, cfgB64 string) error {
+	if playerID == "" {
+		return fmt.Errorf("ConfigureOnConnectCfg: empty playerID")
+	}
+	if cfgB64 == "" {
+		return fmt.Errorf("ConfigureOnConnectCfg: empty cfgB64")
+	}
+	base := strings.TrimSpace(baseURL)
+	if base == "" {
+		base = bootstrapBaseURL()
+	}
+	client := bootstrapHTTPClient()
+	if strings.TrimSpace(clip) == "" {
+		u, perr := url.Parse(strings.TrimRight(base, "/"))
+		if perr != nil {
+			return fmt.Errorf("ConfigureOnConnectCfg: parse base URL: %w", perr)
+		}
+		var derr error
+		if clip, derr = discoverClip(ctx, client, u.Scheme, u.Host); derr != nil {
+			return fmt.Errorf("ConfigureOnConnectCfg: %w", derr)
+		}
+	}
+	bootURL, err := cfgBootstrapURL(base, clip, playerID, groupID, cfgB64)
+	if err != nil {
+		return fmt.Errorf("ConfigureOnConnectCfg: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bootURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("ConfigureOnConnectCfg GET: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("ConfigureOnConnectCfg: proxy returned %d: %s",
+			resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	return nil
+}
+
+// cfgBootstrapURL builds the shaper config-on-connect GET URL for a base64 proxy.cfg
+// blob: the shaper port derived from the API port (21000 → 21081), player_id +
+// optional group_id + proxy.cfg query args, on the given clip's master playlist.
+// Mirrors the CLI's shaperBootstrapURL so the deferred (probe-side) GET is identical
+// to the up-front one (#937).
+func cfgBootstrapURL(base, clip, playerID, groupID, cfgB64 string) (string, error) {
+	u, err := url.Parse(strings.TrimRight(base, "/"))
+	if err != nil {
+		return "", fmt.Errorf("cfgBootstrapURL: parse base URL: %w", err)
+	}
+	host, apiPort := splitHostPort(u.Host)
+	shaperBase := net.JoinHostPort(host, shaperPortFromUIPort(apiPort))
+	q := url.Values{}
+	q.Set("player_id", playerID)
+	if groupID != "" {
+		q.Set("group_id", groupID) // mirrored group (broadcast) — no group_broadcast=false
+	}
+	q.Set("proxy.cfg", cfgB64)
+	return fmt.Sprintf("%s://%s/go-live/%s/master_6s.m3u8?%s",
+		u.Scheme, shaperBase, url.PathEscape(clip), q.Encode()), nil
+}
+
 func bootstrapBaseURL() string {
 	if v := strings.TrimSpace(os.Getenv("HARNESS_BASE_URL")); v != "" {
 		return v

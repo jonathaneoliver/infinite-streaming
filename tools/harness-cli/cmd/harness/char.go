@@ -200,10 +200,11 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 	planArms := make([]charplan.ArmConfig, len(arms))
 
 	// Bootstrap-phase crash-reap (#938): driveFleet's handler only covers the play
-	// window. An interrupt DURING this bootstrap loop — before any device is reserved
-	// — would otherwise orphan the config-on-connect sessions already created here,
-	// exhausting the proxy pool for the next run. Track the bootstrapped player_ids
-	// and release them if we're signalled before driveFleet takes over.
+	// window. Track the prepared player_ids and release their sessions if we're
+	// signalled before driveFleet takes over. With deferred config-on-connect (#937)
+	// the probe — not this loop — creates the sessions, so this is usually a no-op
+	// during build; it still guards the legacy up-front path and is harmless (a
+	// delete of a not-yet-created session just errors and is swallowed).
 	var bootMu sync.Mutex
 	var bootstrapped []string
 	bootSig := make(chan os.Signal, 1)
@@ -248,8 +249,12 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 		playerID := uuid.NewString()
 		res.PlayerID = playerID
 
+		// Fleet path: BUILD the config-on-connect blob but don't GET it — the probe
+		// GETs it after reserving a device (#937). experimentPlayerPatch still needs
+		// the API client (it resolves content-manipulation variants), so the build
+		// stays here; only the pool-slot-consuming GET moves to the probe.
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		_, berr := bootstrapMatrixSession(ctx, client, clip, playerID, group, e)
+		cfgB64, groupID, _, berr := buildMatrixBootstrapCfg(ctx, client, clip, group, e)
 		cancel()
 		if berr != nil {
 			res.Err = "bootstrap: " + berr.Error()
@@ -257,7 +262,7 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 			continue // no CHAR_ARM_i_PLAYER_ID emitted → that fleet index skips
 		}
 		results[i] = res
-		fmt.Fprintf(os.Stderr, "bootstrapped arm %d/%d: %s (player_id=%s)\n", i+1, len(arms), a.ID, playerID)
+		fmt.Fprintf(os.Stderr, "prepared arm %d/%d: %s (player_id=%s)\n", i+1, len(arms), a.ID, playerID)
 		// CHAR_ARM_<i>_PLATFORM is the ONLY per-arm env still emitted — fleet.go's
 		// generic resolver reads it to assign a device of the right platform to each
 		// fleet index (mixed-platform fleets, #860), and it's shared by every fleet
@@ -265,7 +270,10 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 		// RunPlan below (the probe reads CHAR_RUN_PLAN_FILE), so the old flat
 		// CHAR_ARM_<i>_{SEGMENT,CODEC,MUTED,…} surface is gone.
 		armEnv = append(armEnv, fmt.Sprintf("CHAR_ARM_%d_PLATFORM=%s", i, a.Platform))
-		planArms[i] = a.ToArmConfig(playerID, clip, rl, i == patternMaster)
+		ac := a.ToArmConfig(playerID, clip, rl, i == patternMaster)
+		ac.BootstrapCfgB64 = cfgB64 // probe GETs this after reserving a device (#937)
+		ac.GroupID = groupID
+		planArms[i] = ac
 		bootMu.Lock()
 		bootstrapped = append(bootstrapped, playerID)
 		bootMu.Unlock()
@@ -594,27 +602,39 @@ func runArmSequential(client *api.Client, a *charmatrix.Arm, charDir string, dur
 	return res
 }
 
-// bootstrapMatrixSession materialises an in-memory experiment's recipe onto a
-// proxy session via config-on-connect (no store round-trip): build the combined
-// PlayerPatch, base64 it onto the shaper master URL, and GET it. A 3xx means the
-// session is configured (#712 applies before the redirect); 4xx/5xx is a reject.
-// Mirrors cmdSweepBootstrap's HTTP handling.
-func bootstrapMatrixSession(ctx context.Context, client *api.Client, clip, playerID, group string, e *sweep.Experiment) ([]string, error) {
+// buildMatrixBootstrapCfg builds an arm's config-on-connect payload WITHOUT GETting
+// it: the combined PlayerPatch base64'd into the proxy.cfg blob, plus the resolved
+// group_id. Needs the API client (experimentPlayerPatch resolves content-manipulation
+// allowed_variants against the catalog). The fleet path carries the returned blob in
+// the RunPlan so the probe GETs it lazily, after a device is reserved (#937).
+func buildMatrixBootstrapCfg(ctx context.Context, client *api.Client, clip, group string, e *sweep.Experiment) (cfgB64, groupID string, summary []string, err error) {
 	patch, summary, err := experimentPlayerPatch(ctx, client, clip, e)
 	if err != nil {
-		return nil, err
+		return "", "", nil, err
 	}
 	cfgJSON, err := json.Marshal(patch)
 	if err != nil {
-		return nil, err
+		return "", "", nil, err
 	}
-	cfgB64 := base64.RawURLEncoding.EncodeToString(cfgJSON)
+	cfgB64 = base64.RawURLEncoding.EncodeToString(cfgJSON)
 	// The arm's own group (stamped by compare:/groups: in Expand) wins so paired
 	// arms arrive born-grouped on the dashboard; the --group CLI flag is the
 	// fallback for an ungrouped matrix the operator wants to tag by hand.
-	groupID := e.Group
+	groupID = e.Group
 	if groupID == "" {
 		groupID = group
+	}
+	return cfgB64, groupID, summary, nil
+}
+
+// bootstrapMatrixSession builds AND GETs the config-on-connect URL up front (the
+// single-device sequential path). A 3xx means the session is configured (#712
+// applies before the redirect); 4xx/5xx is a reject. Fleet runs instead defer the
+// GET to the probe via buildMatrixBootstrapCfg + the RunPlan (#937).
+func bootstrapMatrixSession(ctx context.Context, client *api.Client, clip, playerID, group string, e *sweep.Experiment) ([]string, error) {
+	cfgB64, groupID, summary, err := buildMatrixBootstrapCfg(ctx, client, clip, group, e)
+	if err != nil {
+		return nil, err
 	}
 	bootURL, err := shaperBootstrapURL(client.BaseURL, clip, playerID, groupID, cfgB64)
 	if err != nil {
