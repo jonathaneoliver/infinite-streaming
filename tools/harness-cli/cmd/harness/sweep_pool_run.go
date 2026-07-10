@@ -40,6 +40,7 @@ func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 	ingestWaitS := fs.Int("ingest-wait-s", 30, "seconds to wait for label ingest before analyze")
 	confirmReps := fs.Int("confirm-reps", 1, "confirmation reps to enqueue on a first-pass hit (n=1 guard)")
 	maxDevices := fs.Int("max-devices", 0, "cap the worker pool below the free-device count (0 = one worker per free device)")
+	maxExperiments := fs.Int("max-experiments", 0, "stop after claiming this many experiments across the pool (0 = drain the serviceable backlog); use a small value for a bounded smoke test")
 	dryRun := fs.Bool("dry-run", false, "print the free roster + serviceable set + planned worker count; claim nothing")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -120,7 +121,7 @@ func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 
 	fmt.Fprintf(os.Stderr, "streaming pool: %d worker(s) over %s\n", len(free), client.BaseURL)
 	ctx := context.Background()
-	outcomes := runStreamingPool(ctx, s, free, own, override, runner)
+	outcomes := runStreamingPool(ctx, s, free, own, override, *maxExperiments, runner)
 	fmt.Print(summarizePool(outcomes))
 	return nil
 }

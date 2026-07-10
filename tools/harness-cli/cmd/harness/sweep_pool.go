@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/sweep"
 )
@@ -119,11 +120,15 @@ func deviceMatchesRequirement(dev DeviceCapability, e *sweep.Experiment) bool {
 // (the `--serviceable` override) — a device still only claims the intersection of
 // what it can physically run and what the operator allowed tonight. Empty ⇒ each
 // device claims its full platform set.
-func runStreamingPool(ctx context.Context, claimer poolClaimer, devices []DeviceCapability, owner string, allow []string, run poolRunner) []poolOutcome {
+// maxExperiments, when >0, caps the total experiments the pool will claim across
+// all workers (a bounded run — e.g. a smoke test); 0 = unbounded (drain the
+// serviceable backlog).
+func runStreamingPool(ctx context.Context, claimer poolClaimer, devices []DeviceCapability, owner string, allow []string, maxExperiments int, run poolRunner) []poolOutcome {
 	var (
 		mu       sync.Mutex
 		outcomes []poolOutcome
 		wg       sync.WaitGroup
+		claimed  int32 // total claims dispatched, for the maxExperiments cap
 	)
 	record := func(o poolOutcome) {
 		mu.Lock()
@@ -144,6 +149,11 @@ func runStreamingPool(ctx context.Context, claimer poolClaimer, devices []Device
 			defer wg.Done()
 			for {
 				if ctx.Err() != nil {
+					return
+				}
+				// Bounded-run cap: reserve a slot atomically before claiming, so at
+				// most maxExperiments claims proceed across all workers.
+				if maxExperiments > 0 && atomic.AddInt32(&claimed, 1) > int32(maxExperiments) {
 					return
 				}
 				e, err := claimer.ClaimNext(owner, tokens...)

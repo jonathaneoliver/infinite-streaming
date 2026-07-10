@@ -161,7 +161,7 @@ func TestRunStreamingPool_PacksUntilDry(t *testing.T) {
 		releasedOnce.Do(func() { close(release) })
 	}()
 
-	outcomes := runStreamingPool(context.Background(), claimer, devices, "owner", nil, run)
+	outcomes := runStreamingPool(context.Background(), claimer, devices, "owner", nil, 0, run)
 	releasedOnce.Do(func() { close(release) }) // safety: unblock if the wave never filled
 	if len(ranBy) != 6 {
 		t.Fatalf("ran %d experiments, want 6 (leftover or double-run)", len(ranBy))
@@ -182,7 +182,7 @@ func TestRunStreamingPool_PlatformGating(t *testing.T) {
 		ran++
 		return poolOutcome{ExpID: e.ID}
 	}
-	outcomes := runStreamingPool(context.Background(), claimer, devices, "o", nil, run)
+	outcomes := runStreamingPool(context.Background(), claimer, devices, "o", nil, 0, run)
 	if ran != 0 {
 		t.Errorf("ran %d appletv items on an iphone device, want 0 (availability gate)", ran)
 	}
@@ -202,7 +202,7 @@ func TestRunStreamingPool_RequeuesOnDeviceMismatch(t *testing.T) {
 		ran++
 		return poolOutcome{ExpID: e.ID}
 	}
-	outcomes := runStreamingPool(context.Background(), claimer, devices, "o", nil, run)
+	outcomes := runStreamingPool(context.Background(), claimer, devices, "o", nil, 0, run)
 	if ran != 0 {
 		t.Errorf("ran a UDID-pinned experiment on the wrong device")
 	}
@@ -215,3 +215,29 @@ func TestRunStreamingPool_RequeuesOnDeviceMismatch(t *testing.T) {
 }
 
 func idOf(i int) string { return "exp-" + string(rune('a'+i)) }
+
+func TestRunStreamingPool_MaxExperimentsCap(t *testing.T) {
+	// 10 items, 3 devices, cap 2 → exactly 2 run (bounded smoke test).
+	backlog := make([]*sweep.Experiment, 10)
+	for i := range backlog {
+		backlog[i] = &sweep.Experiment{ID: "cap-" + string(rune('a'+i)), Platform: "iphone-sim"}
+	}
+	claimer := &fakeClaimer{backlog: backlog}
+	devices := []DeviceCapability{
+		{UDID: "D1", Platform: "ios", Name: "Fleet iPhone 15 #1"},
+		{UDID: "D2", Platform: "ios", Name: "Fleet iPhone 15 #2"},
+		{UDID: "D3", Platform: "ios", Name: "Fleet iPhone 15 #3"},
+	}
+	var ran int32
+	run := func(ctx context.Context, e *sweep.Experiment, dev DeviceCapability) poolOutcome {
+		atomic.AddInt32(&ran, 1)
+		return poolOutcome{ExpID: e.ID}
+	}
+	outcomes := runStreamingPool(context.Background(), claimer, devices, "o", nil, 2, run)
+	if ran != 2 {
+		t.Errorf("ran %d experiments, want exactly 2 (the cap)", ran)
+	}
+	if len(outcomes) != 2 {
+		t.Errorf("got %d outcomes, want 2", len(outcomes))
+	}
+}
