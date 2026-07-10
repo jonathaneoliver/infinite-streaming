@@ -42,12 +42,17 @@ func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 	confirmReps := fs.Int("confirm-reps", 1, "confirmation reps to enqueue on a first-pass hit (n=1 guard)")
 	maxDevices := fs.Int("max-devices", 0, "cap the worker pool below the free-device count (0 = one worker per free device)")
 	maxExperiments := fs.Int("max-experiments", 0, "stop after claiming this many experiments across the pool (0 = drain the serviceable backlog); use a small value for a bounded smoke test")
+	repBatch := fs.Int("rep-batch", 0, "run each claimed experiment as an N-rep batch in ONE warm appium session (#946), instead of a single cold probe; 0/1 = single play")
+	startMode := fs.String("start-mode", "cold", "rep-batch start mode: cold (relaunch the app per rep) | warm (resume-in-place, no relaunch — warm buffers/ABR)")
 	dryRun := fs.Bool("dry-run", false, "print the free roster + serviceable set + planned worker count; claim nothing")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if !*concurrent {
 		return errors.New("harness sweep run currently implements only --concurrent (the streaming pool, #950); pass --concurrent")
+	}
+	if *startMode != "cold" && *startMode != "warm" {
+		return fmt.Errorf("--start-mode %q invalid (cold|warm)", *startMode)
 	}
 
 	free := FreeDevices(availableDevices(deviceFarmBaseURL()))
@@ -118,7 +123,7 @@ func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 	}
 
 	runner := makeSweepPoolRunner(client, s, *charDir, strings.TrimSpace(*content),
-		*durationS, *ingestWaitS, *confirmReps, override)
+		*durationS, *ingestWaitS, *confirmReps, override, *repBatch, *startMode)
 
 	fmt.Fprintf(os.Stderr, "streaming pool: %d worker(s) over %s\n", len(free), client.BaseURL)
 	ctx := context.Background()
@@ -132,7 +137,7 @@ func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 // makeSweepPoolRunner builds the poolRunner that runs ONE experiment on its
 // assigned device: boot the sim if needed, bootstrap the config-on-connect
 // session, drive the probe pinned to the device, wait for ingest, analyze.
-func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDefault string, durationS, ingestWaitS, confirmReps int, override []string) poolRunner {
+func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDefault string, durationS, ingestWaitS, confirmReps int, override []string, repBatch int, startMode string) poolRunner {
 	return func(ctx context.Context, e *sweep.Experiment, dev DeviceCapability) (out poolOutcome) {
 		expStart := time.Now()
 		out = poolOutcome{ExpID: e.ID, Device: dev.UDID, StartedAt: expStart.UTC().Format(time.RFC3339)}
@@ -171,15 +176,37 @@ func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDef
 		// RUNNER's platform for the assigned device (e.g. every iOS sim is
 		// discovered as ipad-sim) — NOT the experiment's sweep token (iphone), or
 		// the probe finds no matching device and skips.
-		playID, bringupMs, probeMs, perr := runSweepProbeCapture(ctx, client.BaseURL, charDir, e, runnerPlatformForDevice(dev), pid, dev.UDID, clip, durationS)
-		out.BringupMs, out.ProbeMs = bringupMs, probeMs
-		if perr != nil || playID == "" {
-			if perr == nil {
-				perr = errors.New("probe produced no play_id (crash/inconclusive)")
+		probePlatform := runnerPlatformForDevice(dev)
+		var playID string
+		if repBatch > 1 {
+			// Warm rep-loop (#946): run N reps of this config in ONE warm appium
+			// session on this device. start_mode=warm resumes each play in place
+			// (no relaunch — warm buffers); cold relaunches per rep. Produces N
+			// play_ids; the first drives the verdict, the rest are recorded on the
+			// outcome for confirmation + the per-rep timing shows the warm saving.
+			reps, bringupMs, probeMs, rerr := runRepBatchCapture(ctx, client.BaseURL, charDir, e, probePlatform, pid, dev.UDID, clip, durationS, repBatch, startMode)
+			out.BringupMs, out.ProbeMs, out.RepBringupsMs, out.StartMode = bringupMs, probeMs, repBringups(reps), startMode
+			if rerr != nil || len(reps) == 0 {
+				if rerr == nil {
+					rerr = errors.New("rep-batch produced no play_id")
+				}
+				out.Err = fmt.Errorf("rep-batch: %w", rerr)
+				_ = s.Move(sweep.StatusRunning, sweep.StatusBacklog, e)
+				return out
 			}
-			out.Err = fmt.Errorf("probe: %w", perr)
-			_ = s.Move(sweep.StatusRunning, sweep.StatusBacklog, e) // requeue
-			return out
+			playID = reps[0].PlayID
+		} else {
+			pid2, bringupMs, probeMs, perr := runSweepProbeCapture(ctx, client.BaseURL, charDir, e, probePlatform, pid, dev.UDID, clip, durationS)
+			out.BringupMs, out.ProbeMs = bringupMs, probeMs
+			if perr != nil || pid2 == "" {
+				if perr == nil {
+					perr = errors.New("probe produced no play_id (crash/inconclusive)")
+				}
+				out.Err = fmt.Errorf("probe: %w", perr)
+				_ = s.Move(sweep.StatusRunning, sweep.StatusBacklog, e) // requeue
+				return out
+			}
+			playID = pid2
 		}
 
 		// Let the forwarder ingest the play's labels before the oracle reads them;
@@ -258,6 +285,76 @@ func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Ex
 		return m[1], bringupMs, probeMs, nil // a play_id means the probe streamed, even if `go test` later non-zeroed
 	}
 	return "", bringupMs, probeMs, runErr
+}
+
+// repResult is one iteration of a warm rep-batch: its play_id + bring-up ms.
+type repResult struct {
+	PlayID    string
+	BringupMs int64
+	Mode      string // cold | warm (rep 0 is always cold)
+}
+
+var repBatchRe = regexp.MustCompile(`REPBATCH rep=(\d+) mode=(\w+) bringup_ms=(\d+) play_id=([0-9a-fA-F-]{36})`)
+
+// runRepBatchCapture invokes TestSweepRepBatch (the warm rep-loop, #946): N reps
+// of one config in a single warm session on udid, with start_mode cold|warm.
+// Parses the REPBATCH lines into per-rep results. Returns the reps, the first
+// rep's bring-up (for the outcome's headline BringupMs), the subprocess wall-
+// time, and any error.
+func runRepBatchCapture(ctx context.Context, base, charDir string, e *sweep.Experiment, probePlatform, playerID, udid, clip string, durationS, reps int, startMode string) ([]repResult, int64, int64, error) {
+	if durationS <= 0 {
+		durationS = 60
+	}
+	a := charmatrix.ArmFromExperiment(e)
+	start := time.Now()
+	timeout := time.Duration((durationS+240)*reps) * time.Second
+	cmd := exec.CommandContext(ctx, "go", "test", "./modes", "-run", "TestSweepRepBatch", "-count=1",
+		"-timeout", fmt.Sprintf("%ds", int(timeout.Seconds())), "-v")
+	cmd.Dir = charDir
+	var buf bytes.Buffer
+	pw := &prefixWriter{w: os.Stderr, prefix: []byte("[" + shortUDID(udid) + "] ")}
+	cmd.Stdout = io.MultiWriter(pw, &buf)
+	cmd.Stderr = io.MultiWriter(pw, &buf)
+	cmd.Env = append(os.Environ(),
+		"LAUNCH_MODE=appium",
+		"HARNESS_BASE_URL="+base,
+		"CHAR_PLAYER_ID="+playerID,
+		"CHARACTERIZATION_DEVICE_UDID="+udid,
+		"CHAR_SWEEP_PLATFORM="+probePlatform,
+		"CHAR_SWEEP_SERVER_URL="+base,
+		"CHAR_SWEEP_DURATION_S="+strconv.Itoa(durationS),
+		"CHAR_REP_COUNT="+strconv.Itoa(reps),
+		"CHAR_START_MODE="+startMode,
+		"CHAR_SWEEP_SEGMENT="+a.Segment,
+		"CHAR_SWEEP_PROTOCOL="+a.Protocol,
+		"CHAR_SWEEP_CODEC="+a.Codec,
+		"CHAR_SWEEP_MUTED="+a.MutedS(),
+		"CHAR_CONTENT="+clip,
+	)
+	runErr := cmd.Run()
+	probeMs := time.Since(start).Milliseconds()
+	var results []repResult
+	for _, m := range repBatchRe.FindAllStringSubmatch(buf.String(), -1) {
+		bm, _ := strconv.ParseInt(m[3], 10, 64)
+		results = append(results, repResult{PlayID: m[4], BringupMs: bm, Mode: m[2]})
+	}
+	var firstBringup int64
+	if len(results) > 0 {
+		firstBringup = results[0].BringupMs
+	}
+	if len(results) == 0 && runErr == nil {
+		runErr = errors.New("rep-batch produced no REPBATCH play_id lines")
+	}
+	return results, firstBringup, probeMs, runErr
+}
+
+// repBringups projects the per-rep bring-up ms for the outcome.
+func repBringups(reps []repResult) []int64 {
+	out := make([]int64, 0, len(reps))
+	for _, r := range reps {
+		out = append(out, r.BringupMs)
+	}
+	return out
 }
 
 // bootSimBestEffort boots a simulator and waits for it, so the probe's Discover

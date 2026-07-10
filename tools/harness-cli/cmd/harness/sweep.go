@@ -85,10 +85,14 @@ Subcommands:
                            the char-matrix fleet path. --dry-run prints the
                            RunPlan. Singletons stay on the single-device probe.
   run --concurrent [--serviceable toks] [--max-devices N] [--dry-run]
+       [--rep-batch N --start-mode cold|warm]
                            STREAMING POOL (#950): pack independent experiments
                            across every free farm device — one worker per device,
                            barrierless, each claims serviceable work until its
-                           platform's backlog is dry. Reps ride this. --dry-run
+                           platform's backlog is dry. --rep-batch N runs each
+                           claimed experiment as an N-rep warm rep-loop in ONE
+                           session (#946): --start-mode warm resumes each play in
+                           place (~1s bring-up) vs cold relaunches (~9s). --dry-run
                            prints the roster + serviceable set + worker count.
   isolate <id> --flip axis=value [--flip …]
                            materialise an OFAT isolation fan off a confirmed

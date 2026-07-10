@@ -297,3 +297,26 @@ func indexOf(hay, needle string) int {
 	}
 	return -1
 }
+
+func TestRepBatchRegexParse(t *testing.T) {
+	out := `
+    rep_batch_test.go:79: REPBATCH session_setup_ms=16605 start_mode=warm reps=3
+    rep_batch_test.go:102: REPBATCH rep=0 mode=cold bringup_ms=412 play_id=54571cac-654b-46aa-8746-527aa0c52524
+    rep_batch_test.go:102: REPBATCH rep=1 mode=warm bringup_ms=1222 play_id=349f38c6-90c6-4b8f-8216-d61246ebe729
+    rep_batch_test.go:102: REPBATCH rep=2 mode=warm bringup_ms=1238 play_id=60c88824-9f5e-4409-a554-89bbfc30875c
+`
+	ms := repBatchRe.FindAllStringSubmatch(out, -1)
+	if len(ms) != 3 {
+		t.Fatalf("parsed %d reps, want 3", len(ms))
+	}
+	// rep 0 cold, reps 1-2 warm; play_ids captured; bringups in the right order.
+	if ms[0][2] != "cold" || ms[1][2] != "warm" || ms[2][2] != "warm" {
+		t.Errorf("modes: %s %s %s", ms[0][2], ms[1][2], ms[2][2])
+	}
+	if ms[0][4] != "54571cac-654b-46aa-8746-527aa0c52524" {
+		t.Errorf("rep0 play_id = %s", ms[0][4])
+	}
+	if ms[1][3] != "1222" {
+		t.Errorf("rep1 bringup_ms = %s, want 1222", ms[1][3])
+	}
+}
