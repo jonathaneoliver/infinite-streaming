@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -197,6 +198,32 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 	// a zero-value ArmConfig (empty PlayerID), so its fleet index skips — exactly
 	// like the old "no CHAR_ARM_i_PLAYER_ID emitted" behavior.
 	planArms := make([]charplan.ArmConfig, len(arms))
+
+	// Bootstrap-phase crash-reap (#938): driveFleet's handler only covers the play
+	// window. An interrupt DURING this bootstrap loop — before any device is reserved
+	// — would otherwise orphan the config-on-connect sessions already created here,
+	// exhausting the proxy pool for the next run. Track the bootstrapped player_ids
+	// and release them if we're signalled before driveFleet takes over.
+	var bootMu sync.Mutex
+	var bootstrapped []string
+	bootSig := make(chan os.Signal, 1)
+	signal.Notify(bootSig, os.Interrupt, syscall.SIGTERM)
+	bootStop := make(chan struct{})
+	go func() {
+		select {
+		case <-bootSig:
+			bootMu.Lock()
+			ids := append([]string(nil), bootstrapped...)
+			bootMu.Unlock()
+			fmt.Fprintf(os.Stderr, "\ninterrupted during bootstrap — releasing %d config-on-connect session(s)\n", len(ids))
+			for _, pid := range ids {
+				reapProxySession(client, pid)
+			}
+			os.Exit(130)
+		case <-bootStop:
+		}
+	}()
+
 	window := 0
 	for i, a := range arms {
 		res := charmatrix.ArmResult{Arm: a, IntendedOff: intendedOf(a)}
@@ -239,7 +266,14 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 		// CHAR_ARM_<i>_{SEGMENT,CODEC,MUTED,…} surface is gone.
 		armEnv = append(armEnv, fmt.Sprintf("CHAR_ARM_%d_PLATFORM=%s", i, a.Platform))
 		planArms[i] = a.ToArmConfig(playerID, clip, rl, i == patternMaster)
+		bootMu.Lock()
+		bootstrapped = append(bootstrapped, playerID)
+		bootMu.Unlock()
 	}
+	// Bootstrap done — hand signal handling to driveFleet (which forwards to the test
+	// binary and reaps post-exit). Stop our handler so the two don't both fire.
+	signal.Stop(bootSig)
+	close(bootStop)
 	if window <= 0 {
 		window = 60
 	}
@@ -370,10 +404,52 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 	// Without this, devices leak "busy" across runs until create-session hangs
 	// to its 180s timeout (#853). Scoped to THIS run's devices via the manifest.
 	reapDeviceFarm(deviceFarmBaseURL(), manifestUDIDs(manifest))
+	// Crash-reap the config-on-connect proxy sessions this run bootstrapped (#938).
+	// The graceful path frees them inside the test binary's t.Cleanup (sess.Release),
+	// but a SIGKILL'd or panicked binary never runs that — the sessions then linger
+	// and exhaust the proxy's config-on-connect pool, 503-ing the next run. Since the
+	// CLI (not the killed child) makes this call, it survives a hard kill of the test
+	// process; it's idempotent, so double-releasing a graceful run's sessions is fine.
+	reapProxySessions(client, planArms)
 	if werr != nil {
 		return fmt.Errorf("go test TestCharMatrixFleet (dir=%s): %w", charDir, werr)
 	}
 	return nil
+}
+
+// reapProxySessions best-effort DELETEs the go-proxy config-on-connect sessions a
+// fleet run bootstrapped, addressed by player_id from the plan. Empty player_ids
+// (skipped/bootstrap-failed arms) are ignored; an already-released session's delete
+// just errors and is swallowed — the whole thing is best-effort cleanup (#938).
+func reapProxySessions(client *api.Client, planArms []charplan.ArmConfig) {
+	for _, pid := range planPlayerIDs(planArms) {
+		reapProxySession(client, pid)
+	}
+}
+
+// planPlayerIDs returns the non-empty player_ids in a plan — the sessions actually
+// bootstrapped. Skipped/bootstrap-failed arms carry a zero-value ArmConfig (empty
+// PlayerID) and are dropped, so the reap only targets sessions that really exist.
+func planPlayerIDs(planArms []charplan.ArmConfig) []string {
+	var ids []string
+	for _, a := range planArms {
+		if pid := strings.TrimSpace(a.PlayerID); pid != "" {
+			ids = append(ids, pid)
+		}
+	}
+	return ids
+}
+
+// reapProxySession releases one config-on-connect session by player_id (no-op on
+// empty). Best-effort with a short timeout so a slow/dead proxy can't wedge teardown.
+func reapProxySession(client *api.Client, playerID string) {
+	pid := strings.TrimSpace(playerID)
+	if pid == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	_ = client.DeletePlayer(ctx, pid, "crash-reap")
 }
 
 // deviceFarmBaseURL is the appium server hosting the device-farm plugin.
