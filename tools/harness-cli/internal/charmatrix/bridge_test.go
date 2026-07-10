@@ -153,6 +153,21 @@ func TestBridgeDeviceRequirementRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBridgeStartModeRoundTrip: start_mode (#946) survives Arm→Experiment→Arm.
+func TestBridgeStartModeRoundTrip(t *testing.T) {
+	e := (&Arm{Platform: "ipad-sim", StartMode: "warm"}).ToExperiment()
+	if e.StartMode != "warm" {
+		t.Fatalf("StartMode lost to Experiment: %q", e.StartMode)
+	}
+	if got := ArmFromExperiment(e); got.StartMode != "warm" {
+		t.Fatalf("StartMode lost from Experiment: %q", got.StartMode)
+	}
+	// Empty stays empty (⇒ cold default), never serialized to a literal.
+	if (&Arm{Platform: "ipad-sim"}).ToExperiment().StartMode != "" {
+		t.Errorf("unset StartMode should stay empty")
+	}
+}
+
 // TestBridgeMarshalDeterministic: the same spec marshals byte-identically twice
 // (golden tests depend on this — yaml.v3 sorts map keys).
 func TestBridgeMarshalDeterministic(t *testing.T) {

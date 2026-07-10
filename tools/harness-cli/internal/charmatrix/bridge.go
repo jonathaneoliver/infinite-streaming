@@ -64,6 +64,7 @@ func ArmFromExperiment(e *sweep.Experiment) *Arm {
 		Real:                cloneBool(e.RequireReal),
 		DeviceUDID:          e.DeviceUDID,
 		DeviceAlias:         e.DeviceAlias,
+		StartMode:           e.StartMode,
 		Content:             e.Content,
 		Mode:                e.Mode,
 		Class:               string(e.Class),

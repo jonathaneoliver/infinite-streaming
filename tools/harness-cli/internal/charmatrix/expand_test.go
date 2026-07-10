@@ -709,3 +709,49 @@ func TestReplicateReps_DeepCloneNoAliasing(t *testing.T) {
 		t.Errorf("mutating instance 0 leaked into instance 1: %v", *reps[1].ProxyLiveOffset)
 	}
 }
+
+func TestExpand_StartModeAxis(t *testing.T) {
+	// start_mode: [cold, warm] × is.segment: [s2, s6] = 4 arms; cold-vs-warm is a
+	// first-class comparison you can drop into a matrix (#946).
+	spec := &Spec{
+		Name:     "sm",
+		Compare:  "start_mode",
+		Parallel: true,
+		Axes: map[string][]any{
+			"start_mode": {"cold", "warm"},
+			"is.segment": {"s2", "s6"},
+		},
+	}
+	arms, err := Expand(spec)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if len(arms) != 4 {
+		t.Fatalf("got %d arms, want 4", len(arms))
+	}
+	modes := map[string]int{}
+	for _, a := range arms {
+		if a.StartMode != "cold" && a.StartMode != "warm" {
+			t.Errorf("arm %s has invalid start_mode %q", a.ID, a.StartMode)
+		}
+		modes[a.StartMode]++
+	}
+	if modes["cold"] != 2 || modes["warm"] != 2 {
+		t.Errorf("want 2 cold + 2 warm, got %v", modes)
+	}
+	// compare: start_mode → each segment pairs cold(control)+warm(variant).
+	roles := map[string]int{}
+	for _, a := range arms {
+		roles[a.Role]++
+	}
+	if roles["control"] != 2 || roles["variant"] != 2 {
+		t.Errorf("compare should make 2 control + 2 variant, got %v", roles)
+	}
+}
+
+func TestExpand_StartModeInvalidRejected(t *testing.T) {
+	spec := &Spec{Name: "bad", Arms: []*Arm{{Platform: "ipad-sim", StartMode: "lukewarm"}}}
+	if _, err := Expand(spec); err == nil {
+		t.Fatal("expected an error for start_mode=lukewarm")
+	}
+}

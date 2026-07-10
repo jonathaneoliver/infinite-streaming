@@ -40,6 +40,7 @@ var axisKeys = map[string]bool{
 	"platform":                  true,
 	"content":                   true,
 	"server":                    true,
+	"start_mode":                true,
 	"mode":                      true,
 	"class":                     true,
 	"duration_s":                true,
@@ -271,6 +272,7 @@ func (a *Arm) ToExperiment() *sweep.Experiment {
 		RequireReal:         a.Real,
 		DeviceUDID:          a.DeviceUDID,
 		DeviceAlias:         a.DeviceAlias,
+		StartMode:           a.StartMode,
 		LaunchMode:          sweep.LaunchModeAppium,
 		Protocol:            a.Protocol,
 		Content:             a.Content,
@@ -450,6 +452,9 @@ func validateArm(a *Arm) error {
 	}
 	if a.Role != "" && a.Role != string(sweep.ArmControl) && a.Role != string(sweep.ArmVariant) {
 		return fmt.Errorf("role %q invalid (control|variant)", a.Role)
+	}
+	if a.StartMode != "" && a.StartMode != string(sweep.StartModeCold) && a.StartMode != string(sweep.StartModeWarm) {
+		return fmt.Errorf("start_mode %q invalid (cold|warm)", a.StartMode)
 	}
 	switch a.VariantOrder {
 	case "", "default", "ascending", "descending":
