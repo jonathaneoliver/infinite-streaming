@@ -150,7 +150,7 @@ env HARNESS_BASE_URL=https://dev.jeoliver.com:21000 \
   harness char matrix tests/characterization/matrix/server-split.yaml
 ```
 
-Cross-server arms are handled end to end: the probe reads `play_id` (harness `--base`) and `measureArm` queries events (`api.Client.WithBaseURL`) from **the arm's own** server, so each arm's pass/fail is honest — no false "FAIL". (One cosmetic gap: the per-arm RESULT viewer link is still built from `HARNESS_BASE_URL`, so a cross-server arm's dashboard link points at the wrong host; the play_id + data are correct.)
+Cross-server arms are handled end to end: the probe reads `play_id` (harness `--base`), `measureArm` queries events (`api.Client.WithBaseURL`), and the RESULT viewer link is built (`cfg.ServerURL`) — all against **the arm's own** server, so each arm's pass/fail is honest (no false "FAIL") and its dashboard link points at the right host.
 
 **Spot-check a cross-server run** on each server's archive — a correct run is a clean diagonal (each player_id's traffic + play only on its own server, zero crossover):
 

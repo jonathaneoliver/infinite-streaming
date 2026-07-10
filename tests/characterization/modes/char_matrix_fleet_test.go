@@ -309,7 +309,12 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 			t.Logf("arm %d: could not read play_id: %v", dev.FleetIndex, perr)
 		}
 	}
-	base := strings.TrimRight(envOr("HARNESS_BASE_URL", "https://dev.jeoliver.com:21000"), "/")
+	// Point the viewer link at the arm's OWN server (#942) — a cross-server arm's
+	// session/play lives there, not on the default base; fall back to HARNESS_BASE_URL.
+	base := strings.TrimRight(cfg.ServerURL, "/")
+	if base == "" {
+		base = strings.TrimRight(envOr("HARNESS_BASE_URL", "https://dev.jeoliver.com:21000"), "/")
+	}
 	viewer := fmt.Sprintf("%s/dashboard/session-viewer.html?player_id=%s", base, cfg.PlayerID)
 	if playID != "" {
 		viewer += "&play_id=" + playID
