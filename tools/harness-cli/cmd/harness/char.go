@@ -315,6 +315,9 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 // simultaneously. Streams the test output through so the operator sees live
 // progress + per-arm viewer links.
 func driveFleet(client *api.Client, platform string, n, windowS int, charDir string, armEnv []string, planArms []charplan.ArmConfig) error {
+	if n < 1 {
+		n = 1
+	}
 	// Fleet bring-up (N parallel WDA builds + the shared home barrier) is slower
 	// than a single launch, so budget more headroom than the sequential probe.
 	timeout := time.Duration(windowS+600) * time.Second
@@ -376,7 +379,16 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 		}
 	}
 
+	// Pin -test.parallel to the fleet size. runFleet fans out one t.Parallel()
+	// subtest per arm, and they all block at the shared home/sweep barriers
+	// (fleetStartBarrier.arriveAndWait). Go caps concurrently-running parallel
+	// subtests at -test.parallel (default GOMAXPROCS); if that cap is below n, the
+	// surplus arms never start, so the barrier's target is never reached and the
+	// started arms block on the barrier channel until the play-window deadline
+	// (~12 min) — a silent stall, not a fast failure. n is small (maxArmsPerGroup
+	// caps it at 4), so there's no risk in letting every arm run at once.
 	cmd := exec.Command(bin, "-test.run=TestCharMatrixFleet", "-test.count=1",
+		fmt.Sprintf("-test.parallel=%d", n),
 		fmt.Sprintf("-test.timeout=%ds", int(timeout.Seconds())), "-test.v=true")
 	cmd.Dir = charDir
 	cmd.Stdout = os.Stderr
