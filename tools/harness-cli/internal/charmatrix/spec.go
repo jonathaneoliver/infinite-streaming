@@ -72,6 +72,7 @@ type Arm struct {
 	// --- run-level (un-namespaced: not a client/server knob) ---
 	Platform  string `json:"platform,omitempty"`   // ipad-sim | iphone | appletv | androidtv | web
 	Content   string `json:"content,omitempty"`    // catalogue name to resume
+	Server    string `json:"server,omitempty"`     // per-arm streaming server URL (#942); empty = the run's default (HARNESS_BASE_URL). As a compare axis, runs arms against different backends.
 	Mode      string `json:"mode,omitempty"`       // steps | pyramid | … (recorded on the experiment)
 	Class     string `json:"class,omitempty"`      // config | fault (overrides the spec default)
 	DurationS int    `json:"duration_s,omitempty"` // play window (overrides the spec default)

@@ -102,3 +102,33 @@ func TestProbeLaunchArgs_EmitsMutedFalse(t *testing.T) {
 	}
 	t.Fatal("muted=false must be emitted")
 }
+
+// TestProbeLaunchArgs_ServerURL: the per-launch server override (#942) is emitted
+// as -is.server_url right after the pinned launch-state flags when set, and
+// omitted entirely when empty (so non-fleet callers keep the app's saved server).
+func TestProbeLaunchArgs_ServerURL(t *testing.T) {
+	got := ProbeLaunchArgs(ProbeConfig{PlayerID: "pid", ServerURL: "https://dev.jeoliver.com:21000"})
+	// find the flag/value pair
+	var val string
+	found := false
+	for i := 0; i+1 < len(got); i++ {
+		if got[i] == "-is.server_url" {
+			val, found = got[i+1], true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("-is.server_url not emitted when ServerURL set: %q", got)
+	}
+	if val != "https://dev.jeoliver.com:21000" {
+		t.Errorf("-is.server_url = %q, want the configured URL", val)
+	}
+
+	// Empty ServerURL must not emit the flag.
+	none := ProbeLaunchArgs(ProbeConfig{PlayerID: "pid"})
+	for _, a := range none {
+		if a == "-is.server_url" {
+			t.Fatalf("-is.server_url emitted with empty ServerURL: %q", none)
+		}
+	}
+}

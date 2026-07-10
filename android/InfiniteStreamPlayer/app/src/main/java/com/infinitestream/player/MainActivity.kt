@@ -37,6 +37,14 @@ object LaunchConfig {
     @Volatile
     var playerId: String? = null
 
+    // #942 per-launch server override: a dashboard URL captured from the launch
+    // intent (`--es is.server_url https://host:21000`) so the harness can pin the
+    // streaming server per launch — letting concurrent sessions target different
+    // backends and stopping a launch from inheriting a stale saved server. Mirrors
+    // iOS reading `-is.server_url` from NSArgumentDomain. null = no override.
+    @Volatile
+    var serverUrl: String? = null
+
     // #714 Approach B: raw proxy.* query fragment appended to the bootstrap
     // URL (e.g. "proxy.shape.rate_mbps=2.5"), captured from the launch intent.
     @Volatile
@@ -109,6 +117,15 @@ class MainActivity : ComponentActivity() {
             if (runCatching { java.util.UUID.fromString(raw) }.isSuccess) {
                 LaunchConfig.playerId = raw
                 tag("launch-arg player_id=$raw")
+            }
+        }
+        // #942 per-launch server override — `--es is.server_url https://host:21000`.
+        // Captured before the VM is created so loadServers→override runs at init and
+        // the app streams against this backend regardless of its saved server.
+        intent?.getStringExtra("is.server_url")?.let { raw ->
+            if (raw.isNotBlank()) {
+                LaunchConfig.serverUrl = raw.trim()
+                tag("launch-arg server_url=${LaunchConfig.serverUrl}")
             }
         }
         // #714 Approach B: capture a raw proxy.* query fragment to append to

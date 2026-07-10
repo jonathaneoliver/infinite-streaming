@@ -273,6 +273,14 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 		ac := a.ToArmConfig(playerID, clip, rl, i == patternMaster)
 		ac.BootstrapCfgB64 = cfgB64 // probe GETs this after reserving a device (#937)
 		ac.GroupID = groupID
+		// Per-arm server (#942): explicit `server:` wins; else default to the run's
+		// base URL so EVERY arm pins a server via -is.server_url (no sim inherits a
+		// stale saved server). Threads to both the app launch arg and the deferred
+		// config-on-connect bootstrap, so a per-arm server bootstraps+streams as one.
+		ac.ServerURL = strings.TrimSpace(a.Server)
+		if ac.ServerURL == "" {
+			ac.ServerURL = client.BaseURL
+		}
 		planArms[i] = ac
 		bootMu.Lock()
 		bootstrapped = append(bootstrapped, playerID)
@@ -430,8 +438,17 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 // (skipped/bootstrap-failed arms) are ignored; an already-released session's delete
 // just errors and is swallowed — the whole thing is best-effort cleanup (#938).
 func reapProxySessions(client *api.Client, planArms []charplan.ArmConfig) {
-	for _, pid := range planPlayerIDs(planArms) {
-		reapProxySession(client, pid)
+	for _, a := range planArms {
+		if strings.TrimSpace(a.PlayerID) == "" {
+			continue
+		}
+		// #942: release each arm's session on the server it was bootstrapped on —
+		// a cross-server session lives on a different proxy than the default base.
+		c := client
+		if ac, err := client.WithBaseURL(strings.TrimSpace(a.ServerURL)); err == nil {
+			c = ac
+		}
+		reapProxySession(c, a.PlayerID)
 	}
 }
 
@@ -712,6 +729,12 @@ func measureArm(client *api.Client, a *charmatrix.Arm, playerID string, res *cha
 	if err != nil {
 		res.Err = appendErr(res.Err, "player_id: "+err.Error())
 		return
+	}
+	// #942: read events from the arm's OWN server. A cross-server arm's play lives
+	// in that server's archive, not the default base's — querying the default would
+	// find nothing and wrongly report the arm as empty. Empty a.Server ⇒ default.
+	if ac, cerr := client.WithBaseURL(strings.TrimSpace(a.Server)); cerr == nil {
+		client = ac
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

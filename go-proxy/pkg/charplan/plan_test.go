@@ -54,7 +54,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		FleetCount: 2,
 		DurationS:  300,
 		Arms: []ArmConfig{
-			{PlayerID: "p0", Platform: "ipad-sim", Segment: "s2", Muted: &tr, PatternMaster: true, BootstrapCfgB64: "eyJ4IjoxfQ", GroupID: "grp-A"},
+			{PlayerID: "p0", Platform: "ipad-sim", Segment: "s2", Muted: &tr, PatternMaster: true, BootstrapCfgB64: "eyJ4IjoxfQ", GroupID: "grp-A", ServerURL: "https://dev.jeoliver.com:21000"},
 			{PlayerID: "p1", Platform: "iphone", Segment: "s6", PeakBitrateMbps: 8},
 		},
 	}
@@ -79,6 +79,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	// silently skips its GET and the session is never configured.
 	if got.Arms[0].BootstrapCfgB64 != "eyJ4IjoxfQ" || got.Arms[0].GroupID != "grp-A" {
 		t.Errorf("bootstrap_cfg_b64/group_id lost in round-trip: %q / %q", got.Arms[0].BootstrapCfgB64, got.Arms[0].GroupID)
+	}
+	if got.Arms[0].ServerURL != "https://dev.jeoliver.com:21000" {
+		t.Errorf("server_url lost in round-trip: %q", got.Arms[0].ServerURL)
 	}
 	if got.Arms[1].BootstrapCfgB64 != "" {
 		t.Errorf("empty BootstrapCfgB64 should omit/round-trip empty, got %q", got.Arms[1].BootstrapCfgB64)

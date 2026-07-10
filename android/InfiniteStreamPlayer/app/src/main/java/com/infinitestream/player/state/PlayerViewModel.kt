@@ -222,6 +222,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         tag("vm:init begin")
         val tA = android.os.SystemClock.uptimeMillis()
         loadServers()
+        applyServerUrlOverride() // #942 — is.server_url launch arg pins the server for this launch
         val tB = android.os.SystemClock.uptimeMillis()
         loadAdvancedFlags()
         val tC = android.os.SystemClock.uptimeMillis()
@@ -329,6 +330,24 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // peak-bitrate cap / 4K setting actually takes effect (#797).
         applyTrackSelectionParameters()
         applyMuteState()
+    }
+
+    /**
+     * #942 per-launch server override. When `--es is.server_url <dashboard-url>`
+     * was passed at launch (LaunchConfig.serverUrl), pin that server as active for
+     * this launch — overriding the saved active server so concurrent sessions can
+     * target different backends and no launch inherits a stale saved server. Mirrors
+     * iOS's `-is.server_url`. addServerFromUrl upserts by host:port and activates,
+     * so re-launching the same URL just re-selects the existing entry.
+     */
+    private fun applyServerUrlOverride() {
+        val url = com.infinitestream.player.LaunchConfig.serverUrl?.trim()
+        if (url.isNullOrEmpty()) return
+        if (addServerFromUrl(url) >= 0) {
+            tag("is.server_url override → active server $url")
+        } else {
+            tag("is.server_url override $url is not a valid URL — ignoring")
+        }
     }
 
     /** Returns the index of the (possibly newly-added) server, or -1. */

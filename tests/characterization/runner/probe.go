@@ -18,6 +18,7 @@ import (
 // whenever one of these moves.
 type ProbeConfig struct {
 	PlayerID           string // -is.player_id — the bootstrapped session id (required)
+	ServerURL          string // -is.server_url — per-launch server override (#942); "" = omit (app uses saved server)
 	Content            string // -is.lastPlayed — pin the resumed clip (optional)
 	Segment            string // -is.segment — s2|s6|ll master variant (optional; empty = app default s6)
 	LiveOffsetS        string // -is.flag.live_offset_s — app-side live-offset override; "" → "0" (always pinned)
@@ -46,6 +47,7 @@ type ProbeConfig struct {
 func ProbeConfigFromArm(a charplan.ArmConfig) ProbeConfig {
 	return ProbeConfig{
 		PlayerID:           a.PlayerID,
+		ServerURL:          a.ServerURL,
 		Content:            a.Content,
 		Segment:            a.Segment,
 		LiveOffsetS:        a.LiveOffsetS,
@@ -92,6 +94,12 @@ func ProbeLaunchArgs(c ProbeConfig) []string {
 		"-is.flag.play_id_rotation_s", "0",
 		"-is.flag.skip_home", "false",
 		"-is.flag.dev_mode", "true",
+	}
+	// Per-launch server override (#942): pin the arm's server so each concurrent
+	// launch can target a different backend and no arm inherits a sim's stale
+	// saved server. Empty leaves the app on its saved server (non-fleet callers).
+	if c.ServerURL != "" {
+		args = append(args, "-is.server_url", c.ServerURL)
 	}
 	// CHAR_CONTENT pins the clip the app resumes (ResumePlayback's
 	// continue-watching hero resolves to it), overriding the device's lastPlayed.
