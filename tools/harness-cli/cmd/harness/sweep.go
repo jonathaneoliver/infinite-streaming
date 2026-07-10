@@ -236,6 +236,7 @@ func cmdSweepAdd(client *api.Client, args []string, asJSON bool) error {
 	segment := fs.String("segment", "", "master variant the probe requests: s2 | s6 | ll (empty = app default s6)")
 	durationS := fs.Int("duration-s", 0, "per-run window in seconds (0 = runner/probe default)")
 	reps := fs.Int("reps", 1, "confirmation reps requested")
+	startMode := fs.String("start-mode", "", "cold|warm (#946): with reps>1, the pool runs it as a warm rep-loop — warm resumes each play in place, cold relaunches. Empty = cold")
 	why := fs.String("why", "", "rationale recorded on the row (why this test)")
 	id := fs.String("id", "", "explicit experiment id (default: auto manual-… with a unique stamp)")
 	// shape (config-class network motion)
@@ -256,6 +257,9 @@ func cmdSweepAdd(client *api.Client, args []string, asJSON bool) error {
 	if c != sweep.ClassConfig && c != sweep.ClassFault {
 		return fmt.Errorf("invalid --class %q: config|fault", *class)
 	}
+	if *startMode != "" && *startMode != string(sweep.StartModeCold) && *startMode != string(sweep.StartModeWarm) {
+		return fmt.Errorf("invalid --start-mode %q: cold|warm", *startMode)
+	}
 	clip := sweep.ContentOrDefault(*content)
 
 	e := &sweep.Experiment{
@@ -270,6 +274,7 @@ func cmdSweepAdd(client *api.Client, args []string, asJSON bool) error {
 		DurationS:  *durationS,
 		Kind:       sweep.KindManual,
 		Reps:       *reps,
+		StartMode:  *startMode,
 		Depth:      0,
 		Why:        "manual_add",
 		WhyText:    *why,
