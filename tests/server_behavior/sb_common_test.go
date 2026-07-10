@@ -149,6 +149,85 @@ func patchSession(c *http.Client, apiBase, sessionID string, set map[string]any)
 	return nil
 }
 
+// controlRevisionV2 fetches the player's current control_revision — the value
+// the v2 PATCH requires echoed back as a strong If-Match ETag.
+func controlRevisionV2(c *http.Client, apiBase, playerID string) (string, error) {
+	u := fmt.Sprintf("https://%s/api/v2/players/%s", apiBase, url.PathEscape(playerID))
+	body, _, err := httpGet(c, u)
+	if err != nil {
+		return "", err
+	}
+	var rec struct {
+		ControlRevision string `json:"control_revision"`
+	}
+	if err := json.Unmarshal(body, &rec); err != nil {
+		return "", err
+	}
+	return rec.ControlRevision, nil
+}
+
+// patchPlayerV2 applies a v2 JSON Merge Patch to a player, handling the required
+// If-Match handshake (GET the current revision, echo it). This is the v2
+// replacement for patchSession/setShapeFull for FAULT config (#924).
+func patchPlayerV2(c *http.Client, apiBase, playerID string, patch map[string]any) error {
+	rev, err := controlRevisionV2(c, apiBase, playerID)
+	if err != nil {
+		return fmt.Errorf("patchPlayerV2 revision: %w", err)
+	}
+	body, _ := json.Marshal(patch)
+	u := fmt.Sprintf("https://%s/api/v2/players/%s", apiBase, url.PathEscape(playerID))
+	req, err := http.NewRequest(http.MethodPatch, u, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/merge-patch+json")
+	req.Header.Set("If-Match", `"`+rev+`"`)
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("patchPlayerV2 %s: %d: %s", u, resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
+// faultRuleV2 builds a v2 fault rule for one request-kind surface in count mode
+// (mode=requests), mirroring the v1 faultSet cadence. kind "all" gets no filter
+// (matches every request); the others scope to their request_kind. Note the v2
+// engine scopes "segment" to VIDEO segments (audio is audio_segment) — the
+// #917 fix — so tests that pull the video ladder see identical fire counts.
+func faultRuleV2(kind, faultType string, freq, consec int) map[string]any {
+	rule := map[string]any{
+		"id":          "sb-" + kind,
+		"type":        faultType,
+		"frequency":   freq,
+		"consecutive": consec,
+		"mode":        "requests",
+	}
+	if kind != "all" {
+		rule["filter"] = map[string]any{"request_kind": []string{kind}}
+	}
+	return rule
+}
+
+// setFaultsV2 replaces the player's fault_rules with the given rules.
+func setFaultsV2(p *probe, rules ...map[string]any) error {
+	arr := make([]any, len(rules))
+	for i, r := range rules {
+		arr[i] = r
+	}
+	return patchPlayerV2(p.c, p.apiBase, p.playerID, map[string]any{"fault_rules": arr})
+}
+
+// clearFaultsV2 removes all fault rules from the player.
+func clearFaultsV2(p *probe) error {
+	return patchPlayerV2(p.c, p.apiBase, p.playerID, map[string]any{"fault_rules": []any{}})
+}
+
 // getSessionMap returns the raw /api/sessions record for playerID so a
 // test can read computed fields (RTT, pattern step, fault counters).
 func getSessionMap(c *http.Client, apiBase, playerID string) (map[string]any, error) {

@@ -15,14 +15,16 @@ import (
 // store's sessionsMu single-mutex contract).
 type fakeAdapter struct {
 	defaultRateMbps int
+	shaping         ShapingCapabilities
 	mu              sync.Mutex
 	sessions        []map[string]any
 
 	// Test-side observation hooks for kernel-apply calls. Real adapter
 	// drives v1's nftables / tc helpers; the fake just records.
-	shapeApplyCalls     []string
-	transportFaultCalls []fakeTransportFaultCall
-	patternApplyCalls   []fakePatternCall
+	shapeApplyCalls       []string
+	shapingModeApplyCalls []string
+	transportFaultCalls   []fakeTransportFaultCall
+	patternApplyCalls     []fakePatternCall
 
 	// SubscribeSessions delivers snapshots whenever sessionsChanged
 	// fires; pretests can call it directly to drive the diff.
@@ -176,6 +178,13 @@ func (a *fakeAdapter) ApplyShapeToPlayer(playerID string) error {
 	return nil
 }
 
+func (a *fakeAdapter) ApplyShapingModeToPlayer(playerID string) error {
+	a.mu.Lock()
+	a.shapingModeApplyCalls = append(a.shapingModeApplyCalls, playerID)
+	a.mu.Unlock()
+	return nil
+}
+
 func (a *fakeAdapter) ApplyTransportFaultToPlayer(playerID, faultType string, consecutive int, consecutiveUnits string, frequency int) error {
 	a.mu.Lock()
 	a.transportFaultCalls = append(a.transportFaultCalls, fakeTransportFaultCall{
@@ -202,6 +211,13 @@ type fakeTransportFaultCall struct {
 // baseline can set a.defaultRateMbps via a helper.
 func (a *fakeAdapter) DefaultRateMbps() int {
 	return a.defaultRateMbps
+}
+
+// ShapingCapabilities test stub — returns the zero value (all controls
+// unavailable, mode "") unless a test sets a.shaping to exercise a specific
+// mode. Issue #910.
+func (a *fakeAdapter) ShapingCapabilities() ShapingCapabilities {
+	return a.shaping
 }
 
 // ApplyPatternToPlayer test stub — records the call for assertions.

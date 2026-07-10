@@ -104,6 +104,10 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
     container_name: infinite-streaming-clickhouse
+    # Self-healing schema: re-apply the idempotent 01-schema.sql on EVERY boot so
+    # a container coming up on an older existing volume upgrades in place (init.d
+    # only runs on first-ever boot). See analytics/clickhouse/self-heal.sh.
+    entrypoint: ["/bin/sh", "/self-heal.sh"]
     ulimits:
       nofile:
         soft: 262144
@@ -116,6 +120,7 @@ services:
       # entrypoint chowns it to clickhouse:101 on first start. See #377.
       - ${CONTENT_DIR:-./sample-content}/clickhouse:/var/lib/clickhouse
       - ./analytics/clickhouse/init.d:/docker-entrypoint-initdb.d:ro
+      - ./analytics/clickhouse/self-heal.sh:/self-heal.sh:ro
     environment:
       - CLICKHOUSE_DB=infinite_streaming
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1

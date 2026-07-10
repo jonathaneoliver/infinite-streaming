@@ -184,6 +184,24 @@ func (a *v2Adapter) DefaultRateMbps() int {
 	return a.app.defaultRateMbps
 }
 
+// ShapingCapabilities maps the package-main boot-time probe result across the
+// v1/v2 boundary. Issue #910.
+func (a *v2Adapter) ShapingCapabilities() server.ShapingCapabilities {
+	if a == nil || a.app == nil {
+		return server.ShapingCapabilities{Mode: "http-only", Reason: "proxy not initialised"}
+	}
+	c := a.app.shaping
+	return server.ShapingCapabilities{
+		Rate:           c.rate,
+		Delay:          c.delay,
+		Loss:           c.loss,
+		TransportFault: c.transportFault,
+		Mode:           c.mode,
+		Forced:         c.forced,
+		Reason:         c.reason,
+	}
+}
+
 // networkEntryToMap converts a typed v1 ring-buffer entry into the
 // loosely-typed map shape v2's translator consumes. Mirrors the keys
 // in NetworkLogEntry.
@@ -200,6 +218,8 @@ func networkEntryToMap(e NetworkLogEntry) map[string]any {
 		"bytes_out":    e.BytesOut,
 		"content_type": e.ContentType,
 		"play_id":      e.PlayID,
+		"player_id":    e.PlayerID, // #911
+
 		// Phase timings — surfaced when httptrace populated them.
 		"dns_ms":         e.DNSMs,
 		"connect_ms":     e.ConnectMs,
@@ -208,6 +228,14 @@ func networkEntryToMap(e NetworkLogEntry) map[string]any {
 		"transfer_ms":    e.TransferMs,
 		"total_ms":       e.TotalMs,
 		"client_wait_ms": e.ClientWaitMs,
+		// Kernel-measured shaped delivery rate (Mbps). Honest
+		// cross-check for the bytes_out/transfer_ms Mbps, which
+		// over-reports on sub-buffer transfers. Linux only; 0/omitted
+		// on the dev build.
+		"delivery_rate_mbps": e.DeliveryRateMbps,
+		// Kernel app-limited flag for the rate above: true = the sample
+		// was starved (app didn't fill the pipe) and is unreliable.
+		"delivery_rate_app_limited": e.DeliveryRateAppLimited,
 		// Fault metadata — flagged on rows where the proxy injected one.
 		"faulted":        e.Faulted,
 		"fault_type":     e.FaultType,
@@ -587,6 +615,32 @@ func (a *v2Adapter) ApplyShapeToPlayer(playerID string) error {
 			return nil
 		}
 		a.app.applySessionShaping(s, port)
+		return nil
+	}
+	return nil
+}
+
+// ApplyShapingModeToPlayer reconciles the #910 per-session degraded gate on
+// the player's bound port after a v2 PATCH changed `shaping_forced_mode`.
+// Delegates to applyForcedShapingModeForPort, the same reconcile the v1
+// /api/nftables/shaping-mode endpoint runs.
+func (a *v2Adapter) ApplyShapingModeToPlayer(playerID string) error {
+	if a == nil || a.app == nil {
+		return nil
+	}
+	for _, s := range a.app.sessionsView() { // #740 read-only: matches player, reads port
+		if !matchesPlayerID(getString(s, "player_id"), playerID) {
+			continue
+		}
+		portStr := getString(s, "x_forwarded_port")
+		if portStr == "" {
+			return nil
+		}
+		port, perr := strconv.Atoi(portStr)
+		if perr != nil {
+			return nil
+		}
+		a.app.applyForcedShapingModeForPort(port)
 		return nil
 	}
 	return nil

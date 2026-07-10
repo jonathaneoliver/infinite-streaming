@@ -1210,7 +1210,11 @@ func (h *Handler) OnDemandDashManifest(w http.ResponseWriter, r *http.Request) {
 
 	variant, duration, llMode, mpdPathForLoad := parseDashVariant(pathPart)
 	if variant == "ll" {
-		if strings.Contains(pathPart, "manifest_2s.mpd") {
+		if strings.Contains(pathPart, "manifest_1s.mpd") {
+			variant = "1s"
+			duration = 1
+			llMode = false
+		} else if strings.Contains(pathPart, "manifest_2s.mpd") {
 			variant = "2s"
 			duration = 2
 			llMode = false
@@ -1301,6 +1305,11 @@ func parseDashVariant(pathPart string) (string, int, bool, string) {
 	lookupBase := base
 
 	switch base {
+	case "manifest_1s.mpd":
+		variant = "1s"
+		duration = 1
+		llMode = false
+		lookupBase = "manifest.mpd"
 	case "manifest_2s.mpd":
 		variant = "2s"
 		duration = 2
@@ -1314,7 +1323,7 @@ func parseDashVariant(pathPart string) (string, int, bool, string) {
 	case "manifest.mpd":
 		variant = "ll"
 	default:
-		if len(parts) >= 2 && (parts[0] == "2s" || parts[0] == "6s") {
+		if len(parts) >= 2 && (parts[0] == "1s" || parts[0] == "2s" || parts[0] == "6s") {
 			variant = parts[0]
 			llMode = false
 			if parsed, err := strconv.Atoi(strings.TrimSuffix(parts[0], "s")); err == nil {
@@ -1344,6 +1353,7 @@ func runDashGeneratorAll(ctx context.Context, genKey string, mpdData *dash.MPDDa
 
 	variants := []dashVariantSpec{
 		{name: "ll", duration: 6, llMode: true},
+		{name: "1s", duration: 1, llMode: false},
 		{name: "2s", duration: 2, llMode: false},
 		{name: "6s", duration: 6, llMode: false},
 	}
@@ -1453,9 +1463,9 @@ func runDashGeneratorAll(ctx context.Context, genKey string, mpdData *dash.MPDDa
 			}
 			dashCacheMu.Unlock()
 
-			logf("[GO-LIVE:DASH] Tick generation: total=%.3fs avg_5m=%.3fs content=%s ll=%.3fs 2s=%.3fs 6s=%.3fs\n",
+			logf("[GO-LIVE:DASH] Tick generation: total=%.3fs avg_5m=%.3fs content=%s ll=%.3fs 1s=%.3fs 2s=%.3fs 6s=%.3fs\n",
 				tickElapsed.Seconds(), avg, content,
-				durByVariant["ll"].Seconds(), durByVariant["2s"].Seconds(), durByVariant["6s"].Seconds())
+				durByVariant["ll"].Seconds(), durByVariant["1s"].Seconds(), durByVariant["2s"].Seconds(), durByVariant["6s"].Seconds())
 		}
 		select {
 		case <-ctx.Done():

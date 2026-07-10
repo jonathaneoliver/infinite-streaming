@@ -137,14 +137,8 @@ func snapshotV1FieldsForPaths(sess map[string]any, paths []string) map[string]an
 				record(k)
 			}
 		case p == "fault_rules", strings.HasPrefix(p, "fault_rules."):
-			for _, surface := range faultSurfaces {
-				for _, suffix := range []string{
-					"_failure_type", "_failure_frequency", "_consecutive_failures",
-					"_failure_mode", "_failure_units", "_consecutive_units", "_frequency_units",
-				} {
-					record(surface + suffix)
-				}
-			}
+			// Faults live solely on _v2_fault_rules since #925 (the native
+			// engine reads it directly); no v1 surface fields to snapshot.
 			record("_v2_fault_rules")
 		}
 	}
@@ -341,6 +335,9 @@ func (s *Server) PatchApiV2PlaysPlayId(w http.ResponseWriter, r *http.Request, p
 		applyPatternFromSession(s, post, playerID)
 	} else if shapeFieldsTouched(paths) {
 		_ = s.v1.ApplyShapeToPlayer(playerID)
+	}
+	if shapingModeTouched(paths) {
+		_ = s.v1.ApplyShapingModeToPlayer(playerID)
 	}
 	if transportFaultTouched(paths) {
 		applyTransportFaultFromSession(s, post, playerID)

@@ -545,6 +545,24 @@ func (e ReplayGapEventType) Valid() bool {
 	}
 }
 
+// Defines values for ShapeMode.
+const (
+	HttpOnly ShapeMode = "http_only"
+	Kernel   ShapeMode = "kernel"
+)
+
+// Valid indicates whether the value is a known member of the ShapeMode enum.
+func (e ShapeMode) Valid() bool {
+	switch e {
+	case HttpOnly:
+		return true
+	case Kernel:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for TransportFaultMode.
 const (
 	TransportFaultModeFailuresPerPackets TransportFaultMode = "failures_per_packets"
@@ -971,6 +989,12 @@ type NetworkLogEntry struct {
 	// ConnectMs Upstream TCP connect time.
 	ConnectMs   *float32 `json:"connect_ms,omitempty"`
 	ContentType *string  `json:"content_type,omitempty"`
+
+	// DeliveryRateAppLimited Kernel tcpi_delivery_rate_app_limited flag for the delivery_rate_mbps sample. true = the sender was starved (app-limited), so the rate reflects the app not the link and reads noisily (starved low or burst high); trust delivery_rate_mbps only when false (network-limited). Only meaningful when delivery_rate_mbps is non-zero. Linux only.
+	DeliveryRateAppLimited *bool `json:"delivery_rate_app_limited,omitempty"`
+
+	// DeliveryRateMbps Kernel-measured shaped delivery rate (tcpi_delivery_rate, Mbps) sampled at end of transfer. Honest cross-check for bytes_out/transfer_ms, which over-reports on sub-buffer transfers (#850). Connection-level; 0/absent when not sampled (non-Linux build).
+	DeliveryRateMbps *float32 `json:"delivery_rate_mbps,omitempty"`
 
 	// DnsMs Upstream DNS resolution time.
 	DnsMs         *float32            `json:"dns_ms,omitempty"`
@@ -2036,7 +2060,10 @@ type Shape struct {
 	// LossCorrelationPct Burst correlation for `loss_pct` → netem `loss <pct>% <corr>%`. 0 ⇒ independent-uniform loss (legacy). Higher = burstier.
 	LossCorrelationPct *float32 `json:"loss_correlation_pct,omitempty"`
 	LossPct            *float32 `json:"loss_pct,omitempty"`
-	Pattern            *Pattern `json:"pattern,omitempty"`
+
+	// Mode Per-session degraded shaping mode (#910). `http_only` forces this ONE session onto the HTTP-only path: kernel rate / delay / loss / netem AND transport faults are gated OFF, while HTTP faults still fire. `kernel` (default) = inherit the host's shaping capability (full kernel shaping when the box has NET_ADMIN + tc + nftables). A session can only be MORE degraded than the host, never less — on a NET_ADMIN-less host every session is effectively `http_only` regardless of this field. Maps to v1 `shaping_forced_mode` (`http_only`↔`"http-only"`, `kernel`↔`""`). The server-wide boot override is `SHAPING_FORCE_DEGRADED` (env), independent of this per-session control. *Broadcasts to group on PATCH.*
+	Mode    *ShapeMode `json:"mode,omitempty"`
+	Pattern *Pattern   `json:"pattern,omitempty"`
 
 	// PatternRateRuntimeMbps Effective rate the kernel is enforcing right now from the active step. Distinct from `rate_mbps` (the static fallback when pattern is off).
 	PatternRateRuntimeMbps *float32 `json:"pattern_rate_runtime_mbps,omitempty"`
@@ -2056,6 +2083,9 @@ type Shape struct {
 	// are mutually exclusive at the kernel rule level.
 	TransportFault *TransportFault `json:"transport_fault,omitempty"`
 }
+
+// ShapeMode Per-session degraded shaping mode (#910). `http_only` forces this ONE session onto the HTTP-only path: kernel rate / delay / loss / netem AND transport faults are gated OFF, while HTTP faults still fire. `kernel` (default) = inherit the host's shaping capability (full kernel shaping when the box has NET_ADMIN + tc + nftables). A session can only be MORE degraded than the host, never less — on a NET_ADMIN-less host every session is effectively `http_only` regardless of this field. Maps to v1 `shaping_forced_mode` (`http_only`↔`"http-only"`, `kernel`↔`""`). The server-wide boot override is `SHAPING_FORCE_DEGRADED` (env), independent of this per-session control. *Broadcasts to group on PATCH.*
+type ShapeMode string
 
 // StreamEvent Discriminated union. `type` selects the variant. Heartbeat frames
 // carry no data and exist only to keep idle proxies / load balancers

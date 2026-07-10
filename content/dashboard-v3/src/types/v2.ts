@@ -1854,6 +1854,12 @@ export interface components {
             jitter_correlation_pct?: number;
             pattern?: components["schemas"]["Pattern"];
             transport_fault?: components["schemas"]["TransportFault"];
+            /**
+             * @description Per-session degraded shaping mode (#910). `http_only` forces this ONE session onto the HTTP-only path: kernel rate / delay / loss / netem AND transport faults are gated OFF, while HTTP faults still fire. `kernel` (default) = inherit the host's shaping capability (full kernel shaping when the box has NET_ADMIN + tc + nftables). A session can only be MORE degraded than the host, never less — on a NET_ADMIN-less host every session is effectively `http_only` regardless of this field. Maps to v1 `shaping_forced_mode` (`http_only`↔`"http-only"`, `kernel`↔`""`). The server-wide boot override is `SHAPING_FORCE_DEGRADED` (env), independent of this per-session control. *Broadcasts to group on PATCH.*
+             * @default kernel
+             * @enum {string}
+             */
+            mode: "kernel" | "http_only";
             /** @description 1-based index of the currently active step in `pattern.steps`. 0 when pattern is disabled or in an inter-step idle gap. */
             readonly pattern_step?: number | null;
             /** @description Same as `pattern_step` but reset whenever the pattern definition changes (the runtime cursor, separate from any cached UI step). */
@@ -2408,6 +2414,13 @@ export interface components {
              * @description Server-perceived wait between request received and first response byte sent.
              */
             client_wait_ms?: number;
+            /**
+             * Format: float
+             * @description Kernel-measured shaped delivery rate (tcpi_delivery_rate, Mbps) sampled at end of transfer. Honest cross-check for bytes_out/transfer_ms, which over-reports on sub-buffer transfers (#850). Connection-level; 0/absent when not sampled (non-Linux build).
+             */
+            delivery_rate_mbps?: number;
+            /** @description Kernel tcpi_delivery_rate_app_limited flag for the delivery_rate_mbps sample. true = the sender was starved (app-limited), so the rate reflects the app not the link and reads noisily (starved low or burst high); trust delivery_rate_mbps only when false (network-limited). Only meaningful when delivery_rate_mbps is non-zero. Linux only. */
+            delivery_rate_app_limited?: boolean;
             faulted?: boolean;
             fault_type?: string;
             fault_action?: string;

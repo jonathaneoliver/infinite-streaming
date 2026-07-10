@@ -28,8 +28,8 @@ import { useGroups } from '@/composables/useGroups';
 import { deviceContentLabel, groupNameFor } from '@/composables/useSessionLabels';
 import type { PlayerRecord } from '@/repo/v2-repo';
 import * as repo from '@/repo/v2-repo';
-import ShapeSliders from '@/components/ShapeSliders.vue';
-import NetworkShapingPattern from '@/components/NetworkShapingPattern.vue';
+import NetworkShaping from '@/components/NetworkShaping.vue';
+import ShapingModeControl from '@/components/ShapingModeControl.vue';
 import TransferTimeouts from '@/components/TransferTimeouts.vue';
 import ContentManipulation from '@/components/ContentManipulation.vue';
 import FaultRules from '@/components/FaultRules.vue';
@@ -299,6 +299,13 @@ const sortedPlayers = computed<PlayerRecord[]>(() => {
 
             <h3 class="session-controls-heading">Session Controls</h3>
 
+            <!-- #910 per-session shaping mode. Governs MORE than the Network
+                 Shaping fold (also gates the Transport fault tab + Pattern),
+                 so it sits above them all. Hidden on a kernel-capable host in
+                 normal use — shown in developer mode or when the host can't
+                 kernel-shape. Same control as testing-session.html. -->
+            <ShapingModeControl :player-id="activePlayer.id" />
+
             <!-- Control panels — same as testing-session.html. These
                  mutate live server state so they stay outside
                  SessionDisplay (which is read-only). The Delete
@@ -317,9 +324,7 @@ const sortedPlayers = computed<PlayerRecord[]>(() => {
             </CollapsibleSection>
 
             <CollapsibleSection title="Network Shaping" :open="true" persist-key="network-shaping">
-              <ShapeSliders :player-id="activePlayer.id" />
-              <h3 class="subhead">Pattern</h3>
-              <NetworkShapingPattern :player-id="activePlayer.id" />
+              <NetworkShaping :player-id="activePlayer.id" />
             </CollapsibleSection>
 
             <h3 class="session-controls-heading">Session Display</h3>

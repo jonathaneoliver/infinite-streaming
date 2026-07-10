@@ -181,12 +181,12 @@ func TestTransportFaults(t *testing.T) {
 
 	// row records exactly what one fault produced across the three dimensions.
 	type row struct {
-		fault      string
-		fresh      string
-		data       string
-		dropDelta  float64
+		fault       string
+		fresh       string
+		data        string
+		dropDelta   float64
 		rejectDelta float64
-		active     bool
+		active      bool
 	}
 	var rows []row
 
@@ -207,12 +207,12 @@ func TestTransportFaults(t *testing.T) {
 
 		drop1, reject1, activeNow := p.transportPacketCounters()
 		return row{
-			fault:      fault,
-			fresh:      fresh,
-			data:       describeDataOutcome(obs),
-			dropDelta:  drop1 - drop0,
+			fault:       fault,
+			fresh:       fresh,
+			data:        describeDataOutcome(obs),
+			dropDelta:   drop1 - drop0,
 			rejectDelta: reject1 - reject0,
-			active:     active || activeNow,
+			active:      active || activeNow,
 		}
 	}
 
@@ -242,10 +242,10 @@ func TestTransportFaults(t *testing.T) {
 	// hang: HTTP-layer (request_connect_hang via the "all" rule). No kernel
 	// rule — expect a data-level stall with ZERO kernel packets.
 	t.Run("hang", func(t *testing.T) {
-		if err := patchSession(p.c, p.apiBase, p.sess.SessionID, faultSet("all", "hung", 1, 1)); err != nil {
+		if err := setFaultsV2(p, faultRuleV2("all", "request_connect_hang", 1, 1)); err != nil {
 			t.Fatalf("arm hang: %v", err)
 		}
-		defer patchSession(p.c, p.apiBase, p.sess.SessionID, faultClear("all"))
+		defer clearFaultsV2(p)
 		time.Sleep(settleKernel)
 
 		drop0, reject0, _ := p.transportPacketCounters()

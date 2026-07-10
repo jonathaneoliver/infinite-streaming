@@ -256,10 +256,15 @@ export function usePlayer(playerId: Ref<string>) {
   /* ─── Fault rules (per-rule sub-resource) ──────────────────────── */
 
   const mutateFaultRule = useMutation({
+    // Shared key so rapid checkbox toggles can be counted with isMutating()
+    // and we only refetch once the LAST one settles (see onSettled).
+    mutationKey: ['faultRule'],
     mutationFn: (rule: FaultRule) =>
       repo.upsertFaultRule(playerId.value, rule, readEtag(qc, playerId.value)),
     onMutate: async (rule) => {
       await qc.cancelQueries({ queryKey: playerKey(playerId.value) });
+      // Read the LIVE cache so concurrent in-flight toggles compose their
+      // optimistic edits instead of clobbering each other.
       const prev = qc.getQueryData<PlayerCacheValue>(playerKey(playerId.value));
       if (prev) {
         const rules = [...(prev.player.fault_rules ?? [])];
@@ -273,16 +278,20 @@ export function usePlayer(playerId: Ref<string>) {
       }
       return { prev };
     },
-    onError: (err: any, _vars, ctx) => {
+    onError: (_err: any, _vars, ctx) => {
+      // Roll back only on error; onSettled handles the (guarded) refetch.
       if (ctx?.prev) qc.setQueryData(playerKey(playerId.value), ctx.prev);
-      if (err?.status !== 404) {
+    },
+    onSettled: () => {
+      // Refetch the authoritative player (recomputed fault_rules + new
+      // control_revision) — but ONLY when this is the last in-flight fault-rule
+      // mutation. Refetching after every toggle lets an earlier refetch return a
+      // snapshot that predates a later toggle's write and stomp its optimistic
+      // update — the "toggle a scope box, it snaps back" race. Inside onSettled
+      // the current mutation still counts, so `<= 1` means "I'm the last one."
+      if (qc.isMutating({ mutationKey: ['faultRule'] }) <= 1) {
         qc.invalidateQueries({ queryKey: playerKey(playerId.value) });
       }
-    },
-    onSuccess: () => {
-      // The PATCH response is just the rule; refetch the player so we
-      // get the recomputed full fault_rules array + new control_revision.
-      qc.invalidateQueries({ queryKey: playerKey(playerId.value) });
     },
   });
 
@@ -322,8 +331,13 @@ export function usePlayer(playerId: Ref<string>) {
     error: query.error,
     sseState: sse.state,
 
-    // Shape (rate / delay / loss / pattern / transport_fault)
+    // Shape (rate / delay / loss / pattern / transport_fault / mode)
     setShape: (partial: Partial<Shape>) => patchShape.mutate(partial),
+    // Awaitable variant — resolves on success, rejects with the HTTP error
+    // (err.status) on failure. Used where the caller needs to surface a
+    // per-error message (e.g. the #910 shaping-mode control's 404 "start
+    // playback first"). Optimistic update + rollback still apply.
+    setShapeAsync: (partial: Partial<Shape>) => patchShape.mutateAsync(partial),
     // setRate disarms any active throughput pattern — the rate slider and
     // the pattern are mutually exclusive sources-of-truth for the kernel
     // cap. Delay and loss are orthogonal axes that can coexist with a

@@ -551,7 +551,7 @@ compare the server's implied rate. Asserts (a) client full-segment rate ≈ cap
 while #850 is open; `REPORTED_RATE_STRICT=1` enforces ratio ≤ 3 at every size
 — the acceptance switch once `delivery_rate_mbps` ships.
 
-**Calibration data (2026-07-05, test-dev, HTTPS; cap 20 Mbps, 3 reps/size): PASS.**
+**Calibration data — pre-#850-fix (2026-07-05, test-dev, HTTPS; cap 20 Mbps, 3 reps/size): PASS.**
 
 | transfer size | client med Mbps | reported med Mbps | reported/client | verdict |
 |---|---|---|---|---|
@@ -562,12 +562,79 @@ while #850 is open; `REPORTED_RATE_STRICT=1` enforces ratio ≤ 3 at every size
 | 4 MB | 19.24 | 28.68 | 1.49× | recorded |
 | full segment (4.5 MB) | 19.17 | 30.09 | 1.57× | PASS |
 
-**Findings:** the #850 over-read is fully reproduced and quantified — up to
-~4900× at init-segment sizes, collapsing through a knee between 256 KB and
-1 MB (the kernel send-buffer size), settling to ~1.5× for multi-MB transfers
-(the residual = the buffered tail excluded from `transfer_ms`). Anything
-below ~1 MB in the network log's rate column is not a throughput measurement;
-use `mbps_transfer_rate` / (future) `delivery_rate_mbps`.
+**Calibration data — with `delivery_rate_mbps` deployed (2026-07-05, same setup): PASS.**
+
+| transfer size | cap | client (http_get) | reported (bytes/transfer_ms) | reported/client | delivery_rate | delivery/client |
+|---|---|---|---|---|---|---|
+| 1 KB | 20 | 0.08 | 264.26 | 3310.67× | 80.26 | 1005.49× |
+| 64 KB | 20 | 21.16 | 2774.01 | 131.10× | 58.80 | 2.78× |
+| 256 KB | 20 | 20.20 | 104.56 | 5.18× | **20.10** | **0.99×** |
+| 1 MB | 20 | 19.63 | 57.33 | 2.92× | **19.55** | **1.00×** |
+| 4 MB | 20 | 19.37 | 29.39 | 1.52× | **19.13** | **0.99×** |
+| full segment (4.4 MB) | 20 | 19.21 | 29.08 | 1.51× | **19.13** | **1.00×** |
+
+**Findings:**
+- The legacy over-read is fully reproduced and quantified — up to ~4900× at
+  init-segment sizes, collapsing through a knee between 256 KB and 1 MB (the
+  kernel send-buffer size), settling to ~1.5× for multi-MB transfers (the
+  residual = the buffered tail excluded from `transfer_ms`). Anything below
+  ~1 MB in the network log's *implied* rate column is not a throughput
+  measurement.
+- `delivery_rate_mbps` (kernel `tcpi_delivery_rate`, shipped for #850) reads
+  **0.99–1.00× the client-measured truth for every transfer ≥ 256 KB** —
+  honest at sizes where the implied figure is 3–255× off. The test now
+  ASSERTS delivery/client ∈ [0.5, 1.5] for ≥ 256 KB sizes.
+- Below ~64 KB the kernel hasn't delivered enough of *this* transfer for an
+  estimate, so `delivery_rate_mbps` reflects the connection's recent history
+  (it's socket-level) — still 4–5× closer than the implied figure, but treat
+  sub-64 KB per-request rates as unmeasurable server-side.
+- **This 256 KB floor holds only under CONTINUOUS pulling (the probe's
+  back-to-back Range GETs).** Real player traffic arrives with idle gaps, so
+  segments up to ~1 MB are fully absorbed into the socket send buffer: the
+  proxy's write returns before the wire drains and `delivery_rate_mbps` is
+  stale connection residue (accurate in steady state, wrong right after a
+  rate change).
+
+### `delivery_rate_app_limited` — the kernel's own reliability flag (2026-07-07)
+
+The size heuristic above (≥ 1 MB / ≥ 5 ms) was a *proxy* for "did the kernel
+meter this at full tilt." The kernel answers that directly via
+`tcpi_delivery_rate_app_limited`, now captured alongside the rate (raw
+`getsockopt(TCP_INFO)`, byte 7 bit 0 — `golang.org/x/sys/unix.TCPInfo` drops
+that bitfield as struct padding). When set, the sender ran out of data to
+push, so the rate is **noisy in both directions** — starved LOW *or* caught
+mid HTB token-bucket burst and reading HIGH (so the metric is NOT a lower
+bound on the cap; it can over-read).
+
+**Calibration vs the shaping cap (valley pattern to ~0.5 Mbps, live iOS,
+play_id c661c293, 542 metered segments) — `delivery/cap`, 1.00× = perfect:**
+
+| gate | dots | median | p90 | within 0.5–2× |
+|---|---|---|---|---|
+| all segments | 542 | 0.86× | **17.25×** | 40% |
+| `app_limited=1` only (the noise) | 180 | **12.14×** | 26× | 3% |
+| `!app_limited`, any size | 362 | 0.58× | 1.01× | 59% |
+| `!app_limited` & ≥ 128 KB | 165 | 0.82× | 1.11× | 87% |
+| **`!app_limited` & ≥ 256 KB (shipped)** | **121** | 0.84× | 1.03× | **93%** |
+| `!app_limited` & ≥ 512 KB | 88 | 0.84× | 0.96× | 94% |
+| `!app_limited` & ≥ 1 MB | 48 | 0.92× | 1.20× | 97% |
+
+Excluding `app_limited` collapses p90 from **17.25× → 1.01×** — the flag is
+the garbage detector. A modest **256 KB burst backstop** then catches the
+residual false-highs (a small network-limited segment delivered entirely
+inside the HTB burst), landing at 93%-in-band while yielding **4.5× more dots
+than the old 1 MB / 5 ms gate** (121 vs 27). **The dashboard bandwidth chart
+plots delivery dots when `!app_limited && bytes_out ≥ 256 KB`** — see
+`extractDeliveryMarkers` in `BandwidthChart.vue`. The median sitting at 0.84×
+(not 1.0×) is honest: `delivery_rate` reads at-or-below the cap, never above
+what actually drained. The per-request calibration table further up (fixed
+cap, continuous pull) and this live-traffic gate answer different questions;
+don't reconcile them to one number.
+- Plumbed + surfaced end-to-end: proxy network log → forwarder → ClickHouse
+  `network_requests.{delivery_rate_mbps,delivery_rate_app_limited}` →
+  `/api/v2/network_requests` + session-bundle network stream → dashboard
+  network-log Mbps column (with the implied figure as fallback + both in the
+  row tooltip) and the bandwidth chart's "Delivery rate (kernel)" dots.
 
 ---
 
