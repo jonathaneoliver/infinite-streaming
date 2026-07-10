@@ -135,9 +135,16 @@ harness char matrix tests/characterization/matrix/live-offset.yaml
 The spec format (`matrix/live-offset.yaml` is a worked example):
 
 - **`axes:`** → cartesian product (an odometer over sorted axis names, so arm ids
-  are reproducible). Known axes: `platform`, `protocol`, `content`, `segment`,
-  `mode`, `class`, `lever`, `live_offset`, `peak_bitrate_mbps`, `duration_s`,
+  are reproducible). Known axes: `platform`, `content`, `server`, `segment`,
+  `protocol`, `mode`, `class`, `live_offset`, `peak_bitrate_mbps`, `duration_s`,
   `reps`. An unknown axis fails fast.
+- **`server:`** (#942) → per-arm backend URL. Threads to the client as the
+  `-is.server_url` launch override AND to the config-on-connect bootstrap, so an
+  arm bootstraps + streams on its own server. As a compare axis it runs concurrent
+  arms against **different** backends (`matrix/server-split.yaml` is a worked
+  two-server example). Omit ⟹ every arm uses `HARNESS_BASE_URL` — no sim inherits a
+  stale saved server. See `tools/harness-cli/README.md#multi-server-char-matrix-942`
+  for the cross-server verification recipe (check each arm on its own archive).
 - **`defaults:`** → a base arm every expanded/explicit arm is layered over.
 - **`arms:`** → explicit-arm escape hatch (appended after the cartesian product),
   each layered over `defaults`. Nested `shape:` / `fault:` /

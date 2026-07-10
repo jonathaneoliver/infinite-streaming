@@ -43,6 +43,7 @@ Enqueue is single-experiment + queue-driven; a `char matrix` YAML is the right t
 | **duration** | `90` s | Parse "Nmin"→N×60, "Ns"→N. |
 | **reps** | `3` | n=1 rule (principles §2). "smoke"/"quick"→1. |
 | **segment** | `is.segment: s6` | s2 / ll only if stated. |
+| **server** | the run's `HARNESS_BASE_URL` | Per-arm `server: <dashboard-url>` (#942) pins which backend that arm streams against — via `-is.server_url` on the client + the config-on-connect bootstrap. Aliases: `"test-dev"`→`https://dev.jeoliver.com:21000` (`.env INFINITE_STREAM_ANNOUNCE_URL`); `"degraded"`/`":28000"`→`https://dev.jeoliver.com:28000` (lean http-only stack). Use as a **compare axis** (`compare: server`, `axes: {server: [url1, url2]}`) to run arms against **different** backends at once. Omit ⟹ every arm uses `HARNESS_BASE_URL` (kills sim server-drift). Caveat: cross-server arms read "FAIL" — the harness captures play_id from `HARNESS_BASE_URL` only; verify per-arm via each server's `/analytics/api/v2/plays`. |
 | **forced flags** | LocalProxy OFF, auto-recovery OFF | The fleet forces these (override via `CHAR_LOCAL_PROXY` / `CHAR_AUTO_RECOVERY`). |
 | **mode → shape** | — | `pyramid`→`proxy.shape: {pattern: pyramid, step_seconds: 12, rate_mbps: 1.5}`; `valley`→`{pattern: valley, step_seconds: 12}` (high→low→high, the inverse of pyramid — starts high so NO startup cap / initial rate is needed); `ramp_up`/`ramp_down`/`square_wave`/`transient_shock`→`{pattern: <m>, step_seconds: 12}`; "const N Mbps cap"→`{rate_mbps: N}`; "uncapped"→`{rate_mbps: 0}` (0 = no cap). |
 
@@ -55,7 +56,7 @@ Enqueue is single-experiment + queue-driven; a `char matrix` YAML is the right t
 6. **Promote on request** — specs default to `scratch/`; most are throwaway. After a run the user likes, OFFER to keep it: `git mv tests/characterization/matrix/scratch/<name>.yaml tests/characterization/matrix/ && git add` (now tracked + covered by the `matrix/*.yaml` validation glob). Never promote unasked.
 
 ## char-matrix knob reference (authoritative — `internal/charmatrix/spec.go`)
-Run-level: `name`, `class`, `platform`, `content`, `duration_s`, `reps`, `parallel`, `defaults:`, `axes:` (cartesian) | `groups:`/`compare:`/`control:` (A/B).
+Run-level: `name`, `class`, `platform`, `content`, `server` (per-arm backend URL, #942 — compare axis for multi-server), `duration_s`, `reps`, `parallel`, `defaults:`, `axes:` (cartesian) | `groups:`/`compare:`/`control:` (A/B).
 Client `is.*` (launch arg, **cold relaunch**): `is.segment` · `is.protocol` (hls|dash) · `is.codec` (h264|hevc|av1) · `is.live_offset` · `is.peak_bitrate_mbps` (0=off) · `is.starts_first_variant`.
 Server `proxy.*` (config-on-connect, **no relaunch**): `proxy.live_offset` · `proxy.shape` (object-axis: a whole shape block, optional `label:`) · `proxy.fault` · `proxy.transfer_timeouts` · `proxy.allowed_variants` (drop-top-N|keep-bottom-N) · `proxy.variant_order` · `proxy.strip_*` · `proxy.overstate_bandwidth`. `0 = unset` for numeric knobs.
 **Living examples:** `matrix/precedence.yaml`, `matrix/shape-patterns.yaml`, `matrix/pyramid-1-s2-firstvar-cap.yaml` (copy structure, NOT their stale `content:`).

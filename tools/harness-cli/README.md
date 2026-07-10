@@ -127,6 +127,38 @@ harness --insecure checkpoint list | head
 harness --insecure undo
 ```
 
+## Multi-server char-matrix (#942)
+
+A matrix arm's **`server:`** field pins which backend that arm streams against. It threads to the client as the `-is.server_url` launch-arg override (iOS `NSArgumentDomain` / Android `--es is.server_url`) **and** to the config-on-connect bootstrap, so an arm bootstraps *and* streams on the same server. Omit it and every arm uses `HARNESS_BASE_URL` — which means each arm always pins a server explicitly, so a sim never inherits a stale saved server (the drift class of "arm played but nothing landed" failures).
+
+As a **compare axis**, `server:` runs concurrent arms against *different* backends:
+
+```yaml
+# tests/characterization/matrix/server-split.yaml — two sims, two servers
+name: server-split
+parallel: true
+duration_s: 90
+defaults: { platform: ipad-sim, content: <clip> }
+groups:
+  - id: srv
+    control:  { server: https://dev.jeoliver.com:21000 }   # test-dev, full stack
+    variants: [ { server: https://dev.jeoliver.com:28000 } ] # lean/degraded stack
+```
+
+```sh
+env HARNESS_BASE_URL=https://dev.jeoliver.com:21000 \
+  harness char matrix tests/characterization/matrix/server-split.yaml
+```
+
+**Verifying a cross-server run:** the harness captures `play_id` from `HARNESS_BASE_URL` only, so an arm on a *different* server reads "FAIL" even though it played — check each arm on its **own** server's archive instead:
+
+```sh
+curl -sk "$SERVER/analytics/api/v2/network_requests?player_id=$PID&from=$FROM"  # segments fetched
+curl -sk "$SERVER/analytics/api/v2/plays?from=$FROM"                            # play landed here
+```
+
+A correct run shows a clean diagonal: each player_id's traffic + play on its own server, zero crossover.
+
 ## Checkpoints + undo
 
 Every mutation writes a JSON checkpoint to `~/.claude/state/harness/<repo>/`. `harness undo` replays the most recent. Useful when an interactive session hits a wrong target or wrong rule.
