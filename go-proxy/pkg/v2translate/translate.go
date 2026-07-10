@@ -724,7 +724,90 @@ func faultRuleFromMap(rule map[string]any) oapigen.FaultRule {
 				f.RequestKind = &rk
 			}
 		}
+		// #919: variant + url_match must round-trip too. Before the native
+		// engine these filters were rejected at PATCH time so they never
+		// reached here; now they persist, and dropping them on read makes the
+		// dashboard's scope selector snap back (optimistic update reverts to a
+		// filter-less rule).
+		if variant, ok := filter["variant"].(map[string]any); ok && len(variant) > 0 {
+			f.Variant = variantPredicateFromMap(variant)
+		}
+		if um, ok := filter["url_match"].(map[string]any); ok && len(um) > 0 {
+			if mode, ok := um["mode"].(string); ok && mode != "" {
+				patterns := stringSliceFromAny(um["patterns"])
+				if len(patterns) > 0 {
+					f.UrlMatch = &oapigen.UrlMatch{Mode: oapigen.UrlMatchMode(mode), Patterns: patterns}
+				}
+			}
+		}
 		out.Filter = &f
+	}
+	return out
+}
+
+// variantPredicateFromMap reconstructs a v2 VariantPredicate from its stored
+// map form so a variant-scoped fault rule round-trips intact on read (#919).
+func variantPredicateFromMap(v map[string]any) *oapigen.VariantPredicate {
+	vp := &oapigen.VariantPredicate{}
+	// Preserve arrays that are PRESENT even when empty: `resolutions: []`
+	// means "match no video variant" (the scope-selector OFF state) and is
+	// semantically distinct from an absent resolutions ("all in scope").
+	// Dropping the empty array collapses OFF back to ON — the dashboard
+	// scope changes silently revert. (#919)
+	if raw, ok := v["rung_indexes"].([]any); ok {
+		idxs := intSliceFromAny(raw)
+		vp.RungIndexes = &idxs
+	}
+	if raw, ok := v["rung_positions"].([]any); ok {
+		pos := stringSliceFromAny(raw)
+		rp := make([]oapigen.VariantPredicateRungPositions, 0, len(pos))
+		for _, p := range pos {
+			rp = append(rp, oapigen.VariantPredicateRungPositions(p))
+		}
+		vp.RungPositions = &rp
+	}
+	if raw, ok := v["resolutions"].([]any); ok {
+		res := stringSliceFromAny(raw)
+		vp.Resolutions = &res
+	}
+	if f, ok := numericFloatTranslate(v["bandwidth_above"]); ok {
+		n := int(f)
+		vp.BandwidthAbove = &n
+	}
+	if f, ok := numericFloatTranslate(v["bandwidth_below"]); ok {
+		n := int(f)
+		vp.BandwidthBelow = &n
+	}
+	if cp, ok := v["codec_prefix"].(string); ok && cp != "" {
+		vp.CodecPrefix = &cp
+	}
+	return vp
+}
+
+func stringSliceFromAny(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, x := range arr {
+		if s, ok := x.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func intSliceFromAny(v any) []int {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]int, 0, len(arr))
+	for _, x := range arr {
+		if f, ok := numericFloatTranslate(x); ok {
+			out = append(out, int(f))
+		}
 	}
 	return out
 }
@@ -752,12 +835,21 @@ func shapeFromSession(s map[string]any) *oapigen.Shape {
 	tfType, _ := s["transport_failure_type"].(string)
 	pattern, _ := s["_v2_shape_pattern"].(map[string]any)
 	drivenBy, _ := s["nftables_pattern_driven_by"].(string)
+	// #910 per-session degraded mode. "http-only" is a shape-bearing state on
+	// its own — a session forced degraded with no rate/delay/loss must still
+	// surface `shape.mode` so the dashboard's mode control reflects it.
+	forcedMode, _ := s["shaping_forced_mode"].(string)
+	degraded := forcedMode == "http-only"
 
 	if rate == 0 && delay == 0 && loss == 0 && jitter == 0 && lossCorr == 0 && jitterCorr == 0 &&
-		(tfType == "" || tfType == "none") && pattern == nil && drivenBy == "" {
+		(tfType == "" || tfType == "none") && pattern == nil && drivenBy == "" && !degraded {
 		return nil
 	}
 	out := &oapigen.Shape{}
+	if degraded {
+		m := oapigen.HttpOnly
+		out.Mode = &m
+	}
 	if rate > 0 {
 		r := float32(rate)
 		out.RateMbps = &r
@@ -882,6 +974,26 @@ func numericFloatTranslate(v any) (float64, bool) {
 	return 0, false
 }
 
+// truthy coerces a v1-row value to a boolean. The proxy SSE path carries
+// JSON booleans; the ClickHouse read path carries UInt8 columns as 0/1
+// numbers (and, under a UseNumber decoder, json.Number). Anything that
+// parses to a non-zero number, or a literal true/"true"/"1", is true.
+func truthy(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return x == "1" || strings.EqualFold(x, "true")
+	case json.Number:
+		f, _ := x.Float64()
+		return f != 0
+	}
+	if f, ok := numericFloatTranslate(v); ok {
+		return f != 0
+	}
+	return false
+}
+
 // NetworkEntryFromV1 projects a v1 network ring-buffer row into a v2
 // NetworkLogEntry. The v1 row is itself a map produced by the network
 // log subsystem; only HAR-shaped fields are copied through.
@@ -939,11 +1051,20 @@ func NetworkEntryFromV1(row map[string]any) oapigen.NetworkLogEntry {
 		{"tls_ms", &out.TlsMs},
 		{"transfer_ms", &out.TransferMs},
 		{"client_wait_ms", &out.ClientWaitMs},
+		{"delivery_rate_mbps", &out.DeliveryRateMbps},
 	} {
 		if v, ok := numericFloatTranslate(row[m.key]); ok {
 			f := float32(v)
 			*m.dst = &f
 		}
+	}
+	// Kernel app-limited flag for the delivery_rate_mbps sample — surfaced
+	// only when true (the sample is unreliable), mirroring faulted. Coerce
+	// robustly: the live proxy SSE sends a JSON bool, the ClickHouse read
+	// path (UInt8) sends 0/1 as a number, so accept both.
+	if truthy(row["delivery_rate_app_limited"]) {
+		t := true
+		out.DeliveryRateAppLimited = &t
 	}
 	// Fault metadata — flagged on rows where the proxy injected a fault.
 	if v, ok := row["faulted"].(bool); ok && v {

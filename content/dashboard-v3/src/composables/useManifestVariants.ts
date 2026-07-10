@@ -27,9 +27,9 @@ export function useManifestVariants(playerId: Ref<string> | string) {
   const variants = computed<ManifestVariant[]>(() => {
     const p = player.value;
     const typed = p?.current_play?.manifest?.variants;
-    if (Array.isArray(typed) && typed.length) return typed;
+    if (Array.isArray(typed) && typed.length) return dedupSortVariants(typed);
     const flat = parseManifestVariants((p as any)?.raw_session?.manifest_variants);
-    if (flat.length) return flat as ManifestVariant[];
+    if (flat.length) return dedupSortVariants(flat as ManifestVariant[]);
     return [];
   });
 
@@ -44,11 +44,41 @@ export function useManifestVariants(playerId: Ref<string> | string) {
   const variantsAll = computed<ManifestVariant[]>(() => {
     const p = player.value;
     const all = parseManifestVariants((p as any)?.raw_session?.manifest_variants_all);
-    if (all.length) return all as ManifestVariant[];
+    if (all.length) return dedupSortVariants(all as ManifestVariant[]);
     return variants.value;
   });
 
   return { variants, variantsAll };
+}
+
+/**
+ * Collapse a raw variant ladder to one entry per DISTINCT rung, sorted by
+ * descending peak bandwidth (highest rung first). Two sources can carry
+ * duplicate rungs the scope/config pickers must not repeat:
+ *   - HLS masters legitimately list a video rendition once PER audio group
+ *     (stereo + surround) — same media-playlist URI, N EXT-X-STREAM-INF lines.
+ *   - Looping DASH MPDs accumulate <Period>s over the live window, each
+ *     carrying the same Representation ladder (fixed at the source in
+ *     parseDASHManifest, deduped here too for defence in depth).
+ * Keyed on `url` (the media-playlist URI for HLS, the segment dir for DASH),
+ * falling back to `resolution@bandwidth` when a source omits it. The nearest-
+ * match helpers below are order- and duplicate-insensitive, so only the
+ * enumerated pickers (fault scope, content manipulation, shaping pattern)
+ * need this normalisation.
+ */
+function dedupSortVariants<T extends { url?: string; resolution?: string; bandwidth?: number }>(
+  list: readonly T[],
+): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const v of list) {
+    const key = v?.url ?? `${v?.resolution ?? ''}@${v?.bandwidth ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(v);
+  }
+  out.sort((a, b) => (b?.bandwidth ?? 0) - (a?.bandwidth ?? 0));
+  return out;
 }
 
 /** Minimal manifest-variant shape the snap helper needs. */

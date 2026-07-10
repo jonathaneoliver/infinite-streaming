@@ -2,7 +2,6 @@ package main
 
 import (
 	"testing"
-	"time"
 )
 
 // Covers resetFailureWindowState (#643) — re-arming an HTTP fault must
@@ -58,52 +57,7 @@ func TestResetFailureWindowState(t *testing.T) {
 	})
 }
 
-// End-to-end through the engine: a fresh window after re-arm delivers
-// the FULL consecutive count, mirroring the live curl reproduction.
-func TestReArmDeliversFullWindow(t *testing.T) {
-	session := SessionData{
-		"master_manifest_failure_type":         "404",
-		"master_manifest_failure_frequency":    0,
-		"master_manifest_consecutive_failures": 10,
-		"master_manifest_failure_units":        "requests",
-		"master_manifest_consecutive_units":    "requests",
-		"master_manifest_frequency_units":      "requests",
-		"master_manifest_failure_mode":         "requests",
-		"master_manifest_requests_count":       0,
-	}
-	now := time.Now()
-
-	fire := func(count int) string {
-		h := NewFailureHandler("master_manifest", session)
-		ft := h.HandleFailure(count, now)
-		session["master_manifest_failure_at"] = h.failureAt
-		session["master_manifest_failure_recover_at"] = h.failureRecoverAt
-		return ft
-	}
-
-	// First arm: consume 4 of the 10-request window.
-	for i := 1; i <= 4; i++ {
-		if got := fire(i); got != "404" {
-			t.Fatalf("first arm req %d: failureType = %q, want 404", i, got)
-		}
-	}
-
-	// Re-arm (same config PATCH) — must clear the cursor.
-	resetFailureWindowState(map[string]interface{}{
-		"master_manifest_failure_type":         "404",
-		"master_manifest_consecutive_failures": 10,
-	}, session)
-
-	// Second arm must deliver a FULL 10-request window. Pre-fix, requests
-	// 5..10 faulted (old recoverAt=11) and 11+ passed clean — only 6 of 10.
-	for i := 5; i <= 14; i++ {
-		if got := fire(i); got != "404" {
-			t.Fatalf("re-arm req %d: failureType = %q, want 404 (stale window resumed?)", i, got)
-		}
-	}
-	// And the window must still CLOSE: request 15 is past the fresh
-	// recover point (5 + 10), so it recovers to none.
-	if got := fire(15); got != "none" {
-		t.Fatalf("req 15: failureType = %q, want none (window must still close)", got)
-	}
-}
+// The native-engine end-to-end re-arm behaviour (#643) is covered by
+// TestNativeReArmResetsWindow (fault_parity_test.go) and
+// TestTranslateFaultRulesClearsRuleState (internal/v2/server) since the v1
+// surface engine + NewFailureHandler were removed in #925.

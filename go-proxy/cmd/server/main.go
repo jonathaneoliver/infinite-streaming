@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"math"
@@ -130,6 +131,16 @@ type NetworkLogEntry struct {
 	// events (user-reload, auto-recovery). Issue #280.
 	PlayID string `json:"play_id,omitempty"`
 
+	// PlayerID identifies the player that made this request, stamped from
+	// the request's `?player_id=` query param (raw/uppercase off iOS) so the
+	// attribution rides the request itself and does NOT depend on the session
+	// having been associated with a player_id yet. Without it, the forwarder's
+	// session→player_id map is cold for a burst of early requests on a fresh
+	// stack and those rows land with an empty player_id — invisible to the
+	// dashboard's player-filtered Network Log. The forwarder canonicalises it
+	// (lowercase) and also learns the session→player mapping from it. Issue #911.
+	PlayerID string `json:"player_id,omitempty"`
+
 	// AttemptID identifies which playback attempt within a play this
 	// request belongs to. The player initialises it to 1 on every
 	// new play and increments by 1 at every `restart` event
@@ -161,6 +172,25 @@ type NetworkLogEntry struct {
 	TTFBMs     float64 `json:"ttfb_ms"`     // Upstream time to first byte
 	TransferMs float64 `json:"transfer_ms"` // Downstream write+flush time to client (= client-perceived `receive`)
 	TotalMs    float64 `json:"total_ms"`
+
+	// DeliveryRateMbps is the kernel's own throughput estimate
+	// (tcpi_delivery_rate) sampled at end of transfer, in decimal Mbps.
+	// The derived bytes_out/transfer_ms Mbps only times the memcpy into
+	// the socket send buffer, so it over-reports 1000× when a sub-buffer
+	// segment is absorbed before tc drains the qdisc onto the wire. This
+	// field is the honest shaped-rate cross-check. Connection-level (not
+	// per-stream), so under HTTP/2 it reflects the whole socket. Linux
+	// only; unset on the macOS dev build.
+	DeliveryRateMbps float64 `json:"delivery_rate_mbps,omitempty"`
+
+	// DeliveryRateAppLimited is the kernel's tcpi_delivery_rate_app_limited
+	// flag for the sample above: true when the sender ran out of data to
+	// push, so DeliveryRateMbps reflects the app's pace rather than the
+	// link and reads noisily (starved low OR burst high). Consumers should
+	// trust the rate only when this is false (a network-limited sample).
+	// omitempty: present only when flagged, and only meaningful when
+	// DeliveryRateMbps is non-zero. Linux only.
+	DeliveryRateAppLimited bool `json:"delivery_rate_app_limited,omitempty"`
 
 	// ClientWaitMs is the time from when the proxy received the request
 	// to when it sent the first response byte back to the client. It IS
@@ -341,7 +371,13 @@ type App struct {
 	// INFINITE_STREAM_DEFAULT_RATE_MBPS. 0 = no cap (today's behaviour);
 	// non-zero = the deployment's interpretation of "no operator
 	// override." See issue #480.
-	defaultRateMbps    int
+	defaultRateMbps int
+	// shaping is the boot-time capability probe result (#910): which
+	// network-shaping controls the kernel actually backs on this host, plus
+	// the resolved mode. Read-only after startup, so no lock. Surfaced on
+	// /api/v2/info and /api/nftables/capabilities; drives the dashboard's
+	// degraded-mode banner and per-control disablement.
+	shaping            shapingCaps
 	client             *http.Client
 	portMap            PortMapping
 	shapeMu            sync.Mutex
@@ -829,6 +865,24 @@ type TcTrafficManager struct {
 	// "is a filter currently installed?" check for cleanup.
 	icmpFilterMu       sync.Mutex
 	icmpFilterIPByPort map[int]string
+
+	// #910 honesty gates. Set once at boot from the shaping probe (or a
+	// forced degraded mode) via SetKernelShaping. When false, the matching
+	// public apply method no-ops instead of touching the kernel, so a
+	// forced-degraded box (where tc actually works) genuinely doesn't shape.
+	// Default true (NewTcTrafficManager) so existing callers/tests are
+	// unaffected until the boot probe narrows them.
+	kernelRate  bool
+	kernelNetem bool
+
+	// #910 per-session (per-port) degrade. When a single session is forced
+	// degraded on an otherwise-capable box (the A/B instrument), its bound
+	// port is registered here and the kernel apply no-ops for JUST that port,
+	// leaving every other session shaping normally. Set/cleared by the App
+	// from the session's shaping_forced_mode.
+	portGateMu   sync.Mutex
+	portRateOff  map[int]bool
+	portNetemOff map[int]bool
 }
 
 type ShapeApplyState struct {
@@ -1019,6 +1073,14 @@ func (a *App) recordSessionStart(session SessionData, manifestURL string) {
 		}
 	}
 	a.emitControlEventForSession(sessionID, "proxy", "session_start", manifestURL)
+	// #910: mark every session that starts under degraded shaping so the
+	// control_events timeline (and the dashboard chip) shows it plainly. Uses
+	// the session's EFFECTIVE caps (host probe narrowed by any per-session
+	// shaping_forced_mode), so a single forced-degraded session is marked even
+	// on a fully-capable box. Source `auto` — a server-detected condition.
+	if eff := a.effectiveShapingForSession(session); eff.degraded() {
+		a.emitControlEventForSession(sessionID, "auto", "shaping_degraded", eff.degradedInfo())
+	}
 }
 
 func (a *App) recordSessionEnd(session SessionData, reason string) {
@@ -1150,12 +1212,274 @@ func (s *NftShapeStep) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// shapingCaps is the package-main mirror of server.ShapingCapabilities —
+// the boot-time result of probing which network-shaping controls the kernel
+// can actually apply on this host. Kept as a main-local type so the probe
+// (which needs TcTrafficManager / exec) stays out of the v2/server package;
+// v2Adapter.ShapingCapabilities maps it across the boundary. Issue #910.
+type shapingCaps struct {
+	rate           bool
+	delay          bool
+	loss           bool
+	transportFault bool
+	forced         bool
+	mode           string
+	reason         string
+}
+
+// degraded reports whether this host is running with anything less than full
+// kernel shaping — i.e. at least one control is unavailable (or forced off).
+// The dashboard + logged data must surface this so an operator is never
+// misled into thinking a configured cap is active. Issue #910.
+func (c shapingCaps) degraded() bool {
+	return !c.rate || !c.delay || !c.loss || !c.transportFault
+}
+
+// kernelRateOn / kernelNetemOn report whether the KERNEL should apply the
+// control for these caps. Only genuine "kernel" mode drives the kernel —
+// "http-only" does no network shaping, so it leaves the kernel untouched.
+// Issue #910.
+func (c shapingCaps) kernelRateOn() bool  { return c.mode == "kernel" && c.rate }
+func (c shapingCaps) kernelNetemOn() bool { return c.mode == "kernel" && (c.delay || c.loss) }
+
+// degradedInfo is the `info` payload carried on the shaping_degraded control
+// event: the resolved mode plus the semicolon-separated list of unavailable
+// controls (semicolons, not commas — commas/`=` are dropped by the forwarder's
+// label encoder; see reference_labelplay_value_encoding). Issue #910.
+func (c shapingCaps) degradedInfo() string {
+	var missing []string
+	if !c.rate {
+		missing = append(missing, "rate")
+	}
+	if !c.delay {
+		missing = append(missing, "delay")
+	}
+	if !c.loss {
+		missing = append(missing, "loss")
+	}
+	if !c.transportFault {
+		missing = append(missing, "transport_fault")
+	}
+	return fmt.Sprintf("mode=%s forced=%t unavailable=%s", c.mode, c.forced, strings.Join(missing, ";"))
+}
+
+// detectShapingCapabilities probes, once at boot, whether the kernel
+// facilities behind each network-shaping control actually apply on this host
+// — tc HTB (rate), tc netem (delay/loss), and nftables (transport faults).
+//
+// SHAPING_FORCE_DEGRADED overrides the live probe so degraded mode can be
+// exercised on a host that DOES have NET_ADMIN (the A/B instrument for #910):
+//
+//	http-only → all shaping controls reported unavailable (only HTTP faults)
+//
+// Any other value (empty/off/kernel) runs the real probe. Issue #910.
+// normalizeShapingMode canonicalises an operator-supplied forced-mode string
+// to "http-only" | "" (empty = off / inherit host). Issue #910.
+func normalizeShapingMode(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "http-only", "httponly", "http":
+		return "http-only"
+	default:
+		return ""
+	}
+}
+
+// forcedShapingCaps returns the capability set implied by a forced degraded
+// mode, or (_, false) when the string doesn't name one. Shared by the boot
+// env override and the per-session toggle (#910). The only degraded mode is
+// http-only, which leaves the KERNEL untouched (network shaping off, HTTP
+// faults still fire).
+func forcedShapingCaps(mode string) (shapingCaps, bool) {
+	switch normalizeShapingMode(mode) {
+	case "http-only":
+		return shapingCaps{
+			mode:   "http-only",
+			forced: true,
+			reason: "forced http-only (network shaping disabled; HTTP faults only)",
+		}, true
+	default:
+		return shapingCaps{}, false
+	}
+}
+
+func detectShapingCapabilities(t *TcTrafficManager) shapingCaps {
+	raw := strings.ToLower(strings.TrimSpace(getenv("SHAPING_FORCE_DEGRADED", "")))
+	if c, ok := forcedShapingCaps(raw); ok {
+		c.reason = "forced via SHAPING_FORCE_DEGRADED — " + c.reason
+		return c
+	}
+	switch raw {
+	case "", "off", "kernel":
+		// fall through to the live probe
+	default:
+		log.Printf("SHAPING_FORCE_DEGRADED=%q unrecognised (want http-only|off); running live probe", raw)
+	}
+
+	if runtime.GOOS != "linux" || t == nil {
+		return shapingCaps{
+			mode:   "http-only",
+			reason: "network shaping requires Linux with tc/netem/nftables; HTTP faults only",
+		}
+	}
+
+	rate, netem := t.probeTcCapabilities()
+	transport := probeNftCapability()
+	c := shapingCaps{rate: rate, delay: netem, loss: netem, transportFault: transport}
+	switch {
+	case rate && netem && transport:
+		c.mode = "kernel"
+	case !rate && !netem && !transport:
+		c.mode = "http-only"
+		c.reason = "no kernel shaping (tc/netem/nftables unavailable); HTTP faults only"
+	default:
+		// Partial kernel: some controls apply, some don't. Mode stays
+		// "kernel" (the working controls really are kernel-backed); the
+		// per-control booleans carry the truth the UI greys out from.
+		c.mode = "kernel"
+		c.reason = "partial kernel shaping: " + missingShapingControls(rate, netem, transport)
+	}
+	return c
+}
+
+// missingShapingControls builds a human list of the unavailable controls for
+// the partial-kernel reason string. Issue #910.
+func missingShapingControls(rate, netem, transport bool) string {
+	var missing []string
+	if !rate {
+		missing = append(missing, "rate (no sch_htb)")
+	}
+	if !netem {
+		missing = append(missing, "delay/loss (no sch_netem)")
+	}
+	if !transport {
+		missing = append(missing, "transport faults (no nftables)")
+	}
+	if len(missing) == 0 {
+		return "none"
+	}
+	return strings.Join(missing, ", ") + " unavailable"
+}
+
+// probeTcCapabilities checks whether tc HTB (rate) and tc netem (delay/loss)
+// actually apply on the shaping interface by installing and removing a
+// throwaway class + qdisc under the shared HTB root. It reuses the same root
+// the live path needs (idempotent), then adds/removes only a scratch leaf, so
+// it never disturbs real per-session shaping. Holds tcMu for the duration —
+// at boot there is no contention, but this keeps it consistent with every
+// other tc-tree mutation (#746). Issue #910.
+func (t *TcTrafficManager) probeTcCapabilities() (rate bool, netem bool) {
+	if runtime.GOOS != "linux" || t == nil {
+		return false, false
+	}
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
+
+	// Rate: the shared HTB root must install. If it can't, tc shaping is
+	// unavailable entirely (no sch_htb / no NET_ADMIN).
+	if err := t.ensureRootQdiscCore(); err != nil {
+		log.Printf("SHAPING probe: tc HTB root unavailable: %v", err)
+		return false, false
+	}
+	rate = true
+
+	// Netem: add a scratch HTB class under the root + a netem qdisc, then
+	// remove both. Scratch handles are chosen high to avoid colliding with
+	// any per-port class (which derive from the port number).
+	const scratchClass = "1:0ffe"
+	const scratchHandle = "0ffe:"
+	_ = exec.Command("tc", "class", "add", "dev", t.interfaceName,
+		"parent", "1:", "classid", scratchClass, "htb", "rate", "1000mbit").Run()
+	if err := exec.Command("tc", "qdisc", "add", "dev", t.interfaceName,
+		"parent", scratchClass, "handle", scratchHandle, "netem", "delay", "1ms").Run(); err == nil {
+		netem = true
+	} else {
+		log.Printf("SHAPING probe: tc netem unavailable: %v", err)
+	}
+	// Best-effort cleanup (deleting the class also drops its child qdisc).
+	_ = exec.Command("tc", "qdisc", "del", "dev", t.interfaceName,
+		"parent", scratchClass, "handle", scratchHandle).Run()
+	_ = exec.Command("tc", "class", "del", "dev", t.interfaceName,
+		"classid", scratchClass).Run()
+	return rate, netem
+}
+
+// probeNftCapability reports whether nftables can install the transport-fault
+// table/chain on this host. It calls the same ensureTransportFaultChain the
+// live DROP/REJECT path uses (idempotent), so a success leaves the host in the
+// state the real path expects. Issue #910.
+func probeNftCapability() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	if err := ensureTransportFaultChain(); err != nil {
+		log.Printf("SHAPING probe: nftables transport faults unavailable: %v", err)
+		return false
+	}
+	return true
+}
+
 func NewTcTrafficManager(interfaceName string, debug bool) *TcTrafficManager {
 	return &TcTrafficManager{
 		interfaceName:      interfaceName,
 		debug:              debug,
 		icmpFilterIPByPort: map[int]string{},
+		// #910: gates default OPEN — every existing caller (and test) expects
+		// the manager to attempt the kernel apply. SetKernelShaping narrows
+		// them at boot when the probe (or a forced degraded mode) says a
+		// control isn't kernel-backed.
+		kernelRate:   true,
+		kernelNetem:  true,
+		portRateOff:  map[int]bool{},
+		portNetemOff: map[int]bool{},
 	}
+}
+
+// SetPortShapingGate registers (or clears) a per-port kernel-apply gate for
+// the #910 per-session degrade. rateOff/netemOff true → the matching kernel
+// apply no-ops for this port only, leaving other sessions shaping normally.
+// Idempotent; clearing removes the entry.
+func (t *TcTrafficManager) SetPortShapingGate(port int, rateOff, netemOff bool) {
+	if t == nil {
+		return
+	}
+	t.portGateMu.Lock()
+	defer t.portGateMu.Unlock()
+	if rateOff {
+		t.portRateOff[port] = true
+	} else {
+		delete(t.portRateOff, port)
+	}
+	if netemOff {
+		t.portNetemOff[port] = true
+	} else {
+		delete(t.portNetemOff, port)
+	}
+}
+
+func (t *TcTrafficManager) portRateGated(port int) bool {
+	t.portGateMu.Lock()
+	defer t.portGateMu.Unlock()
+	return t.portRateOff[port]
+}
+
+func (t *TcTrafficManager) portNetemGated(port int) bool {
+	t.portGateMu.Lock()
+	defer t.portGateMu.Unlock()
+	return t.portNetemOff[port]
+}
+
+// SetKernelShaping is the #910 universal honesty backstop. It gates the two
+// kernel-apply entry points (UpdateRateLimit / UpdateNetem) so EVERY caller —
+// the v2 apply path, the legacy /api/nftables/* handlers, the pattern netem
+// setup, the #480 baseline — no-ops instead of shaping when the host (or a
+// forced degraded mode) can't back the control. Called once after the boot
+// probe; read-lock-free thereafter (booleans set before any session).
+func (t *TcTrafficManager) SetKernelShaping(rate, netem bool) {
+	if t == nil {
+		return
+	}
+	t.kernelRate = rate
+	t.kernelNetem = netem
 }
 
 func (t *TcTrafficManager) IsActive() bool {
@@ -1313,6 +1637,18 @@ func (t *TcTrafficManager) GetPortConfig(port int) (map[string]interface{}, erro
 // can't wipe this port's leaf class mid-apply, then delegates to the lock-free
 // core.
 func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
+	// #910 honesty backstop — no kernel rate shaping when the host (or a
+	// forced degraded mode) can't back it. No-op success so callers proceed
+	// as if "no cap requested"; the degraded condition is surfaced by the
+	// session's shaping_degraded event + the dashboard's disabled controls.
+	if !t.kernelRate || t.portRateGated(port) {
+		reason := "kernel_rate_unavailable"
+		if t.kernelRate {
+			reason = "session_forced_degraded"
+		}
+		log.Printf("NETSHAPE rate gated port=%d rate_mbps=%.3f reason=%s (#910)", port, rateMbps, reason)
+		return nil
+	}
 	t.tcMu.Lock()
 	defer t.tcMu.Unlock()
 	return t.updateRateLimitCore(port, rateMbps)
@@ -1843,6 +2179,16 @@ func netemImpairmentArgs(p NetemParams) []string {
 // UpdateNetem is the public, lock-acquiring entrypoint. It holds t.tcMu for the
 // whole netem mutation (#746) and delegates to the lock-free core.
 func (t *TcTrafficManager) UpdateNetem(port int, p NetemParams) error {
+	// #910 honesty backstop — no kernel netem (delay/loss/jitter) when the
+	// host (or a forced degraded mode) can't back it. No-op success.
+	if !t.kernelNetem || t.portNetemGated(port) {
+		reason := "kernel_netem_unavailable"
+		if t.kernelNetem {
+			reason = "session_forced_degraded"
+		}
+		log.Printf("NETSHAPE netem gated port=%d delay_ms=%d loss_pct=%.3f reason=%s (#910)", port, p.DelayMs, p.LossPct, reason)
+		return nil
+	}
 	t.tcMu.Lock()
 	defer t.tcMu.Unlock()
 	return t.updateNetemCore(port, p)
@@ -2267,6 +2613,26 @@ func main() {
 
 	app.sessionsSnap.Store(&emptySessions)
 
+	// Probe kernel shaping capability once at boot and log the resolved mode
+	// (#910). This is what the dashboard reads to disable/annotate controls
+	// instead of showing a phantom cap on a host without tc/netem/nftables.
+	app.shaping = detectShapingCapabilities(app.traffic)
+	// #910: narrow the kernel-apply gates to what this host/mode actually
+	// backs. Only genuine "kernel" mode drives the kernel — "http-only" does no
+	// network shaping, so it leaves the kernel untouched.
+	if app.traffic != nil {
+		kernelMode := app.shaping.mode == "kernel"
+		app.traffic.SetKernelShaping(kernelMode && app.shaping.rate, kernelMode && (app.shaping.delay || app.shaping.loss))
+	}
+	if app.shaping.reason != "" {
+		log.Printf("SHAPING MODE: %s — %s [rate=%t delay=%t loss=%t transport_fault=%t forced=%t]",
+			app.shaping.mode, app.shaping.reason,
+			app.shaping.rate, app.shaping.delay, app.shaping.loss, app.shaping.transportFault, app.shaping.forced)
+	} else {
+		log.Printf("SHAPING MODE: %s [rate=%t delay=%t loss=%t transport_fault=%t]",
+			app.shaping.mode, app.shaping.rate, app.shaping.delay, app.shaping.loss, app.shaping.transportFault)
+	}
+
 	go app.trackPortThroughput()
 	app.restoreTransportFaultSchedules()
 	// Re-install tc rate/delay/loss state for every session that
@@ -2317,6 +2683,8 @@ func main() {
 	router.HandleFunc("/api/version", app.handleVersion).Methods(http.MethodGet)
 	router.HandleFunc("/api/nftables/port/{port}", app.handleNftPort).Methods(http.MethodGet)
 	router.HandleFunc("/api/nftables/bandwidth/{port}", app.handleNftBandwidth).Methods(http.MethodPost)
+	router.HandleFunc("/api/nftables/shaping-mode/{port}", app.handleNftShapingMode).Methods(http.MethodPost)
+	router.HandleFunc("/api/nftables/shaping-mode", app.handleNftShapingMode).Methods(http.MethodPost)
 	router.HandleFunc("/api/nftables/loss/{port}", app.handleNftLoss).Methods(http.MethodPost)
 	router.HandleFunc("/api/nftables/shape/{port}", app.handleNftShape).Methods(http.MethodPost)
 	router.HandleFunc("/api/nftables/pattern/{port}", app.handleNftPattern).Methods(http.MethodPost)
@@ -3739,13 +4107,27 @@ func (a *App) handleNftStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleNftCapabilities(w http.ResponseWriter, r *http.Request) {
-	status := "disabled"
-	reason := "traffic shaping requires Linux (tc/netem)"
-	if runtime.GOOS == "linux" {
-		status = "enabled"
-		reason = ""
+	// #910: report the real boot-time probe, not a bare GOOS check. "enabled"
+	// only when kernel shaping is actually usable (full or partial); "disabled"
+	// when there is no kernel shaping at all (http-only). The per-control
+	// booleans + mode let the dashboard grey out exactly what's missing rather
+	// than showing a phantom cap.
+	c := a.shaping
+	status := "enabled"
+	if !c.rate && !c.delay && !c.loss && !c.transportFault {
+		status = "disabled"
 	}
-	writeJSON(w, map[string]string{"status": status, "platform": runtime.GOOS, "reason": reason})
+	writeJSON(w, map[string]interface{}{
+		"status":          status,
+		"platform":        runtime.GOOS,
+		"reason":          c.reason,
+		"mode":            c.mode,
+		"forced":          c.forced,
+		"rate":            c.rate,
+		"delay":           c.delay,
+		"loss":            c.loss,
+		"transport_fault": c.transportFault,
+	})
 }
 
 func (a *App) handleNftPort(w http.ResponseWriter, r *http.Request) {
@@ -3934,9 +4316,36 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, np NetemParams) 
 			}
 		}
 	}
+	if mode == "" && stepCount > 0 {
+		// Custom / unnamed pattern — no template mode (hand-edited steps via the
+		// testing UI, or a pattern applied without a named template). Derive a
+		// stable signature from the step profile so it still earns a distinct
+		// `pattern_enabled_custom_<sig>` label instead of collapsing every custom
+		// pattern into one bare `pattern_enabled` — otherwise "which pattern is
+		// running", especially dynamically-applied ones, is unfilterable.
+		h := fnv.New32a()
+		for _, s := range cleanSteps {
+			fmt.Fprintf(h, "%.3f:%g;", s.RateMbps, s.DurationSeconds)
+		}
+		mode = fmt.Sprintf("custom_%08x", h.Sum32())
+	}
 	info := fmt.Sprintf(`{"mode":%q,"steps":%d,"rate_mbps_first":%.3f,"delay_ms":%d,"packet_loss":%.3f}`,
 		mode, stepCount, firstRate, delayMs, loss)
 	a.emitControlEventForPort(port, "proxy", "pattern_enabled", info)
+	// Co-locate a label_changed with pattern_enabled: the session's harness labels
+	// (sweep RunLabels — platform/mode/recipe/… — set on _v2_labels at bootstrap but
+	// never surfaced as a control event) now land on the play with the SAME
+	// attribution pattern_enabled just proved. This is where the play_id is present,
+	// unlike the too-early config-on-connect / reattach binds. Forwarder edge-dedups
+	// re-arms; no-label sessions skip it.
+	for _, ls := range a.sessionsView() { // #740 read-only: reads _v2_labels
+		if getString(ls, "x_forwarded_port") == strconv.Itoa(port) {
+			if lbls, ok := ls["_v2_labels"]; ok && lbls != nil {
+				a.emitControlEventForPort(port, "proxy", "label_changed", labelsInfoJSON(lbls))
+			}
+			break
+		}
+	}
 	go a.runShapePatternLoop(ctx, port, cleanSteps, np)
 	return nil
 }
@@ -4049,17 +4458,40 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 	}
 }
 
+// disablePatternForPort is THE canonical "clear all pattern state" for a port.
+// A pattern lives in THREE representations that MUST be cleared together, or the
+// dashboard shows a phantom "pattern running" after a stop (issue #910):
+//
+//  1. the in-memory step loop            (shapeLoops + shapeStates)
+//  2. the v1 session fields              (nftables_pattern_*)
+//  3. the v2 stash                       (_v2_shape_pattern) — the dashboard's
+//     shape.pattern is built from THIS, not the nftables_pattern_* fields, so
+//     leaving it behind is exactly what made a stopped pattern re-read as
+//     running through the v2 API.
+//
+// Every disable path (shaping-mode switch, switch-to-sliders, group reset,
+// session release) MUST go through here so no representation can drift. If you
+// add a new pattern field/representation, clear it HERE and extend
+// TestDisablePatternClearsAllRepresentations so the invariant is enforced.
 func (a *App) disablePatternForPort(port int) {
-	a.stopShapeLoop(port)
+	a.stopShapeLoop(port) // (1) in-memory loop + shapeStates
 	a.updateSessionsByPortWithControl(port, map[string]interface{}{
-		"nftables_pattern_enabled": false,
-		"nftables_pattern_steps":   []NftShapeStep{},
-		"nftables_pattern_step":    nil,
+		// (2) v1 session fields — enabled/steps/step + the runtime display fields
+		// that otherwise linger and re-read as a running pattern.
+		"nftables_pattern_enabled":           false,
+		"nftables_pattern_steps":             []NftShapeStep{},
+		"nftables_pattern_step":              nil,
+		"nftables_pattern_step_runtime":      nil,
+		"nftables_pattern_rate_runtime_mbps": nil,
+		"nftables_pattern_step_runtime_at":   nil,
+		"nftables_pattern_template_mode":     "",
+		// (3) v2 stash. nil is equivalent to the v2 PATCH path's delete for every
+		// reader (all type-assert to map / nil-check first).
+		"_v2_shape_pattern": nil,
 	}, "")
-	// Emit pattern_disabled to control_events for every session on
-	// this port. Without this hook the dashboard's PlayLog "Control"
-	// bucket stayed silent on toggle paths that bypass
-	// applySessionSettingsUpdate (e.g. switching to sliders mode,
+	// Emit pattern_disabled to control_events for every session on this port.
+	// Without this hook the dashboard's PlayLog "Control" bucket stayed silent on
+	// toggle paths that bypass applySessionSettingsUpdate (switch-to-sliders,
 	// session release, group reset). Issue #474 follow-up.
 	a.emitControlEventForPort(port, "proxy", "pattern_disabled", "")
 }
@@ -4618,6 +5050,16 @@ func (a *App) armTransportFaultLoop(port int, faultType string, consecutiveThres
 		a.setTransportFaultSessionState(port, "none", false, "", 0, 0)
 		return
 	}
+	// #910: honesty gate — if nftables can't back transport faults on this
+	// host, OR this session is forced degraded, don't arm the loop and pretend
+	// it's active. Per-session effective caps so one forced-degraded session
+	// is gated while others on the box keep faulting. The session-level
+	// shaping_degraded event marks the play; the dashboard greys the control.
+	if eff := a.effectiveShapingForPort(port); !eff.transportFault {
+		log.Printf("FAULT transport degraded port=%d control=transport_fault reason=capability_unavailable mode=%s requested_type=%s", port, eff.mode, faultType)
+		a.setTransportFaultSessionState(port, "none", false, "", 0, 0)
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a.faultMu.Lock()
 	a.faultLoops[port] = cancel
@@ -4948,6 +5390,133 @@ func (a *App) handleNftBandwidth(w http.ResponseWriter, r *http.Request) {
 		"nftables_bandwidth_mbps": rateMbps,
 	}, "")
 	writeJSON(w, map[string]interface{}{"success": true, "port": port, "rate": fmt.Sprintf("%g Mbps", rateMbps)})
+}
+
+// handleNftShapingMode sets (or clears) a per-session forced degraded shaping
+// mode on ONE session (#910). Body: {"mode":"http-only"|"off",
+// "player_id":"..."}. The session is addressed by the path {port} (harness /
+// curl) OR by player_id in the body (the dashboard, which works by player_id
+// and doesn't know the proxy port). Lets ONE session run degraded while others
+// on the same box shape normally — the A/B instrument.
+func (a *App) handleNftShapingMode(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		Mode     string `json:"mode"`
+		PlayerID string `json:"player_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid json"})
+		return
+	}
+	// Resolve the target port: explicit path {port} wins; else map player_id.
+	port := 0
+	if portStr := mux.Vars(r)["port"]; portStr != "" {
+		mappedPort, _ := a.portMap.MapExternalPort(portStr)
+		p, err := strconv.Atoi(mappedPort)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": "invalid port"})
+			return
+		}
+		port = p
+	} else if payload.PlayerID != "" {
+		p, ok := a.portForPlayerID(payload.PlayerID)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]string{"error": "no active session for player_id"})
+			return
+		}
+		port = p
+	} else {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "port or player_id required"})
+		return
+	}
+	mode := normalizeShapingMode(payload.Mode) // "" | http-only
+	log.Printf("SHAPING mode set port=%d mode=%q (#910)", port, mode)
+	// Persist the forced mode on the session(s) bound to the port, then
+	// reconcile the kernel + gate state.
+	a.updateSessionsByPortWithControl(port, map[string]interface{}{
+		"shaping_forced_mode": mode,
+	}, "")
+	a.applyForcedShapingModeForPort(port)
+	eff := a.effectiveShapingForPort(port)
+	writeJSON(w, map[string]interface{}{
+		"success":  true,
+		"port":     port,
+		"mode":     eff.mode,
+		"forced":   eff.forced,
+		"degraded": eff.degraded(),
+	})
+}
+
+// applyForcedShapingModeForPort reconciles kernel + gate state after a port's
+// session shaping_forced_mode changed. Degrading: tear down any kernel shaping
+// already on the port BEFORE closing the gate (a closed gate would no-op the
+// teardown), then close it and emit a shaping_degraded event. Clearing: re-open
+// the gate and re-apply the session's stored shape. Issue #910.
+func (a *App) applyForcedShapingModeForPort(port int) {
+	if a.traffic == nil {
+		return
+	}
+	sess, found := a.sessionForPort(port)
+	eff := a.shaping
+	if found {
+		eff = a.effectiveShapingForSession(sess)
+	}
+	degraded := !eff.kernelRateOn() || !eff.kernelNetemOn()
+	if degraded {
+		// Faults-only means NO kernel path at all, so tear down every kernel-backed
+		// control on the port — not just gate it (#910). Fully clear the pattern
+		// first (all 3 representations) so its next tick can't re-arm a rate
+		// mid-teardown and the dashboard stops showing a "running" pattern.
+		a.disablePatternForPort(port)
+		a.traffic.SetPortShapingGate(port, false, false) // open for teardown
+		_ = a.traffic.UpdateRateLimit(port, 0)
+		_ = a.traffic.UpdateNetem(port, NetemParams{})
+		a.clearShapeApplyState(port)
+		a.syncPortShapingGate(port, eff) // close per effective
+		// Transport faults (nftables drop/reject) are kernel-backed too — stop the
+		// loop and remove the rule so the session can't keep dropping packets while
+		// the UI shows the Transport control disabled. (#910)
+		a.stopTransportFaultLoop(port)
+		if err := clearTransportFaultRule(port); err != nil {
+			log.Printf("SHAPING degraded transport-clear failed port=%d err=%v", port, err)
+		}
+		a.setTransportFaultSessionState(port, "none", false, "", 0, 0)
+		// Reset the STORED shape (operator intent), not just the kernel state, so
+		// the dashboard's "Limit (rate_mbps)" line and the impairment values drop
+		// to 0 instead of charting a phantom cap the session no longer enforces.
+		// effective_rate_limit_mbps is re-derived on the next normalize. (#910)
+		a.updateSessionsByPortWithControl(port, map[string]interface{}{
+			"nftables_bandwidth_mbps":         float64(0),
+			"nftables_delay_ms":               float64(0),
+			"nftables_packet_loss":            float64(0),
+			"nftables_jitter_ms":              float64(0),
+			"nftables_loss_correlation_pct":   float64(0),
+			"nftables_jitter_correlation_pct": float64(0),
+		}, "")
+		if found {
+			a.emitControlEventForSession(getString(sess, "session_id"), "harness", "shaping_degraded", eff.degradedInfo())
+		}
+		log.Printf("SHAPING per-session degraded port=%d mode=%s (#910)", port, eff.mode)
+		return
+	}
+	a.syncPortShapingGate(port, eff) // open
+	// #910: returning to kernel is a clean slate — fully clear any pattern so one
+	// armed before the degrade doesn't resurrect in the editor or re-run.
+	a.disablePatternForPort(port)
+	a.clearShapeApplyState(port)
+	if found {
+		// Re-read: disablePatternForPort mutated the session, so applySessionShaping
+		// must see the pattern-free state (else it skips the rate apply thinking a
+		// pattern still owns it).
+		if s, ok := a.sessionForPort(port); ok {
+			sess = s
+		}
+		a.applySessionShaping(sess, port)
+	}
+	log.Printf("SHAPING per-session restored port=%d mode=%s (#910)", port, eff.mode)
 }
 
 func (a *App) handleNftLoss(w http.ResponseWriter, r *http.Request) {
@@ -5619,6 +6188,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// NetworkLogEntry created in this handler via the logEntry closure
 	// below.
 	playID := strings.TrimSpace(r.URL.Query().Get("play_id"))
+	// #911: hoisted above the logEntry closure so it can stamp entry.PlayerID
+	// off the request (warm from request #1), independent of session association.
+	playerID := strings.TrimSpace(r.URL.Query().Get("player_id"))
 	attemptIDStr := strings.TrimSpace(r.URL.Query().Get("attempt_id"))
 	// Client-supplied, play-scoped start (#587). Rotates with play_id;
 	// the proxy just carries it through to the session map so it reaches
@@ -5633,6 +6205,9 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	logEntry := func(sessionID string, entry NetworkLogEntry) {
 		if entry.PlayID == "" {
 			entry.PlayID = playID
+		}
+		if entry.PlayerID == "" {
+			entry.PlayerID = playerID // #911: attribute off the request itself
 		}
 		if entry.AttemptID == 0 {
 			entry.AttemptID = attemptID
@@ -5674,7 +6249,8 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	a.removeInactiveSessions()
 	sessionList := a.getSessionList()
 	sessionNumber := thirdFromLastDigit(externalPort)
-	playerID := r.URL.Query().Get("player_id")
+	// playerID hoisted above the logEntry closure (#911); keep it as the
+	// primary player-id source here for the rest of the handler.
 	playerHeader := r.Header.Get("player_id")
 	playerHeaderAlt := r.Header.Get("Player-ID")
 	playbackSessionHeader := r.Header.Get("X-Playback-Session-Id")
@@ -5702,6 +6278,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				// onto the session port.
 				if stripped := stripProxyArgs(r.URL.RawQuery); stripped != "" {
 					newURL = newURL + "?" + stripped
+				}
+				// The app's first request on the base port reattaches to its pre-configured
+				// session; that bind/sweep-bootstrap path set labels but emitted no
+				// label_changed, and this reattach is the actual play-start — surface the
+				// session labels now, attributed to the play (same per-port channel + timing
+				// that makes pattern_enabled land). Harmless on auto-recovery/loop re-hits
+				// (forwarder edge-dedups labels); no-label sessions skip it.
+				if lbls, ok := existing["_v2_labels"]; ok && lbls != nil {
+					if p, perr := strconv.Atoi(getString(existing, "x_forwarded_port")); perr == nil {
+						a.emitControlEventForPort(p, "proxy", "label_changed", labelsInfoJSON(lbls))
+					}
 				}
 				log.Printf("Redirecting to existing session URL: %s %s -> %s", newURL, externalPort, newPort)
 				http.Redirect(w, r, newURL, http.StatusFound)
@@ -5837,88 +6424,29 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// instead of the server-side derivation.
 		playID := r.URL.Query().Get("play_id")
 		sessionData := SessionData{
-			"session_number":                 fmt.Sprintf("%d", allocated),
-			"sid":                            fmt.Sprintf("%d", allocated),
-			"session_id":                     fmt.Sprintf("%d", allocated),
-			"player_id":                      playerID,
-			"play_id":                        playID,
-			"group_id":                       groupID,
-			"group_broadcast":                groupBroadcast,
-			"control_revision":               newControlRevision(),
-			"headers_player_id":              playerHeader,
-			"headers_player-ID":              playerHeaderAlt,
-			"headers_x_playback_session_id":  playbackSessionHeader,
-			"manifest_requests_count":        0,
-			"master_manifest_requests_count": 0,
-			"segments_count":                 0,
-			"all_requests_count":             0,
-			"last_request":                   createdAt,
-			"first_request_time":             createdAt,
-			"session_start_time":             createdAt,
-			// Segment / manifest / master_manifest fault config —
-			// initialise mode + units explicitly so both server
-			// (NewFailureHandler) and dashboard (Mode dropdown) read
-			// the same value from a single source of truth instead
-			// of falling back to duplicated hard-coded defaults.
-			// "failures_per_seconds" mode → consecutive=requests,
-			// frequency=seconds, matching the dashboard's visible
-			// default Mode for a fresh session.
-			"segment_failure_type":                 "none",
-			"segment_failure_frequency":            0,
-			"segment_consecutive_failures":         0,
-			"segment_failure_units":                "requests",
-			"segment_consecutive_units":            "requests",
-			"segment_frequency_units":              "seconds",
-			"segment_failure_mode":                 "failures_per_seconds",
-			"manifest_failure_type":                "none",
-			"manifest_failure_frequency":           0,
-			"manifest_failure_units":               "requests",
-			"manifest_consecutive_units":           "requests",
-			"manifest_frequency_units":             "seconds",
-			"manifest_failure_mode":                "failures_per_seconds",
-			"manifest_consecutive_failures":        0,
-			"master_manifest_failure_type":         "none",
-			"master_manifest_failure_frequency":    0,
-			"master_manifest_failure_units":        "requests",
-			"master_manifest_consecutive_units":    "requests",
-			"master_manifest_frequency_units":      "seconds",
-			"master_manifest_failure_mode":         "failures_per_seconds",
-			"master_manifest_consecutive_failures": 0,
-			// "All" fault override — when all_failure_type != "none",
-			// HandleRequest uses this rule for every HTTP request and
-			// ignores the per-kind tabs above. Same control shape as
-			// segment, plus all_failure_urls for variant scoping.
-			"all_failure_type":            "none",
-			"all_failure_frequency":       0,
-			"all_consecutive_failures":    0,
-			"all_failure_units":           "requests",
-			"all_consecutive_units":       "requests",
-			"all_frequency_units":         "seconds",
-			"all_failure_mode":            "failures_per_seconds",
-			"current_failures":            0,
-			"consecutive_failures_count":  0,
-			"player_ip":                   requesterIP,
-			"user_agent":                  "",
-			"origination_ip":              requesterIP,
-			"origination_time":            createdAt,
-			"is_external_ip":              isExternalIP(requesterIP),
-			"manifest_failure_at":         nil,
-			"manifest_failure_recover_at": nil,
-			// nil (not []string{}) so the dashboard can tell "fresh
-			// session, default to all-URLs filter" from "user
-			// explicitly cleared the list" — both serialize to JSON
-			// the same when both are []string{}, which made unchecking
-			// "All" silently snap back via the empty-defaults-to-all
-			// rule on the dashboard (#409).
-			"manifest_failure_urls":                    nil,
-			"segment_failure_urls":                     nil,
-			"segment_failure_at":                       nil,
-			"segment_failure_recover_at":               nil,
-			"master_manifest_failure_at":               nil,
-			"master_manifest_failure_recover_at":       nil,
-			"all_failure_at":                           nil,
-			"all_failure_recover_at":                   nil,
-			"all_failure_urls":                         nil,
+			"session_number":                           fmt.Sprintf("%d", allocated),
+			"sid":                                      fmt.Sprintf("%d", allocated),
+			"session_id":                               fmt.Sprintf("%d", allocated),
+			"player_id":                                playerID,
+			"play_id":                                  playID,
+			"group_id":                                 groupID,
+			"group_broadcast":                          groupBroadcast,
+			"control_revision":                         newControlRevision(),
+			"headers_player_id":                        playerHeader,
+			"headers_player-ID":                        playerHeaderAlt,
+			"headers_x_playback_session_id":            playbackSessionHeader,
+			"manifest_requests_count":                  0,
+			"master_manifest_requests_count":           0,
+			"segments_count":                           0,
+			"all_requests_count":                       0,
+			"last_request":                             createdAt,
+			"first_request_time":                       createdAt,
+			"session_start_time":                       createdAt,
+			"player_ip":                                requesterIP,
+			"user_agent":                               "",
+			"origination_ip":                           requesterIP,
+			"origination_time":                         createdAt,
+			"is_external_ip":                           isExternalIP(requesterIP),
 			"transport_failure_type":                   "none",
 			"transport_failure_frequency":              0,
 			"transport_consecutive_failures":           1,
@@ -6046,11 +6574,23 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if a.defaultRateMbps > 0 && a.traffic != nil {
 			if internalPortInt, err := strconv.Atoi(assignedInternalPort); err == nil {
-				effective := a.effectiveRate(0)
-				if err := a.traffic.UpdateRateLimit(internalPortInt, effective); err != nil {
-					log.Printf("baseline rate cap apply failed port=%d rate=%g: %v", internalPortInt, effective, err)
+				// #910 honesty gate: the #480 baseline cap is a direct kernel
+				// apply that bypasses applyShapeIfChanged, so it needs its own
+				// capability check — otherwise a forced-degraded session (on a
+				// box where tc works) would silently cap at the baseline while
+				// reporting shaping off. This else-branch skips applySessionShaping
+				// so we also register the per-port gate here for consistency.
+				eff := a.effectiveShapingForSession(sessionData)
+				a.syncPortShapingGate(internalPortInt, eff)
+				if !eff.kernelRateOn() {
+					log.Printf("baseline rate cap skipped port=%d reason=capability_unavailable mode=%s (#480/#910)", internalPortInt, eff.mode)
 				} else {
-					log.Printf("baseline rate cap applied port=%d rate=%g Mbps (#480)", internalPortInt, effective)
+					effective := a.effectiveRate(0)
+					if err := a.traffic.UpdateRateLimit(internalPortInt, effective); err != nil {
+						log.Printf("baseline rate cap apply failed port=%d rate=%g: %v", internalPortInt, effective, err)
+					} else {
+						log.Printf("baseline rate cap applied port=%d rate=%g Mbps (#480)", internalPortInt, effective)
+					}
 				}
 			}
 		}
@@ -6059,6 +6599,21 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			manifestURL = manifestURL + "?" + r.URL.RawQuery
 		}
 		a.recordSessionStart(sessionData, manifestURL)
+		// Config-on-connect materialized labels onto the session (harness
+		// RunLabels: sweep/exp_id/platform/mode/recipe/… ) but — unlike the PATCH
+		// API — never surfaced them as a `label_changed` control event, so they
+		// never reached the forwarder's `testing=` tier and sweep plays were
+		// unattributable in the Sessions Test/Platform facets. Emit it here, right
+		// after session_start, so config-on-connect plays carry the same testing=
+		// metadata PATCH-stamped plays do. Mirrors the pattern_enabled emit, which
+		// already lands on these plays via the same per-port control channel.
+		if hasConfig {
+			if lbls, ok := configPatch["labels"]; ok && lbls != nil {
+				if p, perr := strconv.Atoi(assignedInternalPort); perr == nil {
+					a.emitControlEventForPort(p, "proxy", "label_changed", labelsInfoJSON(lbls))
+				}
+			}
+		}
 		host := hostWithoutPort(r.Host)
 		scheme := requestScheme(r)
 		newURL := fmt.Sprintf("%s://%s:%s/%s", scheme, host, assignedExternalPort, escapedPath)
@@ -6209,8 +6764,21 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamURL := fmt.Sprintf("http://%s:%s/%s", a.upstreamHost, a.upstreamPort, escapedPath)
-	contentType, isMasterManifest, isManifest, isSegment, playlistInfo := a.getContentType(upstreamURL)
+	contentType, isMasterManifest, isManifest, isSegment, playlistInfo, audioURIs, renditionDir := a.getContentType(upstreamURL, sessionData)
 	requestKind := requestKindLabel(isSegment, isManifest, isMasterManifest)
+	// #919 Tier 1: cache the manifest-declared audio rendition URIs so the fault
+	// classifier can identify audio playlists structurally. Only the master
+	// parse yields these; preserve the prior list on non-master requests.
+	if len(audioURIs) > 0 {
+		sessionData["manifest_audio_uris"] = audioURIs
+	}
+	// #922 Tier 2: when a media playlist transits, record the rendition its
+	// segment directory belongs to (video resolution/rung or audio) — parsed
+	// from the playlist's own segment list, so segment classification is
+	// authoritative instead of URL-token guessing.
+	if isManifest && renditionDir != "" {
+		recordRenditionDir(sessionData, filename, renditionDir)
+	}
 	segmentTransferStartedAt := time.Time{}
 	segmentTransferStartBytes := int64(0)
 	var flightPortNum int
@@ -6251,15 +6819,23 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		a.observeServerSegmentLoop(sessionData, filename)
 	}
 
-	handler := NewRequestHandler(isSegment, isManifest, isMasterManifest, sessionData)
+	// #919: native v2 fault evaluation. classifyRequest maps the request to
+	// its v2 request_kind + variant (read-only over the cached manifest, like
+	// inferServerVideoRendition above); evaluateFaultRules then matches it
+	// first-rule-wins against fault_rules and runs the cadence engine. This
+	// replaces the v1 surface-prefix RequestHandler dispatch — a rule's
+	// FaultFilter decides what it applies to, so audio/init/variant scope work
+	// (#917/#918) with no translation to v1's fixed surfaces.
+	reqClass := classifyRequest(sessionData, filename, isSegment, isManifest, isMasterManifest)
 	// Serialise the failure-decision read-modify-write so video+audio
 	// requests arriving in the same millisecond don't both pass the
 	// "1 per N seconds" filter and double-fire.
 	//
 	// The full atomic sequence is:
 	//   1. Refresh dedup state from the latest snap (defeats stale
-	//      clones).
-	//   2. Run HandleRequest (decides + writes to local clone).
+	//      clones) — includes _faultrule_state, the native per-rule
+	//      cadence state.
+	//   2. Run evaluateFaultRules (decides + writes to local clone).
 	//   3. Save back to the snap BEFORE unlocking, so the next
 	//      goroutine to take the lock sees this goroutine's writes
 	//      when it refreshes.
@@ -6269,7 +6845,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// and the rule fires twice.
 	sessionStateMu.Lock()
 	refreshFailureStateFromLatest(a, sessionData, sessionNumber)
-	failureType := handler.HandleRequest(filename)
+	failureType := evaluateFaultRules(sessionData, reqClass, time.Now())
 	a.saveSessionByID(sessionNumber, sessionData)
 	sessionStateMu.Unlock()
 
@@ -6634,6 +7210,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		_, writeErr := writer.Write(modifiedBody)
 		flushErr := writer.Flush()
 		netEntry.TransferMs = elapsedMs(transferStart)
+		stampDeliveryRate(tcpConnFromContext(r.Context()), netEntry)
 		if idleW != nil {
 			idleW.Stop()
 		}
@@ -6688,6 +7265,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		bytesOut, copyErr = io.Copy(writer, resp.Body)
 		flushErr := writer.Flush()
 		netEntry.TransferMs = elapsedMs(transferStart)
+		stampDeliveryRate(tcpConnFromContext(r.Context()), netEntry)
 		if idleW != nil {
 			idleW.Stop()
 		}
@@ -7171,11 +7749,79 @@ func manipulateDASHManifest(body []byte, cm ContentManipulation) ([]byte, error)
 	return body, nil
 }
 
+// effectiveShapingForSession resolves the capabilities in force for one
+// session: the host probe (a.shaping) narrowed by any per-session
+// shaping_forced_mode. A session can only be MORE degraded than the host,
+// never more capable, so a forced degraded mode always wins. Issue #910.
+func (a *App) effectiveShapingForSession(session SessionData) shapingCaps {
+	if c, ok := forcedShapingCaps(getString(session, "shaping_forced_mode")); ok {
+		return c
+	}
+	return a.shaping
+}
+
+// portForPlayerID resolves the proxy port bound to a player_id (via its
+// session's x_forwarded_port), or (0, false) when the player has no active
+// session. Lets the dashboard (which addresses players by id) drive the
+// per-session shaping-mode endpoint. #910.
+func (a *App) portForPlayerID(playerID string) (int, bool) {
+	if playerID == "" {
+		return 0, false
+	}
+	for _, sess := range a.sessionsView() {
+		// Case-insensitive: iOS emits UPPERCASE UUIDs, but the dashboard
+		// canonicalises player_ids to lowercase before calling — an exact
+		// match silently misses (the documented case-sensitivity trap).
+		if strings.EqualFold(getString(sess, "player_id"), playerID) {
+			if p, err := strconv.Atoi(getString(sess, "x_forwarded_port")); err == nil {
+				return p, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// sessionForPort returns the session bound to a proxy port (matched on
+// x_forwarded_port), or (nil, false) when none is bound. #910.
+func (a *App) sessionForPort(port int) (SessionData, bool) {
+	portStr := strconv.Itoa(port)
+	for _, sess := range a.sessionsView() {
+		if getString(sess, "x_forwarded_port") == portStr {
+			return sess, true
+		}
+	}
+	return nil, false
+}
+
+// effectiveShapingForPort looks up the session bound to a proxy port and
+// returns its effective shaping caps, falling back to the host caps when no
+// session is bound. Used by the port-keyed apply paths (transport arm). #910.
+func (a *App) effectiveShapingForPort(port int) shapingCaps {
+	if sess, ok := a.sessionForPort(port); ok {
+		return a.effectiveShapingForSession(sess)
+	}
+	return a.shaping
+}
+
+// syncPortShapingGate pushes a session's effective kernel-apply gate down to
+// the traffic manager so the per-port backstop no-ops the kernel for a
+// forced-degraded session (and re-opens it when the force is lifted). #910.
+func (a *App) syncPortShapingGate(port int, eff shapingCaps) {
+	if a.traffic == nil {
+		return
+	}
+	a.traffic.SetPortShapingGate(port, !eff.kernelRateOn(), !eff.kernelNetemOn())
+}
+
 func (a *App) applySessionShaping(session SessionData, port int) {
 	if a.traffic == nil || runtime.GOOS != "linux" {
 		log.Printf("NETSHAPE apply skipped port=%d reason=traffic_unavailable_or_non_linux runtime=%s traffic_nil=%t", port, runtime.GOOS, a.traffic == nil)
 		return
 	}
+	// #910: register/refresh this session's per-port kernel gate before any
+	// apply, so a forced-degraded session no-ops the kernel while others on
+	// the same box keep shaping. Applies whether or not a pattern is running.
+	a.syncPortShapingGate(port, a.effectiveShapingForSession(session))
 	if getBool(session, "nftables_pattern_enabled") || sessionHasPatternSteps(session) {
 		// Pattern loop owns the rate while enabled; avoid per-request overrides.
 		log.Printf("NETSHAPE apply skipped port=%d reason=pattern_enabled pattern_enabled=%t pattern_steps=%t", port, getBool(session, "nftables_pattern_enabled"), sessionHasPatternSteps(session))
@@ -7236,52 +7882,77 @@ func (a *App) applyShapeIfChanged(port int, rate float64, np NetemParams) error 
 		log.Printf("NETSHAPE apply skipped port=%d reason=unchanged rate_mbps=%.3f delay_ms=%d loss_pct=%.3f", port, rate, delay, loss)
 		return nil
 	}
+	// #910: honesty gate. When the host (or a forced degraded mode) can't
+	// back a control, we must NOT touch the kernel for it — on the forced-
+	// degraded A/B box tc actually works, so applying anyway would silently
+	// shape while the operator believes shaping is off. We skip the kernel
+	// call, log it, and still converge the apply state so we don't spin. The
+	// session_start `shaping_degraded` control event + the labels[] marker
+	// make the degraded condition visible; the request value is retained but
+	// the dashboard greys it out (task #3).
+	canRate := a.shaping.rate
+	canNetem := a.shaping.delay || a.shaping.loss // one netem qdisc backs both
 	if rate == 0 && delay == 0 && loss == 0 {
 		log.Printf("NETSHAPE apply clear port=%d", port)
-		if err := a.traffic.UpdateRateLimit(port, 0); err != nil {
-			return err
+		if canRate {
+			if err := a.traffic.UpdateRateLimit(port, 0); err != nil {
+				return err
+			}
 		}
 		a.setShapeApplyState(port, desired)
 		return nil
 	}
 	rateChanged := !ok || math.Abs(last.rate-rate) > eps
 	if rateChanged {
-		log.Printf("NETSHAPE apply rate_change port=%d from_mbps=%.3f to_mbps=%.3f", port, last.rate, rate)
-		if err := a.traffic.UpdateRateLimit(port, rate); err != nil {
-			return err
+		if canRate {
+			log.Printf("NETSHAPE apply rate_change port=%d from_mbps=%.3f to_mbps=%.3f", port, last.rate, rate)
+			if err := a.traffic.UpdateRateLimit(port, rate); err != nil {
+				return err
+			}
+		} else {
+			log.Printf("NETSHAPE apply degraded port=%d control=rate reason=capability_unavailable mode=%s requested_mbps=%.3f", port, a.shaping.mode, rate)
 		}
 	}
 	netemChanged := !ok || last.delay != delay || last.jitter != np.JitterMs ||
 		math.Abs(last.loss-loss) > eps || math.Abs(last.lossCorr-np.LossCorrelationPct) > eps ||
 		math.Abs(last.delCorr-np.JitterCorrelationPct) > eps
 	if netemChanged {
-		log.Printf("NETSHAPE apply netem_change port=%d from_delay_ms=%d to_delay_ms=%d from_loss_pct=%.3f to_loss_pct=%.3f jitter_ms=%d loss_corr_pct=%.1f del_corr_pct=%.1f", port, last.delay, delay, last.loss, loss, np.JitterMs, np.LossCorrelationPct, np.JitterCorrelationPct)
-		if err := a.traffic.UpdateNetem(port, np); err != nil {
-			return err
+		if canNetem {
+			log.Printf("NETSHAPE apply netem_change port=%d from_delay_ms=%d to_delay_ms=%d from_loss_pct=%.3f to_loss_pct=%.3f jitter_ms=%d loss_corr_pct=%.1f del_corr_pct=%.1f", port, last.delay, delay, last.loss, loss, np.JitterMs, np.LossCorrelationPct, np.JitterCorrelationPct)
+			if err := a.traffic.UpdateNetem(port, np); err != nil {
+				return err
+			}
+		} else {
+			log.Printf("NETSHAPE apply degraded port=%d control=netem reason=capability_unavailable mode=%s requested_delay_ms=%d requested_loss_pct=%.3f", port, a.shaping.mode, delay, loss)
 		}
 	}
 	a.setShapeApplyState(port, desired)
 	return nil
 }
 
-func (a *App) getContentType(target string) (string, bool, bool, bool, []PlaylistInfo) {
+// getContentType HEAD/GET-probes an upstream URL to classify it (master /
+// media manifest / segment) and, for a master, parses out the video variant
+// ladder (EXT-X-STREAM-INF) plus the audio rendition URIs (EXT-X-MEDIA
+// TYPE=AUDIO). The audio URIs are the structure-driven signal the fault
+// classifier uses to identify audio playlists — replacing filename guessing.
+func (a *App) getContentType(target string, session SessionData) (string, bool, bool, bool, []PlaylistInfo, []string, string) {
 	parsed, err := url.Parse(target)
 	if err != nil {
-		return "", false, false, false, nil
+		return "", false, false, false, nil, nil, ""
 	}
 	if parsed.Hostname() != "" {
 		parsed.Host = fmt.Sprintf("%s:%s", parsed.Hostname(), a.upstreamPort)
 	}
 	headReq, err := http.NewRequest(http.MethodHead, parsed.String(), nil)
 	if err != nil {
-		return "", false, false, false, nil
+		return "", false, false, false, nil, nil, ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	headReq = headReq.WithContext(ctx)
 	resp, err := a.client.Do(headReq)
 	if err != nil {
-		return "", false, false, false, nil
+		return "", false, false, false, nil, nil, ""
 	}
 	contentType := resp.Header.Get("Content-Type")
 	resp.Body.Close()
@@ -7303,11 +7974,11 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 		getReq = getReq.WithContext(ctxGet)
 		getResp, err := a.client.Do(getReq)
 		if err != nil {
-			return contentType, false, true, false, nil
+			return contentType, false, true, false, nil, nil, ""
 		}
 		defer getResp.Body.Close()
 		if getResp.StatusCode >= 400 {
-			return contentType, false, true, false, nil
+			return contentType, false, true, false, nil, nil, ""
 		}
 		contentType = getResp.Header.Get("Content-Type")
 		body, _ := io.ReadAll(getResp.Body)
@@ -7330,18 +8001,110 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 							Resolution:       resolution,
 						})
 					}
-					return contentType, true, false, false, infos
+					// Structure-driven audio: EXT-X-MEDIA renditions hang off each
+					// variant's Alternatives. Collect the TYPE=AUDIO URIs so the
+					// fault classifier can identify audio playlists by manifest
+					// declaration instead of filename spelling. Dedup across variants
+					// (all video variants reference the same audio GROUP-ID).
+					audioURIs := extractAudioURIs(master)
+					return contentType, true, false, false, infos, audioURIs, ""
 				case m3u8.MEDIA:
-					return contentType, false, true, false, nil
+					// #922 Tier 2: the media playlist authoritatively lists its
+					// segment (and EXT-X-MAP init) paths, so the rendition dir it
+					// belongs to is unambiguous — the caller maps that dir to this
+					// playlist's rendition (video resolution/rung or audio).
+					media := playlist.(*m3u8.MediaPlaylist)
+					return contentType, false, true, false, nil, nil, mediaRenditionDir(media)
 				}
 			}
 		}
-		return contentType, false, true, false, nil
+		return contentType, false, true, false, nil, nil, ""
 	}
 	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
-		return contentType, false, true, false, nil
+		// #926: parse the MPD to build the video ladder + segmentDir→rendition
+		// map. go-live's DASH is CMAF — the same segment dirs as HLS — so once
+		// the map is populated the classifier scopes DASH segments unchanged.
+		if getReq, err := http.NewRequest(http.MethodGet, parsed.String(), nil); err == nil {
+			ctxGet, cancelGet := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelGet()
+			getReq = getReq.WithContext(ctxGet)
+			if getResp, derr := a.client.Do(getReq); derr == nil {
+				defer getResp.Body.Close()
+				if getResp.StatusCode < 400 {
+					body, _ := io.ReadAll(io.LimitReader(getResp.Body, 8<<20))
+					if variants, renditions := parseDASHManifest(body); len(renditions) > 0 {
+						mergeRenditionMap(session, renditions)
+						return contentType, false, true, false, variants, nil, ""
+					}
+				}
+			}
+		}
+		return contentType, false, true, false, nil, nil, ""
 	}
-	return contentType, false, false, true, nil
+	return contentType, false, false, true, nil, nil, ""
+}
+
+// extractAudioURIs collects the EXT-X-MEDIA TYPE=AUDIO rendition URIs declared
+// in a master playlist, deduped. grafov/m3u8 hangs the EXT-X-MEDIA renditions
+// off each variant's Alternatives, and every video variant references the same
+// audio GROUP-ID, so the raw list is highly duplicated. This is the
+// structure-driven audio signal the fault classifier consumes (#919 Tier 1) —
+// what the manifest DECLARES as audio, not what a filename spells.
+func extractAudioURIs(master *m3u8.MasterPlaylist) []string {
+	if master == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var uris []string
+	for _, variant := range master.Variants {
+		if variant == nil {
+			continue
+		}
+		for _, alt := range variant.Alternatives {
+			if alt == nil || !strings.EqualFold(alt.Type, "AUDIO") || alt.URI == "" {
+				continue
+			}
+			if !seen[alt.URI] {
+				seen[alt.URI] = true
+				uris = append(uris, alt.URI)
+			}
+		}
+	}
+	return uris
+}
+
+// mediaRenditionDir returns the directory a media playlist's segments live under
+// — the stable, STRUCTURE-DRIVEN rendition identifier (#922 Tier 2). The
+// playlist lists its segment + EXT-X-MAP init paths authoritatively, so the dir
+// is unambiguous no matter how the playlist file itself is named. "" if the
+// playlist carries no segment/map to key off.
+func mediaRenditionDir(media *m3u8.MediaPlaylist) string {
+	if media == nil {
+		return ""
+	}
+	for _, seg := range media.Segments {
+		if seg == nil {
+			continue
+		}
+		if seg.Map != nil && seg.Map.URI != "" {
+			return renditionDirOf(seg.Map.URI)
+		}
+		if seg.URI != "" {
+			return renditionDirOf(seg.URI)
+		}
+	}
+	return ""
+}
+
+// renditionDirOf extracts the rendition directory token (lowercased) from a
+// segment/init path or URL — the last path element before the file. e.g.
+// "/go-live/c/720p/segment_00047.m4s" → "720p"; "audio/init.mp4" → "audio".
+func renditionDirOf(uri string) string {
+	u := uri
+	if parsed, err := url.Parse(uri); err == nil && parsed.Path != "" {
+		u = parsed.Path
+	}
+	return strings.ToLower(pathParent(strings.TrimPrefix(u, "/")))
 }
 
 func (a *App) trackPortThroughput() {
@@ -7458,11 +8221,21 @@ func (a *App) trackPortThroughput() {
 		}
 		adjacent1sRate, hasAdjacent1s := adjacentBacklogActiveRate(state.samples, shortCutoff)
 
+		// #910: mbps_shaper_* is derived from the TC HTB queue backlog — a
+		// KERNEL-shaper metric. In a degraded (faults-only) session the rate gate
+		// is closed and no kernel shaping applies, so the shaper metric is
+		// meaningless. Suppress it (and its rolling average) so it goes away
+		// rather than reporting a phantom shaper — matching a host with no tc.
+		shaperGated := a.traffic != nil && a.traffic.portRateGated(port)
+
 		var mbpsShaperRate interface{}
-		if backlogActive && hasAdjacent1s {
+		if backlogActive && hasAdjacent1s && !shaperGated {
 			mbpsShaperRate = math.Round((adjacent1sRate * 100)) / 100
 		} else {
 			mbpsShaperRate = nil
+		}
+		if shaperGated {
+			state.a1sHistory = state.a1sHistory[:0]
 		}
 		// Record non-nil a1s values and compute a6s as their rolling average over 6s.
 		if v, ok := mbpsShaperRate.(float64); ok {
@@ -7741,6 +8514,11 @@ func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 	}
 	if entry.PlayID == "" {
 		entry.PlayID = a.sessionStickyPlayID(sessionID)
+	}
+	if entry.PlayerID == "" {
+		// #911: sticky fallback for entries that didn't carry a player_id on the
+		// request (some sub-requests) — warms once the session is associated.
+		entry.PlayerID = a.sessionStickyPlayerID(sessionID)
 	}
 	if entry.AttemptID == 0 {
 		entry.AttemptID = a.sessionStickyAttemptID(sessionID)
@@ -9034,8 +9812,8 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 			portStr = getString(session, "x_forwarded_port_external")
 		}
 		if portNum, ok := a.sessionPortToInternal(portStr); ok {
-			if pattern, ok := a.getShapePattern(portNum); ok {
-				session["nftables_pattern_enabled"] = len(pattern.Steps) > 0
+			if pattern, ok := a.getShapePattern(portNum); ok && len(pattern.Steps) > 0 {
+				session["nftables_pattern_enabled"] = true
 				session["nftables_pattern_steps"] = pattern.Steps
 				if pattern.ActiveAt != "" {
 					session["nftables_pattern_step"] = pattern.ActiveStep
@@ -9046,6 +9824,12 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 			} else {
 				session["nftables_pattern_enabled"] = false
 				session["nftables_pattern_steps"] = []NftShapeStep{}
+				if getString(session, "nftables_pattern_driven_by") == "" {
+					session["nftables_pattern_step"] = nil
+					session["nftables_pattern_step_runtime"] = nil
+					session["nftables_pattern_rate_runtime_mbps"] = nil
+					session["nftables_pattern_step_runtime_at"] = nil
+				}
 			}
 		}
 		// nftables_bandwidth_mbps holds the operator's raw intent —
@@ -10012,6 +10796,12 @@ type FailureHandler struct {
 	failureAt        interface{}
 	failureRecoverAt interface{}
 	resetFailureType interface{}
+	// continuous faults EVERY matching request until the rule is cleared —
+	// the "on until I cancel it" mode. Set when both consecutive and
+	// frequency are 0 (see failureHandlerFromMatch). Short-circuits the
+	// cadence math so the rule never schedules a recovery window and never
+	// one-shot self-clears.
+	continuous bool
 }
 
 // refreshFailureStateFromLatest copies the fault-decision-relevant
@@ -10030,62 +10820,14 @@ func refreshFailureStateFromLatest(a *App, dst SessionData, sessionID string) {
 		if getString(s, "session_id") != sessionID {
 			continue
 		}
-		// Counters and timestamps that gate the dedup. Order matters
-		// only in the sense that all of these need to come from the
-		// same snapshot.
-		for _, k := range []string{
-			"segments_count", "manifest_requests_count", "master_manifest_requests_count",
-			"all_requests_count",
-			"segment_failure_at", "segment_failure_recover_at",
-			"manifest_failure_at", "manifest_failure_recover_at",
-			"master_manifest_failure_at", "master_manifest_failure_recover_at",
-			"all_failure_at", "all_failure_recover_at",
-		} {
-			if v, ok := s[k]; ok {
-				dst[k] = v
-			}
+		// The native per-rule cadence state gates the fault dedup: copied
+		// wholesale so the evaluator's read-modify-write sees the latest
+		// per-rule count / schedule and can't double-fire concurrent requests
+		// (#919). The v1 surface cursors it used to also copy are gone (#925).
+		if v, ok := s["_faultrule_state"]; ok {
+			dst["_faultrule_state"] = v
 		}
 		return
-	}
-}
-
-func NewFailureHandler(prefix string, session SessionData) *FailureHandler {
-	failureUnits := getString(session, prefix+"_failure_units")
-	consecutiveUnits := getString(session, prefix+"_consecutive_units")
-	frequencyUnits := getString(session, prefix+"_frequency_units")
-	if consecutiveUnits == "" {
-		consecutiveUnits = failureUnits
-	}
-	if frequencyUnits == "" {
-		frequencyUnits = failureUnits
-	}
-	// Defaults match the dashboard's visible default Mode
-	// ("Failures / Seconds"), which maps to consecutiveUnits=requests
-	// and frequencyUnits=seconds. The dashboard only PATCHes Mode
-	// when the user actively changes it, so a session whose
-	// `<prefix>_failure_mode` field was never set still has empty
-	// units here. Defaulting to the same shape as the visible Mode
-	// avoids "rate limit doesn't fire as expected" on first use.
-	if consecutiveUnits == "" {
-		consecutiveUnits = "requests"
-	}
-	if frequencyUnits == "" {
-		frequencyUnits = "seconds"
-	}
-	resetFailureType := session[prefix+"_reset_failure_type"]
-	if resetString, ok := resetFailureType.(string); ok {
-		resetFailureType = normalizeRequestFailureType(resetString)
-	}
-	return &FailureHandler{
-		failureType:      normalizeRequestFailureType(getString(session, prefix+"_failure_type")),
-		failureUnits:     failureUnits,
-		consecutiveUnits: consecutiveUnits,
-		frequencyUnits:   frequencyUnits,
-		failureFrequency: getInt(session, prefix+"_failure_frequency"),
-		consecutive:      getInt(session, prefix+"_consecutive_failures"),
-		failureAt:        session[prefix+"_failure_at"],
-		failureRecoverAt: session[prefix+"_failure_recover_at"],
-		resetFailureType: resetFailureType,
 	}
 }
 
@@ -10095,6 +10837,13 @@ func (h *FailureHandler) HandleFailure(count int, now time.Time) string {
 	}
 	if h.failureType == "none" {
 		return "none"
+	}
+	// Continuous mode: fault every matching request, no recovery window, no
+	// one-shot self-clear. The rule stays armed until the operator changes or
+	// clears it. This is what consecutive=0 & frequency=0 means (the UI's
+	// default) — "keep failing until I cancel it".
+	if h.continuous {
+		return h.failureType
 	}
 	if h.frequencyUnits == "seconds" {
 		h.handleFailureTime(count, now)
@@ -10372,214 +11121,6 @@ func (a *App) updateSessionGroup(groupID string, updates map[string]interface{})
 		}
 		return sessions, changed
 	})
-}
-
-type RequestHandler struct {
-	mode       string
-	session    SessionData
-	failureKey string
-}
-
-func NewRequestHandler(isSegment, isUpdateManifest, isMasterManifest bool, session SessionData) *RequestHandler {
-	if isSegment {
-		return &RequestHandler{mode: "segment", session: session}
-	}
-	if isMasterManifest {
-		return &RequestHandler{mode: "master_manifest", session: session}
-	}
-	if isUpdateManifest {
-		return &RequestHandler{mode: "manifest", session: session}
-	}
-	return &RequestHandler{mode: "unknown", session: session}
-}
-
-func (h *RequestHandler) HandleRequest(filename string) string {
-	// "All" override — when set, every HTTP request runs through the
-	// single all-rule and the per-kind tabs (segment/manifest/master)
-	// are bypassed. The dashboard reflects this by disabling those
-	// tabs and showing an "All override active" banner.
-	if getString(h.session, "all_failure_type") != "" &&
-		getString(h.session, "all_failure_type") != "none" {
-		return h.handleAllFailure(filename)
-	}
-	switch h.mode {
-	case "segment":
-		return h.handleSegmentFailure(filename)
-	case "manifest":
-		return h.handleManifestFailure(filename)
-	case "master_manifest":
-		return h.handleFailure("master_manifest", "master_manifest_requests_count")
-	default:
-		return "none"
-	}
-}
-
-func (h *RequestHandler) handleAllFailure(filename string) string {
-	h.session["all_requests_count"] = getInt(h.session, "all_requests_count") + 1
-	allURLs := getStringSlice(h.session, "all_failure_urls")
-	if len(allURLs) > 0 {
-		if !shouldApplyFailure(allURLs, filename, pathParent(filename)) {
-			return "none"
-		}
-	}
-	preFailureAt := h.session["all_failure_at"]
-	preFailureRecoverAt := h.session["all_failure_recover_at"]
-	failure := NewFailureHandler("all", h.session)
-	count := getInt(h.session, "all_requests_count")
-	failureType := failure.HandleFailure(count, time.Now())
-	log.Printf(
-		"ALL FAILURE DEBUG count=%d type_in=%s type_out=%s units=%s consecutiveUnits=%s frequencyUnits=%s freq=%d consecutive=%d preFailureAt=%v preFailureRecoverAt=%v postFailureAt=%v postFailureRecoverAt=%v file=%s",
-		count,
-		getString(h.session, "all_failure_type"),
-		failureType,
-		failure.failureUnits,
-		failure.consecutiveUnits,
-		failure.frequencyUnits,
-		failure.failureFrequency,
-		failure.consecutive,
-		preFailureAt,
-		preFailureRecoverAt,
-		failure.failureAt,
-		failure.failureRecoverAt,
-		filename,
-	)
-	h.session["all_failure_at"] = failure.failureAt
-	h.session["all_failure_recover_at"] = failure.failureRecoverAt
-	if failure.resetFailureType != nil {
-		h.session["all_failure_type"] = failure.resetFailureType
-		h.session["all_reset_failure_type"] = nil
-		h.session["control_revision"] = newControlRevision()
-	}
-	return failureType
-}
-
-func (h *RequestHandler) handleFailure(prefix, countKey string) string {
-	count := getInt(h.session, countKey) + 1
-	h.session[countKey] = count
-	failure := NewFailureHandler(prefix, h.session)
-	failureType := failure.HandleFailure(count, time.Now())
-	if prefix == "segment" {
-		log.Printf(
-			"SEGMENT FAILURE DEBUG count=%d type=%s units=%s consecutiveUnits=%s frequencyUnits=%s freq=%d consecutive=%d failureAt=%v recoverAt=%v resetType=%v",
-			count,
-			failure.failureType,
-			failure.failureUnits,
-			failure.consecutiveUnits,
-			failure.frequencyUnits,
-			failure.failureFrequency,
-			failure.consecutive,
-			failure.failureAt,
-			failure.failureRecoverAt,
-			failure.resetFailureType,
-		)
-	}
-	h.session[prefix+"_failure_at"] = failure.failureAt
-	h.session[prefix+"_failure_recover_at"] = failure.failureRecoverAt
-	if failure.resetFailureType != nil {
-		h.session[prefix+"_failure_type"] = failure.resetFailureType
-		h.session[prefix+"_reset_failure_type"] = nil
-		h.session["control_revision"] = newControlRevision()
-	}
-	return failureType
-}
-
-func (h *RequestHandler) handleManifestFailure(filename string) string {
-	h.session["manifest_requests_count"] = getInt(h.session, "manifest_requests_count") + 1
-	manifestURLs := getStringSlice(h.session, "manifest_failure_urls")
-	match := shouldApplyFailure(manifestURLs, filename, pathParent(filename))
-	if !match {
-		return "none"
-	}
-	failure := NewFailureHandler("manifest", h.session)
-	failureType := failure.HandleFailure(getInt(h.session, "manifest_requests_count"), time.Now())
-	h.session["manifest_failure_at"] = failure.failureAt
-	h.session["manifest_failure_recover_at"] = failure.failureRecoverAt
-	if failure.resetFailureType != nil {
-		h.session["manifest_failure_type"] = failure.resetFailureType
-		h.session["manifest_reset_failure_type"] = nil
-		h.session["control_revision"] = newControlRevision()
-	}
-	return failureType
-}
-
-func (h *RequestHandler) handleSegmentFailure(filename string) string {
-	h.session["segments_count"] = getInt(h.session, "segments_count") + 1
-	segmentURLs := getStringSlice(h.session, "segment_failure_urls")
-	match := shouldApplyFailure(segmentURLs, filename, pathParent(filename))
-	if !match {
-		return "none"
-	}
-	failure := NewFailureHandler("segment", h.session)
-	failureType := failure.HandleFailure(getInt(h.session, "segments_count"), time.Now())
-	log.Printf(
-		"SEGMENT FAILURE DEBUG count=%d type=%s units=%s consecutiveUnits=%s frequencyUnits=%s freq=%d consecutive=%d failureAt=%v recoverAt=%v resetType=%v",
-		getInt(h.session, "segments_count"),
-		failure.failureType,
-		failure.failureUnits,
-		failure.consecutiveUnits,
-		failure.frequencyUnits,
-		failure.failureFrequency,
-		failure.consecutive,
-		failure.failureAt,
-		failure.failureRecoverAt,
-		failure.resetFailureType,
-	)
-	h.session["segment_failure_at"] = failure.failureAt
-	h.session["segment_failure_recover_at"] = failure.failureRecoverAt
-	if failure.resetFailureType != nil {
-		h.session["segment_failure_type"] = failure.resetFailureType
-		h.session["segment_reset_failure_type"] = nil
-		h.session["control_revision"] = newControlRevision()
-	}
-	return failureType
-}
-
-func shouldApplyFailure(entries []string, filename, variant string) bool {
-	if len(entries) == 0 {
-		return false
-	}
-	decodedFilename := filename
-	if unescaped, err := url.PathUnescape(filename); err == nil {
-		decodedFilename = unescaped
-	}
-	base := pathBase(decodedFilename)
-	decodedVariant := variant
-	if unescaped, err := url.PathUnescape(variant); err == nil {
-		decodedVariant = unescaped
-	}
-	for _, entry := range entries {
-		if entry == "" {
-			continue
-		}
-		decodedEntry := entry
-		if unescaped, err := url.PathUnescape(entry); err == nil {
-			decodedEntry = unescaped
-		}
-		entryBase := pathBase(decodedEntry)
-		if entryBase == "All" || decodedEntry == "All" {
-			return true
-		}
-		if decodedEntry == decodedVariant || entry == variant {
-			return true
-		}
-		if decodedEntry == base || entry == base {
-			return true
-		}
-		if strings.Contains(decodedFilename, decodedEntry) || strings.Contains(filename, entry) {
-			return true
-		}
-		if strings.Contains(entryBase, "playlist_") {
-			trimmed := strings.TrimSuffix(entryBase, ".m3u8")
-			parts := strings.Split(trimmed, "_")
-			if len(parts) > 0 {
-				candidate := parts[len(parts)-1]
-				if candidate != "" && strings.Contains(decodedFilename, "/"+candidate+"/") {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 func updateSessionTraffic(session SessionData, bytesIn, bytesOut int64) {

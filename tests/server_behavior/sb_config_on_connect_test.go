@@ -264,7 +264,7 @@ func TestConfigOnConnect_Labels(t *testing.T) {
 }
 
 // ============================================================================
-// fault_rules[] (bracket/array form → per-surface v1 keys)
+// fault_rules[] (bracket/array form → stored on _v2_fault_rules, #925)
 // ============================================================================
 
 func TestConfigOnConnect_FaultRule(t *testing.T) {
@@ -274,14 +274,20 @@ func TestConfigOnConnect_FaultRule(t *testing.T) {
 			"&proxy.fault_rules[0].frequency=3"+
 			"&proxy.fault_rules[0].filter.request_kind[0]=segment")
 
-	if got := asString(sess["segment_failure_type"]); got != "corrupted" {
-		t.Errorf("segment_failure_type = %q, want corrupted", got)
+	// Faults live solely on _v2_fault_rules since #925 (native engine).
+	rules, ok := sess["_v2_fault_rules"].([]any)
+	if !ok || len(rules) != 1 {
+		t.Fatalf("_v2_fault_rules = %v, want one rule", sess["_v2_fault_rules"])
 	}
-	if got := asFloat(sess["segment_failure_frequency"]); got != 3 {
-		t.Errorf("segment_failure_frequency = %v, want 3", sess["segment_failure_frequency"])
+	rule, _ := rules[0].(map[string]any)
+	if asString(rule["type"]) != "corrupted" {
+		t.Errorf("rule.type = %v, want corrupted", rule["type"])
 	}
-	if got := asString(sess["segment_failure_mode"]); got != "requests" {
-		t.Errorf("segment_failure_mode = %q, want requests", got)
+	if asFloat(rule["frequency"]) != 3 {
+		t.Errorf("rule.frequency = %v, want 3", rule["frequency"])
+	}
+	if asString(rule["mode"]) != "requests" {
+		t.Errorf("rule.mode = %v, want requests", rule["mode"])
 	}
 }
 

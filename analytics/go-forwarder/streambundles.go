@@ -328,6 +328,7 @@ var bundleRegistry = map[string]bundleDef{
 			"request_range", "response_content_range",
 			"dns_ms", "connect_ms", "tls_ms",
 			"ttfb_ms", "transfer_ms", "total_ms", "client_wait_ms",
+			"delivery_rate_mbps",
 			"faulted", "fault_type", "fault_action", "fault_category",
 			"entry_fingerprint",
 		},

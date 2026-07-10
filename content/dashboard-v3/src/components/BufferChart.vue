@@ -11,7 +11,7 @@ import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import { useCompareOverlays, useCompareSelf } from '@/composables/useCompareContext';
 import { compareBufferSeries } from '@/composables/compareSeries';
 import type { Stream } from '@/composables/useSessionTimeSeries';
-import type { LifecycleMarker } from '@/composables/useLifecycleMarkers';
+import type { LifecycleMarker, EventMarker } from '@/composables/useLifecycleMarkers';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
 defineProps<{
@@ -21,6 +21,8 @@ defineProps<{
   coordId?: string;
   /** Shared player-lifecycle vertical lines, forwarded to MetricsLineChart. */
   lifecycleMarkers?: LifecycleMarker[];
+  /** Focus-window event bars (severity-filtered), forwarded to MetricsLineChart. */
+  eventMarkers?: EventMarker[];
   eventsStream: Stream<Record<string, unknown>>;
 }>();
 
@@ -62,6 +64,7 @@ const series = computed<SeriesSpec[]>(() =>
     :player-id="playerId"
     :coord-id="coordId"
     :lifecycle-markers="lifecycleMarkers"
+    :event-markers="eventMarkers"
     title="Buffer & live offset"
     unit="buffer (s)"
     :series="series"

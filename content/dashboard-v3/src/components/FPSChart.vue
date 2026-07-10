@@ -17,7 +17,7 @@ import { computed, ref, watch } from 'vue';
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import { tsOfRow } from '@/composables/chRowAdapter';
-import type { LifecycleMarker } from '@/composables/useLifecycleMarkers';
+import type { LifecycleMarker, EventMarker } from '@/composables/useLifecycleMarkers';
 import type { PlayerRecord } from '@/repo/v2-repo';
 import { useCompareOverlays, useCompareSelf } from '@/composables/useCompareContext';
 import { compareFpsSeries } from '@/composables/compareSeries';
@@ -29,6 +29,8 @@ const props = defineProps<{
   coordId?: string;
   /** Shared player-lifecycle vertical lines, forwarded to MetricsLineChart. */
   lifecycleMarkers?: LifecycleMarker[];
+  /** Focus-window event bars (severity-filtered), forwarded to MetricsLineChart. */
+  eventMarkers?: EventMarker[];
   eventsStream: Stream<Record<string, unknown>>;
 }>();
 
@@ -142,6 +144,7 @@ const series = computed<SeriesSpec[]>(() => {
     :player-id="playerId"
     :coord-id="coordId"
     :lifecycle-markers="lifecycleMarkers"
+    :event-markers="eventMarkers"
     title="Frame rate (derived)"
     unit="fps"
     :series="series"

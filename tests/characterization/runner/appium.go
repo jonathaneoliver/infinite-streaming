@@ -180,6 +180,12 @@ func (a *AppiumLauncher) SetLaunchArgs(args []string) {
 var baselineTestFlags = [][2]string{
 	{"-is.flag.4k", "true"},
 	{"-is.flag.peak_bitrate_mbps", "0"},
+	// Previews off: `0` decode slots so the home-screen preview-video tiles stay
+	// static thumbnails. Auto-playing previews add real GPU/decode load on the
+	// sims during launch + the fleet HOME barrier (every arm sits on the home
+	// screen before playback), which competes with the run. A mode that sets it
+	// explicitly wins. (App-side: PlayerViewModel reads this string-coerced.)
+	{"-is.flag.preview_video_slots", "0"},
 }
 
 func withBaselineTestFlags(args []string) []string {

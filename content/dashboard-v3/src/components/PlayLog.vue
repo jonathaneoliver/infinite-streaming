@@ -24,10 +24,17 @@
 import { computed, nextTick, onBeforeUnmount, ref, toRef, watch } from 'vue';
 import { usePlayer } from '@/composables/usePlayer';
 import { useChartCoordination } from '@/composables/useChartCoordination';
+import { collapseNetFailureLabels, humanizeNetFailure, labelTooltip } from '@/lib/labelGlossary';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 
 const props = defineProps<{
   playerId: string;
+  /** Shared chart-coordination key (SessionDisplay's `view:<player>`) so the
+   *  Play Log's focus window matches every other panel. Falls back to playerId,
+   *  but SessionDisplay MUST pass it — otherwise the log reads an unpinned coord
+   *  bucket and shows nothing in archive views (#828 wired every other panel but
+   *  missed PlayLog). Data still keys off playerId. Mirrors NetworkLog. */
+  coordId?: string;
   /** play_id from the URL, used as the fallback `play_id` value for
    *  event rows — the events SSE doesn't yet project play_id (the
    *  derivation in events_query.go doesn't carry it through the
@@ -46,7 +53,7 @@ const props = defineProps<{
 
 const playerIdRef = toRef(props, 'playerId');
 usePlayer(playerIdRef); // keep the SSE subscription warm
-const coord = useChartCoordination(playerIdRef);
+const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
 
 /** Real player UUID for display purposes. The `playerId` prop is the
  *  shared cache key used by useChartCoordination + the streams cache;
@@ -250,7 +257,13 @@ function buildNetworkRow(raw: Record<string, unknown>): Row | null {
   const durMs = totalMs > 0 ? totalMs : summed;
   const enriched: Record<string, unknown> = { ...raw };
   if (bytesOut > 0) enriched.KB = (bytesOut / 1024);
-  if (transferMs > 0 && bytesOut > 0) {
+  // Prefer the kernel-measured delivery rate (#850 — honest under tc
+  // shaping); the implied bytes/transfer figure is the fallback for rows
+  // that predate the field.
+  const kernelMbps = numOrZero(raw.delivery_rate_mbps);
+  if (kernelMbps > 0) {
+    enriched.Mbps = kernelMbps;
+  } else if (transferMs > 0 && bytesOut > 0) {
     enriched.Mbps = (bytesOut * 8) / (transferMs * 1000);
   }
   if (durMs > 0) enriched.duration = fmtMs(durMs);
@@ -500,6 +513,25 @@ function rowLabels(r: Row): string[] {
   // control_events rows carry their own labels[] (see
   // computeControlLabels in labels.go) so no synthesis is needed.
   return [];
+}
+
+/** Chip list for display: collapse a failed network row's facet labels under
+ *  its derived `net_failure:` signature (#892) so the line reads as one
+ *  failure. rowLabels() (the query/tint surface) is left untouched — the
+ *  signature carries the worst facet severity, so the row tint is unchanged. */
+function displayLabels(r: Row): string[] {
+  return collapseNetFailureLabels(rowLabels(r));
+}
+/** Chip text: humanise the net_failure signature; every other label keeps its
+ *  existing form (event name with the `*` synth mark). */
+function labelChipText(l: string): string {
+  const tail = l.slice(l.indexOf('=') + 1);
+  const ev = tail.replace(/^\*/, '');
+  return ev.startsWith('net_failure:') ? humanizeNetFailure(ev) : tail;
+}
+/** Chip hover: composed tooltip for the signature, raw label otherwise. */
+function labelChipTitle(l: string): string {
+  return l.includes('net_failure:') ? (labelTooltip(l) || l) : l;
 }
 
 /** #506 batch-derived per-row token, LEFT-JOINed by the forwarder
@@ -1103,12 +1135,12 @@ function onRowsWheel(e: WheelEvent) {
           <div class="cell c-flags" :style="{ color: rowFlags(r).color }">{{ rowFlags(r).text }}</div>
           <div class="cell c-labels">
             <span
-              v-for="l in rowLabels(r)"
+              v-for="l in displayLabels(r)"
               :key="l"
               class="label-chip"
               :class="`label-${labelSeverity(l)}`"
-              :title="l"
-            >{{ l.slice(l.indexOf('=') + 1) }}</span>
+              :title="labelChipTitle(l)"
+            >{{ labelChipText(l) }}</span>
           </div>
           <div class="cell c-player" :title="r.playerId">{{ shortId(r.playerId) }}</div>
           <div class="cell c-play" :title="r.playId">{{ shortId(r.playId) }}</div>

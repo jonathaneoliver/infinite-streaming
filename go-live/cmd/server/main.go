@@ -94,6 +94,7 @@ func main() {
 	fmt.Println("  GET  /go-live/{content}/master.m3u8 - On-demand master playlist")
 	fmt.Println("  GET  /go-live/{content}/{variant}.m3u8 - On-demand variant playlist")
 	fmt.Println("  GET  /go-live/{content}/manifest.mpd - On-demand DASH MPD (LL)")
+	fmt.Println("  GET  /go-live/{content}/manifest_1s.mpd - On-demand DASH MPD (1s)")
 	fmt.Println("  GET  /go-live/{content}/manifest_2s.mpd - On-demand DASH MPD (2s)")
 	fmt.Println("  GET  /go-live/{content}/manifest_6s.mpd - On-demand DASH MPD (6s)")
 	fmt.Println()

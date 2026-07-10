@@ -145,7 +145,7 @@ func qoeDefaults() *QoEThresholds {
 	t.Continuity.StallBurstWindowS = 60
 	t.Network.TTFBBreachMs = 500
 	t.Network.TransferStallMs = 5000
-	t.Network.RateCapBreachFactor = 1.10
+	t.Network.RateCapBreachFactor = 1.25
 	t.Network.CMCDMTPDriftRatio = 0.5
 	t.ABR.BitrateUnderutilizedRatio = 0.5   // variant using < half the link
 	t.ABR.AbrHeadroomMargin = 0.85          // need ~15% headroom to sustain a rung

@@ -300,15 +300,20 @@ func TestConfigOnConnect_MaterializeEndToEnd(t *testing.T) {
 	if !getBool(sess, "content_strip_resolution") {
 		t.Errorf("content_strip_resolution = false, want true")
 	}
-	// fault_rules[segment] → segment_*
-	if got := getString(sess, "segment_failure_type"); got != "corrupted" {
-		t.Errorf("segment_failure_type = %q, want corrupted", got)
+	// fault_rules → _v2_fault_rules (native engine; no v1 surface projection since #925)
+	rules, _ := sess["_v2_fault_rules"].([]any)
+	if len(rules) != 1 {
+		t.Fatalf("_v2_fault_rules = %v, want one rule", sess["_v2_fault_rules"])
 	}
-	if got := getInt(sess, "segment_failure_frequency"); got != 3 {
-		t.Errorf("segment_failure_frequency = %v, want 3", got)
+	rule, _ := rules[0].(map[string]any)
+	if rule["type"] != "corrupted" {
+		t.Errorf("rule.type = %v, want corrupted", rule["type"])
 	}
-	if got := getString(sess, "segment_failure_mode"); got != "requests" {
-		t.Errorf("segment_failure_mode = %q, want requests", got)
+	if got := intFromInterface(rule["frequency"]); got != 3 {
+		t.Errorf("rule.frequency = %v, want 3", rule["frequency"])
+	}
+	if rule["mode"] != "requests" {
+		t.Errorf("rule.mode = %v, want requests", rule["mode"])
 	}
 	// labels → _v2_labels
 	labels, ok := sess["_v2_labels"].(map[string]any)
@@ -317,17 +322,22 @@ func TestConfigOnConnect_MaterializeEndToEnd(t *testing.T) {
 	}
 }
 
-// TestConfigOnConnect_MaterializeRejectsVariantFilter documents that config-on-
-// connect inherits the PATCH translator's limits: filter.variant has no v1
-// surface yet, so it is rejected at materialization (→ 400 on the bootstrap).
-func TestConfigOnConnect_MaterializeRejectsVariantFilter(t *testing.T) {
+// TestConfigOnConnect_MaterializeAcceptsVariantFilter is the #919 reversal:
+// filter.variant is now evaluated natively from _v2_fault_rules, so config-on-
+// connect materialization must ACCEPT it (no v1 surface needed) and stash the
+// rule rather than rejecting the bootstrap.
+func TestConfigOnConnect_MaterializeAcceptsVariantFilter(t *testing.T) {
 	patch, _, err := parseProxyArgs(mustQuery(t,
 		"proxy.fault_rules[0].type=corrupted"+
 			"&proxy.fault_rules[0].filter.variant.bandwidth_above=6000000"))
 	if err != nil {
-		t.Fatalf("parse should succeed (translation is where it's rejected): %v", err)
+		t.Fatalf("parse should succeed: %v", err)
 	}
-	if aerr := v2server.ApplyConfigPatch(SessionData{}, patch); aerr == nil {
-		t.Fatalf("expected ApplyConfigPatch to reject filter.variant, got nil")
+	sess := SessionData{}
+	if aerr := v2server.ApplyConfigPatch(sess, patch); aerr != nil {
+		t.Fatalf("ApplyConfigPatch must accept filter.variant post-#919, got %v", aerr)
+	}
+	if rules, ok := sess["_v2_fault_rules"].([]any); !ok || len(rules) != 1 {
+		t.Fatalf("variant-scoped rule not stashed on _v2_fault_rules; got %v", sess["_v2_fault_rules"])
 	}
 }

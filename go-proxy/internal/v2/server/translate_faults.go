@@ -2,82 +2,16 @@ package server
 
 import "fmt"
 
-// Translation between v2's `fault_rules` array model and v1's
-// 5-surface storage model.
+// Storage + validation for the v2 fault_rules array.
 //
-// v2 model: an ordered array of FaultRule entries, each with its own
-// filter + behaviour. Evaluation is first-match-wins.
-//
-// v1 model: five hardcoded surfaces (segment, partial, manifest,
-// master_manifest, audio_segment, audio_manifest, init) — each with its
-// own (failure_type, frequency, consecutive, units, mode) tuple — plus
-// an `all_*` family that overrides every surface when set.
-//
-// Translation strategy:
-//  1. Walk the v2 fault_rules array.
-//  2. For each rule, derive the target v1 surface from
-//     `filter.request_kind`. A rule with no filter maps to the v1
-//     `all_*` family.
-//  3. Map the v2 type / frequency / consecutive / mode straight onto
-//     the v1 surface fields.
-//  4. Stash the original v2 array on `_v2_fault_rules` for round-trip.
-//
-// Subset support: rules with `filter.variant`, `filter.codec`, or
-// `filter.url_match` need v1-side variant tracking that doesn't exist
-// yet — those return an unsupportedFaultRuleError so the handler can
-// surface a 501 with detail.
+// Since #925 the proxy runtime evaluates fault_rules NATIVELY
+// (evaluateFaultRules in package main reads `_v2_fault_rules` directly), so
+// there is no longer any translation to v1 surface fields. This file just
+// stores the array and validates rule shape — the name is kept for the many
+// handler call sites.
 
-// supportedFaultTypes lists the v2 FaultRule.type values that map to
-// v1 surface failure_type. The translator stores these verbatim on
-// the v1 session as `<surface>_failure_type`; the proxy's request
-// handler is the consumer that knows how to act on each type. The
-// dashboard's failure-type radios drive every value here.
-var supportedFaultTypes = map[string]bool{
-	"none":                       true,
-	"404":                        true,
-	"403":                        true,
-	"500":                        true,
-	"503":                        true,
-	"timeout":                    true,
-	"corrupted":                  true,
-	"connection_refused":         true,
-	"dns_failure":                true,
-	"rate_limiting":              true,
-	"request_connect_reset":      true,
-	"request_connect_delayed":    true,
-	"request_connect_hang":       true,
-	"request_first_byte_reset":   true,
-	"request_first_byte_delayed": true,
-	"request_first_byte_hang":    true,
-	"request_body_reset":         true,
-	"request_body_delayed":       true,
-	"request_body_hang":          true,
-}
-
-// v1SurfaceForRequestKind returns the v1 field-name prefix for a v2
-// request_kind value. Returns ("", false) for v2-only kinds (init,
-// partial, audio_*) that v1 doesn't model as a distinct surface.
-func v1SurfaceForRequestKind(kind string) (string, bool) {
-	switch kind {
-	case "segment":
-		return "segment", true
-	case "partial":
-		// v1's segment surface covers HLS partials too; the proxy
-		// doesn't distinguish during request classification.
-		return "segment", true
-	case "manifest":
-		return "manifest", true
-	case "master_manifest":
-		return "master_manifest", true
-	case "audio_segment", "audio_manifest", "init":
-		// v1 has no dedicated surface — Phase I+ work.
-		return "", false
-	}
-	return "", false
-}
-
-// unsupportedFaultRuleError describes why a v2 fault_rule can't be
-// translated to v1. Surfaced as 501 with detail by the handler.
+// unsupportedFaultRuleError describes why a v2 fault_rule is malformed.
+// Surfaced as 501 with detail by the handler.
 type unsupportedFaultRuleError struct {
 	RuleID string
 	Reason string
@@ -90,222 +24,72 @@ func (e *unsupportedFaultRuleError) Error() string {
 	return fmt.Sprintf("unsupported fault_rule %q: %s", e.RuleID, e.Reason)
 }
 
-// faultSurfaces names every v1 surface translateFaultRules can write
-// to. Used to clear stale v1 state before re-applying the v2 array.
-var faultSurfaces = []string{"segment", "manifest", "master_manifest", "all"}
-
-// clearV1FaultSurfaces resets every v1 fault surface to "none" / 0.
-// Called before applying a fresh v2 fault_rules array so abandoned
-// rules don't linger in v1's surface fields.
-func clearV1FaultSurfaces(s map[string]any) {
-	for _, surface := range faultSurfaces {
-		s[surface+"_failure_type"] = "none"
-		s[surface+"_failure_frequency"] = 0
-		s[surface+"_consecutive_failures"] = 0
-		s[surface+"_failure_mode"] = "failures_per_seconds"
-		s[surface+"_failure_units"] = "requests"
-		s[surface+"_consecutive_units"] = "requests"
-		s[surface+"_frequency_units"] = "seconds"
-		// #643 — also clear the engine's persisted window cursor, or a
-		// re-armed rule RESUMES the previous arm's half-consumed
-		// fault/recover window and silently under-delivers. This is the
-		// v2 twin of resetFailureWindowState on the v1 PATCH path
-		// (cmd/server/main.go); the harness CLI arms faults through
-		// HERE, which is why the v1-side fix alone didn't take.
-		delete(s, surface+"_failure_at")
-		delete(s, surface+"_failure_recover_at")
-	}
-}
-
-// translateFaultRules applies a v2 fault_rules array to v1 surface
-// fields on the supplied session map. Stashes the original array on
-// `_v2_fault_rules`. Returns an unsupportedFaultRuleError if any rule
-// uses a filter the v1 model can't represent.
-//
-// Rules are first-match-wins: only the first rule targeting each v1
-// surface produces side-effects; subsequent rules that hit the same
-// surface are stored on `_v2_fault_rules` but don't drive v1 state.
+// translateFaultRules stores the v2 fault_rules array as the sole fault input
+// for the native evaluator, and resets the per-rule cadence cursors so a
+// re-armed rule opens a FRESH window (#643) rather than resuming the previous
+// arm's half-consumed one. Returns an unsupportedFaultRuleError for a malformed
+// rule (surfaced as 501). rules==nil clears all fault config.
 func translateFaultRules(s map[string]any, rules []any) error {
-	clearV1FaultSurfaces(s)
+	// Re-arm reset: drop the native per-rule cadence state (the #925 successor
+	// to clearing v1's <surface>_failure_at cursors) so a config change doesn't
+	// resume the previous arm's window.
+	delete(s, "_faultrule_state")
 	if rules == nil {
 		delete(s, "_v2_fault_rules")
 		return nil
 	}
-	s["_v2_fault_rules"] = rules
-
-	used := map[string]bool{}
 	for _, raw := range rules {
 		rule, ok := raw.(map[string]any)
 		if !ok {
 			return &unsupportedFaultRuleError{Reason: "fault_rules entries must be objects"}
 		}
-		if err := applyOneFaultRule(s, rule, used); err != nil {
+		if err := validateFaultRule(rule); err != nil {
 			return err
 		}
 	}
+	s["_v2_fault_rules"] = rules
 	return nil
 }
 
-// applyOneFaultRule writes one v2 rule to the v1 surface(s) it
-// targets. Updates `used` so first-match-wins ordering holds.
-func applyOneFaultRule(s map[string]any, rule map[string]any, used map[string]bool) error {
+// validateFaultRule rejects structurally-malformed rules (a client 4xx/501).
+// The native matcher tolerates absent/loose fields and honours any fault type,
+// so only a broken filter/url_match shape is an error.
+func validateFaultRule(rule map[string]any) error {
 	id, _ := rule["id"].(string)
-
-	// Reject filter shapes the v1 model can't express.
 	filterAny, hasFilter := rule["filter"]
-	var filter map[string]any
-	// urlPatterns is the list of URL-substring entries the rule's
-	// filter.url_match maps to. Written verbatim to the v1 surface's
-	// `_failure_urls` slice — the legacy v1 matcher (shouldApplyFailure)
-	// then scopes the fault to URLs whose pathBase / pathParent matches
-	// any of these strings.
-	var urlPatterns []string
-	if hasFilter && filterAny != nil {
-		f, ok := filterAny.(map[string]any)
-		if !ok {
-			return &unsupportedFaultRuleError{RuleID: id, Reason: "filter must be an object"}
-		}
-		if _, has := f["variant"]; has {
-			return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.variant requires v1 variant tracking (not yet wired)"}
-		}
-		if _, has := f["codec"]; has {
-			return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.codec requires v1 variant tracking (not yet wired)"}
-		}
-		if um, has := f["url_match"]; has && um != nil {
-			umMap, ok := um.(map[string]any)
-			if !ok {
-				return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.url_match must be an object"}
-			}
-			umMode, _ := umMap["mode"].(string)
-			switch umMode {
-			case "substring", "basename", "exact", "":
-				// v1's matcher treats every entry as
-				// substring-or-pathParent-or-pathBase, so all three
-				// modes collapse to the same v1 behaviour. mode="" is
-				// the schema's effective default (also substring).
-			case "regex":
-				return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.url_match.mode=regex is not yet wired (v1's matcher is substring-only)"}
-			default:
-				return &unsupportedFaultRuleError{RuleID: id, Reason: fmt.Sprintf("filter.url_match.mode=%q is not recognised", umMode)}
-			}
-			rawPatterns, _ := umMap["patterns"].([]any)
-			for _, p := range rawPatterns {
-				if str, ok := p.(string); ok && str != "" {
-					urlPatterns = append(urlPatterns, str)
-				}
-			}
-			if len(urlPatterns) == 0 {
-				return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.url_match.patterns must contain at least one non-empty string"}
-			}
-		}
-		filter = f
+	if !hasFilter || filterAny == nil {
+		return nil
 	}
-
-	faultType, _ := rule["type"].(string)
-	if !supportedFaultTypes[faultType] {
-		return &unsupportedFaultRuleError{
-			RuleID: id,
-			Reason: "unsupported fault type — v1 surface model accepts none / 404 / 500 / 503 / timeout / corrupted",
-		}
+	f, ok := filterAny.(map[string]any)
+	if !ok {
+		return &unsupportedFaultRuleError{RuleID: id, Reason: "filter must be an object"}
 	}
-
-	frequency := 0
-	if f, ok := numericFloat(rule["frequency"]); ok {
-		frequency = int(f)
+	um, has := f["url_match"]
+	if !has || um == nil {
+		return nil
 	}
-	consecutive := 1
-	if f, ok := numericFloat(rule["consecutive"]); ok && int(f) >= 1 {
-		consecutive = int(f)
+	umMap, ok := um.(map[string]any)
+	if !ok {
+		return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.url_match must be an object"}
 	}
-	mode, _ := rule["mode"].(string)
-	if mode == "" {
-		mode = "failures_per_seconds"
-	}
-
-	// Resolve targets.
-	var targets []string
-	switch {
-	case filter == nil:
-		targets = []string{"all"}
-	default:
-		kinds, ok := filter["request_kind"].([]any)
-		if !ok || len(kinds) == 0 {
-			// filter present but no request_kind → effectively no
-			// surface scoping, treat as all.
-			targets = []string{"all"}
-		} else {
-			seen := map[string]bool{}
-			for _, k := range kinds {
-				kindStr, ok := k.(string)
-				if !ok {
-					continue
-				}
-				surface, ok := v1SurfaceForRequestKind(kindStr)
-				if !ok {
-					return &unsupportedFaultRuleError{
-						RuleID: id,
-						Reason: fmt.Sprintf("request_kind %q has no v1 surface (init / audio_* not yet wired)", kindStr),
-					}
-				}
-				if !seen[surface] {
-					seen[surface] = true
-					targets = append(targets, surface)
-				}
-			}
-			if len(targets) == 0 {
-				targets = []string{"all"}
-			}
-		}
-	}
-
-	for _, surface := range targets {
-		if used[surface] {
-			// First-match-wins: a previous rule already claimed this
-			// v1 surface. Subsequent rules that hit it are stored on
-			// `_v2_fault_rules` (already done above) but don't drive
-			// v1 state.
-			continue
-		}
-		used[surface] = true
-		s[surface+"_failure_type"] = faultType
-		s[surface+"_failure_frequency"] = frequency
-		s[surface+"_consecutive_failures"] = consecutive
-		s[surface+"_failure_mode"] = mode
-		// v1's shouldApplyFailure short-circuits to "none" when the
-		// surface's URL filter is empty. For a rule WITH url_match
-		// patterns, write the patterns verbatim — the legacy matcher
-		// will scope the fault to URLs whose pathBase / pathParent
-		// matches any of them. For a rule WITHOUT a url filter, set
-		// the legacy "All" sentinel so the matcher applies the rule
-		// to every URL on the surface.
-		if len(urlPatterns) > 0 {
-			out := make([]any, 0, len(urlPatterns))
-			for _, p := range urlPatterns {
-				out = append(out, p)
-			}
-			s[surface+"_failure_urls"] = out
-		} else {
-			s[surface+"_failure_urls"] = []any{"All"}
-		}
+	if mode, _ := umMap["mode"].(string); mode != "" {
 		switch mode {
-		case "failures_per_seconds":
-			s[surface+"_consecutive_units"] = "requests"
-			s[surface+"_frequency_units"] = "seconds"
-		case "requests":
-			s[surface+"_consecutive_units"] = "requests"
-			s[surface+"_frequency_units"] = "requests"
-		case "seconds":
-			s[surface+"_consecutive_units"] = "seconds"
-			s[surface+"_frequency_units"] = "seconds"
+		case "substring", "basename", "exact", "regex":
+		default:
+			return &unsupportedFaultRuleError{RuleID: id, Reason: fmt.Sprintf("filter.url_match.mode=%q is not recognised", mode)}
 		}
 	}
-	return nil
+	patterns, _ := umMap["patterns"].([]any)
+	for _, p := range patterns {
+		if str, ok := p.(string); ok && str != "" {
+			return nil
+		}
+	}
+	return &unsupportedFaultRuleError{RuleID: id, Reason: "filter.url_match.patterns must contain at least one non-empty string"}
 }
 
-// faultRulesFromSession returns the v2 fault_rules array stashed on the
-// session map (or nil if the player has never had a v2-shaped rules
-// patch applied). Used by the per-rule sub-resource handlers to
-// fetch / mutate / delete one rule by id.
+// faultRulesFromSession returns the stored v2 fault_rules array (raw), used by
+// the per-rule sub-resource handlers to locate and mutate a single rule.
 func faultRulesFromSession(s map[string]any) []any {
 	if s == nil {
 		return nil
@@ -316,8 +100,7 @@ func faultRulesFromSession(s map[string]any) []any {
 	return nil
 }
 
-// findFaultRuleIndex returns the array index of the first rule whose
-// id matches the supplied ruleID, or -1.
+// findFaultRuleIndex returns the index of the rule with the given id, or -1.
 func findFaultRuleIndex(rules []any, ruleID string) int {
 	for i, raw := range rules {
 		rule, ok := raw.(map[string]any)

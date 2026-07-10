@@ -1502,6 +1502,8 @@ components:
         transfer_ms: { type: number, format: float }
         total_ms: { type: number, format: float }
         client_wait_ms: { type: number, format: float }
+        delivery_rate_mbps: { type: number, format: float }
+        delivery_rate_app_limited: { type: integer, enum: [0, 1] }
         faulted: { type: integer, enum: [0, 1] }
         fault_type: { type: string }
         fault_action: { type: string }

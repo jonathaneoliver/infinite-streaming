@@ -1,19 +1,34 @@
 #!/bin/sh
-# post-checkout — ensure content/dashboard-v3/node_modules exists in this
-# worktree so `make test-deploy-dev` / `make test-deploy-frontend` can build
-# the Vue dashboard.
+# post-checkout — seed the gitignored-but-needed files a fresh worktree
+# doesn't inherit, so `make test-deploy-dev` / `make test-deploy-frontend`
+# work out of the box:
+#   1. .env                            — deploy creds (TEST_SSH, …)
+#   2. content/dashboard-v3/node_modules — Vue build deps
 #
-# node_modules is gitignored, so a fresh `git worktree add` never brings it.
-# That bit a #740 deploy on 2026-06-11: `make test-deploy-dev`'s rsync --delete
-# wiped the test-dev box, THEN the Vue build failed for lack of node_modules,
-# leaving the box half-updated. This hook seeds deps on every worktree add.
+# Both are gitignored, so a fresh `git worktree add` never brings them.
+# node_modules bit a #740 deploy on 2026-06-11 (rsync --delete wiped test-dev,
+# THEN the Vue build failed for lack of deps). A missing .env is subtler: the
+# Makefile falls back to the placeholder TEST_SSH=user@test-host, so `make
+# deploy` dies with "Could not resolve hostname test-host".
 #
-# Idempotent and quiet: no-op when deps are already present or when
-# dashboard-v3 isn't part of the checked-out tree. Never fails the checkout.
+# Idempotent and quiet: no-op when a file is already present or has no source
+# to copy from. Never fails the checkout.
 #
 # Install into the active hooks dir with `make install-hooks`.
 
 top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+
+# 1. .env — copy from the first sibling worktree that has one.
+if [ ! -f "$top/.env" ]; then
+	git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}' | while read -r wt; do
+		[ "$wt" = "$top" ] && continue
+		[ -f "$wt/.env" ] || continue
+		echo "[post-checkout] seeding .env from $wt"
+		cp "$wt/.env" "$top/.env" 2>/dev/null && break
+	done
+fi
+
+# 2. content/dashboard-v3/node_modules
 dir="$top/content/dashboard-v3"
 [ -f "$dir/package.json" ] || exit 0
 [ -d "$dir/node_modules/.bin" ] && exit 0

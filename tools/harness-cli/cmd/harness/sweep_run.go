@@ -708,7 +708,12 @@ func toProxyFaultRule(f *sweep.Fault) (proxy.FaultRule, error) {
 	}
 	m := proxy.FaultRuleMode(mode)
 	rule.Mode = &m
-	if filter, err := buildFilter(f.RequestKind, f.URLSubstr, ""); err != nil {
+	if filter, err := buildFilter(faultFilterInput{
+		kindCSV:        f.RequestKind,
+		urlSubstr:      f.URLSubstr,
+		bandwidthAbove: -1,
+		bandwidthBelow: -1,
+	}); err != nil {
 		return rule, err
 	} else if filter != nil {
 		rule.Filter = filter

@@ -348,12 +348,17 @@ func TestQoEMinVariantStuck(t *testing.T) {
 }
 
 func TestQoEFPSDip(t *testing.T) {
-	// dropped/(displayed+dropped) ≥ 0.2.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", FramesDisplayed: 81, FramesDropped: 19}); hasLabel(got, qoeLabel(SevWarning, "qoe_fps_dip")) {
+	// dropped/(displayed+dropped) ≥ 0.2. Rows carry a first frame — fps is
+	// gated behind playback start (no stable render rate before then).
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", VideoFirstFrameTimeMs: 100, FramesDisplayed: 81, FramesDropped: 19}); hasLabel(got, qoeLabel(SevWarning, "qoe_fps_dip")) {
 		t.Fatalf("19%% drop should not dip: %v", got)
 	}
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", FramesDisplayed: 80, FramesDropped: 20}); !hasLabel(got, qoeLabel(SevWarning, "qoe_fps_dip")) {
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", VideoFirstFrameTimeMs: 100, FramesDisplayed: 80, FramesDropped: 20}); !hasLabel(got, qoeLabel(SevWarning, "qoe_fps_dip")) {
 		t.Fatalf("20%% drop should dip: %v", got)
+	}
+	// Pre-first-frame: a high drop ratio must NOT fire (startup gate).
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", VideoFirstFrameTimeMs: 0, FramesDisplayed: 80, FramesDropped: 20}); hasLabel(got, qoeLabel(SevWarning, "qoe_fps_dip")) {
+		t.Fatalf("pre-first-frame fps must not fire: %v", got)
 	}
 }
 
@@ -408,17 +413,17 @@ func TestQoEAbrStartupGate(t *testing.T) {
 
 func TestQoERateCapBreach(t *testing.T) {
 	want := qoeLabel(SevWarning, "qoe_rate_cap_breach")
-	// #657: gate on the kernel-measured served rate. 12 > 10*1.10=11 → breach.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NftablesBandwidthMbps: 12, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
-		t.Fatalf("served 12 over cap 10 should breach: %v", got)
+	// #657: gate on the kernel-measured served rate. 13 > 10*1.25=12.5 → breach.
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NftablesBandwidthMbps: 13, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
+		t.Fatalf("served 13 over cap 10 should breach: %v", got)
 	}
 	// Fallback to the proxy per-segment transfer rate when nftables is absent.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", MbpsTransferRate: 12, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
-		t.Fatalf("transfer-rate fallback 12 over cap 10 should breach: %v", got)
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", MbpsTransferRate: 13, EffectiveRateLimitMbps: 10}); !hasLabel(got, want) {
+		t.Fatalf("transfer-rate fallback 13 over cap 10 should breach: %v", got)
 	}
-	// 10.5 < 11 → no breach.
-	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NftablesBandwidthMbps: 10.5, EffectiveRateLimitMbps: 10}); hasLabel(got, want) {
-		t.Fatalf("served 10.5 within factor should not breach: %v", got)
+	// 12 < 10*1.25=12.5 → no breach (would have breached under the old 1.10).
+	if got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", NftablesBandwidthMbps: 12, EffectiveRateLimitMbps: 10}); hasLabel(got, want) {
+		t.Fatalf("served 12 within factor should not breach: %v", got)
 	}
 	// #657: a client network_bitrate over-read (30) must NOT breach when the
 	// server actually delivered under the cap (the whole point of the re-base).
@@ -499,7 +504,7 @@ func TestQoENetworkRowLabels(t *testing.T) {
 func TestQoELiveOffset(t *testing.T) {
 	mk := func(off, cfgd float32) []string {
 		return evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress",
-			RecommendedOffsetS: 5, LiveOffsetS: off, ConfiguredOffsetS: cfgd})
+			VideoFirstFrameTimeMs: 100, RecommendedOffsetS: 5, LiveOffsetS: off, ConfiguredOffsetS: cfgd})
 	}
 	concerning := qoeLabel(SevWarning, "qoe_live_offset_concerning")
 	breach := qoeLabel(SevCritical, "qoe_live_offset_breach")
@@ -532,12 +537,33 @@ func TestQoELiveOffset(t *testing.T) {
 }
 
 func TestQoELiveOffsetSilentOnVOD(t *testing.T) {
-	// No recommended offset (VOD) → no live labels.
-	got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", LiveOffsetS: 60})
+	// No recommended offset (VOD) → no live labels. First frame present so
+	// it's the VOD/no-rec path being tested, not the startup gate.
+	got := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", VideoFirstFrameTimeMs: 100, LiveOffsetS: 60})
 	for _, l := range got {
 		if l == qoeLabel(SevWarning, "qoe_live_offset_concerning") || l == qoeLabel(SevCritical, "qoe_live_offset_breach") {
 			t.Fatalf("VOD row should emit no live-offset label: %v", got)
 		}
+	}
+}
+
+// TestQoELiveOffsetStartupGate — a breach-magnitude offset must NOT fire
+// before the first frame (the playhead is still at 0 during startup buffering
+// and live_offset_s is uninitialised, e.g. edge+recommended). The same offset
+// with a first frame present DOES fire. Guards the whole-play tier against a
+// spurious startup breach (the d1412504 case).
+func TestQoELiveOffsetStartupGate(t *testing.T) {
+	breach := qoeLabel(SevCritical, "qoe_live_offset_breach")
+	// excess = 120 - 21 = 99 ≫ the 10s breach margin.
+	pre := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress",
+		VideoFirstFrameTimeMs: 0, RecommendedOffsetS: 21, LiveOffsetS: 120})
+	if hasLabel(pre, breach) {
+		t.Fatalf("pre-first-frame offset must not breach: %v", pre)
+	}
+	post := evalQoE(&row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress",
+		VideoFirstFrameTimeMs: 2493, RecommendedOffsetS: 21, LiveOffsetS: 120})
+	if !hasLabel(post, breach) {
+		t.Fatalf("post-first-frame offset breach should fire: %v", post)
 	}
 }
 
@@ -722,7 +748,13 @@ func TestQoEReFiresOnNewInstance(t *testing.T) {
 	}
 }
 
-func TestQoETerminalSummaryForcesStillTrue(t *testing.T) {
+// TestQoETerminalNoForceEmitTwoAxes — the terminal row no longer force-emits
+// still-true conditions (each appears once, at its rising edge, on the
+// per-moment timeline). Instead it carries two aggregates: qoe_exit_* (state at
+// close) and qoe_tier_* (whole-play grade). A VST-concerning that fired at
+// startup and stayed true is NOT re-stamped on the terminal row, but both
+// aggregates read warning → acceptable.
+func TestQoETerminalNoForceEmitTwoAxes(t *testing.T) {
 	s := newLabelState()
 	concerning := qoeLabel(SevWarning, "qoe_vst_concerning")
 	mk := func(ts, ev, status string) *row {
@@ -730,13 +762,40 @@ func TestQoETerminalSummaryForcesStillTrue(t *testing.T) {
 	}
 	computeEventLabelsWithState(s, mk("2026-06-03 00:00:01.000", "", "in_progress")) // first determination (emits)
 	computeEventLabelsWithState(s, mk("2026-06-03 00:00:02.000", "", "in_progress")) // sustained (suppressed)
-	// Terminal row: summary must force-emit the still-true VST + the tier.
 	got := computeEventLabelsWithState(s, mk("2026-06-03 00:00:03.000", "session_end", "completed"))
-	if !hasLabel(got, concerning) {
-		t.Fatalf("terminal summary must carry still-true %s: %v", concerning, got)
+	if hasLabel(got, concerning) {
+		t.Fatalf("terminal row must NOT force-emit the still-true %s: %v", concerning, got)
+	}
+	if !hasLabel(got, qoeLabel(SevWarning, "qoe_exit_acceptable")) {
+		t.Fatalf("qoe_exit must reflect state-at-close (warning → acceptable): %v", got)
 	}
 	if !hasLabel(got, qoeLabel(SevWarning, "qoe_tier_acceptable")) {
-		t.Fatalf("tier must reflect the summary (warning → acceptable): %v", got)
+		t.Fatalf("qoe_tier must reflect whole-play (warning → acceptable): %v", got)
+	}
+}
+
+// TestQoETierWholePlayVsExit — the two aggregates diverge: a mid-play critical
+// (a freeze) that recovered downgrades the whole-play qoe_tier_* to
+// unacceptable, but qoe_exit_* stays premium because the stream was clean at
+// the moment the user closed it.
+func TestQoETierWholePlayVsExit(t *testing.T) {
+	s := newLabelState()
+	mk := func(ts, ev, status string) *row {
+		return &row{Ts: ts, PlayerID: "p", PlayID: "x", LastEvent: ev, PlaybackStatus: status}
+	}
+	computeEventLabelsWithState(s, mk("2026-06-05 00:00:01.000", "play_start", "in_progress"))
+	// Mid-play freeze (critical), then recovery to clean.
+	if got := computeEventLabelsWithState(s, mk("2026-06-05 00:00:05.000", "frozen", "in_progress")); !hasLabel(got, SevCritical+"=stall_frozen") {
+		t.Fatalf("frozen row should emit stall_frozen: %v", got)
+	}
+	computeEventLabelsWithState(s, mk("2026-06-05 00:00:10.000", "", "in_progress")) // recovered, clean
+	// Clean close.
+	got := computeEventLabelsWithState(s, mk("2026-06-05 00:05:00.000", "session_end", "completed"))
+	if !hasLabel(got, qoeLabel(SevCritical, "qoe_tier_unacceptable")) {
+		t.Fatalf("whole-play tier must be unacceptable (mid-play freeze): %v", got)
+	}
+	if !hasLabel(got, qoeLabel(SevInfo, "qoe_exit_premium")) {
+		t.Fatalf("exit must be premium (clean at close): %v", got)
 	}
 }
 
@@ -760,11 +819,107 @@ func TestQoELeadingTerminalIgnored(t *testing.T) {
 			t.Fatalf("leading play_end must not emit %s: %v", bad, got)
 		}
 	}
-	// Play opens (restart), then a real clean terminal — should still get a
-	// tier, proving the guard wasn't consumed by the leaked frame.
-	computeEventLabelsWithState(s, &row{Ts: "2026-06-04 00:00:01.100", PlayerID: "p", PlayID: "x", LastEvent: "restart", PlaybackStatus: "in_progress"})
+	// Play opens (play_start — a clean, non-terminal open), then a real clean
+	// terminal — should still get a premium tier, proving the guard wasn't
+	// consumed by the leaked frame. (Opening with `restart` would inject a
+	// critical restart_auto_recovery, which now correctly downgrades the
+	// whole-play tier — a separate behavior, not what this test isolates.)
+	computeEventLabelsWithState(s, &row{Ts: "2026-06-04 00:00:01.100", PlayerID: "p", PlayID: "x", LastEvent: "play_start", PlaybackStatus: "in_progress"})
 	end := computeEventLabelsWithState(s, &row{Ts: "2026-06-04 00:05:00.000", PlayerID: "p", PlayID: "x", LastEvent: "play_end", PlaybackStatus: "completed", PlayingTimeMs: 290000})
 	if !hasLabel(end, qoeLabel(SevInfo, "qoe_tier_premium")) {
-		t.Fatalf("real terminal after the play opened should still get a tier: %v", end)
+		t.Fatalf("real terminal after the play opened should still get a premium tier: %v", end)
+	}
+}
+
+// --- Derived whole-tuple net_failure signature (#892) ----------------
+
+func TestNetFailureSignature(t *testing.T) {
+	cases := []struct {
+		name string
+		row  netRow
+		want string
+	}{
+		{"clean 2xx segment → no signature", netRow{Status: 200, RequestKind: "segment"}, ""},
+		{"client disconnect on segment (2xx partial)", netRow{Status: 200, Faulted: 1, RequestKind: "segment", FaultType: "partial", FaultCategory: "client_disconnect"}, "segment/client_disconnect/incomplete"},
+		{"socket drop on init (2xx corrupt)", netRow{Status: 200, Faulted: 1, RequestKind: "init", FaultType: "corrupt", FaultCategory: "socket"}, "segment/socket/incomplete"},
+		{"idle timeout on audio segment", netRow{Status: 0, Faulted: 1, RequestKind: "audio_segment", FaultType: "transfer_idle_timeout", FaultCategory: "transfer_timeout"}, "segment/idle_timeout/timeout"},
+		{"active timeout on segment", netRow{Status: 0, Faulted: 1, RequestKind: "segment", FaultType: "transfer_active_timeout", FaultCategory: "transfer_timeout"}, "segment/active_timeout/timeout"},
+		{"404 manifest, not faulted → status outcome", netRow{Status: 404, RequestKind: "manifest"}, "manifest/http_4xx"},
+		{"503 master manifest, not faulted", netRow{Status: 503, RequestKind: "master_manifest"}, "master_manifest/http_5xx"},
+		{"faulted with unknown category → cause omitted", netRow{Status: 200, Faulted: 1, RequestKind: "segment", FaultType: "partial", FaultCategory: ""}, "segment/incomplete"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := tc.row
+			if got := netFailureSignature(&r); got != tc.want {
+				t.Fatalf("netFailureSignature = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The signature rides ALONGSIDE the facets (never replaces them) so each axis
+// stays independently queryable, and it inherits the worst facet severity so
+// the classification-tier bump is unchanged.
+func TestNetFailureSignatureStacksWithFacets(t *testing.T) {
+	s := newLabelState()
+	got := computeNetworkLabelsWithState(s, &netRow{
+		Ts: tsBase, Status: 200, Faulted: 1, RequestKind: "segment",
+		FaultType: "partial", FaultCategory: "client_disconnect",
+	})
+	for _, want := range []string{
+		SevWarning + "=fault_incomplete",
+		SevWarning + "=" + synthMark + "segment_failure",
+		SevWarning + "=" + synthMark + "transport_disconnect",
+		SevWarning + "=" + synthMark + "net_failure:segment/client_disconnect/incomplete",
+	} {
+		if !hasLabel(got, want) {
+			t.Fatalf("missing %q in %v", want, got)
+		}
+	}
+}
+
+func TestNetFailureSignatureInheritsErrorSeverity(t *testing.T) {
+	s := newLabelState()
+	got := computeNetworkLabelsWithState(s, &netRow{
+		Ts: tsBase, Status: 0, Faulted: 1, RequestKind: "segment",
+		FaultType: "transfer_active_timeout", FaultCategory: "transfer_timeout",
+	})
+	// fault_timeout is an error facet → the signature must be error-sev too.
+	want := SevError + "=" + synthMark + "net_failure:segment/active_timeout/timeout"
+	if !hasLabel(got, want) {
+		t.Fatalf("timeout signature should inherit error severity: want %q in %v", want, got)
+	}
+}
+
+// TestShapingDegradedControlLabels pins the #910 degraded-shaping labels:
+// a warning-tier synthesized `shaping_degraded` plus a per-mode label parsed
+// from the proxy `info` string (space-separated, hyphen→underscore).
+func TestShapingDegradedControlLabels(t *testing.T) {
+	got := computeControlLabels(&ctrlRow{
+		Event: "shaping_degraded",
+		Info:  "mode=http-only forced=true unavailable=rate;delay;loss;transport_fault",
+	})
+	for _, want := range []string{
+		SevWarning + "=" + synthMark + "shaping_degraded",
+		SevWarning + "=" + synthMark + "shaping_http_only",
+	} {
+		if !hasLabel(got, want) {
+			t.Fatalf("missing %q in %v", want, got)
+		}
+	}
+}
+
+func TestShapingModeFromInfo(t *testing.T) {
+	cases := map[string]string{
+		"mode=http-only forced=true unavailable=rate": "http_only",
+		"mode=kernel":  "kernel",
+		"forced=false": "",
+		"":             "",
+	}
+	for in, want := range cases {
+		if got := shapingModeFromInfo(in); got != want {
+			t.Fatalf("shapingModeFromInfo(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

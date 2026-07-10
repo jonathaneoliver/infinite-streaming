@@ -24,7 +24,7 @@
   "network": {
     "ttfb_breach_ms": 500,
     "transfer_stall_ms": 5000,
-    "rate_cap_breach_factor": 1.10,
+    "rate_cap_breach_factor": 1.25,
     "cmcd_mtp_drift_ratio": 0.5
   },
   "abr": {

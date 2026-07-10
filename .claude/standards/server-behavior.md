@@ -451,6 +451,193 @@ rest with 400.
 
 ---
 
+## 1.12 Cross-session isolation under churn (#816 / #818)
+
+**Test:** `tests/server_behavior/server_isolation_test.go::TestServerIsolation`
+
+**Why it exists:** issue #816 — the config-on-start sweep deleted per-session
+u32 filters by match-spec at the shared prio 1, so starting session B could
+silently wipe live session A's cap; A then fell through to the uncapped
+10 Gbps HTB `default 999` (70–770 Mbps under a ~7 Mbps cap) until its next
+rate-set. Fixed in #818 (delete by exact resolved handle). No single-session
+test and no window-average assertion can see this class: the contract isn't
+just "set X → deliver X", it's **"…and nothing else changes X"**.
+
+**Methodology:** a VICTIM session pinned at a low cap pulls continuously with
+**per-fetch** throughput samples (the max transient is the signal — a 2 s
+line-rate burst barely moves an average). AGGRESSOR sessions churn through
+the full lifecycle around it: allocation (config-on-start sweep, #816's
+production trigger) → rate-set (own-cap check, bidirectional) → rate-clear
+(the RemoveFilter path; must fall back to the BASELINE cap, not line rate) →
+DELETE teardown. The allocator recycles the freed slot each round, so the
+churn walks the exact `port % 1000` classid collision domain from #816.
+
+**Contract:** victim's single worst fetch ≤ cap × `ISOLATION_MARGIN`; each
+aggressor's own cap holds; a rate-cleared session ≤ baseline × margin.
+
+**Calibration data (2026-07-05, test-dev, HTTPS): PASS.** Victim cap 8 Mbps,
+aggressor 3 Mbps, 4 churn rounds (all recycling slot 30481 while the victim
+held 30381), margin ×1.5:
+
+| window | victim avg | victim max | aggr avg | aggr max | cleared max | verdict |
+|---|---|---|---|---|---|---|
+| baseline (no churn) | 7.71 | 7.89 | — | — | — | PASS |
+| round 1 churn | 7.66 | 7.66 | 2.92 | 3.03 | 96.99 | PASS |
+| round 2 churn | 7.65 | 7.79 | 2.92 | 3.06 | 96.95 | PASS |
+| round 3 churn | 7.66 | 7.66 | 2.92 | 3.09 | 96.02 | PASS |
+| round 4 churn | 7.66 | 7.66 | 2.92 | 3.03 | 95.72 | PASS |
+
+**Findings:** post-#818 the victim never budged (max 7.89 vs threshold 12.00)
+across allocation/clear/teardown churn. `cleared max ≈ 96–97` confirms the
+clear-semantics half: rate=0 lands on the baseline cap (100 → ~95% delivered,
+matching §1), not on the uncapped default class.
+
+**The suite-wide canary (`canary_test.go`):** `TestMain` additionally runs a
+background canary session (cap 5 Mbps, breach > `SB_CANARY_MARGIN`=3×) pulling
+for the WHOLE `go test` invocation — every test in this package doubles as a
+cross-session-interference trial, and a breach fails the run with timestamps
+to correlate against the -v log. Disable with `SB_CANARY=0`; auto-disabled in
+short mode and when `RESTART_CMD` is set. First run: 35 fetches, avg 4.77 /
+max 4.87 Mbps — clean.
+
+---
+
+## 1.13 Restart persistence (#686) — opt-in, EXPECTED TO FAIL until fixed
+
+**Test:** `tests/server_behavior/restart_persistence_test.go::TestRestartPersistence`
+
+**Why it exists:** issue #686 — session + shaping state is memory-only since
+the #470 refactor (`restoreShapeApplication` iterates an always-empty list;
+`server_start` reports `restored=0`). A redeploy silently drops every
+session's cap to the deployment baseline until the next rate-set — the
+"restore-window rate spike".
+
+**Contract:** a session capped at N Mbps before a restart is still capped at
+N Mbps after it, with NO re-apply — measured by pulling straight at the
+per-session port (a mid-stream client never refetches the master). Session
+still present on `/api/sessions`; no post-restart fetch > cap × margin.
+
+**Status:** this is the ACCEPTANCE test for #686 and fails until that fix
+ships. It skips unless `RESTART_CMD` is set (a restart kills every live
+session on the box — only point it at a stack you own):
+
+```bash
+RESTART_CMD="ssh $TEST_SSH 'cd ~/test-dev && docker compose restart go-server'" \
+  go test -v -run TestRestartPersistence -timeout 15m
+```
+
+Setting `RESTART_CMD` also disables the canary (its session legitimately dies
+in the restart). Knobs: `RESTART_CAPS=5,20`, `RESTART_WAIT_S=180`,
+`RESTART_MARGIN=1.5`.
+
+---
+
+## 1.14 Per-request reported-rate honesty (#850)
+
+**Test:** `tests/server_behavior/server_reported_rate_test.go::TestServerReportedRate`
+
+**Why it exists:** issue #850 — the network log's implied rate
+(`bytes_out / transfer_ms`) times only the proxy's write+flush into the
+socket send buffer, NOT delivery to the client; tc HTB drains BELOW the
+socket, so sub-buffer transfers read wildly high. This corrupted signal fed
+the iOS cold-start over-selection investigation.
+
+**Methodology:** under a fixed cap, pull a sweep of transfer sizes (1 KB
+init-segment analog → full segment), measure each client-side, then match the
+same requests in `/api/session/{id}/network` by their `Range` header and
+compare the server's implied rate. Asserts (a) client full-segment rate ≈ cap
+(sanity) and (b) the full-segment reported/client ratio stays within
+`REPORTED_RATE_LARGE_BAND` (2.5×). Small-size divergence is RECORDED only
+while #850 is open; `REPORTED_RATE_STRICT=1` enforces ratio ≤ 3 at every size
+— the acceptance switch once `delivery_rate_mbps` ships.
+
+**Calibration data — pre-#850-fix (2026-07-05, test-dev, HTTPS; cap 20 Mbps, 3 reps/size): PASS.**
+
+| transfer size | client med Mbps | reported med Mbps | reported/client | verdict |
+|---|---|---|---|---|
+| 1 KB | 0.08 | 390.10 | **4878.93×** | recorded |
+| 64 KB | 21.54 | 3177.50 | **147.51×** | recorded |
+| 256 KB | 19.91 | 5065.58 | **254.49×** | recorded |
+| 1 MB | 19.54 | 61.52 | 3.15× | recorded |
+| 4 MB | 19.24 | 28.68 | 1.49× | recorded |
+| full segment (4.5 MB) | 19.17 | 30.09 | 1.57× | PASS |
+
+**Calibration data — with `delivery_rate_mbps` deployed (2026-07-05, same setup): PASS.**
+
+| transfer size | cap | client (http_get) | reported (bytes/transfer_ms) | reported/client | delivery_rate | delivery/client |
+|---|---|---|---|---|---|---|
+| 1 KB | 20 | 0.08 | 264.26 | 3310.67× | 80.26 | 1005.49× |
+| 64 KB | 20 | 21.16 | 2774.01 | 131.10× | 58.80 | 2.78× |
+| 256 KB | 20 | 20.20 | 104.56 | 5.18× | **20.10** | **0.99×** |
+| 1 MB | 20 | 19.63 | 57.33 | 2.92× | **19.55** | **1.00×** |
+| 4 MB | 20 | 19.37 | 29.39 | 1.52× | **19.13** | **0.99×** |
+| full segment (4.4 MB) | 20 | 19.21 | 29.08 | 1.51× | **19.13** | **1.00×** |
+
+**Findings:**
+- The legacy over-read is fully reproduced and quantified — up to ~4900× at
+  init-segment sizes, collapsing through a knee between 256 KB and 1 MB (the
+  kernel send-buffer size), settling to ~1.5× for multi-MB transfers (the
+  residual = the buffered tail excluded from `transfer_ms`). Anything below
+  ~1 MB in the network log's *implied* rate column is not a throughput
+  measurement.
+- `delivery_rate_mbps` (kernel `tcpi_delivery_rate`, shipped for #850) reads
+  **0.99–1.00× the client-measured truth for every transfer ≥ 256 KB** —
+  honest at sizes where the implied figure is 3–255× off. The test now
+  ASSERTS delivery/client ∈ [0.5, 1.5] for ≥ 256 KB sizes.
+- Below ~64 KB the kernel hasn't delivered enough of *this* transfer for an
+  estimate, so `delivery_rate_mbps` reflects the connection's recent history
+  (it's socket-level) — still 4–5× closer than the implied figure, but treat
+  sub-64 KB per-request rates as unmeasurable server-side.
+- **This 256 KB floor holds only under CONTINUOUS pulling (the probe's
+  back-to-back Range GETs).** Real player traffic arrives with idle gaps, so
+  segments up to ~1 MB are fully absorbed into the socket send buffer: the
+  proxy's write returns before the wire drains and `delivery_rate_mbps` is
+  stale connection residue (accurate in steady state, wrong right after a
+  rate change).
+
+### `delivery_rate_app_limited` — the kernel's own reliability flag (2026-07-07)
+
+The size heuristic above (≥ 1 MB / ≥ 5 ms) was a *proxy* for "did the kernel
+meter this at full tilt." The kernel answers that directly via
+`tcpi_delivery_rate_app_limited`, now captured alongside the rate (raw
+`getsockopt(TCP_INFO)`, byte 7 bit 0 — `golang.org/x/sys/unix.TCPInfo` drops
+that bitfield as struct padding). When set, the sender ran out of data to
+push, so the rate is **noisy in both directions** — starved LOW *or* caught
+mid HTB token-bucket burst and reading HIGH (so the metric is NOT a lower
+bound on the cap; it can over-read).
+
+**Calibration vs the shaping cap (valley pattern to ~0.5 Mbps, live iOS,
+play_id c661c293, 542 metered segments) — `delivery/cap`, 1.00× = perfect:**
+
+| gate | dots | median | p90 | within 0.5–2× |
+|---|---|---|---|---|
+| all segments | 542 | 0.86× | **17.25×** | 40% |
+| `app_limited=1` only (the noise) | 180 | **12.14×** | 26× | 3% |
+| `!app_limited`, any size | 362 | 0.58× | 1.01× | 59% |
+| `!app_limited` & ≥ 128 KB | 165 | 0.82× | 1.11× | 87% |
+| **`!app_limited` & ≥ 256 KB (shipped)** | **121** | 0.84× | 1.03× | **93%** |
+| `!app_limited` & ≥ 512 KB | 88 | 0.84× | 0.96× | 94% |
+| `!app_limited` & ≥ 1 MB | 48 | 0.92× | 1.20× | 97% |
+
+Excluding `app_limited` collapses p90 from **17.25× → 1.01×** — the flag is
+the garbage detector. A modest **256 KB burst backstop** then catches the
+residual false-highs (a small network-limited segment delivered entirely
+inside the HTB burst), landing at 93%-in-band while yielding **4.5× more dots
+than the old 1 MB / 5 ms gate** (121 vs 27). **The dashboard bandwidth chart
+plots delivery dots when `!app_limited && bytes_out ≥ 256 KB`** — see
+`extractDeliveryMarkers` in `BandwidthChart.vue`. The median sitting at 0.84×
+(not 1.0×) is honest: `delivery_rate` reads at-or-below the cap, never above
+what actually drained. The per-request calibration table further up (fixed
+cap, continuous pull) and this live-traffic gate answer different questions;
+don't reconcile them to one number.
+- Plumbed + surfaced end-to-end: proxy network log → forwarder → ClickHouse
+  `network_requests.{delivery_rate_mbps,delivery_rate_app_limited}` →
+  `/api/v2/network_requests` + session-bundle network stream → dashboard
+  network-log Mbps column (with the implied figure as fallback + both in the
+  row tooltip) and the bandwidth chart's "Delivery rate (kernel)" dots.
+
+---
+
 ## 2. Future server-behavior tests (proposed)
 
 Each row below is an as-yet-unwritten test in `tests/server_behavior/`.
@@ -475,13 +662,13 @@ scope (§1.9), are also implemented and calibrated.
 
 ### P1 — composition + lifecycle
 
-| Test file (proposed) | Concern |
+| Test file | Concern |
 |---|---|
-| `concurrent_session_isolation_test.go` | Two sessions at different caps; verify each enforces its own without bleed (htb classes truly isolated). |
-| `restart_persistence_test.go` | Set non-default caps on N sessions, restart proxy, verify sessions still capped (the `restoreShapeApplication` regression bait). |
-| `group_propagation_test.go` | Set shape on player A; link B to A's group; verify B inherits live shape changes (per docs / FaultRules group semantics). |
-| `baseline_visibility_test.go` | `INFINITE_STREAM_DEFAULT_RATE_MBPS=N` → `/api/v2/info.default_rate_mbps == N`; every new session inherits it; `effective_rate_limit_mbps` matches kernel state. |
-| `session_limit_test.go` | Allocate `INFINITE_STREAM_MAX_SESSIONS+1` sessions; verify the last one is rejected (503 or equivalent). |
+| `server_isolation_test.go` ✅ | Cross-session isolation under lifecycle churn — a victim's cap survives foreign allocation/clear/teardown (#816). Plus the always-on suite canary (`canary_test.go`). See §1.12. |
+| `restart_persistence_test.go` ✅ (opt-in) | Set non-default caps on N sessions, restart proxy, verify sessions still capped. #686 acceptance test — fails until that ships. See §1.13. |
+| `group_propagation_test.go` (proposed) | Set shape on player A; link B to A's group; verify B inherits live shape changes (per docs / FaultRules group semantics). |
+| `baseline_visibility_test.go` (proposed) | `INFINITE_STREAM_DEFAULT_RATE_MBPS=N` → `/api/v2/info.default_rate_mbps == N`; every new session inherits it; `effective_rate_limit_mbps` matches kernel state. |
+| `session_limit_test.go` (proposed) | Allocate `INFINITE_STREAM_MAX_SESSIONS+1` sessions; verify the last one is rejected (503 or equivalent). |
 
 ### P2 — quirks + edge cases
 
@@ -491,7 +678,8 @@ scope (§1.9), are also implemented and calibrated.
 | `server_content_test.go` ✅ | Content manipulations (strip codecs / avg-bandwidth, overstate bandwidth, segment corruption) + combined; verify served bytes differ as expected. See §1.10. |
 | `server_socket_test.go` ✅ | Nine socket-phase faults (connect/first_byte/body × reset/hang/delayed); verify client-observed wire shape per the contract. See §1.8. |
 | `server_scope_test.go` ✅ | Fault scope checkboxes — fault scoped to one variant fires there and nowhere else. See §1.9. |
-| `clear_semantics_test.go` (proposed) | Verify `--rate 0`, `--clear`, and `--rate=baseline` all map to identical kernel state (no override). |
+| `clear_semantics_test.go` (partially covered) | Verify `--rate 0`, `--clear`, and `--rate=baseline` all map to identical kernel state (no override). The rate=0 → baseline-cap half is asserted every churn round in §1.12's isolation test. |
+| `server_reported_rate_test.go` ✅ | Per-request network-log rate vs client-measured, across transfer sizes (#850 over-read curve). See §1.14. |
 
 ---
 
@@ -531,7 +719,16 @@ go test -v -run TestServerTransfer     -timeout 5m   # TIMEOUT_ACTIVE_S, TIMEOUT
 go test -v -run TestServerSocketFaults -timeout 10m  # SOCKET_PROBE_TIMEOUT_S, SOCKET_FAULT_ATTEMPTS
 go test -v -run TestServerScope        -timeout 5m   # SCOPE_FREQUENCY, SCOPE_SAMPLES, FAULT_TYPE
 go test -v -run TestServerContent      -timeout 5m
+
+# Lifecycle / isolation family (§1.12–1.14):
+go test -v -run TestServerIsolation    -timeout 10m  # ISOLATION_VICTIM_CAP_MBPS, ISOLATION_AGGRESSOR_CAP_MBPS, ISOLATION_CHURN_ROUNDS, ISOLATION_MARGIN
+go test -v -run TestServerReportedRate -timeout 10m  # REPORTED_RATE_CAP_MBPS, REPORTED_RATE_REPS, REPORTED_RATE_STRICT
+RESTART_CMD="…" go test -v -run TestRestartPersistence -timeout 15m  # opt-in; restarts the target proxy!
 ```
+
+Every non-short run also starts the **canary** (§1.12) — a background
+session whose cap must survive everything the tests do; a breach fails
+the whole invocation. `SB_CANARY=0` to disable.
 
 Tests post heartbeat metrics to the proxy so they're **visible in
 testing.html's session list** during the run — open the dashboard
@@ -556,3 +753,13 @@ to that player_id to watch the bitrate chart live.
    the run is visible in the dashboard.
 6. **Update Section 1 here** with the latest calibration numbers
    whenever you re-run + commit a baseline shift.
+7. **Assert per-fetch maxima, not just window averages**, in any
+   rate-enforcement test. The #816 failure was a seconds-long
+   line-rate burst — invisible in a 60 s average, unmissable in a
+   per-fetch max. `sampledPull` + `sampleStats` in `sb_common_test.go`
+   are the shared primitives.
+8. **Treat lifecycle events as perturbations to measure under**, not
+   just setup steps. Both #816 and #686 trigger at session-allocation /
+   restart boundaries that steady-state tests never cross. The full
+   contract is "set X → deliver X, **nothing else changes X** (isolation),
+   and **X survives restarts** (durability)."

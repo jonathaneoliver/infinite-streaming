@@ -30,7 +30,7 @@ import { usePlayer } from '@/composables/usePlayer';
 import { useCompareOverlays, useCompareSelf, useCompareSiblings, sessionMarkerColor, SELF_MARKER_COLOR } from '@/composables/useCompareContext';
 import { compareBandwidthSeries } from '@/composables/compareSeries';
 import type { Stream } from '@/composables/useSessionTimeSeries';
-import type { LifecycleMarker } from '@/composables/useLifecycleMarkers';
+import type { LifecycleMarker, EventMarker } from '@/composables/useLifecycleMarkers';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
 const props = defineProps<{
@@ -41,12 +41,18 @@ const props = defineProps<{
   coordId?: string;
   /** Shared player-lifecycle vertical lines, passed straight to MetricsLineChart. */
   lifecycleMarkers?: LifecycleMarker[];
+  /** Focus-window event bars (severity-filtered), forwarded to MetricsLineChart. */
+  eventMarkers?: EventMarker[];
   eventsStream: Stream<Record<string, unknown>>;
   /** AVMetrics stream — used to overlay per-segment throughput dots
    *  on the bandwidth chart (issue #486). Optional so existing
    *  callers without the avmetrics scope (live testing.html
    *  pre-spike) can still mount the chart. */
   avmetricsStream?: Stream<Record<string, unknown>>;
+  /** Network-requests stream — used to overlay kernel-measured
+   *  delivery-rate dots (tcpi_delivery_rate, #850) per segment
+   *  request. Optional for callers without the network scope. */
+  networkStream?: Stream<Record<string, unknown>>;
 }>();
 const coordId = computed(() => props.coordId ?? props.playerId);
 const coord = useChartCoordination(coordId);
@@ -270,23 +276,117 @@ const sessionMarkerSets = computed<Array<{ tag: string; color: string | null; do
   return [{ tag: '', color: null, dots: extractSegmentMarkers(props.avmetricsStream, null, '') }];
 });
 
-const segmentMarkers = computed(() => sessionMarkerSets.value.flatMap((s) => s.dots));
+const segmentMarkers = computed(() => sessionMarkerSets.value.flatMap((s) => s.dots).concat(deliveryMarkers.value));
 
 /** Per-session legend chips, one per session that actually contributed dots
- *  — `Video segment fetch (Sx)`, coloured to match its dots. Empty in single-session
- *  (that path uses the flat `segmentMarkersLabel` chip instead). Issue #486. */
+ *  — `Video segment fetch (Sx)`, coloured to match its dots. Issue #486.
+ *  Single-session mode also switches to group chips when BOTH marker
+ *  families are present (iOS segment dots + kernel delivery dots), so each
+ *  family gets its own named chip; a lone family keeps the flat
+ *  `segmentMarkersLabel` chip. Each chip toggles independently (per-tag
+ *  visibility in MetricsLineChart) — Video and Delivery are not lockstep. */
 const segmentMarkerGroups = computed<Array<{ tag: string; label: string; color: string }>>(() => {
-  if (!compareSelf.value) return [];
-  return sessionMarkerSets.value
-    .filter((s) => s.dots.length > 0)
-    .map((s) => ({ tag: s.tag, label: `Video segment fetch (${s.tag})`, color: s.color ?? SELF_MARKER_COLOR }));
+  if (compareSelf.value) {
+    return sessionMarkerSets.value
+      .filter((s) => s.dots.length > 0)
+      .map((s) => ({ tag: s.tag, label: `Video segment fetch (${s.tag})`, color: s.color ?? SELF_MARKER_COLOR }));
+  }
+  const hasVideoDots = sessionMarkerSets.value.some((s) => s.dots.length > 0);
+  if (!hasVideoDots || deliveryMarkers.value.length === 0) return [];
+  return [
+    { tag: '', label: 'Video segment fetch', color: '#475569' },
+    { tag: 'delivery', label: 'Delivery rate (kernel)', color: DELIVERY_COLOR },
+  ];
 });
 
 const segmentMarkersLabel = computed(() => {
-  // Single-session only — compare mode uses the per-session group chips. Gate
-  // on the active player being iOS so non-iOS players never see the chip.
-  if (compareSelf.value) return '';
+  // Single-session, single-family only — group chips take over when both
+  // families (or compare-mode sessions) contribute.
+  if (compareSelf.value || segmentMarkerGroups.value.length) return '';
+  if (deliveryMarkers.value.length) return 'Delivery rate (kernel)';
   return isAVPlayerForMarkers.value ? 'Video segment fetch' : '';
+});
+
+/** Kernel-measured delivery-rate dots (#850): one dot per SEGMENT request
+ *  whose wire delivery the kernel actually metered. Server-side sibling
+ *  of the iOS avmetrics dots above — honest under tc shaping, where the
+ *  implied bytes_out/transfer_ms figure over-reads up to ~5000× on
+ *  sub-buffer transfers. Active session only — compare siblings don't
+ *  ship a network stream.
+ *
+ *  Reliability gate — delivery_rate is only trustworthy when the kernel
+ *  observed the link at full tilt. We drop a dot only when:
+ *    - NOT app-limited (`delivery_rate_app_limited` falsy). This is the
+ *      kernel's own reliability signal (tcpi_delivery_rate_app_limited):
+ *      when the sender ran out of data to push, the sample reflects the
+ *      app's pace, not the link, and reads noisily — starved LOW or,
+ *      caught mid token-bucket burst, HIGH. Replaces the old ≥5 ms
+ *      transfer_ms heuristic, which couldn't tell a throttled small
+ *      segment from a buffer-absorbed one.
+ *    - bytes ≥ 256 KB — a burst backstop. `app_limited` guards the
+ *      false-LOW (starved) case but not every false-HIGH: a tiny
+ *      segment can be network-limited yet delivered entirely inside the
+ *      HTB burst allowance, over-reading the average cap. This modest
+ *      floor (was 1 MB) excludes the burst-prone tiddlers while showing
+ *      far more of the low-throttle valley than before. Tunable — see
+ *      §1.14 calibration. */
+const DELIVERY_COLOR = '#10b981'; // emerald — distinct from the slate/sky avmetrics dots
+const DELIVERY_MIN_BYTES = 1024 * 256;
+function extractDeliveryMarkers(
+  stream: Stream<Record<string, unknown>> | undefined,
+): Array<{ x: number; y: number; color?: string; label?: string; tag?: string }> {
+  if (!stream) return [];
+  void stream.version.value;
+  const rows = stream.inRange(0, Number.MAX_SAFE_INTEGER);
+  const out: Array<{ x: number; y: number; color?: string; label?: string; tag?: string }> = [];
+  for (const row of rows) {
+    if (String(row.request_kind ?? '') !== 'segment') continue;
+    const mbps = Number(row.delivery_rate_mbps);
+    if (!Number.isFinite(mbps) || mbps <= 0) continue;
+    // Kernel says the sample was app-limited → unreliable, skip. The flag
+    // arrives as a JSON bool (live proxy SSE) or 0/1 number (ClickHouse
+    // UInt8 read path), so accept both.
+    const appLimited = row.delivery_rate_app_limited;
+    if (appLimited === true || appLimited === 1 || appLimited === '1') continue;
+    const bytes = Number(row.bytes_out);
+    if (!Number.isFinite(bytes) || bytes < DELIVERY_MIN_BYTES) continue;
+    const tsRaw = row.ts ?? row.timestamp;
+    let ts = NaN;
+    if (typeof tsRaw === 'number') {
+      ts = tsRaw;
+    } else if (typeof tsRaw === 'string') {
+      // ClickHouse "YYYY-MM-DD HH:MM:SS.fff" → RFC3339; RFC3339 passes through.
+      const normalised = tsRaw.length > 10 && tsRaw.charAt(10) === ' '
+        ? tsRaw.replace(' ', 'T') + 'Z'
+        : tsRaw;
+      ts = Date.parse(normalised);
+    }
+    if (!Number.isFinite(ts) || ts <= 0) continue;
+    const url = String(row.url ?? row.path ?? '');
+    const filename = url ? (url.split('?')[0].split('/').pop() ?? '') : '';
+    // transfer_ms no longer gates the dot (app_limited does), but the
+    // implied bytes/transfer figure is still handy in the tooltip as the
+    // (over-reading) contrast to the honest kernel rate.
+    const transferMs = Number(row.transfer_ms);
+    const implied = Number.isFinite(transferMs) && transferMs > 0
+      ? (bytes * 8) / (transferMs * 1000)
+      : NaN;
+    const lines = [
+      `Delivery rate (kernel) · ${mbps.toFixed(2)} Mbps`,
+      filename,
+      `${bytes.toLocaleString()} bytes`,
+      Number.isFinite(implied) ? `implied ${implied.toFixed(2)} Mbps (bytes/transfer)` : '',
+    ].filter(Boolean);
+    out.push({ x: ts, y: mbps, color: DELIVERY_COLOR, label: lines.join('\n'), tag: 'delivery' });
+  }
+  return out;
+}
+
+const deliveryMarkers = computed(() => {
+  // Compare mode keeps the marker tag namespace for S1/S2 session
+  // grouping — delivery dots would collide, so they're single-session only.
+  if (compareSelf.value) return [];
+  return extractDeliveryMarkers(props.networkStream);
 });
 
 function colorForRequestType(type: string): string {
@@ -557,6 +657,7 @@ const compareOverlays = useCompareOverlays((sib) => {
     :player-id="playerId"
     :coord-id="coordId"
     :lifecycle-markers="lifecycleMarkers"
+    :event-markers="eventMarkers"
     title="Bandwidth"
     unit="Mbps"
     :series="series"

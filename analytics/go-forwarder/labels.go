@@ -132,8 +132,10 @@ type playLabelState struct {
 	// A label is emitted only on its rising edge (off→on): its first
 	// determination, or a new instance after it cleared. While a condition
 	// stays continuously true it is suppressed (no per-heartbeat repeats).
-	// The terminal row force-emits the still-true set so the summary +
-	// qoe_tier_* reflect end state. nil until first use.
+	// The terminal row no longer force-emits the still-true set: the
+	// end-state grade is emitted separately as qoe_exit_* (conditions active
+	// at close), and the whole-play grade qoe_tier_* reads worstSeen below.
+	// nil until first use.
 	qoeActive map[string]struct{}
 	// #657 — clear-cooldown re-arm. qoeLastOn records the last row-time each
 	// qoe label was TRUE. A rising edge re-fires only if the label has been
@@ -141,6 +143,12 @@ type playLabelState struct {
 	// above/below its threshold within the cooldown counts as one episode
 	// (one chip) instead of re-chipping on every re-crossing. nil until use.
 	qoeLastOn map[string]time.Time
+	// Whole-play worst-severity accumulator. Folded on EVERY row (lifecycle
+	// labels + qoe conditions true on the row + terminal outcome) so the
+	// terminal qoe_tier_* grades the ENTIRE playback, not just the end state
+	// — a mid-play critical that recovered still downgrades the tier. "" =
+	// nothing ranked yet. The end-state grade is qoe_exit_* (current-at-close).
+	worstSeen string
 	// LRU touch for GC.
 	seen time.Time
 }
@@ -389,6 +397,12 @@ func computeEventLabelsWithState(s *labelState, r *row) []string {
 		}
 	}
 
+	// Fold this row's lifecycle labels into the whole-play worst-severity
+	// accumulator before the qoe labeler layers on (it folds its own
+	// conditions and reads worstSeen for the terminal qoe_tier_*). This is
+	// what lets a mid-play stall_frozen/wedge count toward the whole-play tier.
+	ps.worstSeen = worseSeverity(ps.worstSeen, worstSeverity(out))
+
 	// #550 Phase 3 — threshold-based QoE auto-labels. Orthogonal to the
 	// LastEvent switch above; layered on whatever the event arm emitted.
 	// s.thresholds() is read while we still hold s.mu (locked at the top).
@@ -609,6 +623,20 @@ func computeNetworkLabelsWithState(s *labelState, r *netRow) []string {
 		}
 	}
 
+	// Derived whole-tuple signature (#892). A network_requests row is ONE
+	// HTTP request, so kind × transport-cause × outcome are single-valued —
+	// exactly one tuple, no grouping ambiguity. Emit it ALONGSIDE (not
+	// instead of) the facets so the dashboard can show one collapsed chip
+	// while the facets stay independently queryable. Worst facet severity so
+	// the classification-tier bump is unchanged.
+	if sig := netFailureSignature(r); sig != "" {
+		sev := worstSeverity(out)
+		if sev == "" {
+			sev = SevWarning
+		}
+		out = append(out, sev+"="+synthMark+"net_failure:"+sig)
+	}
+
 	// Synthesized: request_retry on the second fetch of the same URL
 	// within 1-4 s, but ONLY when the previous fetch failed (status
 	// >= 400 OR faulted). Without that guard, normal LL-HLS manifest
@@ -632,6 +660,92 @@ func computeNetworkLabelsWithState(s *labelState, r *netRow) []string {
 	}
 
 	return out
+}
+
+// netFailureSignature composes the orthogonal failure facets of a single
+// network request — kind × transport-cause × outcome — into one canonical
+// whole-tuple string, e.g. "segment/client_disconnect/incomplete". Because a
+// network_requests row is exactly one HTTP request, each axis is single-valued
+// and the tuple is unambiguous (see .claude/standards/label-facets.md). Mirrors
+// the facet logic above so the signature and the facet labels never disagree.
+// Returns "" when the row is not a failure. Order: kind / cause / outcome;
+// cause is omitted when the row isn't faulted; outcome falls back to the HTTP
+// status class on a non-faulted >=400.
+func netFailureSignature(r *netRow) string {
+	if !(r.Status >= 400 || r.Faulted != 0) {
+		return ""
+	}
+
+	// kind — mirror the per-kind failure switch.
+	var kind string
+	switch r.RequestKind {
+	case "master_manifest":
+		kind = "master_manifest"
+	case "manifest", "audio_manifest":
+		kind = "manifest"
+	case "segment", "audio_segment", "init", "partial":
+		kind = "segment"
+	default:
+		kind = strings.ToLower(strings.TrimSpace(r.RequestKind))
+		if kind == "" {
+			kind = "request"
+		}
+	}
+
+	// outcome — mirror the fault classification, else the HTTP status class.
+	var outcome string
+	if r.Faulted != 0 {
+		ft := strings.ToLower(r.FaultType)
+		switch {
+		case strings.Contains(ft, "timeout"):
+			outcome = "timeout"
+		case strings.Contains(ft, "corrupt"),
+			strings.Contains(ft, "partial"),
+			strings.Contains(ft, "abandon"):
+			outcome = "incomplete"
+		default:
+			if r.Status >= 200 && r.Status < 300 {
+				outcome = "incomplete"
+			} else {
+				outcome = "other"
+			}
+		}
+	} else if r.Status >= 500 {
+		outcome = "http_5xx"
+	} else if r.Status >= 400 {
+		outcome = "http_4xx"
+	}
+
+	// cause — mirror the transport-fault classification (faulted rows only).
+	var cause string
+	if r.Faulted != 0 {
+		switch strings.ToLower(r.FaultCategory) {
+		case "socket":
+			cause = "socket"
+		case "client_disconnect":
+			cause = "client_disconnect"
+		case "transfer_timeout":
+			ft := strings.ToLower(r.FaultType)
+			switch {
+			case strings.Contains(ft, "active"):
+				cause = "active_timeout"
+			case strings.Contains(ft, "idle"):
+				cause = "idle_timeout"
+			default:
+				cause = "transport"
+			}
+		}
+	}
+
+	parts := make([]string, 0, 3)
+	parts = append(parts, kind)
+	if cause != "" {
+		parts = append(parts, cause)
+	}
+	if outcome != "" {
+		parts = append(parts, outcome)
+	}
+	return strings.Join(parts, "/")
 }
 
 // computeControlLabels stamps a control_events row's labels at ingest.
@@ -710,6 +824,18 @@ func computeControlLabels(r *ctrlRow) []string {
 		return []string{SevInfo + "=" + synthMark + "session_start"}
 	case "session_end":
 		return []string{SevInfo + "=" + synthMark + "session_end"}
+	case "shaping_degraded":
+		// #910: the session ran without full kernel shaping (http-only, whether
+		// probed or forced). Warning severity — a configured cap may not be
+		// active, so an operator must not read the play as if it were. A
+		// per-mode label rides alongside so `--label-has shaping_http_only`
+		// works. Mode comes off the proxy `info` string
+		// ("mode=<m> forced=<b> unavailable=<...>").
+		out := []string{SevWarning + "=" + synthMark + "shaping_degraded"}
+		if mode := shapingModeFromInfo(r.Info); mode != "" {
+			out = append(out, SevWarning+"="+synthMark+"shaping_"+mode)
+		}
+		return out
 	// Generic fallback when the changed field isn't yet enumerated.
 	case "control_change":
 		return []string{SevInfo + "=" + synthMark + "control_change"}
@@ -804,6 +930,34 @@ func patternModeFromInfo(info string) string {
 	return string(b)
 }
 
+// shapingModeFromInfo pulls the shaping mode out of a shaping_degraded
+// control_event's `info` string ("mode=<m> forced=<b> unavailable=<...>",
+// space-separated — NOT JSON) and sanitises it into a label-safe token
+// (hyphens → underscore; e.g. "http-only" → "http_only"). Returns "" when no
+// mode token is present. Issue #910.
+func shapingModeFromInfo(info string) string {
+	for _, tok := range strings.Fields(info) {
+		rest, ok := strings.CutPrefix(tok, "mode=")
+		if !ok {
+			continue
+		}
+		b := make([]byte, 0, len(rest))
+		for i := 0; i < len(rest); i++ {
+			c := rest[i]
+			switch {
+			case c >= 'A' && c <= 'Z',
+				c >= 'a' && c <= 'z',
+				c >= '0' && c <= '9':
+				b = append(b, c)
+			case c == '-', c == '_':
+				b = append(b, '_')
+			}
+		}
+		return string(b)
+	}
+	return ""
+}
+
 // isSegmentPath matches HLS / DASH media segment extensions.
 func isSegmentPath(path string) bool {
 	for _, ext := range []string{".m4s", ".ts", ".mp4", ".m4a", ".m4v", ".aac", ".webm", ".mp3"} {
@@ -844,6 +998,33 @@ func worstSeverity(labels []string) string {
 		return SevInfo
 	}
 	return ""
+}
+
+// sevRank orders severities for the whole-play worst-severity accumulator.
+// "" (nothing ranked) is 0; error outranks critical to match worstSeverity's
+// own precedence.
+func sevRank(s string) int {
+	switch s {
+	case SevError:
+		return 4
+	case SevCritical:
+		return 3
+	case SevWarning:
+		return 2
+	case SevInfo:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// worseSeverity returns whichever of two severity strings ranks higher — the
+// fold step for the per-play worstSeen accumulator.
+func worseSeverity(a, b string) string {
+	if sevRank(b) > sevRank(a) {
+		return b
+	}
+	return a
 }
 
 // parseChTs parses CH's "YYYY-MM-DD HH:MM:SS.fff" timestamp form (or
