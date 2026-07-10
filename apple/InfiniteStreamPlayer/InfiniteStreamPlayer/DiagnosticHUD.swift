@@ -19,6 +19,11 @@ struct DiagnosticHUD: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
+            // ID first (#946): the 8-char player_id·play_id so an operator
+            // watching a wall of sims can read this session's id straight off the
+            // screen and match it to the harness output.
+            row("ID", vm.hudShortIDs)
+            row("PORT", vm.hudPort)
             row("STATE", stateText)
             // NET / AVG NET / VIDEO source fields match what we PATCH:
             //   NET     → player_metrics_network_bitrate_mbps     (LocalHTTPProxy per-chunk wire rate; nil during idle)

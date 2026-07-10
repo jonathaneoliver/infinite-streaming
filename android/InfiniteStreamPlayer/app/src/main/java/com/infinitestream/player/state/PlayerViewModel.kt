@@ -68,6 +68,24 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private var currentPlayId: String = UUID.randomUUID().toString()
 
     /**
+     * Short session id for the diagnostic HUD (#946): the first 8 chars of the
+     * player_id and current play_id, so an operator watching a wall of devices
+     * can read this session's id off the screen and match it to the harness
+     * output (which references sessions by the same 8-char prefixes). Companion
+     * to the iOS `hudShortIDs`.
+     */
+    val hudShortIDs: String
+        get() = "${playerId.take(8)}·${currentPlayId.take(8)}"
+
+    /**
+     * The playback port the stream actually goes to (activeServer.port) — the
+     * redirected/proxy port that pins which session/server this device is
+     * streaming through. Shown as its own HUD row (#946).
+     */
+    val hudPort: String
+        get() = (_state.value.activeServer?.port ?: 0).toString()
+
+    /**
      * `start_time` (#587) — client-supplied, play-scoped play start
      * (ISO-8601 UTC). Minted with `currentPlayId` and rotated at the SAME
      * boundaries; threaded through every URL as `?start_time=...` so the

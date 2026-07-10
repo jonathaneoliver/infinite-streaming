@@ -538,6 +538,10 @@ private fun DiagnosticHud(vm: PlayerViewModel) {
             .background(Color.Black.copy(alpha = 0.45f))
             .padding(horizontal = Space.s3, vertical = Space.s2),
     ) {
+        // ID first (#946): the 8-char player_id·play_id, read off-screen to match
+        // a device to the harness output. Companion to the iOS HUD's ID row.
+        DiagnosticRow("ID", vm.hudShortIDs)
+        DiagnosticRow("PORT", vm.hudPort)
         DiagnosticRow("STATE", stateText)
         DiagnosticRow("NET", netText)
         DiagnosticRow("AVG NET", avgNetText)

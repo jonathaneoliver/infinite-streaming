@@ -210,6 +210,22 @@ final class PlayerViewModel: ObservableObject {
     // downstream with no case-folding needed (see canonicalV2ID).
     private var currentPlayID: String = UUID().uuidString.lowercased()
 
+    /// Short session id for the diagnostic HUD (#946): the first 8 chars of the
+    /// player_id and current play_id, so an operator watching a wall of sims can
+    /// read the id straight off the screen and match it to the harness output
+    /// (which references sessions by the same 8-char prefixes). player_id is
+    /// stable per session; play_id updates on the next HUD redraw after a rotate.
+    var hudShortIDs: String {
+        "\(playerId.prefix(8))·\(currentPlayID.prefix(8))"
+    }
+
+    /// The playback port the stream actually goes to (activeServer.playbackURL)
+    /// — the redirected/proxy port that pins which session/server this device is
+    /// streaming through. Shown as its own HUD row (#946).
+    var hudPort: String {
+        activeServer.flatMap { URL(string: $0.playbackURL)?.port }.map(String.init) ?? "?"
+    }
+
     /// #621 — the play_id whose `play_start` boundary has already been
     /// emitted. startPlayback's fresh branch compares against this so a
     /// same-play re-prepare (settings tweak, double-prepare on launch)
