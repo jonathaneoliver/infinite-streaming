@@ -46,6 +46,18 @@ func TestRptVerdict(t *testing.T) {
 			rptLabels("info=first_frame", "critical=unexpected_fault"),
 			"ok", "",
 		},
+		{
+			// #884 renamed unexpected_<cond> -> anomaly_<cond>_<surface>; the new
+			// spelling must still be excluded so it doesn't leak into worst_qoe.
+			"no tier; renamed VOMM anomaly labels excluded, worst QoE = segment_failure",
+			rptLabels("warning=anomaly_end_net", "info=anomaly_startup_event", "warning=*segment_failure"),
+			"warn", "segment_failure",
+		},
+		{
+			"no tier, only anomaly labels → ok (not warn)",
+			rptLabels("warning=anomaly_stall_net", "info=anomaly_fault_event"),
+			"ok", "",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

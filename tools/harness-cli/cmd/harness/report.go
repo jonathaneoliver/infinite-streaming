@@ -412,16 +412,19 @@ func renderStudyReport(w io.Writer, group string, rows []map[string]any) {
 	tw.Flush()
 	fmt.Fprintln(w, "\nmetrics are shown ALWAYS (not only when a label fires) — labels threshold the value and hide the")
 	fmt.Fprintln(w, "gradient among the 'good' arms; compare the numbers to rank them.")
-	fmt.Fprintln(w, "verdict = qoe_tier end-state (premium/ok/BAD); worst_qoe = worst QoE label (lifecycle/teardown excluded).")
+	fmt.Fprintln(w, "verdict = qoe_tier end-state (premium/ok/BAD); worst_qoe = worst QoE label (lifecycle + VOMM anomaly labels excluded).")
 }
 
 // rptVerdict computes a QoE verdict + the worst QoE-relevant label from a
 // label_histogram ([ "<severity>=<event>", count ] pairs). The verdict prefers
 // the forwarder's authoritative qoe_tier_* END-STATE rollup
 // (premium/acceptable/unacceptable, qoe_labels.go); absent that it falls back to
-// the worst QoE-scoped severity. Lifecycle/teardown labels (unexpected_*, etc.)
-// are excluded — they're error-tier but describe how the play *ended* (the
-// harness stops it at duration), not how it *performed*.
+// the worst QoE-scoped severity. Two label families are excluded from that
+// fallback because neither describes playback QoE: session lifecycle/teardown
+// labels (first_frame, session_start, … — the harness stops the play at
+// duration), and the VOMM per-row anomaly labels (anomaly_<cond>_<surface>,
+// #884; legacy unexpected_<cond>) — surprise scores from derive_labels.py, not
+// a QoE signal.
 func rptVerdict(v any) (verdict, worstQoE string) {
 	arr, _ := v.([]any)
 	tier := ""
@@ -442,7 +445,7 @@ func rptVerdict(v any) (verdict, worstQoE string) {
 			tier = event
 			continue
 		}
-		if rptLifecycleLabel(event) {
+		if rptNonQoELabel(event) {
 			continue
 		}
 		if r := rptSeverityRank(sev); r > best {
@@ -462,13 +465,36 @@ func rptVerdict(v any) (verdict, worstQoE string) {
 	return verdict, worstQoE
 }
 
-// rptLifecycleLabel reports labels that describe session lifecycle/teardown
-// rather than playback QoE — excluded from the verdict + worst-label so a
-// harness-stopped play doesn't read as "BAD".
-func rptLifecycleLabel(event string) bool {
+// rptNonQoELabel reports labels that must not influence the QoE verdict or
+// worst-label: session lifecycle/teardown markers, and the VOMM anomaly labels.
+// Excluding them keeps a clean, harness-stopped play from reading "BAD".
+func rptNonQoELabel(event string) bool {
 	switch event {
-	case "unexpected_end", "unexpected_fault", "unexpected_startup",
-		"first_frame", "play_start", "session_start", "server_start", "loop_server":
+	case "first_frame", "play_start", "session_start", "server_start", "loop_server":
+		return true
+	}
+	return rptAnomalyLabel(event)
+}
+
+// rptAnomalyLabel matches the VOMM per-row surprise labels
+// anomaly_<cond>[_<surface>] — cond ∈ startup/fault/stall/end, surface ∈
+// net/event (#884, derive_labels.py). The legacy unexpected_<cond> spelling is
+// still accepted for pre-#884 archive rows, mirroring the forwarder's own
+// /^(?:anomaly|unexpected)_(startup|fault|stall|end)(?:_(net|event))?$/ matcher.
+// These are surprise scores, not QoE — see rptVerdict.
+func rptAnomalyLabel(event string) bool {
+	cond, ok := strings.CutPrefix(event, "anomaly_")
+	if !ok {
+		cond, ok = strings.CutPrefix(event, "unexpected_")
+	}
+	if !ok {
+		return false
+	}
+	if i := strings.IndexByte(cond, '_'); i >= 0 { // drop the _<surface> suffix
+		cond = cond[:i]
+	}
+	switch cond {
+	case "startup", "fault", "stall", "end":
 		return true
 	}
 	return false
