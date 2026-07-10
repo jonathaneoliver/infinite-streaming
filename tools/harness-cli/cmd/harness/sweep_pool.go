@@ -77,6 +77,30 @@ func sweepPlatformsForDevice(d DeviceCapability) []string {
 	return nil
 }
 
+// runnerPlatformForDevice returns the platform the characterization RUNNER will
+// classify this device as during discovery — which the probe filters on. It
+// differs from the sweep tokens: the runner's mapSimRuntime labels EVERY iOS
+// simulator `ipad-sim` (never iphone-sim), so a Fleet iPhone 15 sim is
+// discovered as ipad-sim. Passing the experiment's own token (e.g. iphone) as
+// CHAR_SWEEP_PLATFORM would make the probe find no matching device and skip.
+func runnerPlatformForDevice(d DeviceCapability) string {
+	switch strings.ToLower(d.Platform) {
+	case "tvos":
+		return "appletv"
+	case "android":
+		return "androidtv"
+	case "ios":
+		if d.Real {
+			if strings.Contains(strings.ToLower(d.Name), "ipad") {
+				return "ipad"
+			}
+			return "iphone"
+		}
+		return "ipad-sim" // the runner classifies every iOS simulator as ipad-sim
+	}
+	return d.Platform
+}
+
 // serviceableTokens is the union of the sweep platform tokens the given free
 // devices can service — the allow-list a caller passes to `sweep next --claim
 // --serviceable` so unserviceable work is never returned (scenario 3's gate).

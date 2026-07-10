@@ -241,3 +241,24 @@ func TestRunStreamingPool_MaxExperimentsCap(t *testing.T) {
 		t.Errorf("got %d outcomes, want 2", len(outcomes))
 	}
 }
+
+func TestRunnerPlatformForDevice(t *testing.T) {
+	cases := []struct {
+		name string
+		dev  DeviceCapability
+		want string
+	}{
+		// Every iOS sim → ipad-sim (the runner's mapSimRuntime), even an iPhone model.
+		{"iphone sim", DeviceCapability{Platform: "ios", Name: "Fleet iPhone 15 #1"}, "ipad-sim"},
+		{"ipad sim", DeviceCapability{Platform: "ios", Name: "iPad Pro"}, "ipad-sim"},
+		{"real iphone", DeviceCapability{Platform: "ios", Name: "Jonathans iPhone", Real: true}, "iphone"},
+		{"real ipad", DeviceCapability{Platform: "ios", Name: "iPad Air", Real: true}, "ipad"},
+		{"appletv", DeviceCapability{Platform: "tvos", Name: "Apple TV"}, "appletv"},
+		{"android", DeviceCapability{Platform: "android", Name: "Android TV"}, "androidtv"},
+	}
+	for _, c := range cases {
+		if got := runnerPlatformForDevice(c.dev); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}

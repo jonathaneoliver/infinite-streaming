@@ -159,8 +159,12 @@ func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDef
 			return out
 		}
 
-		// Drive the probe pinned to THIS device and capture its play_id.
-		playID, perr := runSweepProbeCapture(ctx, client.BaseURL, charDir, e, pid, dev.UDID, clip, durationS)
+		// Drive the probe pinned to THIS device and capture its play_id. The probe
+		// filters discovered devices by CHAR_SWEEP_PLATFORM, which must be the
+		// RUNNER's platform for the assigned device (e.g. every iOS sim is
+		// discovered as ipad-sim) — NOT the experiment's sweep token (iphone), or
+		// the probe finds no matching device and skips.
+		playID, perr := runSweepProbeCapture(ctx, client.BaseURL, charDir, e, runnerPlatformForDevice(dev), pid, dev.UDID, clip, durationS)
 		if perr != nil || playID == "" {
 			if perr == nil {
 				perr = errors.New("probe produced no play_id (crash/inconclusive)")
@@ -194,7 +198,7 @@ func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDef
 // to stderr (device-prefixed) while capturing it to parse the play_id. Mirrors
 // driveProbe's env, sourced from the experiment via the #873 bridge so the
 // client knobs (segment / offset / codec / pattern / …) match the recipe.
-func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Experiment, playerID, udid, clip string, durationS int) (string, error) {
+func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Experiment, probePlatform, playerID, udid, clip string, durationS int) (string, error) {
 	if durationS <= 0 {
 		durationS = 60
 	}
@@ -213,7 +217,7 @@ func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Ex
 		"HARNESS_BASE_URL="+base,
 		"CHAR_PLAYER_ID="+playerID,
 		"CHARACTERIZATION_DEVICE_UDID="+udid,
-		"CHAR_SWEEP_PLATFORM="+e.Platform,
+		"CHAR_SWEEP_PLATFORM="+probePlatform,
 		"CHAR_SWEEP_DURATION_S="+strconv.Itoa(durationS),
 		"CHAR_SWEEP_SEGMENT="+a.Segment,
 		"CHAR_SWEEP_LIVE_OFFSET="+a.ClientLiveOffsetS(),
