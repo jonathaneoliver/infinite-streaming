@@ -84,6 +84,12 @@ Subcommands:
                            group/pattern (control masters; variants bind). Reuses
                            the char-matrix fleet path. --dry-run prints the
                            RunPlan. Singletons stay on the single-device probe.
+  run --concurrent [--serviceable toks] [--max-devices N] [--dry-run]
+                           STREAMING POOL (#950): pack independent experiments
+                           across every free farm device — one worker per device,
+                           barrierless, each claims serviceable work until its
+                           platform's backlog is dry. Reps ride this. --dry-run
+                           prints the roster + serviceable set + worker count.
   isolate <id> --flip axis=value [--flip …]
                            materialise an OFAT isolation fan off a confirmed
                            hit (control + one variant per flip) into backlog/.
@@ -117,6 +123,8 @@ func cmdSweep(client *api.Client, args []string, asJSON bool) error {
 		return cmdSweepExport(client, args[1:], asJSON)
 	case "run-fan":
 		return cmdSweepRunFan(client, args[1:], asJSON)
+	case "run":
+		return cmdSweepRun(client, args[1:], asJSON)
 	case "status":
 		return cmdSweepStatus(client, args[1:], asJSON)
 	case "ls":

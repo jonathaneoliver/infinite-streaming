@@ -380,24 +380,56 @@ func cmdSweepAnalyze(client *api.Client, args []string, asJSON bool) error {
 		return fmt.Errorf("load %s/%s: %w", *from, id, err)
 	}
 
-	// Oracle A: pull the play's severity-tagged labels (the label_histogram on
-	// the plays row, unioned across all three source tables) and classify.
-	pid, err := parsePlayID(*play)
+	bucket, labels, enqueued, err := analyzeExperiment(client, s, e, sweep.Status(*from), *play, *confirmReps)
 	if err != nil {
 		return err
+	}
+
+	viewer := viewerURL(client.BaseURL, e.PlayerID, *play)
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"experiment": e.ID, "player_id": e.PlayerID, "play_id": *play, "verdict": e.Result.Verdict,
+			"labels": labels, "moved_to": bucket, "confirm_reps": enqueued,
+			"session_viewer": viewer,
+		})
+	}
+	fmt.Printf("%s: verdict=%s → %s/ (%d labels)\n", e.ID, e.Result.Verdict, bucket, len(labels))
+	if k := sweep.PrimaryKind(labels); k != "" {
+		fmt.Printf("  primary: %s\n", k)
+	}
+	fmt.Printf("  player_id=%s play_id=%s\n", e.PlayerID, *play)
+	fmt.Printf("  session-viewer: %s\n", viewer)
+	if len(enqueued) > 0 {
+		fmt.Printf("  n=1 guard: enqueued %d confirmation reps → backlog (%s)\n", len(enqueued), strings.Join(enqueued, ", "))
+	}
+	return nil
+}
+
+// analyzeExperiment is the oracle + bookkeeping core shared by `sweep analyze`
+// and the streaming pool (#950): pull the play's labels, classify, run the #793
+// manipulation-check gate, apply the n=1 confirmation guard, move the experiment
+// to its verdict bucket, and record the run. Returns the bucket it landed in,
+// the labels read, and any confirmation-rep ids enqueued. `from` is the bucket e
+// currently sits in (the Move source). Callers own the presentation.
+func analyzeExperiment(client *api.Client, s *sweep.Store, e *sweep.Experiment, from sweep.Status, play string, confirmReps int) (sweep.Status, []string, []string, error) {
+	// Oracle A: pull the play's severity-tagged labels (the label_histogram on
+	// the plays row, unioned across all three source tables) and classify.
+	pid, err := parsePlayID(play)
+	if err != nil {
+		return "", nil, nil, err
 	}
 	limit := 1
 	params := &forwarder.GetApiV2PlaysParams{PlayId: &pid, Limit: &limit}
 	body, err := client.ArchivePlays(context.Background(), params)
 	if err != nil {
-		return fmt.Errorf("query play %s: %w", *play, err)
+		return "", nil, nil, fmt.Errorf("query play %s: %w", play, err)
 	}
 	labels, err := sweep.LabelsFromPlayHistogram(body)
 	if err != nil {
-		return err
+		return "", nil, nil, err
 	}
 
-	bucket := sweep.Analyze(e, *play, labels)
+	bucket := sweep.Analyze(e, play, labels)
 
 	// Manipulation-check gate (epic #793): a live-offset recipe is only
 	// interpretable if changing the knob actually moved the player's ACHIEVED
@@ -407,7 +439,7 @@ func cmdSweepAnalyze(client *api.Client, args []string, asJSON bool) error {
 	if intended, ok := sweep.IntendedLiveOffset(e); ok {
 		evBody, evErr := client.ArchiveEvents(context.Background(), &forwarder.GetApiV2EventsParams{PlayId: &pid})
 		if evErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: manipulation check could not read offsets for %s: %v\n", *play, evErr)
+			fmt.Fprintf(os.Stderr, "warning: manipulation check could not read offsets for %s: %v\n", play, evErr)
 		} else if achieved := sweep.AchievedOffsetFromEvents(evBody); !sweep.ManipulationLanded(intended, achieved, sweep.SegmentSlackS(e.Segment)) {
 			got := achieved.RecommendedS
 			if got <= 0 {
@@ -431,17 +463,17 @@ func cmdSweepAnalyze(client *api.Client, args []string, asJSON bool) error {
 	// being promoted straight away. The reps land in backlog; this experiment
 	// still records its verdict and moves to its bucket for the post-mortem.
 	var enqueued []string
-	if *confirmReps > 0 && sweep.NeedsConfirmation(e) {
-		for _, rep := range sweep.ConfirmationReps(e, *confirmReps, nowUTC()) {
+	if confirmReps > 0 && sweep.NeedsConfirmation(e) {
+		for _, rep := range sweep.ConfirmationReps(e, confirmReps, nowUTC()) {
 			if err := s.Save(sweep.StatusBacklog, rep); err != nil {
-				return err
+				return "", nil, nil, err
 			}
 			enqueued = append(enqueued, rep.ID)
 		}
 	}
 
-	if err := s.Move(sweep.Status(*from), bucket, e); err != nil {
-		return err
+	if err := s.Move(from, bucket, e); err != nil {
+		return "", nil, nil, err
 	}
 	// Record the run in the append-only history + mark the play interesting
 	// (best-effort: the verdict already landed; don't fail on a history hiccup).
@@ -450,25 +482,7 @@ func cmdSweepAnalyze(client *api.Client, args []string, asJSON bool) error {
 			fmt.Fprintf(os.Stderr, "warning: record run history: %v\n", err)
 		}
 	}
-
-	viewer := viewerURL(client.BaseURL, e.PlayerID, *play)
-	if asJSON {
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{
-			"experiment": e.ID, "player_id": e.PlayerID, "play_id": *play, "verdict": e.Result.Verdict,
-			"labels": labels, "moved_to": bucket, "confirm_reps": enqueued,
-			"session_viewer": viewer,
-		})
-	}
-	fmt.Printf("%s: verdict=%s → %s/ (%d labels)\n", e.ID, e.Result.Verdict, bucket, len(labels))
-	if k := sweep.PrimaryKind(labels); k != "" {
-		fmt.Printf("  primary: %s\n", k)
-	}
-	fmt.Printf("  player_id=%s play_id=%s\n", e.PlayerID, *play)
-	fmt.Printf("  session-viewer: %s\n", viewer)
-	if len(enqueued) > 0 {
-		fmt.Printf("  n=1 guard: enqueued %d confirmation reps → backlog (%s)\n", len(enqueued), strings.Join(enqueued, ", "))
-	}
-	return nil
+	return bucket, labels, enqueued, nil
 }
 
 // --- sweep promote --------------------------------------------------------
