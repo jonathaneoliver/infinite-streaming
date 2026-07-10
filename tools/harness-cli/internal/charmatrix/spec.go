@@ -85,6 +85,12 @@ type Arm struct {
 	Class       string `json:"class,omitempty"`      // config | fault (overrides the spec default)
 	DurationS   int    `json:"duration_s,omitempty"` // play window (overrides the spec default)
 	Reps        int    `json:"reps,omitempty"`       // confirmation reps (overrides the spec default)
+	// Set by ReplicateReps (#951) when an arm is fanned into rep-instances, not
+	// authored in YAML. RepGroup ties a rep-batch together (= the pre-replication
+	// arm ID); RepIndex is this instance's 0-based position. They ride through to
+	// sweep.Experiment.RepGroup so the dashboard/archive can aggregate the batch.
+	RepGroup string `json:"rep_group,omitempty"`
+	RepIndex int    `json:"rep_index,omitempty"`
 
 	// --- client knobs (is.* — launch arg, cold relaunch on change) ---
 	Segment            string   `json:"is.segment,omitempty"`              // s1 | s2 | s6 | ll (empty = app default s6)

@@ -608,3 +608,104 @@ func TestArm_ToExperimentNoSharedPointers(t *testing.T) {
 		t.Fatal("experiments share a Shape.RateMbps pointer")
 	}
 }
+
+func TestReplicateReps_FansSequentialArms(t *testing.T) {
+	spec := &Spec{
+		Name: "m",
+		Reps: 3, // spec-level reps → every arm inherits reps=3
+		Axes: map[string][]any{"is.segment": {"s2", "s6"}},
+	}
+	arms, err := Expand(spec)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if len(arms) != 2 {
+		t.Fatalf("pre-replication: got %d arms, want 2", len(arms))
+	}
+	reps := ReplicateReps(arms, false /* sequential */)
+	if len(reps) != 6 { // 2 cells × 3 reps
+		t.Fatalf("post-replication: got %d instances, want 6", len(reps))
+	}
+	// Each cell's 3 instances share a RepGroup (the pre-replication ID), carry
+	// distinct rep IDs + 0..2 indices, and reset Reps to 1 (no re-replication).
+	byGroup := map[string][]*Arm{}
+	for _, a := range reps {
+		if a.RepGroup == "" {
+			t.Errorf("instance %s missing RepGroup", a.ID)
+		}
+		if a.Reps != 1 {
+			t.Errorf("instance %s Reps=%d, want 1", a.ID, a.Reps)
+		}
+		if !strings.Contains(a.ID, "/rep") {
+			t.Errorf("instance ID %q missing /rep suffix", a.ID)
+		}
+		byGroup[a.RepGroup] = append(byGroup[a.RepGroup], a)
+	}
+	if len(byGroup) != 2 {
+		t.Fatalf("want 2 rep-groups, got %d", len(byGroup))
+	}
+	for g, insts := range byGroup {
+		if len(insts) != 3 {
+			t.Fatalf("group %s has %d instances, want 3", g, len(insts))
+		}
+		seen := map[int]bool{}
+		for _, a := range insts {
+			seen[a.RepIndex] = true
+		}
+		for k := 0; k < 3; k++ {
+			if !seen[k] {
+				t.Errorf("group %s missing RepIndex %d", g, k)
+			}
+		}
+	}
+}
+
+func TestReplicateReps_NoRepsIsIdentity(t *testing.T) {
+	spec := &Spec{Name: "m", Axes: map[string][]any{"is.segment": {"s2", "s6"}}}
+	arms, _ := Expand(spec)
+	reps := ReplicateReps(arms, false)
+	if len(reps) != len(arms) {
+		t.Fatalf("reps unset should be identity: got %d, want %d", len(reps), len(arms))
+	}
+	for i := range arms {
+		if reps[i].ID != arms[i].ID || reps[i].RepGroup != "" {
+			t.Errorf("arm %d mutated: id=%q repGroup=%q", i, reps[i].ID, reps[i].RepGroup)
+		}
+	}
+}
+
+func TestReplicateReps_ParallelUnchanged(t *testing.T) {
+	// Parallel/synchronized specs must NOT rep-replicate (reps ride the streaming
+	// executor #950; a comparison group can't fan under the ≤4-arm HOME barrier).
+	spec := &Spec{Name: "m", Reps: 3, Parallel: true, Axes: map[string][]any{"is.segment": {"s2", "s6"}}}
+	arms, _ := Expand(spec)
+	reps := ReplicateReps(arms, true /* parallel */)
+	if len(reps) != len(arms) {
+		t.Fatalf("parallel spec should be unchanged: got %d, want %d", len(reps), len(arms))
+	}
+}
+
+func TestReplicateReps_DeepCloneNoAliasing(t *testing.T) {
+	// Rep-instances must not share pointer fields — mutating one must not touch
+	// its siblings (the JSON-round-trip clone guarantees this).
+	off := 12.0
+	spec := &Spec{
+		Name: "m",
+		Arms: []*Arm{{ID: "a", Platform: "ipad-sim", Reps: 2, ProxyLiveOffset: &off}},
+	}
+	arms, err := Expand(spec)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	reps := ReplicateReps(arms, false)
+	if len(reps) != 2 {
+		t.Fatalf("got %d instances, want 2", len(reps))
+	}
+	if reps[0].ProxyLiveOffset == reps[1].ProxyLiveOffset {
+		t.Fatalf("rep-instances alias the same *float64 pointer")
+	}
+	*reps[0].ProxyLiveOffset = 99
+	if *reps[1].ProxyLiveOffset != 12.0 {
+		t.Errorf("mutating instance 0 leaked into instance 1: %v", *reps[1].ProxyLiveOffset)
+	}
+}

@@ -93,6 +93,11 @@ func cmdCharMatrix(client *api.Client, args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
+	// Fan each arm into its `reps` execution-instances (#951) so a spec that sets
+	// reps runs each cell N times, tied by a shared rep_group. A no-op when no arm
+	// sets reps>1. Parallel/synchronized specs are returned unchanged (reps ride
+	// the streaming executor, #950); this replication drives the sequential path.
+	arms = charmatrix.ReplicateReps(arms, spec.Parallel)
 
 	// --validate: the spec loaded + expanded cleanly. Report and stop — quiet
 	// pass/fail for the test-author skill's fast loop and CI, no network, no
