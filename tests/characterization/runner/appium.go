@@ -396,6 +396,60 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 	return &Session{Device: d, Launcher: a}, nil
 }
 
+// RelaunchApp relaunches the app on the device's EXISTING appium session with a
+// fresh set of launch args — the warm-session path (#946, config #2). It reuses
+// the session + WDA (the ~expensive, ~20s part) and only cold-launches the app,
+// so a warm-session pool worker can bind a NEW experiment's player_id/config
+// without paying for a fresh session each time (and without the back-to-back
+// session-create race). The APP still cold-starts (fresh AVPlayer) — this is the
+// plumbing optimization, orthogonal to start_mode; a genuine warm START (resume
+// in the running app) is a separate primitive.
+//
+// Requires LaunchToHome to have opened a session for d first. iOS/XCUITest only:
+// terminate + relaunch with the new NSArgumentDomain args, then the same server-
+// picker + drive-to-home LaunchToHome does. Returns an error on other platforms
+// (the caller falls back to a cold LaunchToHome).
+func (a *AppiumLauncher) RelaunchApp(ctx context.Context, d Device, args []string) error {
+	sessID := a.sessionID(d)
+	if sessID == "" {
+		return errors.New("RelaunchApp: no active appium session for device (call LaunchToHome first)")
+	}
+	bundleID := a.BundleIDs[d.Platform]
+	if bundleID == "" {
+		return fmt.Errorf("RelaunchApp: no bundle id for platform %s", d.Platform)
+	}
+	// Fold in the baseline test flags exactly as LaunchToHome does, so a warm
+	// relaunch lands with the same known-good defaults (4K on, peak clamp off…).
+	effectiveArgs := withBaselineTestFlags(args)
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+		if err := a.execScript(ctx, sessID, "mobile: terminateApp", map[string]any{"bundleId": bundleID}); err != nil {
+			return fmt.Errorf("RelaunchApp terminate: %w", err)
+		}
+		launch := map[string]any{"bundleId": bundleID}
+		if len(effectiveArgs) > 0 {
+			// XCUITest folds `arguments` into NSArgumentDomain on launch, exactly
+			// like processArguments at session-create — so -is.player_id /
+			// -is.server_url bind the new session on this warm relaunch.
+			launch["arguments"] = effectiveArgs
+		}
+		if err := a.execScript(ctx, sessID, "mobile: launchApp", launch); err != nil {
+			return fmt.Errorf("RelaunchApp launch: %w", err)
+		}
+	default:
+		return fmt.Errorf("RelaunchApp: warm relaunch unsupported on %s — use a cold LaunchToHome", d.Platform)
+	}
+
+	// Same post-launch as LaunchToHome: clear the server picker (no-op when a
+	// server is set — which -is.server_url guarantees), then drive back to home.
+	if err := a.navigateServerPickerIfPresent(ctx, sessID, bootstrapBaseURL()); err != nil {
+		return fmt.Errorf("RelaunchApp server picker: %w", err)
+	}
+	_ = a.tapByAccessibilityID(ctx, sessID, "playback-back-button")
+	time.Sleep(800 * time.Millisecond)
+	return nil
+}
+
 // ResumePlayback taps the home-continue-watching tile to start
 // playback. Caller has had the chance to ApplyRate (or any other
 // pre-playback setup) since LaunchToHome returned. Does NOT wait for a
@@ -871,6 +925,15 @@ func (a *AppiumLauncher) findByAccessibilityID(ctx context.Context, sessID, id s
 func (a *AppiumLauncher) clickElement(ctx context.Context, sessID, elementID string) error {
 	_, err := a.doRequest(ctx, "POST",
 		fmt.Sprintf("/session/%s/element/%s/click", sessID, elementID), map[string]any{})
+	return err
+}
+
+// execScript runs an Appium `mobile:` extension command on the session (W3C
+// execute/sync). arg is the single command-argument object (e.g. {"bundleId":…,
+// "arguments":[…]} for mobile: launchApp).
+func (a *AppiumLauncher) execScript(ctx context.Context, sessID, script string, arg map[string]any) error {
+	body := map[string]any{"script": script, "args": []any{arg}}
+	_, err := a.doRequest(ctx, "POST", "/session/"+sessID+"/execute/sync", body)
 	return err
 }
 
