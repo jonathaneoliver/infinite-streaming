@@ -410,40 +410,69 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 // picker + drive-to-home LaunchToHome does. Returns an error on other platforms
 // (the caller falls back to a cold LaunchToHome).
 func (a *AppiumLauncher) RelaunchApp(ctx context.Context, d Device, args []string) error {
+	if err := a.TerminateApp(ctx, d); err != nil {
+		return err
+	}
+	return a.LaunchAppWarmToHome(ctx, d, args)
+}
+
+// TerminateApp kills the app on the device's existing appium session (the STOP
+// half of a warm relaunch, #946) — split out so a caller can time teardown
+// separately from startup. iOS/XCUITest `mobile: terminateApp`.
+func (a *AppiumLauncher) TerminateApp(ctx context.Context, d Device) error {
 	sessID := a.sessionID(d)
 	if sessID == "" {
-		return errors.New("RelaunchApp: no active appium session for device (call LaunchToHome first)")
+		return errors.New("TerminateApp: no active appium session for device")
 	}
 	bundleID := a.BundleIDs[d.Platform]
 	if bundleID == "" {
-		return fmt.Errorf("RelaunchApp: no bundle id for platform %s", d.Platform)
+		return fmt.Errorf("TerminateApp: no bundle id for platform %s", d.Platform)
+	}
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+		return a.execScript(ctx, sessID, "mobile: terminateApp", map[string]any{"bundleId": bundleID})
+	default:
+		return fmt.Errorf("TerminateApp: unsupported on %s", d.Platform)
+	}
+}
+
+// LaunchAppWarmToHome cold-launches the app on the EXISTING session with fresh
+// args, then drives past the server picker to home (the START half of a warm
+// relaunch, #946). Assumes the app is already terminated (call TerminateApp
+// first, or use RelaunchApp which does both). Timing THIS alone measures pure
+// startup, excluding the teardown of the previous play/app.
+func (a *AppiumLauncher) LaunchAppWarmToHome(ctx context.Context, d Device, args []string) error {
+	sessID := a.sessionID(d)
+	if sessID == "" {
+		return errors.New("LaunchAppWarmToHome: no active appium session for device")
+	}
+	bundleID := a.BundleIDs[d.Platform]
+	if bundleID == "" {
+		return fmt.Errorf("LaunchAppWarmToHome: no bundle id for platform %s", d.Platform)
 	}
 	// Fold in the baseline test flags exactly as LaunchToHome does, so a warm
-	// relaunch lands with the same known-good defaults (4K on, peak clamp off…).
+	// launch lands with the same known-good defaults (4K on, peak clamp off…).
 	effectiveArgs := withBaselineTestFlags(args)
 	switch d.Platform {
 	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
-		if err := a.execScript(ctx, sessID, "mobile: terminateApp", map[string]any{"bundleId": bundleID}); err != nil {
-			return fmt.Errorf("RelaunchApp terminate: %w", err)
-		}
 		launch := map[string]any{"bundleId": bundleID}
 		if len(effectiveArgs) > 0 {
 			// XCUITest folds `arguments` into NSArgumentDomain on launch, exactly
 			// like processArguments at session-create — so -is.player_id /
-			// -is.server_url bind the new session on this warm relaunch.
+			// -is.server_url bind the new session on this warm launch.
 			launch["arguments"] = effectiveArgs
 		}
 		if err := a.execScript(ctx, sessID, "mobile: launchApp", launch); err != nil {
-			return fmt.Errorf("RelaunchApp launch: %w", err)
+			return fmt.Errorf("LaunchAppWarmToHome launch: %w", err)
 		}
 	default:
-		return fmt.Errorf("RelaunchApp: warm relaunch unsupported on %s — use a cold LaunchToHome", d.Platform)
+		return fmt.Errorf("LaunchAppWarmToHome: unsupported on %s — use a cold LaunchToHome", d.Platform)
 	}
-
-	// Same post-launch as LaunchToHome: clear the server picker (no-op when a
-	// server is set — which -is.server_url guarantees), then drive back to home.
-	if err := a.navigateServerPickerIfPresent(ctx, sessID, bootstrapBaseURL()); err != nil {
-		return fmt.Errorf("RelaunchApp server picker: %w", err)
+	// Clear the server picker with a SHORT probe: a warm relaunch already has the
+	// server set (-is.server_url), so the picker won't appear — a long poll here
+	// is pure wasted startup time. 1s is ample to detect a stray picker.
+	if err := a.navigateServerPickerIfPresentT(ctx, sessID, bootstrapBaseURL(), time.Second); err != nil {
+		return fmt.Errorf("LaunchAppWarmToHome server picker: %w", err)
 	}
 	_ = a.tapByAccessibilityID(ctx, sessID, "playback-back-button")
 	time.Sleep(800 * time.Millisecond)
@@ -956,9 +985,18 @@ func (a *AppiumLauncher) sendKeysToElement(ctx context.Context, sessID, elementI
 // (e.g. seeded via SeedServerProfile). Best-effort UI fallback to the
 // UserDefaults seed; requires the app to carry the server-* accessibility ids.
 func (a *AppiumLauncher) navigateServerPickerIfPresent(ctx context.Context, sessID, baseURL string) error {
+	return a.navigateServerPickerIfPresentT(ctx, sessID, baseURL, 4*time.Second)
+}
+
+// navigateServerPickerIfPresentT is the same with a caller-chosen probe timeout.
+// The first launch (fresh sim) genuinely may show the picker → 4s. A WARM
+// relaunch already has a server set (-is.server_url), so the picker never
+// appears — a long poll there is pure wasted startup time (it inflated the cold
+// rep bring-up by ~4s, #946), so LaunchAppWarmToHome passes a short probe.
+func (a *AppiumLauncher) navigateServerPickerIfPresentT(ctx context.Context, sessID, baseURL string, probe time.Duration) error {
 	// Short probe — if the picker root isn't in the AX tree we're already past
 	// it (on Home), so this is a cheap no-op on the common path.
-	if _, err := a.waitForAccessibilityID(ctx, sessID, "server-picker-screen", 4*time.Second); err != nil {
+	if _, err := a.waitForAccessibilityID(ctx, sessID, "server-picker-screen", probe); err != nil {
 		return nil
 	}
 	if err := a.tapByAccessibilityID(ctx, sessID, "server-add-by-url"); err != nil {

@@ -49,11 +49,11 @@ type poolOutcome struct {
 	AnalyzeMs   int64  // ingest wait + oracle analyze
 	TotalMs     int64  // whole experiment, bootstrap → verdict
 
-	// Rep-batch (#946) — set only under --rep-batch. StartMode is cold|warm;
-	// RepBringupsMs is the per-rep bring-up (warm reps are ~1s vs ~9s cold),
-	// making the warm saving visible per experiment.
-	StartMode     string
-	RepBringupsMs []int64
+	// Rep-batch (#946) — set only under a rep-batch. StartMode is cold|warm;
+	// Reps carries each iteration's teardown (stop the previous) + startup
+	// (launch+resume the next), kept separate so the warm saving is visible.
+	StartMode string
+	Reps      []repResult
 }
 
 // poolRunner does the real per-experiment work on a specific device: bootstrap
@@ -251,14 +251,16 @@ func summarizePool(outcomes []poolOutcome, wallMs int64) string {
 		fmt.Fprintf(&b, "  %-6s %-40s %-9s %7ds %7ds %7ds\n",
 			status, truncate(o.ExpID, 40), shortUDID(o.Device),
 			o.BringupMs/1000, o.ProbeMs/1000, o.TotalMs/1000)
-		// Rep-batch (#946): show the per-rep bring-up so the warm saving is
-		// visible (warm reps ~1s vs cold ~9s).
-		if len(o.RepBringupsMs) > 0 {
-			parts := make([]string, len(o.RepBringupsMs))
-			for i, ms := range o.RepBringupsMs {
-				parts[i] = fmt.Sprintf("%.1fs", float64(ms)/1000)
+		// Rep-batch (#946): show per-rep teardown (stop the previous) + startup
+		// (launch+resume) separately, so the warm saving is visible (warm startup
+		// ~1s vs cold ~9s) AND the shutdown+relaunch cost is kept.
+		if len(o.Reps) > 0 {
+			parts := make([]string, len(o.Reps))
+			for i, r := range o.Reps {
+				parts[i] = fmt.Sprintf("r%d %s tear=%.1fs start=%.1fs", i, r.Mode,
+					float64(r.TeardownMs)/1000, float64(r.StartupMs)/1000)
 			}
-			fmt.Fprintf(&b, "         rep-batch (%s): %s\n", orDash(o.StartMode), strings.Join(parts, " "))
+			fmt.Fprintf(&b, "         rep-batch (%s): %s\n", orDash(o.StartMode), strings.Join(parts, " · "))
 		}
 	}
 	fmt.Fprintf(&b, "streaming pool: %d ran, %d skipped, %d errored\n", ran, skipped, errs)

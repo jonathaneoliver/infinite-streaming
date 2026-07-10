@@ -301,22 +301,50 @@ func indexOf(hay, needle string) int {
 func TestRepBatchRegexParse(t *testing.T) {
 	out := `
     rep_batch_test.go:79: REPBATCH session_setup_ms=16605 start_mode=warm reps=3
-    rep_batch_test.go:102: REPBATCH rep=0 mode=cold bringup_ms=412 play_id=54571cac-654b-46aa-8746-527aa0c52524
-    rep_batch_test.go:102: REPBATCH rep=1 mode=warm bringup_ms=1222 play_id=349f38c6-90c6-4b8f-8216-d61246ebe729
-    rep_batch_test.go:102: REPBATCH rep=2 mode=warm bringup_ms=1238 play_id=60c88824-9f5e-4409-a554-89bbfc30875c
+    rep_batch_test.go:102: REPBATCH rep=0 mode=cold teardown_ms=0 startup_ms=412 play_id=54571cac-654b-46aa-8746-527aa0c52524
+    rep_batch_test.go:102: REPBATCH rep=1 mode=warm teardown_ms=1800 startup_ms=1222 play_id=349f38c6-90c6-4b8f-8216-d61246ebe729
+    rep_batch_test.go:102: REPBATCH rep=2 mode=warm teardown_ms=1750 startup_ms=1238 play_id=60c88824-9f5e-4409-a554-89bbfc30875c
 `
 	ms := repBatchRe.FindAllStringSubmatch(out, -1)
 	if len(ms) != 3 {
 		t.Fatalf("parsed %d reps, want 3", len(ms))
 	}
-	// rep 0 cold, reps 1-2 warm; play_ids captured; bringups in the right order.
 	if ms[0][2] != "cold" || ms[1][2] != "warm" || ms[2][2] != "warm" {
 		t.Errorf("modes: %s %s %s", ms[0][2], ms[1][2], ms[2][2])
 	}
-	if ms[0][4] != "54571cac-654b-46aa-8746-527aa0c52524" {
-		t.Errorf("rep0 play_id = %s", ms[0][4])
+	// group order: rep, mode, teardown_ms, startup_ms, play_id
+	if ms[1][3] != "1800" || ms[1][4] != "1222" {
+		t.Errorf("rep1 teardown/startup = %s/%s, want 1800/1222", ms[1][3], ms[1][4])
 	}
-	if ms[1][3] != "1222" {
-		t.Errorf("rep1 bringup_ms = %s, want 1222", ms[1][3])
+	if ms[0][5] != "54571cac-654b-46aa-8746-527aa0c52524" {
+		t.Errorf("rep0 play_id = %s", ms[0][5])
+	}
+}
+
+func TestResolveRepBatch(t *testing.T) {
+	warm := &sweep.Experiment{Reps: 3, StartMode: "warm"}
+	cold3 := &sweep.Experiment{Reps: 3}           // reps set, no start_mode → cold
+	single := &sweep.Experiment{}                 // no reps
+	warm1 := &sweep.Experiment{StartMode: "warm"} // warm but reps=1 → single (warm no-op)
+
+	cases := []struct {
+		name     string
+		runReps  int
+		runMode  string
+		e        *sweep.Experiment
+		wantReps int
+		wantMode string
+	}{
+		{"spec warm rep-loop", 0, "cold", warm, 3, "warm"},
+		{"spec reps, default cold", 0, "cold", cold3, 3, "cold"},
+		{"single play", 0, "cold", single, 1, "cold"},
+		{"warm but reps=1 → single", 0, "cold", warm1, 1, "warm"},
+		{"run-level override wins", 5, "warm", cold3, 5, "warm"},
+	}
+	for _, c := range cases {
+		gotReps, gotMode := resolveRepBatch(c.runReps, c.runMode, c.e)
+		if gotReps != c.wantReps || gotMode != c.wantMode {
+			t.Errorf("%s: got (%d,%s), want (%d,%s)", c.name, gotReps, gotMode, c.wantReps, c.wantMode)
+		}
 	}
 }

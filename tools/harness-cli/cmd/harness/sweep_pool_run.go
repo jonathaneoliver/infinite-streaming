@@ -177,15 +177,18 @@ func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDef
 		// discovered as ipad-sim) — NOT the experiment's sweep token (iphone), or
 		// the probe finds no matching device and skips.
 		probePlatform := runnerPlatformForDevice(dev)
+		// Run-level --rep-batch overrides; otherwise the experiment's own reps +
+		// start_mode drive it (spec-driven auto-routing, #946).
+		effReps, effMode := resolveRepBatch(repBatch, startMode, e)
 		var playID string
-		if repBatch > 1 {
+		if effReps > 1 {
 			// Warm rep-loop (#946): run N reps of this config in ONE warm appium
 			// session on this device. start_mode=warm resumes each play in place
 			// (no relaunch — warm buffers); cold relaunches per rep. Produces N
 			// play_ids; the first drives the verdict, the rest are recorded on the
 			// outcome for confirmation + the per-rep timing shows the warm saving.
-			reps, bringupMs, probeMs, rerr := runRepBatchCapture(ctx, client.BaseURL, charDir, e, probePlatform, pid, dev.UDID, clip, durationS, repBatch, startMode)
-			out.BringupMs, out.ProbeMs, out.RepBringupsMs, out.StartMode = bringupMs, probeMs, repBringups(reps), startMode
+			reps, bringupMs, probeMs, rerr := runRepBatchCapture(ctx, client.BaseURL, charDir, e, probePlatform, pid, dev.UDID, clip, durationS, effReps, effMode)
+			out.BringupMs, out.ProbeMs, out.Reps, out.StartMode = bringupMs, probeMs, reps, effMode
 			if rerr != nil || len(reps) == 0 {
 				if rerr == nil {
 					rerr = errors.New("rep-batch produced no play_id")
@@ -287,14 +290,16 @@ func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Ex
 	return "", bringupMs, probeMs, runErr
 }
 
-// repResult is one iteration of a warm rep-batch: its play_id + bring-up ms.
+// repResult is one iteration of a warm rep-batch: teardown (stop the previous
+// play/app — kept separate) + startup (launch+resume the next) + its play_id.
 type repResult struct {
-	PlayID    string
-	BringupMs int64
-	Mode      string // cold | warm (rep 0 is always cold)
+	PlayID     string
+	TeardownMs int64
+	StartupMs  int64
+	Mode       string // cold | warm (rep 0 is always cold)
 }
 
-var repBatchRe = regexp.MustCompile(`REPBATCH rep=(\d+) mode=(\w+) bringup_ms=(\d+) play_id=([0-9a-fA-F-]{36})`)
+var repBatchRe = regexp.MustCompile(`REPBATCH rep=(\d+) mode=(\w+) teardown_ms=(\d+) startup_ms=(\d+) play_id=([0-9a-fA-F-]{36})`)
 
 // runRepBatchCapture invokes TestSweepRepBatch (the warm rep-loop, #946): N reps
 // of one config in a single warm session on udid, with start_mode cold|warm.
@@ -335,12 +340,13 @@ func runRepBatchCapture(ctx context.Context, base, charDir string, e *sweep.Expe
 	probeMs := time.Since(start).Milliseconds()
 	var results []repResult
 	for _, m := range repBatchRe.FindAllStringSubmatch(buf.String(), -1) {
-		bm, _ := strconv.ParseInt(m[3], 10, 64)
-		results = append(results, repResult{PlayID: m[4], BringupMs: bm, Mode: m[2]})
+		td, _ := strconv.ParseInt(m[3], 10, 64)
+		su, _ := strconv.ParseInt(m[4], 10, 64)
+		results = append(results, repResult{PlayID: m[5], TeardownMs: td, StartupMs: su, Mode: m[2]})
 	}
 	var firstBringup int64
 	if len(results) > 0 {
-		firstBringup = results[0].BringupMs
+		firstBringup = results[0].StartupMs
 	}
 	if len(results) == 0 && runErr == nil {
 		runErr = errors.New("rep-batch produced no REPBATCH play_id lines")
@@ -348,13 +354,21 @@ func runRepBatchCapture(ctx context.Context, base, charDir string, e *sweep.Expe
 	return results, firstBringup, probeMs, runErr
 }
 
-// repBringups projects the per-rep bring-up ms for the outcome.
-func repBringups(reps []repResult) []int64 {
-	out := make([]int64, 0, len(reps))
-	for _, r := range reps {
-		out = append(out, r.BringupMs)
+// resolveRepBatch decides how many reps + which start mode to run a claimed
+// experiment as (#946). A run-level --rep-batch (>1) is an explicit operator
+// override and wins for every experiment. Otherwise the experiment's OWN spec
+// drives it: an experiment carrying reps>1 runs as a rep-batch in its own
+// start_mode (start_mode: warm → the warm rep-loop) — so `compare: start_mode`
+// / a `reps: 3, start_mode: warm` arm auto-routes with no run-level flag. reps≤1
+// ⇒ a single probe (start_mode warm has no effect on one play — rep 0 is cold).
+func resolveRepBatch(runReps int, runMode string, e *sweep.Experiment) (reps int, mode string) {
+	if runReps > 1 {
+		return runReps, runMode
 	}
-	return out
+	if e.Reps > 1 {
+		return e.Reps, string(e.StartModeOrDefault())
+	}
+	return 1, string(e.StartModeOrDefault())
 }
 
 // bootSimBestEffort boots a simulator and waits for it, so the probe's Discover
