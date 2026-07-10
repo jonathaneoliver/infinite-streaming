@@ -61,11 +61,20 @@ The `*qoe_buffering_severe_startup` → `qoe_tier_unacceptable` threshold trips 
 | import-F-s1-00 (N=0) | `176f259f` | 2.88 | 4588 | severe_startup → unacceptable |
 | import-F-s1-02 (N=2) | `b6e81396` | 2.70 | 4800 | severe_startup → unacceptable |
 
-Every follow-on play in the same batch ran ~1.0s ffs / ~1.5s buf (`tier_acceptable`).
-So every fresh sweep batch manufactures one false `aberration` on its first arm, which
-then costs a 3-rep confirmation cycle to refute. **Fix:** the probe should run a discarded
-**warmup play** (or the oracle should suppress `severe_startup` on the first cold launch
-of a session/device) so the first *scored* arm isn't paying the cold-start penalty.
+**Revised attribution (after 4 slow + 4 fast plays across 3 sims):** the penalty is
+**not** sim/client warmth — `severe_startup` recurred on a "warm" sim (#2, ffs 2.56s)
+while three *rapid back-to-back* plays on a colder sim (#3) ran fast (ffs 0.35–0.96s).
+The clean split is **time-since-last-play**: all 4 `severe_startup` plays followed an
+idle gap (session start, or a pause while writing up results); all 4 fast plays were
+rapid back-to-back. That points to a **server-side go-live per-content worker
+cold-start** — the worker idles out, then respins and regenerates the s1 (1s LL) segments
+on the next request, so the first play after idle eats the segment-generation latency.
+**Tag: needs-test.** Distinguishing test: after a forced idle, run two back-to-back plays
+of the same content — 1st slow / 2nd fast confirms worker cold-start; both slow points
+back at the client. **Fix (either layer):** keep the go-live worker warm (or pre-generate)
+for content under active sweep, and/or have the probe run a discarded warmup play so the
+first *scored* arm isn't paying the respin latency. The per-batch false `aberration` +
+3-rep refutation cost is the same regardless of which layer causes it.
 
 ## Evidence — the guard was right anyway (aberration refuted)
 
