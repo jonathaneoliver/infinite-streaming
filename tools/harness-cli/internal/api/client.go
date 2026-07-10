@@ -143,6 +143,35 @@ func New(opts Options) (*Client, error) {
 	}, nil
 }
 
+// WithBaseURL returns a clone of c targeting a different base URL, reusing the
+// same HTTP transport (TLS policy), auth, and snapshot store — only the generated
+// sub-clients are rebound to the new origin. Used for per-arm cross-server queries
+// (#942): a fleet arm that streamed on another server needs its events read from
+// THAT server's archive, not the default base. Empty or same base returns c as-is.
+func (c *Client) WithBaseURL(baseURL string) (*Client, error) {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if base == "" || base == c.BaseURL {
+		return c, nil
+	}
+	editor := makeAuthEditor(c.BasicAuth)
+	pc, err := proxy.NewClient(base, proxy.WithHTTPClient(c.HTTP), proxy.WithRequestEditorFn(asProxyEditor(editor)))
+	if err != nil {
+		return nil, fmt.Errorf("proxy client: %w", err)
+	}
+	fc, err := forwarder.NewClient(base+"/analytics", forwarder.WithHTTPClient(c.HTTP), forwarder.WithRequestEditorFn(asForwarderEditor(editor)))
+	if err != nil {
+		return nil, fmt.Errorf("forwarder client: %w", err)
+	}
+	return &Client{
+		BaseURL:   base,
+		HTTP:      c.HTTP,
+		BasicAuth: c.BasicAuth,
+		Snap:      c.Snap,
+		proxy:     pc,
+		forwarder: fc,
+	}, nil
+}
+
 // reqEditor is the protocol-agnostic signature used by both generated
 // clients (proxy and forwarder define this same shape but in their own
 // packages, so we keep a separate type and adapt at the call site).

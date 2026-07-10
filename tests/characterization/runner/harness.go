@@ -153,6 +153,17 @@ func harnessArgs(extra ...string) []string {
 	return append(args, extra...)
 }
 
+// runHarnessOn is runHarness against a specific base URL (#942 cross-server): the
+// global `--base` flag targets THAT server instead of $HARNESS_BASE_URL, so a
+// player_id read / release lands on the server the arm actually streamed against.
+// Empty base ⇒ the default ($HARNESS_BASE_URL) — same as runHarness.
+func runHarnessOn(ctx context.Context, base string, args ...string) ([]byte, error) {
+	if strings.TrimSpace(base) != "" {
+		args = append([]string{"--base", base}, args...)
+	}
+	return runHarness(ctx, args...)
+}
+
 func runHarness(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, HarnessBin, harnessArgs(args...)...)
 	out, err := cmd.Output()
@@ -216,7 +227,14 @@ func PreLaunchInfo(ctx context.Context, d Device) (*PlayerRecord, error) {
 // drops the ETag for now (Phase 0 doesn't mutate); add it back when the
 // runner needs optimistic concurrency.
 func ShowPlayer(ctx context.Context, target string) (*PlayerRecord, error) {
-	raw, err := runHarness(ctx, "players", "show", target)
+	return ShowPlayerOn(ctx, "", target)
+}
+
+// ShowPlayerOn is ShowPlayer against a specific server (#942): reads the player
+// from `base` instead of $HARNESS_BASE_URL, so a cross-server arm's play_id is
+// captured from the server it actually streamed on. Empty base ⇒ the default.
+func ShowPlayerOn(ctx context.Context, base, target string) (*PlayerRecord, error) {
+	raw, err := runHarnessOn(ctx, base, "players", "show", target)
 	if err != nil {
 		return nil, err
 	}

@@ -173,6 +173,7 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		t.Fatalf("LaunchToHome: %v", lerr)
 	}
 	sess.PlayerID = cfg.PlayerID
+	sess.ServerURL = cfg.ServerURL // #942: play_id read + release target the arm's own server
 	// Record the device-farm UDID this arm acquired so the harness can release
 	// EXACTLY this run's devices after the process exits (#853) — concurrent-run
 	// safe. O_APPEND keeps parallel arms' lines from interleaving.
