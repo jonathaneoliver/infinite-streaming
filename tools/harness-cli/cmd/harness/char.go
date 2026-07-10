@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -197,6 +198,33 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 	// a zero-value ArmConfig (empty PlayerID), so its fleet index skips — exactly
 	// like the old "no CHAR_ARM_i_PLAYER_ID emitted" behavior.
 	planArms := make([]charplan.ArmConfig, len(arms))
+
+	// Bootstrap-phase crash-reap (#938): driveFleet's handler only covers the play
+	// window. Track the prepared player_ids and release their sessions if we're
+	// signalled before driveFleet takes over. With deferred config-on-connect (#937)
+	// the probe — not this loop — creates the sessions, so this is usually a no-op
+	// during build; it still guards the legacy up-front path and is harmless (a
+	// delete of a not-yet-created session just errors and is swallowed).
+	var bootMu sync.Mutex
+	var bootstrapped []string
+	bootSig := make(chan os.Signal, 1)
+	signal.Notify(bootSig, os.Interrupt, syscall.SIGTERM)
+	bootStop := make(chan struct{})
+	go func() {
+		select {
+		case <-bootSig:
+			bootMu.Lock()
+			ids := append([]string(nil), bootstrapped...)
+			bootMu.Unlock()
+			fmt.Fprintf(os.Stderr, "\ninterrupted during bootstrap — releasing %d config-on-connect session(s)\n", len(ids))
+			for _, pid := range ids {
+				reapProxySession(client, pid)
+			}
+			os.Exit(130)
+		case <-bootStop:
+		}
+	}()
+
 	window := 0
 	for i, a := range arms {
 		res := charmatrix.ArmResult{Arm: a, IntendedOff: intendedOf(a)}
@@ -221,8 +249,12 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 		playerID := uuid.NewString()
 		res.PlayerID = playerID
 
+		// Fleet path: BUILD the config-on-connect blob but don't GET it — the probe
+		// GETs it after reserving a device (#937). experimentPlayerPatch still needs
+		// the API client (it resolves content-manipulation variants), so the build
+		// stays here; only the pool-slot-consuming GET moves to the probe.
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		_, berr := bootstrapMatrixSession(ctx, client, clip, playerID, group, e)
+		cfgB64, groupID, _, berr := buildMatrixBootstrapCfg(ctx, client, clip, group, e)
 		cancel()
 		if berr != nil {
 			res.Err = "bootstrap: " + berr.Error()
@@ -230,7 +262,7 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 			continue // no CHAR_ARM_i_PLAYER_ID emitted → that fleet index skips
 		}
 		results[i] = res
-		fmt.Fprintf(os.Stderr, "bootstrapped arm %d/%d: %s (player_id=%s)\n", i+1, len(arms), a.ID, playerID)
+		fmt.Fprintf(os.Stderr, "prepared arm %d/%d: %s (player_id=%s)\n", i+1, len(arms), a.ID, playerID)
 		// CHAR_ARM_<i>_PLATFORM is the ONLY per-arm env still emitted — fleet.go's
 		// generic resolver reads it to assign a device of the right platform to each
 		// fleet index (mixed-platform fleets, #860), and it's shared by every fleet
@@ -238,8 +270,26 @@ func runMatrixParallel(client *api.Client, arms []*charmatrix.Arm, charDir strin
 		// RunPlan below (the probe reads CHAR_RUN_PLAN_FILE), so the old flat
 		// CHAR_ARM_<i>_{SEGMENT,CODEC,MUTED,…} surface is gone.
 		armEnv = append(armEnv, fmt.Sprintf("CHAR_ARM_%d_PLATFORM=%s", i, a.Platform))
-		planArms[i] = a.ToArmConfig(playerID, clip, rl, i == patternMaster)
+		ac := a.ToArmConfig(playerID, clip, rl, i == patternMaster)
+		ac.BootstrapCfgB64 = cfgB64 // probe GETs this after reserving a device (#937)
+		ac.GroupID = groupID
+		// Per-arm server (#942): explicit `server:` wins; else default to the run's
+		// base URL so EVERY arm pins a server via -is.server_url (no sim inherits a
+		// stale saved server). Threads to both the app launch arg and the deferred
+		// config-on-connect bootstrap, so a per-arm server bootstraps+streams as one.
+		ac.ServerURL = strings.TrimSpace(a.Server)
+		if ac.ServerURL == "" {
+			ac.ServerURL = client.BaseURL
+		}
+		planArms[i] = ac
+		bootMu.Lock()
+		bootstrapped = append(bootstrapped, playerID)
+		bootMu.Unlock()
 	}
+	// Bootstrap done — hand signal handling to driveFleet (which forwards to the test
+	// binary and reaps post-exit). Stop our handler so the two don't both fire.
+	signal.Stop(bootSig)
+	close(bootStop)
 	if window <= 0 {
 		window = 60
 	}
@@ -370,10 +420,61 @@ func driveFleet(client *api.Client, platform string, n, windowS int, charDir str
 	// Without this, devices leak "busy" across runs until create-session hangs
 	// to its 180s timeout (#853). Scoped to THIS run's devices via the manifest.
 	reapDeviceFarm(deviceFarmBaseURL(), manifestUDIDs(manifest))
+	// Crash-reap the config-on-connect proxy sessions this run bootstrapped (#938).
+	// The graceful path frees them inside the test binary's t.Cleanup (sess.Release),
+	// but a SIGKILL'd or panicked binary never runs that — the sessions then linger
+	// and exhaust the proxy's config-on-connect pool, 503-ing the next run. Since the
+	// CLI (not the killed child) makes this call, it survives a hard kill of the test
+	// process; it's idempotent, so double-releasing a graceful run's sessions is fine.
+	reapProxySessions(client, planArms)
 	if werr != nil {
 		return fmt.Errorf("go test TestCharMatrixFleet (dir=%s): %w", charDir, werr)
 	}
 	return nil
+}
+
+// reapProxySessions best-effort DELETEs the go-proxy config-on-connect sessions a
+// fleet run bootstrapped, addressed by player_id from the plan. Empty player_ids
+// (skipped/bootstrap-failed arms) are ignored; an already-released session's delete
+// just errors and is swallowed — the whole thing is best-effort cleanup (#938).
+func reapProxySessions(client *api.Client, planArms []charplan.ArmConfig) {
+	for _, a := range planArms {
+		if strings.TrimSpace(a.PlayerID) == "" {
+			continue
+		}
+		// #942: release each arm's session on the server it was bootstrapped on —
+		// a cross-server session lives on a different proxy than the default base.
+		c := client
+		if ac, err := client.WithBaseURL(strings.TrimSpace(a.ServerURL)); err == nil {
+			c = ac
+		}
+		reapProxySession(c, a.PlayerID)
+	}
+}
+
+// planPlayerIDs returns the non-empty player_ids in a plan — the sessions actually
+// bootstrapped. Skipped/bootstrap-failed arms carry a zero-value ArmConfig (empty
+// PlayerID) and are dropped, so the reap only targets sessions that really exist.
+func planPlayerIDs(planArms []charplan.ArmConfig) []string {
+	var ids []string
+	for _, a := range planArms {
+		if pid := strings.TrimSpace(a.PlayerID); pid != "" {
+			ids = append(ids, pid)
+		}
+	}
+	return ids
+}
+
+// reapProxySession releases one config-on-connect session by player_id (no-op on
+// empty). Best-effort with a short timeout so a slow/dead proxy can't wedge teardown.
+func reapProxySession(client *api.Client, playerID string) {
+	pid := strings.TrimSpace(playerID)
+	if pid == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	_ = client.DeletePlayer(ctx, pid, "crash-reap")
 }
 
 // deviceFarmBaseURL is the appium server hosting the device-farm plugin.
@@ -518,27 +619,39 @@ func runArmSequential(client *api.Client, a *charmatrix.Arm, charDir string, dur
 	return res
 }
 
-// bootstrapMatrixSession materialises an in-memory experiment's recipe onto a
-// proxy session via config-on-connect (no store round-trip): build the combined
-// PlayerPatch, base64 it onto the shaper master URL, and GET it. A 3xx means the
-// session is configured (#712 applies before the redirect); 4xx/5xx is a reject.
-// Mirrors cmdSweepBootstrap's HTTP handling.
-func bootstrapMatrixSession(ctx context.Context, client *api.Client, clip, playerID, group string, e *sweep.Experiment) ([]string, error) {
+// buildMatrixBootstrapCfg builds an arm's config-on-connect payload WITHOUT GETting
+// it: the combined PlayerPatch base64'd into the proxy.cfg blob, plus the resolved
+// group_id. Needs the API client (experimentPlayerPatch resolves content-manipulation
+// allowed_variants against the catalog). The fleet path carries the returned blob in
+// the RunPlan so the probe GETs it lazily, after a device is reserved (#937).
+func buildMatrixBootstrapCfg(ctx context.Context, client *api.Client, clip, group string, e *sweep.Experiment) (cfgB64, groupID string, summary []string, err error) {
 	patch, summary, err := experimentPlayerPatch(ctx, client, clip, e)
 	if err != nil {
-		return nil, err
+		return "", "", nil, err
 	}
 	cfgJSON, err := json.Marshal(patch)
 	if err != nil {
-		return nil, err
+		return "", "", nil, err
 	}
-	cfgB64 := base64.RawURLEncoding.EncodeToString(cfgJSON)
+	cfgB64 = base64.RawURLEncoding.EncodeToString(cfgJSON)
 	// The arm's own group (stamped by compare:/groups: in Expand) wins so paired
 	// arms arrive born-grouped on the dashboard; the --group CLI flag is the
 	// fallback for an ungrouped matrix the operator wants to tag by hand.
-	groupID := e.Group
+	groupID = e.Group
 	if groupID == "" {
 		groupID = group
+	}
+	return cfgB64, groupID, summary, nil
+}
+
+// bootstrapMatrixSession builds AND GETs the config-on-connect URL up front (the
+// single-device sequential path). A 3xx means the session is configured (#712
+// applies before the redirect); 4xx/5xx is a reject. Fleet runs instead defer the
+// GET to the probe via buildMatrixBootstrapCfg + the RunPlan (#937).
+func bootstrapMatrixSession(ctx context.Context, client *api.Client, clip, playerID, group string, e *sweep.Experiment) ([]string, error) {
+	cfgB64, groupID, summary, err := buildMatrixBootstrapCfg(ctx, client, clip, group, e)
+	if err != nil {
+		return nil, err
 	}
 	bootURL, err := shaperBootstrapURL(client.BaseURL, clip, playerID, groupID, cfgB64)
 	if err != nil {
@@ -616,6 +729,12 @@ func measureArm(client *api.Client, a *charmatrix.Arm, playerID string, res *cha
 	if err != nil {
 		res.Err = appendErr(res.Err, "player_id: "+err.Error())
 		return
+	}
+	// #942: read events from the arm's OWN server. A cross-server arm's play lives
+	// in that server's archive, not the default base's — querying the default would
+	// find nothing and wrongly report the arm as empty. Empty a.Server ⇒ default.
+	if ac, cerr := client.WithBaseURL(strings.TrimSpace(a.Server)); cerr == nil {
+		client = ac
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

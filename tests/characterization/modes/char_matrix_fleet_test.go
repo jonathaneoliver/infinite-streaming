@@ -173,6 +173,7 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		t.Fatalf("LaunchToHome: %v", lerr)
 	}
 	sess.PlayerID = cfg.PlayerID
+	sess.ServerURL = cfg.ServerURL // #942: play_id read + release target the arm's own server
 	// Record the device-farm UDID this arm acquired so the harness can release
 	// EXACTLY this run's devices after the process exits (#853) — concurrent-run
 	// safe. O_APPEND keeps parallel arms' lines from interleaving.
@@ -190,10 +191,34 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		_ = launcher.Close()
 	})
 
+	// Deferred config-on-connect (#937): the CLI built this arm's full proxy.cfg
+	// blob but did NOT GET it up front — doing so would allocate every arm's session
+	// before any device is reserved and exhaust the proxy pool (503) on a large
+	// fleet. Now that a device is reserved (LaunchToHome, above) and t.Cleanup is
+	// registered to release it on any failure, materialise the session HERE, before
+	// playback. The fleet caps concurrent devices at ≤4, so ≤4 sessions live at once.
+	// Empty BootstrapCfgB64 => the CLI already bootstrapped up front (legacy/sequential
+	// path) — skip. A GET failure after a device is reserved is fatal for this arm;
+	// t.Cleanup frees the device + session.
+	if cfg.BootstrapCfgB64 != "" {
+		// Bootstrap on the arm's OWN server (#942) so a per-arm server materialises
+		// its config-on-connect session where that arm actually streams; falls back
+		// to the run's base URL for arms with no explicit server.
+		bootBase := cfg.ServerURL
+		if bootBase == "" {
+			bootBase = plan.BaseURL
+		}
+		if berr := runner.ConfigureOnConnectCfg(setupCtx, bootBase, cfg.Content, cfg.PlayerID, cfg.GroupID, cfg.BootstrapCfgB64); berr != nil {
+			t.Fatalf("deferred config-on-connect (arm %d, player_id=%s): %v", dev.FleetIndex, cfg.PlayerID, berr)
+		}
+		t.Logf("arm %d: config-on-connect materialised (deferred, post-reserve)", dev.FleetIndex)
+	}
+
 	// NO proxy reset here. The flow is reset → configure-on-connect → play, and
 	// config-on-connect IS the reset+configure step: each arm gets a fresh
 	// player_id whose session is created AND fully provisioned (shape+cap+faults+
-	// content) by the bootstrap GET in char.go before this test runs. A reset
+	// content) by the deferred config-on-connect GET above (or, on the legacy path,
+	// by the bootstrap GET in char.go before this test runs). A reset
 	// AFTER that bootstrap (what used to live here) reverted the session to the
 	// global INFINITE_STREAM_DEFAULT_RATE_MBPS baseline (100 Mbps) — wiping the
 	// config-on-connect rate cap — so the player streamed unthrottled for the ~2s
@@ -284,7 +309,12 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 			t.Logf("arm %d: could not read play_id: %v", dev.FleetIndex, perr)
 		}
 	}
-	base := strings.TrimRight(envOr("HARNESS_BASE_URL", "https://dev.jeoliver.com:21000"), "/")
+	// Point the viewer link at the arm's OWN server (#942) — a cross-server arm's
+	// session/play lives there, not on the default base; fall back to HARNESS_BASE_URL.
+	base := strings.TrimRight(cfg.ServerURL, "/")
+	if base == "" {
+		base = strings.TrimRight(envOr("HARNESS_BASE_URL", "https://dev.jeoliver.com:21000"), "/")
+	}
 	viewer := fmt.Sprintf("%s/dashboard/session-viewer.html?player_id=%s", base, cfg.PlayerID)
 	if playID != "" {
 		viewer += "&play_id=" + playID

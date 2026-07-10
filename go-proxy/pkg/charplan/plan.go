@@ -55,9 +55,26 @@ type RunPlan struct {
 // &true/&false = force. This replaces the old ""-vs-"false" magic-string logic.
 type ArmConfig struct {
 	// binding
-	PlayerID string `json:"player_id"`          // bootstrapped config-on-connect session id ("" => probe skips this index)
+	PlayerID string `json:"player_id"`          // config-on-connect session id ("" => probe skips this index)
 	Platform string `json:"platform,omitempty"` // per-arm platform capability (mixed fleets)
 	Content  string `json:"content,omitempty"`  // resolved clip (the CLI already applied its default)
+
+	// Per-arm streaming server (#942). Dashboard/content origin (e.g.
+	// https://dev.jeoliver.com:21000); the app derives its playback origin as
+	// port+81. Threaded to BOTH the client (launch-arg -is.server_url override, so
+	// each arm can target a different backend) AND the deferred config-on-connect
+	// bootstrap (so an arm bootstraps + streams on the same server). Empty => the
+	// producer fills it with RunPlan.BaseURL, so every arm is always explicit.
+	ServerURL string `json:"server_url,omitempty"`
+
+	// deferred config-on-connect (#937): the CLI COMPUTES the recipe but hands the
+	// probe the ready-to-GET blob instead of GETting it up front, so the session is
+	// materialised only AFTER a farm device is reserved — bounding live proxy
+	// sessions by device count, not arm count (avoids the large-fleet 503). Empty
+	// BootstrapCfgB64 => the session was already bootstrapped up front (legacy path);
+	// the probe then skips the deferred GET.
+	BootstrapCfgB64 string `json:"bootstrap_cfg_b64,omitempty"` // base64 proxy.cfg PlayerPatch blob
+	GroupID         string `json:"group_id,omitempty"`          // born-group id for the connect param
 
 	// client launch-arg knobs (cold relaunch on change → ProbeLaunchArgs)
 	Segment            string `json:"segment,omitempty"`

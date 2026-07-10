@@ -16,6 +16,11 @@ type Session struct {
 	Device   Device
 	PlayerID string
 	Launcher Launcher
+	// ServerURL is the backend this session's player streams against (#942). When
+	// set, play_id reads + release target THIS server (via harness --base) instead
+	// of $HARNESS_BASE_URL — required for cross-server fleet arms whose session
+	// lives on a different server. Empty ⇒ the default base.
+	ServerURL string
 }
 
 // CurrentPlayID returns the bound player's active play_id, fetched fresh
@@ -41,7 +46,7 @@ func (s *Session) PlayerState(ctx context.Context) (*PlayerRecord, error) {
 	if s == nil || s.PlayerID == "" {
 		return nil, errors.New("session: no player bound")
 	}
-	return ShowPlayer(ctx, s.PlayerID)
+	return ShowPlayerOn(ctx, s.ServerURL, s.PlayerID)
 }
 
 // CloseViaUI closes the playback screen the way a user would — driving
@@ -78,7 +83,7 @@ func (s *Session) Release(ctx context.Context) error {
 	if s == nil || s.PlayerID == "" {
 		return nil
 	}
-	_, err := runHarness(ctx, "players", "rm", "--yes", s.PlayerID)
+	_, err := runHarnessOn(ctx, s.ServerURL, "players", "rm", "--yes", s.PlayerID)
 	return err
 }
 

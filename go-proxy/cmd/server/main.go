@@ -3874,6 +3874,16 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 				a.clearShapeApplyState(port)
 			}
 		}
+		// #944: a DELETE doesn't itself broadcast, so the v2 `player.deleted`
+		// event (a snapshot diff) only fires when a SURVIVING session next
+		// POSTs metrics. When this delete empties the list there's no survivor
+		// to trigger it, so poke the hub with an empty frame — otherwise the
+		// dashboard's session list stays stale after "release all" / deleting
+		// the last session. Deletes that leave survivors self-heal on the next
+		// metrics tick, so only the empties-the-list case needs the poke.
+		if len(removed) > 0 && len(a.getSessionList()) == 0 {
+			a.broadcastEmptySessions()
+		}
 		writeJSON(w, map[string]string{"message": "Session deleted successfully"})
 		return
 	}
@@ -10017,6 +10027,24 @@ func (a *App) emitSessionEvent(session SessionData) {
 	rev := atomic.AddUint64(&a.sessionsBroadcastSeq, 1)
 	preMarshaled := a.buildSessionsEvent(normalized, rev, 0, nil)
 	a.sessionsHub.Broadcast(normalized, rev, preMarshaled)
+}
+
+// broadcastEmptySessions pokes the session hub with a zero-length frame so the
+// v2 SSE `player.deleted` diff advances when NO live session remains to trigger
+// it (#944). The v2 adapter (SubscribeSessions) re-reads the live session list
+// on any hub broadcast and diffs it — but the hub only broadcasts on a live
+// session's metrics POST (emitSessionEvent), never on a DELETE. So deleting the
+// LAST session leaves nothing to POST, the diff never runs, and the dashboard
+// keeps showing the gone session. An EMPTY payload drives that diff while
+// keeping /api/sessions/stream consumers (the forwarder) from writing rows —
+// see the #470 note above on why a full-list re-broadcast is off the table.
+func (a *App) broadcastEmptySessions() {
+	if a.sessionsHub == nil {
+		return
+	}
+	rev := atomic.AddUint64(&a.sessionsBroadcastSeq, 1)
+	preMarshaled := a.buildSessionsEvent(nil, rev, 0, nil)
+	a.sessionsHub.Broadcast(nil, rev, preMarshaled)
 }
 
 func (a *App) removeInactiveSessions() {
