@@ -5,12 +5,14 @@
 
 ## TL;DR
 
-Driving one full sweep iteration end-to-end (`config` class, `import-F-s1-00`,
-s1/live_offset=0) surfaced **two structural gaps** between the single-device sweep
-state machine and the multi-device char-matrix fleet runner. The n=1 confirmation
-guard still reached the *correct* answer (the hit was a startup transient, **refuted**),
-but only because the verdict was recovered by querying play labels directly — the
-tooling could not carry the reps through the queue.
+Driving two full sweep iterations end-to-end (`config` class, `import-F-s1-00` and
+`-s1-02`, s1/live_offset 0 and 2) surfaced **three gaps**: two structural, between the
+single-device sweep state machine and the multi-device char-matrix fleet runner (A, B),
+and one oracle calibration bug — the cold first-of-batch play systematically false-flags
+`severe_startup` (C). The n=1 confirmation guard still reached the *correct* answer both
+times (the hits were startup transients, **refuted**), but only because the verdict was
+recovered by querying play labels directly — the tooling could not carry the reps through
+the queue.
 
 ## What happened (timeline)
 
@@ -32,7 +34,7 @@ tooling could not carry the reps through the queue.
      not found`**. `analyze` only reads `running/`; the char-matrix path never claimed
      the reps into it.
 
-## The two gaps
+## The three gaps
 
 ### Gap A — the fleet runner bypasses the sweep queue state machine
 `harness char matrix` drives the probe via config-on-connect but does **not** transition
@@ -48,6 +50,22 @@ The n=1 guard's reps get **`score = 0`** and there is **no claim-by-id**. `sweep
 is strictly score-ordered, so reps sit behind every score>0 seed indefinitely (the
 skill doc's "reps outrank seeds" does not hold in the CH scheduler). The only way to run
 them today is the fleet path (Gap A), which then can't record their verdict.
+
+### Gap C — the oracle false-positives on the cold first-of-batch play
+The `*qoe_buffering_severe_startup` → `qoe_tier_unacceptable` threshold trips on the sim's
+**first play after idle** (cold app launch), independent of the arm under test.
+**2 of 2** first-of-batch plays hit it with a near-identical signature:
+
+| exp | play | ffs_s | startup buf ms | verdict |
+|---|---|---|---|---|
+| import-F-s1-00 (N=0) | `176f259f` | 2.88 | 4588 | severe_startup → unacceptable |
+| import-F-s1-02 (N=2) | `b6e81396` | 2.70 | 4800 | severe_startup → unacceptable |
+
+Every follow-on play in the same batch ran ~1.0s ffs / ~1.5s buf (`tier_acceptable`).
+So every fresh sweep batch manufactures one false `aberration` on its first arm, which
+then costs a 3-rep confirmation cycle to refute. **Fix:** the probe should run a discarded
+**warmup play** (or the oracle should suppress `severe_startup` on the first cold launch
+of a session/device) so the first *scored* arm isn't paying the cold-start penalty.
 
 ## Evidence — the guard was right anyway (aberration refuted)
 
