@@ -349,6 +349,15 @@ func (a *v2Adapter) DeletePlayer(playerID string) bool {
 			a.app.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
 		}
 	}
+	// #944: v2 `player.deleted` is a snapshot-diff artifact that only advances
+	// when the session hub broadcasts — which happens on a live session's
+	// metrics POST, never on a DELETE. If this delete empties the list there's
+	// no survivor to trigger it, so poke the hub with an empty frame; the v2
+	// adapter re-reads the (now empty) live list and fires player.deleted.
+	// Deletes that leave survivors self-heal on the next metrics tick.
+	if len(a.app.getSessionList()) == 0 {
+		a.app.broadcastEmptySessions()
+	}
 	return true
 }
 
