@@ -165,6 +165,11 @@ async function releaseAll() {
   for (const p of players.value) {
     try { await deletePlayer(p.id); } catch (e) { console.error(e); }
   }
+  // deletePlayer only issues the DELETE — the list's sole removal path is the
+  // SSE `deleted` event (usePlayers.removeFromList). If the stream isn't
+  // delivering, the cards would linger, so re-pull the authoritative list
+  // ourselves rather than relying on SSE to clear the display (#944).
+  await refetch();
 }
 
 function portOf(p: PlayerRecord): string {
