@@ -32,13 +32,22 @@ type poolClaimer interface {
 	Move(from, to sweep.Status, e *sweep.Experiment) error
 }
 
-// poolOutcome is one experiment's disposition in a streaming-pool run.
+// poolOutcome is one experiment's disposition in a streaming-pool run, with the
+// per-phase timing (#946) that makes the cold-vs-warm / fresh-vs-warm-session
+// delta measurable. All durations are milliseconds; StartedAt is UTC RFC3339.
 type poolOutcome struct {
 	ExpID   string
 	Device  string // UDID the worker ran it on
 	Verdict string // sweep verdict, when the run produced one
 	Skipped bool   // claimed but the device didn't satisfy a finer requirement → requeued
 	Err     error
+
+	StartedAt   string // UTC, when this experiment's work began (wire = UTC)
+	BootstrapMs int64  // config-on-connect session setup
+	BringupMs   int64  // session-create + app launch + resume-to-play (the probe's PROBE_TIMING) — what warm shrinks
+	ProbeMs     int64  // full probe subprocess wall-time (bring-up + play window)
+	AnalyzeMs   int64  // ingest wait + oracle analyze
+	TotalMs     int64  // whole experiment, bootstrap → verdict
 }
 
 // poolRunner does the real per-experiment work on a specific device: bootstrap
@@ -210,24 +219,58 @@ func runStreamingPool(ctx context.Context, claimer poolClaimer, devices []Device
 }
 
 // summarizePool renders a one-line-per-outcome summary of a streaming-pool run.
-func summarizePool(outcomes []poolOutcome) string {
+// summarizePool renders one line per outcome with its phase timing (bring-up /
+// probe / total), then an aggregate — including total work-time vs the run's
+// wall-clock (wallMs), which shows the concurrency win and, once warm mode
+// lands, the bring-up saving. wallMs ≤ 0 omits the concurrency line.
+func summarizePool(outcomes []poolOutcome, wallMs int64) string {
 	var b strings.Builder
 	var ran, skipped, errs int
+	var sumWork, sumBringup int64
+	fmt.Fprintf(&b, "  %-6s %-40s %-9s %8s %8s %8s\n", "STATUS", "EXPERIMENT", "DEVICE", "bringup", "probe", "total")
 	for _, o := range outcomes {
+		status := strings.ToUpper(orDash(o.Verdict))
 		switch {
 		case o.Err != nil:
 			errs++
-			fmt.Fprintf(&b, "  ERR   %-44s %s: %v\n", o.ExpID, o.Device, o.Err)
+			status = "ERR"
 		case o.Skipped:
 			skipped++
-			fmt.Fprintf(&b, "  SKIP  %-44s %s (device requirement)\n", o.ExpID, o.Device)
+			status = "SKIP"
 		default:
 			ran++
-			fmt.Fprintf(&b, "  %-5s %-44s %s\n", strings.ToUpper(orDash(o.Verdict)), o.ExpID, o.Device)
 		}
+		sumWork += o.TotalMs
+		sumBringup += o.BringupMs
+		fmt.Fprintf(&b, "  %-6s %-40s %-9s %7ds %7ds %7ds\n",
+			status, truncate(o.ExpID, 40), shortUDID(o.Device),
+			o.BringupMs/1000, o.ProbeMs/1000, o.TotalMs/1000)
 	}
 	fmt.Fprintf(&b, "streaming pool: %d ran, %d skipped, %d errored\n", ran, skipped, errs)
+	if n := int64(len(outcomes)); n > 0 {
+		fmt.Fprintf(&b, "timing: bring-up avg %ds · work-time %ds total", sumBringup/1000/max64(n, 1), sumWork/1000)
+		if wallMs > 0 {
+			// wall-clock < sum-of-work by the concurrency factor; the ratio is the
+			// effective parallelism the pool achieved.
+			fmt.Fprintf(&b, " · wall-clock %ds (%.1f× parallel)", wallMs/1000, float64(sumWork)/float64(max64(wallMs, 1)))
+		}
+		fmt.Fprintln(&b)
+	}
 	return b.String()
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func max64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func orDash(s string) string {

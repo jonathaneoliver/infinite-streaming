@@ -47,6 +47,12 @@ func TestSweepProbe(t *testing.T) {
 		durationS = 60
 	}
 
+	// Bring-up clock (#946): from probe start to first-frame-ready is the cost
+	// that warm-session / warm-start shrink. Emit it as a parseable PROBE_TIMING
+	// line so the pool can attribute bring-up vs play and show the cold/warm delta.
+	probeStart := time.Now()
+	t.Logf("PROBE_TIMING started_at=%s", probeStart.UTC().Format(time.RFC3339Nano))
+
 	mode, launcher, err := runner.PickMode()
 	if err != nil {
 		t.Skipf("PickMode: %v", err)
@@ -136,6 +142,12 @@ func TestSweepProbe(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("ResumePlayback: %v", rerr)
 	}
+	// Bring-up done: session created + app launched + playback started. This is
+	// the wall-time warm-session (reuse the appium/WDA session) and warm-start
+	// (don't relaunch the app) each cut into — logged so the pool can report the
+	// cold-vs-warm delta per experiment.
+	bringupMs := time.Since(probeStart).Milliseconds()
+	t.Logf("PROBE_TIMING bringup_ms=%d", bringupMs)
 
 	// Drive the bandwidth motion for a config-class pattern recipe: once the
 	// master is fetched (variants known), arm the pattern — the same path the

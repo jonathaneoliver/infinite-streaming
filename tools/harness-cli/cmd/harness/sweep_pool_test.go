@@ -262,3 +262,38 @@ func TestRunnerPlatformForDevice(t *testing.T) {
 		}
 	}
 }
+
+func TestSummarizePool_Timing(t *testing.T) {
+	outcomes := []poolOutcome{
+		{ExpID: "exp-a", Device: "D1AAAAAA", Verdict: "clean", BringupMs: 22000, ProbeMs: 68000, TotalMs: 100000},
+		{ExpID: "exp-b", Device: "D2BBBBBB", Verdict: "notable", BringupMs: 24000, ProbeMs: 70000, TotalMs: 102000},
+		{ExpID: "exp-c", Device: "D1AAAAAA", Err: errThing, BringupMs: 0, ProbeMs: 180000, TotalMs: 181000},
+	}
+	// Two workers, ~283s of work; pretend it took 190s wall-clock → ~1.5× parallel.
+	got := summarizePool(outcomes, 190000)
+	for _, want := range []string{"bringup", "probe", "total", "CLEAN", "NOTABLE", "ERR", "streaming pool: 2 ran, 0 skipped, 1 errored", "wall-clock 190s", "parallel"} {
+		if !contains(got, want) {
+			t.Errorf("summary missing %q\n---\n%s", want, got)
+		}
+	}
+}
+
+var errThing = fmtErr("boom")
+
+func fmtErr(s string) error { return &simpleErr{s} }
+
+type simpleErr struct{ s string }
+
+func (e *simpleErr) Error() string { return e.s }
+
+func contains(hay, needle string) bool {
+	return len(hay) >= len(needle) && (indexOf(hay, needle) >= 0)
+}
+func indexOf(hay, needle string) int {
+	for i := 0; i+len(needle) <= len(hay); i++ {
+		if hay[i:i+len(needle)] == needle {
+			return i
+		}
+	}
+	return -1
+}

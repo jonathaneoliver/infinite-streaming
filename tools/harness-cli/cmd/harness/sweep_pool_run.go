@@ -28,6 +28,7 @@ import (
 )
 
 var playIDRe = regexp.MustCompile(`play_id:\s*([0-9a-fA-F-]{36})`)
+var bringupRe = regexp.MustCompile(`PROBE_TIMING bringup_ms=(\d+)`)
 
 func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 	fs := flag.NewFlagSet("sweep run", flag.ContinueOnError)
@@ -121,8 +122,10 @@ func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 
 	fmt.Fprintf(os.Stderr, "streaming pool: %d worker(s) over %s\n", len(free), client.BaseURL)
 	ctx := context.Background()
+	runStart := time.Now()
 	outcomes := runStreamingPool(ctx, s, free, own, override, *maxExperiments, runner)
-	fmt.Print(summarizePool(outcomes))
+	wallMs := time.Since(runStart).Milliseconds()
+	fmt.Print(summarizePool(outcomes, wallMs))
 	return nil
 }
 
@@ -130,8 +133,10 @@ func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 // assigned device: boot the sim if needed, bootstrap the config-on-connect
 // session, drive the probe pinned to the device, wait for ingest, analyze.
 func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDefault string, durationS, ingestWaitS, confirmReps int, override []string) poolRunner {
-	return func(ctx context.Context, e *sweep.Experiment, dev DeviceCapability) poolOutcome {
-		out := poolOutcome{ExpID: e.ID, Device: dev.UDID}
+	return func(ctx context.Context, e *sweep.Experiment, dev DeviceCapability) (out poolOutcome) {
+		expStart := time.Now()
+		out = poolOutcome{ExpID: e.ID, Device: dev.UDID, StartedAt: expStart.UTC().Format(time.RFC3339)}
+		defer func() { out.TotalMs = time.Since(expStart).Milliseconds() }()
 		clip := sweep.ContentOrDefault(e.Content)
 		if clip == "" {
 			clip = contentDefault
@@ -150,9 +155,11 @@ func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDef
 
 		// Bootstrap the recipe onto a fresh config-on-connect session.
 		pid := uuid.NewString()
+		bootStart := time.Now()
 		bctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		_, berr := bootstrapMatrixSession(bctx, client, clip, pid, e.Group, e)
 		cancel()
+		out.BootstrapMs = time.Since(bootStart).Milliseconds()
 		if berr != nil {
 			out.Err = fmt.Errorf("bootstrap: %w", berr)
 			_ = s.Move(sweep.StatusRunning, sweep.StatusBacklog, e) // requeue for a retry
@@ -164,7 +171,8 @@ func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDef
 		// RUNNER's platform for the assigned device (e.g. every iOS sim is
 		// discovered as ipad-sim) — NOT the experiment's sweep token (iphone), or
 		// the probe finds no matching device and skips.
-		playID, perr := runSweepProbeCapture(ctx, client.BaseURL, charDir, e, runnerPlatformForDevice(dev), pid, dev.UDID, clip, durationS)
+		playID, bringupMs, probeMs, perr := runSweepProbeCapture(ctx, client.BaseURL, charDir, e, runnerPlatformForDevice(dev), pid, dev.UDID, clip, durationS)
+		out.BringupMs, out.ProbeMs = bringupMs, probeMs
 		if perr != nil || playID == "" {
 			if perr == nil {
 				perr = errors.New("probe produced no play_id (crash/inconclusive)")
@@ -176,11 +184,13 @@ func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDef
 
 		// Let the forwarder ingest the play's labels before the oracle reads them;
 		// analyzing too early reads 0 labels → false inconclusive.
+		analyzeStart := time.Now()
 		if !sleepCtx(ctx, time.Duration(ingestWaitS)*time.Second) {
 			out.Err = errors.New("cancelled before analyze")
 			return out
 		}
 		bucket, _, _, aerr := analyzeExperiment(client, s, e, sweep.StatusRunning, playID, confirmReps)
+		out.AnalyzeMs = time.Since(analyzeStart).Milliseconds()
 		if aerr != nil {
 			out.Err = fmt.Errorf("analyze: %w", aerr)
 			return out
@@ -198,11 +208,15 @@ func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDef
 // to stderr (device-prefixed) while capturing it to parse the play_id. Mirrors
 // driveProbe's env, sourced from the experiment via the #873 bridge so the
 // client knobs (segment / offset / codec / pattern / …) match the recipe.
-func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Experiment, probePlatform, playerID, udid, clip string, durationS int) (string, error) {
+// Returns the play_id, the probe's self-reported bring-up ms (session+launch+
+// resume, from its PROBE_TIMING line), the full subprocess wall-time ms, and any
+// error. bringupMs/probeMs are 0 when unparsed.
+func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Experiment, probePlatform, playerID, udid, clip string, durationS int) (playID string, bringupMs, probeMs int64, err error) {
 	if durationS <= 0 {
 		durationS = 60
 	}
 	a := charmatrix.ArmFromExperiment(e)
+	probeStart := time.Now()
 	timeout := time.Duration(durationS+240) * time.Second
 	cmd := exec.CommandContext(ctx, "go", "test", "./modes", "-run", "TestSweepProbe", "-count=1",
 		"-timeout", fmt.Sprintf("%ds", int(timeout.Seconds())), "-v")
@@ -236,10 +250,14 @@ func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Ex
 		"CHAR_CONTENT="+clip,
 	)
 	runErr := cmd.Run()
-	if m := playIDRe.FindStringSubmatch(buf.String()); len(m) == 2 {
-		return m[1], nil // a play_id means the probe streamed, even if `go test` later non-zeroed
+	probeMs = time.Since(probeStart).Milliseconds()
+	if m := bringupRe.FindStringSubmatch(buf.String()); len(m) == 2 {
+		bringupMs, _ = strconv.ParseInt(m[1], 10, 64)
 	}
-	return "", runErr
+	if m := playIDRe.FindStringSubmatch(buf.String()); len(m) == 2 {
+		return m[1], bringupMs, probeMs, nil // a play_id means the probe streamed, even if `go test` later non-zeroed
+	}
+	return "", bringupMs, probeMs, runErr
 }
 
 // bootSimBestEffort boots a simulator and waits for it, so the probe's Discover
