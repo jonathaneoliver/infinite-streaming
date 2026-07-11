@@ -220,11 +220,17 @@ final class PlayerViewModel: ObservableObject {
         "\(playerId.prefix(8))·\(currentPlayID.prefix(8))"
     }
 
-    /// The playback port the stream actually goes to (activeServer.playbackURL)
-    /// — the redirected/proxy port that pins which session/server this device is
-    /// streaming through. Shown as its own HUD row (#946).
+    /// The port the stream is actually served from — the per-session go-proxy
+    /// port AFTER the 302 redirect (e.g. 21081 → 21281), read live from AVMetrics
+    /// once a request completes. Falls back to the base playback port
+    /// (pre-redirect) until then. Shown as its own HUD row (#946).
     var hudPort: String {
-        activeServer.flatMap { URL(string: $0.playbackURL)?.port }.map(String.init) ?? "?"
+        if #available(iOS 18.0, *),
+           let sub = avMetricsSubscriber as? AVMetricsSubscriber,
+           let served = sub.servedPort() {
+            return String(served)
+        }
+        return activeServer.flatMap { URL(string: $0.playbackURL)?.port }.map(String.init) ?? "?"
     }
 
     /// #621 — the play_id whose `play_start` boundary has already been

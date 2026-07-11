@@ -58,6 +58,13 @@ final class AVMetricsSubscriber: @unchecked Sendable {
     private let ttfbRingLock = NSLock()
     private var ttfbRing: [Double] = []
 
+    // The ACTUAL served port from the last resource request's final transaction
+    // (#946) — i.e. the per-session go-proxy port AFTER the 302 redirect from the
+    // base playback port (e.g. 21081 → 21281). The HUD reads this so it shows the
+    // real session port, not the pre-redirect one.
+    private let servedPortLock = NSLock()
+    private var lastServedPort: Int?
+
     init(item: AVPlayerItem,
          onBatch: @escaping OnBatch,
          onSeek: OnSeek? = nil) {
@@ -217,6 +224,11 @@ final class AVMetricsSubscriber: @unchecked Sendable {
         var bytesFromTx: Int = 0
         var durMsFromTx: Double = 0
         if let metrics = req.networkTransactionMetrics {
+            // The LAST transaction is the final hop after any redirect, so its
+            // request URL carries the actual served (per-session go-proxy) port.
+            if let port = metrics.transactionMetrics.last?.request.url?.port {
+                servedPortLock.lock(); lastServedPort = port; servedPortLock.unlock()
+            }
             for tx in metrics.transactionMetrics {
                 if let reqEnd = tx.requestEndDate,
                    let respStart = tx.responseStartDate {
@@ -323,6 +335,13 @@ final class AVMetricsSubscriber: @unchecked Sendable {
 
     /// Push a TTFB sample into the ring buffer (FIFO, drop oldest).
     /// Thread-safe — called from the AVMetric async loop.
+    /// The actual served port (post go-proxy redirect) from the most recent
+    /// resource request, or nil before any request completes. Read by the HUD.
+    func servedPort() -> Int? {
+        servedPortLock.lock(); defer { servedPortLock.unlock() }
+        return lastServedPort
+    }
+
     private func pushTTFB(_ ms: Double) {
         ttfbRingLock.lock()
         ttfbRing.append(ms)
