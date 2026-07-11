@@ -15,9 +15,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,6 +33,55 @@ import (
 
 var playIDRe = regexp.MustCompile(`play_id:\s*([0-9a-fA-F-]{36})`)
 var bringupRe = regexp.MustCompile(`PROBE_TIMING bringup_ms=(\d+)`)
+
+var (
+	modesBinOnce sync.Once
+	modesBinPath string
+	modesBinErr  error
+)
+
+// ensureModesBinary compiles the characterization `modes` test package into a
+// standalone binary ONCE, and returns its path. The pool then runs that binary
+// directly instead of via `go test ./modes` — critical for leak-hardening: the
+// `go test` wrapper does NOT propagate SIGTERM to the test binary it spawns (it
+// kills the child), so on ctx-cancel neither the modes interruptContext nor the
+// interrupt backstop in the binary ever runs, and the appium/proxy session
+// leaks. Running the binary directly means hardenSubprocessCancel's SIGTERM
+// reaches the process that actually holds the session, which then frees both
+// slots before exiting (proven: a direct SIGTERM releases the sim in ~3s, a
+// `go test`-wrapped one leaks). Bonus: no per-probe recompile.
+func ensureModesBinary(charDir string) (string, error) {
+	modesBinOnce.Do(func() {
+		out := filepath.Join(os.TempDir(), "sweep-modes.test")
+		cmd := exec.Command("go", "test", "-c", "-o", out, "./modes")
+		cmd.Dir = charDir
+		if b, err := cmd.CombinedOutput(); err != nil {
+			modesBinErr = fmt.Errorf("compile modes test binary: %w\n%s", err, b)
+			return
+		}
+		modesBinPath = out
+	})
+	return modesBinPath, modesBinErr
+}
+
+// hardenSubprocessCancel makes ctx-cancel deliver a CATCHABLE SIGTERM to the
+// test binary's whole process group, instead of the default SIGKILL to just the
+// `go test` wrapper (which orphans the child modes.test binary — the one holding
+// the appium/WDA session — leaving the sim busy). With Setpgid the binary shares
+// the wrapper's group, so signalling -pid reaches it; its interrupt backstop
+// then frees the appium + proxy slots and exits within the grace window.
+// WaitDelay force-kills the group if it doesn't exit in time. macOS/Linux only,
+// which is where the harness runs.
+func hardenSubprocessCancel(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) // -pid = whole group
+	}
+	cmd.WaitDelay = 20 * time.Second
+}
 
 func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 	fs := flag.NewFlagSet("sweep run", flag.ContinueOnError)
@@ -126,7 +179,14 @@ func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 		*durationS, *ingestWaitS, *confirmReps, override, *repBatch, *startMode)
 
 	fmt.Fprintf(os.Stderr, "streaming pool: %d worker(s) over %s\n", len(free), client.BaseURL)
-	ctx := context.Background()
+	// Cancel the whole pool (and each in-flight probe subprocess) on Ctrl-C /
+	// SIGTERM. This is REQUIRED for the leak-hardening: the probe subprocesses run
+	// in their own process group (Setpgid, see hardenSubprocessCancel), so the
+	// terminal's Ctrl-C no longer reaches them — cancelling this ctx is the only
+	// path that fires cmd.Cancel → SIGTERM → the binary's backstop frees its
+	// appium + proxy slots. Without it a Ctrl-C would orphan the subprocesses.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	runStart := time.Now()
 	outcomes := runStreamingPool(ctx, s, free, own, override, *maxExperiments, runner)
 	wallMs := time.Since(runStart).Milliseconds()
@@ -248,9 +308,14 @@ func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Ex
 	a := charmatrix.ArmFromExperiment(e)
 	probeStart := time.Now()
 	timeout := time.Duration(durationS+240) * time.Second
-	cmd := exec.CommandContext(ctx, "go", "test", "./modes", "-run", "TestSweepProbe", "-count=1",
-		"-timeout", fmt.Sprintf("%ds", int(timeout.Seconds())), "-v")
+	bin, berr := ensureModesBinary(charDir)
+	if berr != nil {
+		return "", 0, time.Since(probeStart).Milliseconds(), berr
+	}
+	cmd := exec.CommandContext(ctx, bin, "-test.run", "TestSweepProbe$", "-test.count=1",
+		"-test.timeout", fmt.Sprintf("%ds", int(timeout.Seconds())), "-test.v")
 	cmd.Dir = charDir
+	hardenSubprocessCancel(cmd) // ctx-cancel → SIGTERM to the binary → backstop frees slots
 	var buf bytes.Buffer
 	// Prefix each probe's stderr with its UDID so concurrent workers are legible.
 	pw := &prefixWriter{w: os.Stderr, prefix: []byte("[" + shortUDID(udid) + "] ")}
@@ -313,9 +378,14 @@ func runRepBatchCapture(ctx context.Context, base, charDir string, e *sweep.Expe
 	a := charmatrix.ArmFromExperiment(e)
 	start := time.Now()
 	timeout := time.Duration((durationS+240)*reps) * time.Second
-	cmd := exec.CommandContext(ctx, "go", "test", "./modes", "-run", "TestSweepRepBatch", "-count=1",
-		"-timeout", fmt.Sprintf("%ds", int(timeout.Seconds())), "-v")
+	bin, berr := ensureModesBinary(charDir)
+	if berr != nil {
+		return nil, 0, time.Since(start).Milliseconds(), berr
+	}
+	cmd := exec.CommandContext(ctx, bin, "-test.run", "TestSweepRepBatch$", "-test.count=1",
+		"-test.timeout", fmt.Sprintf("%ds", int(timeout.Seconds())), "-test.v")
 	cmd.Dir = charDir
+	hardenSubprocessCancel(cmd) // ctx-cancel → SIGTERM to the binary → backstop frees slots
 	var buf bytes.Buffer
 	pw := &prefixWriter{w: os.Stderr, prefix: []byte("[" + shortUDID(udid) + "] ")}
 	cmd.Stdout = io.MultiWriter(pw, &buf)

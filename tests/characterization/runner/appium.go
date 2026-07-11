@@ -371,6 +371,10 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 	a.sessions[d.UDID] = sessID
 	a.allocatedUDID = d.UDID
 	a.mu.Unlock()
+	// Track this launcher so the interrupt backstop / TestMain frees its
+	// device-farm slot even if the run is killed before Close() runs. Warm
+	// relaunches reuse this same launcher, so registering here covers them too.
+	registerLauncher(a)
 
 	// A freshly-installed/erased sim can come up on the blocking
 	// ServerPickerScreen (no saved server) instead of playback/home. Drive
@@ -393,7 +397,13 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 		time.Sleep(800 * time.Millisecond)
 	}
 	launched = true // keep the farm lock; Close releases it at test end
-	return &Session{Device: d, Launcher: a}, nil
+	sess := &Session{Device: d, Launcher: a}
+	// Track the proxy session too, so the backstop / TestMain frees the
+	// config-on-connect slot on a killed run. PlayerID is set by the caller
+	// after this returns; Release reads it via the pointer, so a later kill
+	// still releases the right session (no-op if PlayerID is never set).
+	registerSession(sess)
+	return sess, nil
 }
 
 // RelaunchApp relaunches the app on the device's EXISTING appium session with a
@@ -782,6 +792,7 @@ func (a *AppiumLauncher) Close() error {
 			firstErr = err
 		}
 	}
+	unregisterLauncher(a) // slot freed; drop from the interrupt backstop set
 	return firstErr
 }
 
@@ -1076,7 +1087,18 @@ func (a *AppiumLauncher) createSession(ctx context.Context, caps map[string]any)
 			"firstMatch":  []any{map[string]any{}},
 		},
 	}
-	raw, err := a.doRequest(ctx, "POST", "/session", body)
+	// The session-create POST must NOT be abandoned mid-flight. If the caller's
+	// ctx is interrupted here (timeout/pkill/Ctrl-C during setup), appium may
+	// still create the session server-side — the sim goes busy — but a cancelled
+	// POST means we never learn its id, so nothing can ever DELETE it: an orphaned
+	// device-farm slot the backstop can't see (it registers only AFTER the id is
+	// stored). WithoutCancel lets the POST finish so we capture the id; the
+	// interrupt then unwinds through the normal cleanup (discardSession /
+	// registerLauncher → backstop), which frees the slot. Keeps a 120s cap so a
+	// genuinely wedged create still fails instead of hanging.
+	createCtx, cancelCreate := context.WithTimeout(context.WithoutCancel(ctx), 120*time.Second)
+	defer cancelCreate()
+	raw, err := a.doRequest(createCtx, "POST", "/session", body)
 	if err != nil {
 		return "", "", err
 	}
