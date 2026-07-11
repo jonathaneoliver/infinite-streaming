@@ -82,8 +82,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      * redirected/proxy port that pins which session/server this device is
      * streaming through. Shown as its own HUD row (#946).
      */
+    // The ACTUAL served port from the last completed load — the per-session
+    // go-proxy port AFTER the 302 redirect (LoadEventInfo.uri is post-redirect).
+    // The HUD prefers this over the base playback port. -1 until a load completes.
+    @Volatile private var lastServedPort: Int = -1
+
     val hudPort: String
-        get() = (_state.value.activeServer?.port ?: 0).toString()
+        get() = (if (lastServedPort > 0) lastServedPort else (_state.value.activeServer?.port ?: 0)).toString()
 
     /**
      * `start_time` (#587) — client-supplied, play-scoped play start
@@ -1409,6 +1414,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 mediaLoadData: MediaLoadData
             ) {
                 if (mediaLoadData.trackType == C.TRACK_TYPE_VIDEO) metrics?.onVideoLoadCompleted()
+                // Capture the post-redirect served port for the HUD (#946):
+                // LoadEventInfo.uri is the URI actually read from, after redirects.
+                val p = loadEventInfo.uri.port
+                if (p > 0) lastServedPort = p
             }
         })
         player.setVideoFrameMetadataListener(VideoFrameMetadataListener { _, _, _, _ ->
