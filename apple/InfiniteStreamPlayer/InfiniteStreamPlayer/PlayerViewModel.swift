@@ -86,8 +86,9 @@ final class PlayerViewModel: ObservableObject {
     /// Makes the startup pick deterministic, the primary lever for the
     /// order × forced-first-variant experiment (#683, pairs with #682).
     @Published var startsOnFirstEligibleVariant: Bool = false
-    /// Stream URL goes through the per-session go-proxy port. Off → API port.
-    @Published var localProxy: Bool = true
+    /// On-device LocalHTTPProxy for the stream URL. Default OFF (opt-in): the
+    /// load path re-derives this from the flag, defaulting off when unset.
+    @Published var localProxy: Bool = false
     /// Auto-retry the current stream on non-codec player errors. Default OFF for
     /// now: the recovery ladder's #814 pre-retry re-cap trusts the iOS throughput
     /// estimate, which over-reads on a throttled path and re-caps ABR ABOVE the
@@ -2420,11 +2421,15 @@ final class PlayerViewModel: ObservableObject {
         allow4K          = d.object(forKey: Self.flag4K) as? Bool ?? true
         // Present (launch-arg or persisted) → coerce: d.bool parses BOTH the
         // NSArgumentDomain STRING ("false"/"true") and a persisted NSNumber.
-        // Absent → default ON. (Plain `as? Bool` silently ignored the launch-arg
-        // string and always fell back to true, so -is.flag.local_proxy false was inert.)
+        // Absent → default OFF. LocalHTTPProxy is opt-in: characterization forces
+        // it off (and reset_advanced wipes the persisted flag), and it breaks the
+        // AVPlayer cold-start bitrate estimate (localhost) — so an app with no
+        // saved preference should NOT silently re-enable it. (Plain `as? Bool`
+        // silently ignored the launch-arg string and always fell back, so
+        // -is.flag.local_proxy false was inert.)
         localProxy = d.object(forKey: Self.flagLocalProxy) != nil
             ? d.bool(forKey: Self.flagLocalProxy)
-            : true
+            : false
         // Default OFF when unset (see autoRecovery decl). d.bool returns false when
         // the key is absent in every domain, and parses both a persisted NSNumber
         // and an NSArgumentDomain launch-arg string (`-is.flag.auto_recovery true`).
