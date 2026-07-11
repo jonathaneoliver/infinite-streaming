@@ -1048,18 +1048,19 @@ final class PlayerViewModel: ObservableObject {
         playIdMintedAt = Date()
         playIdLastActivityAt = .distantPast
         // Session playback ALWAYS routes through the shaped go-proxy port
-        // (playbackURL). The `localProxy` flag only toggles the ON-DEVICE
-        // LocalHTTPProxy in startPlayback (rewrite-through-127.0.0.1 vs direct),
-        // NOT whether traffic is shaped. Previously localProxy=false fell back to
-        // the unshaped content port, conflating "no on-device proxy" with "no
-        // throttle" — so a localProxy-off test was silently unthrottled.
+        // (throughGoProxy: true → playbackURL). The separate on-device
+        // LocalHTTPProxy (PlayerViewModel.localProxy) toggles the
+        // rewrite-through-127.0.0.1 hop in startPlayback, NOT whether traffic is
+        // shaped. Previously this arg fell back to the unshaped content port,
+        // conflating "no on-device proxy" with "no throttle" — so a
+        // LocalHTTPProxy-off test was silently unthrottled (#862).
         var url = StreamURLBuilder.playbackURL(
             server: server,
             contentName: selectedContent,
             protocolOption: streamProtocol,
             segment: segment,
             playerId: playerId,
-            localProxy: true
+            throughGoProxy: true
         )
         guard let resolved = url else { return }
         // k3s-dev content port (40000) doesn't accept ?player_id= —

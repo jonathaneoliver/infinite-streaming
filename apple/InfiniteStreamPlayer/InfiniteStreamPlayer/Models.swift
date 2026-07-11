@@ -303,16 +303,20 @@ enum CodecFilter: String, CaseIterable, Identifiable, Codable {
 enum StreamURLBuilder {
     /// Build the playback URL exactly the way the Android client does.
     ///
-    /// `localProxy=true` (default) routes through the per-session
-    /// go-proxy port (failure injection in the loop). `false` hits the
-    /// API port directly. Same `/go-live/...` route in both cases.
+    /// `throughGoProxy=true` (default) routes the stream through the per-session
+    /// go-proxy port (`playbackURL`) where failure injection + traffic shaping
+    /// live; `false` hits the go-live/content port directly (`contentURL`, no
+    /// per-session shaping). Same `/go-live/...` route in both cases. NOTE: this
+    /// is which SERVER PORT the stream hits — unrelated to the on-device
+    /// LocalHTTPProxy (`PlayerViewModel.localProxy`); the stream must always go
+    /// through go-proxy for shaping/variants, so this stays true (#862).
     static func playbackURL(
         server: ServerProfile,
         contentName: String,
         protocolOption: StreamProtocol,
         segment: SegmentLength,
         playerId: String,
-        localProxy: Bool = true
+        throughGoProxy: Bool = true
     ) -> URL? {
         guard !contentName.isEmpty else { return nil }
         let manifest: String
@@ -320,7 +324,7 @@ enum StreamURLBuilder {
         case .hls:  manifest = "master\(segment.suffix).m3u8"
         case .dash: manifest = "manifest\(segment.suffix).mpd"
         }
-        let base = localProxy ? server.playbackURL : server.contentURL
+        let base = throughGoProxy ? server.playbackURL : server.contentURL
         guard var components = URLComponents(string: base) else { return nil }
         components.path = "/go-live/\(contentName)/\(manifest)"
         var items: [URLQueryItem] = []
