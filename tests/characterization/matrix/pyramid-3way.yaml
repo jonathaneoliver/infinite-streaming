@@ -1,0 +1,29 @@
+# Parallel GROUPED PYRAMID across THREE targets on ONE shared bandwidth timeline:
+#   control  = iphone-sim  (leader — arms the pyramid; proxy broadcasts to the group)
+#   variant0 = ipad-sim    (sim)
+#   variant1 = iphone       (Jonathan's REAL iPhone, pinned via CHARACTERIZATION_DEVICE_UDID)
+#
+#   CHARACTERIZATION_DEVICE_UDID=00008120-000242DE1152201E \
+#   CHAR_IOS_XCODE_ORG_ID=63328J83Q8 CHAR_IOS_XCODE_SIGNING_ID="Apple Development" \
+#   CHAR_IOS_WDA_BUNDLE_ID=com.jeoliver.WebDriverAgentRunner \
+#   HARNESS_BASE_URL=https://dev.jeoliver.com:21000 \
+#     harness char matrix tests/characterization/matrix/pyramid-3way.yaml
+#
+# PYRAMID = low→high→low (the inverse of valley). It STARTS LIMITED, so it MUST
+# carry an initial network cap (proxy.shape.rate_mbps) applied at config-on-connect
+# before the pattern arms — else the matrix validator rejects it. Same groups/env
+# requirements as valley-3way (real iPhone: wired-USB tunnel + :4799 appium + the
+# CHARACTERIZATION_DEVICE_UDID pin — the harness now guards all three loudly).
+name: pyramid-3way
+class: config
+parallel: true
+duration_s: 300
+defaults:
+  content: insane_newer_p200_h264
+  proxy.shape: { pattern: pyramid, step_seconds: 12, rate_mbps: 1.5 }
+groups:
+  - id: pyramid
+    control: { platform: iphone-sim }   # master
+    variants:
+      - { platform: ipad-sim }          # sim
+      - { platform: iphone }            # real iPhone — pinned via CHARACTERIZATION_DEVICE_UDID
