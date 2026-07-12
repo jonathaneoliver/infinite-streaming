@@ -190,9 +190,10 @@ func TestBridgeMarshalDeterministic(t *testing.T) {
 	}
 }
 
-// TestDroppedClientKnobsGuard: client-only is.* knobs that ToExperiment can't
-// carry are reported (so import refuses), while carried knobs are not.
-func TestDroppedClientKnobsGuard(t *testing.T) {
+// TestClientKnobsRoundTrip: the former client-only is.* knobs (codec /
+// peak_bitrate / live_offset / starts_first_variant, #906) now round-trip through
+// ToExperiment → ArmFromExperiment, so DroppedClientKnobs flags nothing.
+func TestClientKnobsRoundTrip(t *testing.T) {
 	peak := 3
 	off := 5.0
 	yes := true
@@ -201,23 +202,24 @@ func TestDroppedClientKnobsGuard(t *testing.T) {
 		PeakBitrateMbps:    peak,
 		AppLiveOffset:      &off,
 		StartsFirstVariant: &yes,
-		// carried knobs — must NOT be flagged:
-		Segment: "s2", Muted: &yes, Shape: &sweep.Shape{Pattern: "valley"},
+		Segment:            "s2", Muted: &yes, Shape: &sweep.Shape{Pattern: "valley"},
 	}
-	got := a.DroppedClientKnobs()
-	want := map[string]bool{"is.codec": true, "is.peak_bitrate_mbps": true, "is.live_offset": true, "is.starts_first_variant": true}
-	if len(got) != len(want) {
-		t.Fatalf("want %d dropped knobs, got %v", len(want), got)
+	if d := a.DroppedClientKnobs(); len(d) != 0 {
+		t.Fatalf("all client knobs are now carried; want 0 dropped, got %v", d)
 	}
-	for _, k := range got {
-		if !want[k] {
-			t.Fatalf("unexpected dropped knob %q (carried knobs must not be flagged)", k)
-		}
+	// Carried onto the Experiment and reconstructed without loss or shared state.
+	got := ArmFromExperiment(a.ToExperiment())
+	if got.Codec != "hevc" || got.PeakBitrateMbps != 3 {
+		t.Fatalf("codec/peak not round-tripped: codec=%q peak=%d", got.Codec, got.PeakBitrateMbps)
 	}
-	// An arm with only carried knobs drops nothing.
-	clean := &Arm{Segment: "s6", Muted: &yes, Protocol: "hls"}
-	if d := clean.DroppedClientKnobs(); len(d) != 0 {
-		t.Fatalf("clean arm should drop nothing, got %v", d)
+	if got.AppLiveOffset == nil || *got.AppLiveOffset != 5.0 {
+		t.Fatalf("app_live_offset not round-tripped: %v", got.AppLiveOffset)
+	}
+	if got.StartsFirstVariant == nil || !*got.StartsFirstVariant {
+		t.Fatalf("starts_first_variant not round-tripped: %v", got.StartsFirstVariant)
+	}
+	if got.AppLiveOffset == a.AppLiveOffset {
+		t.Fatalf("app_live_offset pointer must be cloned, not shared")
 	}
 }
 
