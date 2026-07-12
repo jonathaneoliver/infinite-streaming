@@ -13,7 +13,13 @@
 #   - never kill the real-iPhone `ios tunnel` (RemoteXPC) or the `appium-mcp`
 #     server — this script preserves both.
 #
-# Usage:  tools/appium-device-farm/farm.sh <status|setup|reset|shutdown|unblock>
+# Usage:  tools/appium-device-farm/farm.sh <status|setup|reset|shutdown|free|kill|purge-foreign|unblock>
+#
+#   kill — STOP ALL TESTING and leave a clean state: kills the char/sweep test
+#          drivers (so nothing relaunches), stops the app on every sim, frees
+#          orphaned go-proxy sessions, unblocks devices, reaps stale sweep
+#          claims, and verifies. Keeps the DF server + sims booted (use
+#          `shutdown` to also tear the farm down).
 #
 # Env (passed through to boot-pool.sh):
 #   DF_PORT        DF/Appium port                 (default 4723)
@@ -55,6 +61,48 @@ kill_farm() {
 	pkill -f 'TestCharMatrixFleet'          2>/dev/null || true
 	# NOT killed: 'ios tunnel start' (real-iPhone RemoteXPC) and 'appium-mcp'.
 	sleep 2
+}
+
+# Stop every characterization / sweep TEST DRIVER. Killing these FIRST is what
+# makes `kill` leave a clean state: a still-running driver would just relaunch an
+# app or re-create a proxy session right after we tear them down. pkill matches
+# the go-test wrapper, the compiled test binaries (overnight's modes.test and the
+# pool's $TMPDIR/sweep-modes.test), overnight.sh/boot-pool.sh, and the sweep pool
+# itself. Preserves the DF appium server + real-iPhone tunnel + appium-mcp (those
+# are the farm infra; `kill` keeps the farm usable). The apps the drivers spawned
+# on the sims are stopped separately by terminate_apps.
+kill_test_drivers() {
+	local any=0 pat
+	for pat in \
+		'overnight.sh' 'boot-pool.sh' \
+		'go test.*modes' 'modes\.test' 'sweep-modes\.test' \
+		'harness sweep run' 'sweep run --concurrent'; do
+		if pkill -f "$pat" 2>/dev/null; then echo "  killed drivers matching: $pat"; any=1; fi
+	done
+	[ "$any" = 0 ] && echo "  no test drivers running"
+	sleep 2
+}
+
+# Return experiments claimed by the killed sweep runners to the backlog, so a
+# hard-stopped pool doesn't leave rows stuck in 'running'. Non-fatal + best-effort
+# (needs the harness CLI + a reachable deploy).
+reap_sweep_claims() {
+	if ! command -v harness >/dev/null 2>&1; then echo "  (harness not on PATH — skipping sweep reap)"; return 0; fi
+	harness --insecure --base "$PROXY_URL" sweep reap --max-age-min 0 2>&1 | sed 's/^/  /' || echo "  (sweep reap failed — non-fatal)"
+}
+
+# Confirm the kill actually left us clean: no drivers alive, no busy sims.
+verify_clean() {
+	local procs
+	procs=$(pgrep -fl 'overnight.sh|go test.*modes|modes\.test|sweep-modes\.test|harness sweep run' 2>/dev/null | grep -v 'pgrep' || true)
+	if [ -n "$procs" ]; then echo "  WARN drivers STILL alive:"; echo "$procs" | sed 's/^/    /'; else echo "  drivers: none running ✓"; fi
+	local busy
+	busy=$(curl -s -m6 "${BASE}/device-farm/api/device" 2>/dev/null | python3 -c "
+import sys,json
+try: ds=json.load(sys.stdin)
+except Exception: print(''); sys.exit()
+print(','.join(str(d.get('udid',''))[:8] for d in ds if d.get('busy')))" 2>/dev/null)
+	if [ -n "$busy" ]; then echo "  WARN busy devices: $busy"; else echo "  devices: all free ✓"; fi
 }
 
 start_df() {
@@ -261,5 +309,13 @@ case "${1:-status}" in
 	purge-foreign) log "purge-foreign: DELETE default (non-Fleet) iPhone/iPad sims so the DF pool = Fleet + real only"
 	          purge_foreign; log "purge complete — DF roster is now real devices + ${DF_POOL_MATCH} sims." ;;
 	unblock)  echo "=== unblock stuck devices ==="; unblock_stuck ;;
-	*) echo "usage: $0 <status|setup|reset|shutdown|free|purge-foreign|unblock>" >&2; exit 2 ;;
+	kill)     echo "=== kill ALL testing → clean state (farm + sims stay up) ==="
+	          log "killing test drivers…";   kill_test_drivers
+	          log "stopping apps on sims…";  terminate_apps
+	          log "freeing proxy sessions…"; free_proxy_sessions
+	          log "unblocking devices…";     unblock_stuck
+	          log "reaping sweep claims…";   reap_sweep_claims
+	          echo "--- verify ---";         verify_clean
+	          echo "all testing stopped; farm + sims left clean." ;;
+	*) echo "usage: $0 <status|setup|reset|shutdown|free|kill|purge-foreign|unblock>" >&2; exit 2 ;;
 esac
