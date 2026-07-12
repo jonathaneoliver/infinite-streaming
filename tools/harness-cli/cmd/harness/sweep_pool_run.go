@@ -33,6 +33,17 @@ import (
 
 var playIDRe = regexp.MustCompile(`play_id:\s*([0-9a-fA-F-]{36})`)
 var bringupRe = regexp.MustCompile(`PROBE_TIMING bringup_ms=(\d+)`)
+var probeDeviceRe = regexp.MustCompile(`PROBE_DEVICE udid=([0-9A-Za-z-]+)`)
+
+// parseProbeDevice extracts the DF-allocated UDID the runner announced (see
+// LaunchToHome). Empty when absent (non-DF runs, or the line never printed) — the
+// caller then keeps the pool's nominal device.
+func parseProbeDevice(out string) string {
+	if m := probeDeviceRe.FindStringSubmatch(out); len(m) == 2 {
+		return m[1]
+	}
+	return ""
+}
 
 var (
 	modesBinOnce sync.Once
@@ -307,8 +318,11 @@ func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDef
 			// (no relaunch — warm buffers); cold relaunches per rep. Produces N
 			// play_ids; the first drives the verdict, the rest are recorded on the
 			// outcome for confirmation + the per-rep timing shows the warm saving.
-			reps, bringupMs, probeMs, rerr := runRepBatchCapture(ctx, client.BaseURL, charDir, e, probePlatform, pid, dev.UDID, clip, durationS, effReps, effMode)
+			reps, bringupMs, probeMs, rdev, rerr := runRepBatchCapture(ctx, client.BaseURL, charDir, e, probePlatform, pid, dev.UDID, clip, durationS, effReps, effMode)
 			out.BringupMs, out.ProbeMs, out.Reps, out.StartMode = bringupMs, probeMs, reps, effMode
+			if rdev != "" { // DF reassigned — report the device the rep-batch ACTUALLY ran on
+				out.Device = rdev
+			}
 			if rerr != nil || len(reps) == 0 {
 				if rerr == nil {
 					rerr = errors.New("rep-batch produced no play_id")
@@ -319,8 +333,11 @@ func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDef
 			}
 			playID = reps[0].PlayID
 		} else {
-			pid2, bringupMs, probeMs, perr := runSweepProbeCapture(ctx, client.BaseURL, charDir, e, probePlatform, pid, dev.UDID, clip, durationS)
+			pid2, bringupMs, probeMs, pdev, perr := runSweepProbeCapture(ctx, client.BaseURL, charDir, e, probePlatform, pid, dev.UDID, clip, durationS)
 			out.BringupMs, out.ProbeMs = bringupMs, probeMs
+			if pdev != "" { // DF reassigned — report the device the probe ACTUALLY ran on
+				out.Device = pdev
+			}
 			if perr != nil || pid2 == "" {
 				if perr == nil {
 					perr = errors.New("probe produced no play_id (crash/inconclusive)")
@@ -361,7 +378,7 @@ func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDef
 // Returns the play_id, the probe's self-reported bring-up ms (session+launch+
 // resume, from its PROBE_TIMING line), the full subprocess wall-time ms, and any
 // error. bringupMs/probeMs are 0 when unparsed.
-func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Experiment, probePlatform, playerID, udid, clip string, durationS int) (playID string, bringupMs, probeMs int64, err error) {
+func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Experiment, probePlatform, playerID, udid, clip string, durationS int) (playID string, bringupMs, probeMs int64, device string, err error) {
 	if durationS <= 0 {
 		durationS = 60
 	}
@@ -370,7 +387,7 @@ func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Ex
 	timeout := time.Duration(durationS+240) * time.Second
 	bin, berr := ensureModesBinary(charDir)
 	if berr != nil {
-		return "", 0, time.Since(probeStart).Milliseconds(), berr
+		return "", 0, time.Since(probeStart).Milliseconds(), "", berr
 	}
 	cmd := exec.CommandContext(ctx, bin, "-test.run", "TestSweepProbe$", "-test.count=1",
 		"-test.timeout", fmt.Sprintf("%ds", int(timeout.Seconds())), "-test.v")
@@ -406,13 +423,14 @@ func runSweepProbeCapture(ctx context.Context, base, charDir string, e *sweep.Ex
 	)
 	runErr := cmd.Run()
 	probeMs = time.Since(probeStart).Milliseconds()
+	device = parseProbeDevice(buf.String()) // the DF-allocated UDID, if the farm reassigned
 	if m := bringupRe.FindStringSubmatch(buf.String()); len(m) == 2 {
 		bringupMs, _ = strconv.ParseInt(m[1], 10, 64)
 	}
 	if m := playIDRe.FindStringSubmatch(buf.String()); len(m) == 2 {
-		return m[1], bringupMs, probeMs, nil // a play_id means the probe streamed, even if `go test` later non-zeroed
+		return m[1], bringupMs, probeMs, device, nil // a play_id means the probe streamed, even if `go test` later non-zeroed
 	}
-	return "", bringupMs, probeMs, runErr
+	return "", bringupMs, probeMs, device, runErr
 }
 
 // repResult is one iteration of a warm rep-batch: teardown (stop the previous
@@ -431,7 +449,7 @@ var repBatchRe = regexp.MustCompile(`REPBATCH rep=(\d+) mode=(\w+) teardown_ms=(
 // Parses the REPBATCH lines into per-rep results. Returns the reps, the first
 // rep's bring-up (for the outcome's headline BringupMs), the subprocess wall-
 // time, and any error.
-func runRepBatchCapture(ctx context.Context, base, charDir string, e *sweep.Experiment, probePlatform, playerID, udid, clip string, durationS, reps int, startMode string) ([]repResult, int64, int64, error) {
+func runRepBatchCapture(ctx context.Context, base, charDir string, e *sweep.Experiment, probePlatform, playerID, udid, clip string, durationS, reps int, startMode string) ([]repResult, int64, int64, string, error) {
 	if durationS <= 0 {
 		durationS = 60
 	}
@@ -440,7 +458,7 @@ func runRepBatchCapture(ctx context.Context, base, charDir string, e *sweep.Expe
 	timeout := time.Duration((durationS+240)*reps) * time.Second
 	bin, berr := ensureModesBinary(charDir)
 	if berr != nil {
-		return nil, 0, time.Since(start).Milliseconds(), berr
+		return nil, 0, time.Since(start).Milliseconds(), "", berr
 	}
 	cmd := exec.CommandContext(ctx, bin, "-test.run", "TestSweepRepBatch$", "-test.count=1",
 		"-test.timeout", fmt.Sprintf("%ds", int(timeout.Seconds())), "-test.v")
@@ -481,7 +499,7 @@ func runRepBatchCapture(ctx context.Context, base, charDir string, e *sweep.Expe
 	if len(results) == 0 && runErr == nil {
 		runErr = errors.New("rep-batch produced no REPBATCH play_id lines")
 	}
-	return results, firstBringup, probeMs, runErr
+	return results, firstBringup, probeMs, parseProbeDevice(buf.String()), runErr
 }
 
 // resolveRepBatch decides how many reps + which start mode to run a claimed
