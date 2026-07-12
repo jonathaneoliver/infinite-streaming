@@ -140,6 +140,20 @@ func resolveFleetDeviceFarm(t *testing.T, p runner.Platform) []runner.Device {
 					"tap Trust, confirm `ios list --details` shows ConnectionType: USB, then restart the tunnel "+
 					"(`ios tunnel start --userspace`) and verify `ios tunnel ls` is non-empty.", i, u)
 			}
+			// GUARD C — a real iOS device is driven through a PLAIN appium (default
+			// :4799), NOT the sim farm on :4723. If that server is down the arm dies
+			// with a create-session error mid bring-up; check it up front. Skips when
+			// the URL can't be resolved (farm off ⇒ operator owns their appium).
+			if url := runner.RealDeviceAppiumURL(); url != "" {
+				actx, acancel := context.WithTimeout(context.Background(), 5*time.Second)
+				reachable := runner.AppiumReachable(actx, url)
+				acancel()
+				if !reachable {
+					t.Fatalf("arm %d REAL device %s needs a plain Appium at %s (the off-farm real-device driver, "+
+						"separate from the sim farm on :4723) but it is not answering /status — start it with "+
+						"`appium --port 4799` (or point CHAR_IOS_DIRECT_APPIUM_URL at your Appium).", i, u, url)
+				}
+			}
 		}
 		fleet[i] = dev
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os/exec"
 	"strings"
 )
@@ -48,4 +49,31 @@ func IOSTunnelUp(ctx context.Context, udid string) (up bool, err error) {
 		return false, fmt.Errorf("ios tunnel ls: %w", runErr)
 	}
 	return tunnelListHasUDID(out, udid), nil
+}
+
+// RealDeviceAppiumURL resolves the plain-Appium base URL a REAL iOS device is
+// driven through — reusing directIOSAppiumURL (CHAR_IOS_DIRECT_APPIUM_URL wins,
+// else :4799 under the farm) so the preflight checks the SAME endpoint the
+// launcher will use. Returns "" when the farm is off (the operator points
+// APPIUM_URL at their own plain Appium) — the caller then skips the check.
+func RealDeviceAppiumURL() string { return directIOSAppiumURL("") }
+
+// AppiumReachable reports whether an Appium server answers GET /status at base.
+// Used to preflight the real-device :4799 server before a run so its absence
+// fails loudly up front instead of as a create-session error mid bring-up.
+func AppiumReachable(ctx context.Context, base string) bool {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if base == "" {
+		return false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/status", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
