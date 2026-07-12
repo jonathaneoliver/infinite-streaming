@@ -61,6 +61,7 @@ const (
 	abortSamplerPeriod    = 1 * time.Second
 )
 
+func TestAbortIPhoneSim(t *testing.T) { runAbort(t, runner.PlatformIPhoneSim) }
 func TestAbortIPadSim(t *testing.T)   { runAbort(t, runner.PlatformIPadSim) }
 func TestAbortIPhone(t *testing.T)    { runAbort(t, runner.PlatformIPhone) }
 func TestAbortAppleTV(t *testing.T)   { runAbort(t, runner.PlatformAppleTV) }

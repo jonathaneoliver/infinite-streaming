@@ -386,7 +386,7 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 	// past it by adding the harness's server URL. No-op when a server is
 	// already saved (the seeded common path). iOS only.
 	switch d.Platform {
-	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+	case PlatformIPhone, PlatformIPad, PlatformIPhoneSim, PlatformIPadSim:
 		if err := a.navigateServerPickerIfPresent(ctx, sessID, bootstrapBaseURL()); err != nil {
 			a.discardSession(d) // don't leak the just-opened session on this error path
 			return nil, fmt.Errorf("server picker navigation: %w", err)
@@ -397,7 +397,7 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 	// home (skipHomeOnLaunch=false, or some other path) the back button
 	// element isn't visible and the tap is a no-op.
 	switch d.Platform {
-	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+	case PlatformIPhone, PlatformIPad, PlatformIPhoneSim, PlatformIPadSim:
 		_ = a.tapByAccessibilityID(ctx, sessID, "playback-back-button")
 		time.Sleep(800 * time.Millisecond)
 	}
@@ -444,7 +444,7 @@ func (a *AppiumLauncher) TerminateApp(ctx context.Context, d Device) error {
 		return fmt.Errorf("TerminateApp: no bundle id for platform %s", d.Platform)
 	}
 	switch d.Platform {
-	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+	case PlatformIPhone, PlatformIPad, PlatformIPhoneSim, PlatformIPadSim:
 		return a.execScript(ctx, sessID, "mobile: terminateApp", map[string]any{"bundleId": bundleID})
 	default:
 		return fmt.Errorf("TerminateApp: unsupported on %s", d.Platform)
@@ -469,7 +469,7 @@ func (a *AppiumLauncher) LaunchAppWarmToHome(ctx context.Context, d Device, args
 	// launch lands with the same known-good defaults (4K on, peak clamp off…).
 	effectiveArgs := withBaselineTestFlags(args)
 	switch d.Platform {
-	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+	case PlatformIPhone, PlatformIPad, PlatformIPhoneSim, PlatformIPadSim:
 		launch := map[string]any{"bundleId": bundleID}
 		if len(effectiveArgs) > 0 {
 			// XCUITest folds `arguments` into NSArgumentDomain on launch, exactly
@@ -506,7 +506,7 @@ func (a *AppiumLauncher) ResumePlayback(ctx context.Context, d Device) error {
 		return errors.New("ResumePlayback: no active appium session for device")
 	}
 	switch d.Platform {
-	case PlatformIPhone, PlatformIPad, PlatformIPadSim, PlatformAndroidTV:
+	case PlatformIPhone, PlatformIPad, PlatformIPhoneSim, PlatformIPadSim, PlatformAndroidTV:
 		// Wait for the continue-watching control to render before tapping —
 		// the catalogue fetch is async, so a just-forced-to-Home screen
 		// can show an empty content row for a few seconds (observed after
@@ -542,7 +542,7 @@ func (a *AppiumLauncher) ResumePlaybackClip(ctx context.Context, d Device, clipI
 		return errors.New("ResumePlaybackClip: no active appium session for device")
 	}
 	switch d.Platform {
-	case PlatformIPhone, PlatformIPad, PlatformIPadSim, PlatformAndroidTV:
+	case PlatformIPhone, PlatformIPad, PlatformIPhoneSim, PlatformIPadSim, PlatformAndroidTV:
 		id := "home-tile-" + clipID
 		elID, err := a.waitForAccessibilityID(ctx, sessID, id, 30*time.Second)
 		if err != nil {
@@ -616,7 +616,7 @@ func (a *AppiumLauncher) Kill(ctx context.Context, d Device) error {
 // that predates #630 (rebuild + redeploy so the AX ids are present).
 func (a *AppiumLauncher) SetSegmentLength(ctx context.Context, d Device, value string) error {
 	switch d.Platform {
-	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+	case PlatformIPhone, PlatformIPad, PlatformIPhoneSim, PlatformIPadSim:
 	default:
 		return fmt.Errorf("SetSegmentLength: unsupported platform %s", d.Platform)
 	}
@@ -656,7 +656,7 @@ func (a *AppiumLauncher) ClosePlaybackViaUI(ctx context.Context, d Device) error
 		return nil // never launched; nothing to close
 	}
 	switch d.Platform {
-	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+	case PlatformIPhone, PlatformIPad, PlatformIPhoneSim, PlatformIPadSim:
 		// The iOS playback overlay's back chevron — the same element
 		// LaunchToHome taps — invokes vm.endSessionForUserBack() before
 		// navigating home, which is what emits play_end.
@@ -1311,7 +1311,7 @@ func appiumCapabilities(d Device, bundleID string, df bool, platformVersion stri
 			caps["appium:wdaLaunchTimeout"] = to
 			caps["appium:wdaConnectionTimeout"] = to
 		}
-	case PlatformIPadSim:
+	case PlatformIPhoneSim, PlatformIPadSim:
 		caps["platformName"] = "iOS"
 		caps["appium:automationName"] = "XCUITest"
 		// Sim launches are faster than real-device; trim the WDA install

@@ -15,6 +15,7 @@ import (
 // "player picked the right variant" from "player was still adapting".
 // 6 steps × 30 s. Total runtime ~3 min + warmup.
 
+func TestStepsIPhoneSim(t *testing.T) { runSteps(t, runner.PlatformIPhoneSim) }
 func TestStepsIPadSim(t *testing.T)   { runSteps(t, runner.PlatformIPadSim) }
 func TestStepsIPhone(t *testing.T)    { runSteps(t, runner.PlatformIPhone) }
 func TestStepsAppleTV(t *testing.T)   { runSteps(t, runner.PlatformAppleTV) }

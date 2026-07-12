@@ -165,7 +165,7 @@ func killApp(ctx context.Context, d Device, bundleID string) error {
 	switch d.Platform {
 	case PlatformIPhone, PlatformIPad, PlatformAppleTV:
 		return devicectlTerminate(ctx, d.UDID, bundleID)
-	case PlatformIPadSim:
+	case PlatformIPhoneSim, PlatformIPadSim:
 		return simctlTerminate(ctx, d.UDID, bundleID)
 	case PlatformAndroidTV:
 		return adbForceStop(ctx, d.UDID, bundleID)
@@ -177,7 +177,7 @@ func launchApp(ctx context.Context, d Device, bundleID string) error {
 	switch d.Platform {
 	case PlatformIPhone, PlatformIPad, PlatformAppleTV:
 		return devicectlLaunch(ctx, d.UDID, bundleID)
-	case PlatformIPadSim:
+	case PlatformIPhoneSim, PlatformIPadSim:
 		return simctlLaunch(ctx, d.UDID, bundleID)
 	case PlatformAndroidTV:
 		return adbLaunch(ctx, d.UDID, bundleID)
@@ -448,8 +448,8 @@ func listSimctlDevices(ctx context.Context, bootedOnly bool) ([]Device, error) {
 	}
 	var out []Device
 	for runtime, devs := range resp.Devices {
-		platform := mapSimRuntime(runtime)
-		if platform == "" {
+		family := simRuntimeFamily(runtime)
+		if family == "" {
 			continue
 		}
 		for _, d := range devs {
@@ -457,7 +457,7 @@ func listSimctlDevices(ctx context.Context, bootedOnly bool) ([]Device, error) {
 				continue
 			}
 			out = append(out, Device{
-				Platform: platform,
+				Platform: simPlatform(family, d.Name, d.DeviceTypeIdentifier),
 				UDID:     d.UDID,
 				Label:    d.Name,
 			})
@@ -487,14 +487,45 @@ func BootSim(ctx context.Context, udid string) error {
 	return nil
 }
 
-func mapSimRuntime(rt string) Platform {
+// simRuntimeFamily maps a simctl runtime identifier to its OS family — "ios"
+// or "tvos" — or "" for a runtime we don't drive. The family alone does NOT
+// determine the platform token: an iOS runtime hosts both iPhone and iPad sims,
+// so simPlatform makes the final iphone-sim/ipad-sim call from the device model.
+func simRuntimeFamily(rt string) string {
 	switch {
 	case strings.Contains(rt, "iOS"):
-		return PlatformIPadSim
+		return "ios"
 	case strings.Contains(rt, "tvOS"):
-		return PlatformAppleTV
+		return "tvos"
 	}
 	return ""
+}
+
+// simPlatform resolves one simulator's platform token from its runtime family
+// and its device model. iOS sims split into iphone-sim vs ipad-sim by model
+// (simctl reports both the human name, e.g. "Fleet iPhone 15", and the
+// deviceTypeIdentifier, e.g. "…SimDeviceType.iPhone-15") — keying only on the
+// runtime family collapsed every iOS sim to ipad-sim and made iphone-sim
+// unselectable. Anything not obviously an iPad is treated as an iPhone sim (the
+// default rig).
+func simPlatform(family, name, deviceTypeID string) Platform {
+	switch family {
+	case "tvos":
+		return PlatformAppleTV
+	case "ios":
+		if isIPadModel(name, deviceTypeID) {
+			return PlatformIPadSim
+		}
+		return PlatformIPhoneSim
+	}
+	return ""
+}
+
+// isIPadModel reports whether a device's name or deviceTypeIdentifier names an
+// iPad. Shared by the runner's sim discovery and the sweep pool's device→token
+// mapping so the two can't drift on what counts as an iPad.
+func isIPadModel(name, deviceTypeID string) bool {
+	return strings.Contains(strings.ToLower(name+" "+deviceTypeID), "ipad")
 }
 
 // LatestSimRuntimeVersion returns the highest installed, available simulator

@@ -255,7 +255,7 @@ func resolveFleetFromUDIDs(t *testing.T, p runner.Platform, udids []string) []ru
 		t.Logf("fleet[%d] resolved %s → platform=%s (%s)", i, u, d.Platform, d.Label)
 		// Only simulators are booted + server-seeded; real devices are already
 		// on and carry their own saved server.
-		if autoboot && d.Platform == runner.PlatformIPadSim {
+		if autoboot && d.Platform.IsIOSSim() {
 			if err := runner.BootSim(ctx, d.UDID); err != nil {
 				t.Fatalf("boot fleet sim %d (%s): %v", i, d.UDID, err)
 			}
@@ -429,7 +429,7 @@ func staggerFleetLaunch(t *testing.T, fleetIndex int) {
 // data container, so non-sim platforms are skipped.
 func seedFleetServer(ctx context.Context, t *testing.T, d runner.Device) {
 	t.Helper()
-	if d.Platform != runner.PlatformIPadSim {
+	if !d.Platform.IsIOSSim() {
 		return
 	}
 	if strings.TrimSpace(os.Getenv("CHAR_FLEET_SEED_SERVER")) == "0" {
