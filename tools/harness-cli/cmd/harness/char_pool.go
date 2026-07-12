@@ -229,6 +229,9 @@ func runCharModeCapture(ctx context.Context, base, charDir string, e *sweep.Expe
 	probeStart := time.Now()
 	runErr := cmd.Run()
 	out.ProbeMs = time.Since(probeStart).Milliseconds()
+	if d := parseProbeDevice(buf.String()); d != "" { // DF reassigned — report the device it ACTUALLY ran on
+		out.Device = d
+	}
 	// `go test -run` matching nothing PASSES with exit 0 ("no tests to run") — a
 	// silent false pass. Treat it as a can't-run error (bad mode, or this device's
 	// platform has no such mode variant), which renders as ERR not a green pass.

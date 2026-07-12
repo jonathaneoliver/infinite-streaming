@@ -366,6 +366,11 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 	// it too.
 	if df && allocatedUDID != "" {
 		d.UDID = allocatedUDID
+		// Announce the DF-allocated UDID so the pool records the device the probe
+		// ACTUALLY ran on, not its nominal pick (in DF mode the farm arbitrates —
+		// the udid cap is dropped — so they routinely differ). Parsed by the pool's
+		// runSweep/runCharModeCapture; harmless noise for non-pool runs.
+		fmt.Fprintf(os.Stderr, "PROBE_DEVICE udid=%s\n", allocatedUDID)
 	}
 	a.mu.Lock()
 	a.sessions[d.UDID] = sessID
