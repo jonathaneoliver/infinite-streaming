@@ -30,6 +30,13 @@ func qoeLabel(sev, event string) string {
 	return sev + "=" + synthMark + event
 }
 
+// noFirstFrameAfter is how long a play may stay alive without rendering a first
+// frame before qoe_no_first_frame fires. Deliberately generous: it must exceed
+// any legitimate (even heavily-shaped) startup so a slow-but-eventual first
+// frame sets firstFrameTime and suppresses the label — the goal is to catch
+// "never started video," not "started slowly" (which qoe_vst_* already grades).
+const noFirstFrameAfter = 30 * time.Second
+
 // isPlayTerminalEvent reports whether this row is the play's authoritative
 // terminal row — the client's end-of-play metrics POST carrying the final
 // snapshot + outcome. We key the outcome labels on the discrete END EVENT,
@@ -74,6 +81,9 @@ func computeQoEEventLabels(cfg *QoEThresholds, ps *playLabelState, r *row, now t
 	}
 	if !isPlayTerminalEvent(r) {
 		ps.everOpened = true
+		if ps.openTime.IsZero() {
+			ps.openTime = now // first row this play was seen alive
+		}
 	}
 	// firstTerminal is true only on the FIRST authoritative terminal row
 	// (last_event == session_end|play_end). The client re-emits the
@@ -95,6 +105,22 @@ func computeQoEEventLabels(cfg *QoEThresholds, ps *playLabelState, r *row, now t
 		case vst >= cfg.Startup.VSTConcerningMs:
 			current = append(current, qoeLabel(SevWarning, "qoe_vst_concerning"))
 		}
+	}
+
+	// Startup — never rendered a first frame (IN-FLIGHT). The sibling of the
+	// terminal qoe_vsf (#553): a play that stays alive (this row is non-terminal,
+	// so heartbeats are still flowing) but hasn't produced a first frame after
+	// noFirstFrameAfter would otherwise read CLEAN, because qoe_vsf only fires
+	// when the client declares start_failure on a terminal row. Once per play; a
+	// slow-but-eventual start sets firstFrameTime before the threshold and
+	// suppresses it (no false positive). SevWarning (notable) — inferred from
+	// absence is weaker than a client-declared failure, and a stuck startup is as
+	// often infra (dead sim/appium, unseeded server) as a real player fault, so
+	// we surface it to investigate rather than assert a bug.
+	if !isPlayTerminalEvent(r) && ps.firstFrameTime.IsZero() && !ps.noFirstFrameEmitted &&
+		!ps.openTime.IsZero() && now.Sub(ps.openTime) >= noFirstFrameAfter {
+		current = append(current, qoeLabel(SevWarning, "qoe_no_first_frame"))
+		ps.noFirstFrameEmitted = true
 	}
 
 	// Continuity — CIRR (rebuffer ratio) and CIRT (mean interruption).

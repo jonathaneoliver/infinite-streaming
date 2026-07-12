@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 )
 
 // minimalRow builds a row that triggers no Phase 3 qoe_* labels: zero
@@ -921,5 +922,46 @@ func TestShapingModeFromInfo(t *testing.T) {
 		if got := shapingModeFromInfo(in); got != want {
 			t.Fatalf("shapingModeFromInfo(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestQoENoFirstFrameInFlight covers the in-flight no-video gap: a play that
+// stays alive (heart-beating) but never renders a first frame is flagged
+// qoe_no_first_frame after noFirstFrameAfter — WITHOUT waiting for a terminal
+// row or a client-declared start_failure (which the terminal qoe_vsf needs).
+func TestQoENoFirstFrameInFlight(t *testing.T) {
+	label := qoeLabel(SevWarning, "qoe_no_first_frame")
+	t0 := time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)
+	ps := &playLabelState{}
+	open := &row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", LastEvent: "play_start"}
+	alive := &row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress"}
+
+	// Open the play; on the opening row itself it's too early → no label.
+	if got := computeQoEEventLabels(nil, ps, open, t0); hasLabel(got, label) {
+		t.Fatalf("must not fire on the opening row: %v", got)
+	}
+	// Still alive 31s later, still no first frame → fire once.
+	if got := computeQoEEventLabels(nil, ps, alive, t0.Add(31*time.Second)); !hasLabel(got, label) {
+		t.Fatalf("expected qoe_no_first_frame after %s: %v", noFirstFrameAfter, got)
+	}
+	// Once per play — a later alive row must not re-stamp it.
+	if got := computeQoEEventLabels(nil, ps, alive, t0.Add(45*time.Second)); hasLabel(got, label) {
+		t.Fatalf("qoe_no_first_frame must fire once per play: %v", got)
+	}
+}
+
+// TestQoENoFirstFrameSuppressedBySlowStart confirms a slow-but-eventual first
+// frame (before the threshold) sets firstFrameTime and suppresses the label —
+// the point is to catch "never started video", not "started slowly".
+func TestQoENoFirstFrameSuppressedBySlowStart(t *testing.T) {
+	label := qoeLabel(SevWarning, "qoe_no_first_frame")
+	t0 := time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)
+	ps := &playLabelState{}
+	open := &row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress", LastEvent: "play_start"}
+	_ = computeQoEEventLabels(nil, ps, open, t0)
+	ps.firstFrameTime = t0.Add(20 * time.Second) // frame arrived at 20s, before the 30s bound
+	alive := &row{Ts: tsBase, PlayerID: "p", PlayID: "x", PlaybackStatus: "in_progress"}
+	if got := computeQoEEventLabels(nil, ps, alive, t0.Add(35*time.Second)); hasLabel(got, label) {
+		t.Fatalf("slow-but-eventual start must suppress qoe_no_first_frame: %v", got)
 	}
 }
