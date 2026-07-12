@@ -210,6 +210,20 @@ func clipIDFromContent(name string) string {
 	return lower
 }
 
+// resumePinnedContent starts playback of the CHAR_CONTENT clip DETERMINISTICALLY
+// when one is pinned — tapping its home-tile-<clip> tile via ResumePlaybackClip —
+// instead of the continue-watching hero (ResumePlayback), which resolves to the
+// pinned clip only after the catalogue loads and otherwise races onto the
+// FEATURED clip (a pinned run silently streaming the wrong video). With no
+// CHAR_CONTENT it falls back to the hero. Shared by every mode so content
+// fidelity no longer depends on which resume path a mode happened to use.
+func resumePinnedContent(ctx context.Context, appium *runner.AppiumLauncher, d runner.Device) error {
+	if clip := strings.TrimSpace(os.Getenv("CHAR_CONTENT")); clip != "" {
+		return appium.ResumePlaybackClip(ctx, d, clipIDFromContent(clip))
+	}
+	return appium.ResumePlayback(ctx, d)
+}
+
 // armContentConfig resolves this fleet member's per-member content treatment for
 // an A/B run, applied at ALLOCATE (left of the group barrier — content is not
 // broadcast-eligible, so it stays per-member, even inside a CHAR_FLEET_GROUP).
