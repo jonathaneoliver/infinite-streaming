@@ -1,17 +1,32 @@
-# Parallel VALLEY test across two sim MODELS — one iphone-sim + one ipad-sim,
-# running simultaneously. Valley = high→low→high (the inverse of pyramid); it
-# starts high, so no startup rate cap is needed. Exercises the iphone-sim /
-# ipad-sim split end-to-end: discovery, per-arm platform claim, correct labels.
+# Parallel GROUPED VALLEY test across two sim MODELS — one iphone-sim + one
+# ipad-sim, running simultaneously on ONE shared bandwidth timeline. Valley =
+# high→low→high (the inverse of pyramid); it starts high, so no startup rate cap
+# is needed.
 #
 #   harness char matrix tests/characterization/matrix/valley-sim-split.yaml
+#
+# GROUPING: the two arms are a control + variant of ONE explicit `groups:` block,
+# so they share a single group_id (the groups path is NOT platform-suffixed,
+# unlike an `axes: platform` expansion). Both sims are born into that proxy group
+# at config-on-connect; the leader (control = iphone-sim) arms one valley and the
+# proxy BROADCASTS it to every group member — so the ipad-sim variant experiences
+# the identical shaped pipe (it does NOT arm its own; a shared timeline is what
+# makes the model-vs-model comparison fair). An `axes: platform` matrix instead
+# puts each platform in its OWN group, so only the master gets shaped.
+#
+# duration_s is sized so the valley fully traverses (step 12s) with room for ABR
+# to downshift at the floor and recover on the up-leg.
 #
 # Needs one booted iphone-sim AND one booted ipad-sim in the farm.
 name: valley-sim-split
 class: config
 parallel: true
-duration_s: 90
+duration_s: 300
 defaults:
   content: insane_newer_p200_h264
   proxy.shape: { pattern: valley, step_seconds: 12 }
-axes:
-  platform: [iphone-sim, ipad-sim]
+groups:
+  - id: valley
+    control: { platform: iphone-sim }   # leader — arms the valley, proxy broadcasts to the group
+    variants:
+      - { platform: ipad-sim }          # shares the group_id → receives the same shaped pipe
