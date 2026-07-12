@@ -127,6 +127,14 @@ type playLabelState struct {
 	// onto this play_id (no play_start boundary yet) — its accumulators are
 	// the prior play's, so the QoE labeler ignores it.
 	everOpened bool
+	// openTime is when this play was first seen alive (its first non-terminal
+	// row), and noFirstFrameEmitted guards the once-per-play qoe_no_first_frame
+	// label. Together they catch a play that stays alive (heart-beating) yet
+	// never renders a first frame — the IN-FLIGHT sibling of the terminal
+	// qoe_vsf, which needs the client to declare start_failure on a terminal
+	// row. Without this an ever-alive no-video play reads CLEAN.
+	openTime            time.Time
+	noFirstFrameEmitted bool
 	// #595 — edge-triggering for level/sticky qoe_* labels. qoeActive is
 	// the set of qoe labels that were true on the previous evaluated row.
 	// A label is emitted only on its rising edge (off→on): its first

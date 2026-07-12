@@ -202,7 +202,7 @@ func resumeUntilHeartbeat(ctx context.Context, t *testing.T, appium *runner.Appi
 	t.Helper()
 	var herr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		if rerr := appium.ResumePlayback(ctx, *picked); rerr != nil {
+		if rerr := resumePinnedContent(ctx, appium, *picked); rerr != nil {
 			t.Logf("resume attempt %d: %v", attempt, rerr)
 		}
 		if herr = sess.WaitForHeartbeat(ctx, 50*time.Second); herr == nil {

@@ -371,6 +371,10 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 	a.sessions[d.UDID] = sessID
 	a.allocatedUDID = d.UDID
 	a.mu.Unlock()
+	// Track this launcher so the interrupt backstop / TestMain frees its
+	// device-farm slot even if the run is killed before Close() runs. Warm
+	// relaunches reuse this same launcher, so registering here covers them too.
+	registerLauncher(a)
 
 	// A freshly-installed/erased sim can come up on the blocking
 	// ServerPickerScreen (no saved server) instead of playback/home. Drive
@@ -393,7 +397,96 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 		time.Sleep(800 * time.Millisecond)
 	}
 	launched = true // keep the farm lock; Close releases it at test end
-	return &Session{Device: d, Launcher: a}, nil
+	sess := &Session{Device: d, Launcher: a}
+	// Track the proxy session too, so the backstop / TestMain frees the
+	// config-on-connect slot on a killed run. PlayerID is set by the caller
+	// after this returns; Release reads it via the pointer, so a later kill
+	// still releases the right session (no-op if PlayerID is never set).
+	registerSession(sess)
+	return sess, nil
+}
+
+// RelaunchApp relaunches the app on the device's EXISTING appium session with a
+// fresh set of launch args — the warm-session path (#946, config #2). It reuses
+// the session + WDA (the ~expensive, ~20s part) and only cold-launches the app,
+// so a warm-session pool worker can bind a NEW experiment's player_id/config
+// without paying for a fresh session each time (and without the back-to-back
+// session-create race). The APP still cold-starts (fresh AVPlayer) — this is the
+// plumbing optimization, orthogonal to start_mode; a genuine warm START (resume
+// in the running app) is a separate primitive.
+//
+// Requires LaunchToHome to have opened a session for d first. iOS/XCUITest only:
+// terminate + relaunch with the new NSArgumentDomain args, then the same server-
+// picker + drive-to-home LaunchToHome does. Returns an error on other platforms
+// (the caller falls back to a cold LaunchToHome).
+func (a *AppiumLauncher) RelaunchApp(ctx context.Context, d Device, args []string) error {
+	if err := a.TerminateApp(ctx, d); err != nil {
+		return err
+	}
+	return a.LaunchAppWarmToHome(ctx, d, args)
+}
+
+// TerminateApp kills the app on the device's existing appium session (the STOP
+// half of a warm relaunch, #946) — split out so a caller can time teardown
+// separately from startup. iOS/XCUITest `mobile: terminateApp`.
+func (a *AppiumLauncher) TerminateApp(ctx context.Context, d Device) error {
+	sessID := a.sessionID(d)
+	if sessID == "" {
+		return errors.New("TerminateApp: no active appium session for device")
+	}
+	bundleID := a.BundleIDs[d.Platform]
+	if bundleID == "" {
+		return fmt.Errorf("TerminateApp: no bundle id for platform %s", d.Platform)
+	}
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+		return a.execScript(ctx, sessID, "mobile: terminateApp", map[string]any{"bundleId": bundleID})
+	default:
+		return fmt.Errorf("TerminateApp: unsupported on %s", d.Platform)
+	}
+}
+
+// LaunchAppWarmToHome cold-launches the app on the EXISTING session with fresh
+// args, then drives past the server picker to home (the START half of a warm
+// relaunch, #946). Assumes the app is already terminated (call TerminateApp
+// first, or use RelaunchApp which does both). Timing THIS alone measures pure
+// startup, excluding the teardown of the previous play/app.
+func (a *AppiumLauncher) LaunchAppWarmToHome(ctx context.Context, d Device, args []string) error {
+	sessID := a.sessionID(d)
+	if sessID == "" {
+		return errors.New("LaunchAppWarmToHome: no active appium session for device")
+	}
+	bundleID := a.BundleIDs[d.Platform]
+	if bundleID == "" {
+		return fmt.Errorf("LaunchAppWarmToHome: no bundle id for platform %s", d.Platform)
+	}
+	// Fold in the baseline test flags exactly as LaunchToHome does, so a warm
+	// launch lands with the same known-good defaults (4K on, peak clamp off…).
+	effectiveArgs := withBaselineTestFlags(args)
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+		launch := map[string]any{"bundleId": bundleID}
+		if len(effectiveArgs) > 0 {
+			// XCUITest folds `arguments` into NSArgumentDomain on launch, exactly
+			// like processArguments at session-create — so -is.player_id /
+			// -is.server_url bind the new session on this warm launch.
+			launch["arguments"] = effectiveArgs
+		}
+		if err := a.execScript(ctx, sessID, "mobile: launchApp", launch); err != nil {
+			return fmt.Errorf("LaunchAppWarmToHome launch: %w", err)
+		}
+	default:
+		return fmt.Errorf("LaunchAppWarmToHome: unsupported on %s — use a cold LaunchToHome", d.Platform)
+	}
+	// Clear the server picker with a SHORT probe: a warm relaunch already has the
+	// server set (-is.server_url), so the picker won't appear — a long poll here
+	// is pure wasted startup time. 1s is ample to detect a stray picker.
+	if err := a.navigateServerPickerIfPresentT(ctx, sessID, bootstrapBaseURL(), time.Second); err != nil {
+		return fmt.Errorf("LaunchAppWarmToHome server picker: %w", err)
+	}
+	_ = a.tapByAccessibilityID(ctx, sessID, "playback-back-button")
+	time.Sleep(800 * time.Millisecond)
+	return nil
 }
 
 // ResumePlayback taps the home-continue-watching tile to start
@@ -699,6 +792,7 @@ func (a *AppiumLauncher) Close() error {
 			firstErr = err
 		}
 	}
+	unregisterLauncher(a) // slot freed; drop from the interrupt backstop set
 	return firstErr
 }
 
@@ -874,6 +968,15 @@ func (a *AppiumLauncher) clickElement(ctx context.Context, sessID, elementID str
 	return err
 }
 
+// execScript runs an Appium `mobile:` extension command on the session (W3C
+// execute/sync). arg is the single command-argument object (e.g. {"bundleId":…,
+// "arguments":[…]} for mobile: launchApp).
+func (a *AppiumLauncher) execScript(ctx context.Context, sessID, script string, arg map[string]any) error {
+	body := map[string]any{"script": script, "args": []any{arg}}
+	_, err := a.doRequest(ctx, "POST", "/session/"+sessID+"/execute/sync", body)
+	return err
+}
+
 // sendKeysToElement types text into a previously-found element (W3C
 // element/value). Clicks it first to focus the field.
 func (a *AppiumLauncher) sendKeysToElement(ctx context.Context, sessID, elementID, text string) error {
@@ -893,9 +996,18 @@ func (a *AppiumLauncher) sendKeysToElement(ctx context.Context, sessID, elementI
 // (e.g. seeded via SeedServerProfile). Best-effort UI fallback to the
 // UserDefaults seed; requires the app to carry the server-* accessibility ids.
 func (a *AppiumLauncher) navigateServerPickerIfPresent(ctx context.Context, sessID, baseURL string) error {
+	return a.navigateServerPickerIfPresentT(ctx, sessID, baseURL, 4*time.Second)
+}
+
+// navigateServerPickerIfPresentT is the same with a caller-chosen probe timeout.
+// The first launch (fresh sim) genuinely may show the picker → 4s. A WARM
+// relaunch already has a server set (-is.server_url), so the picker never
+// appears — a long poll there is pure wasted startup time (it inflated the cold
+// rep bring-up by ~4s, #946), so LaunchAppWarmToHome passes a short probe.
+func (a *AppiumLauncher) navigateServerPickerIfPresentT(ctx context.Context, sessID, baseURL string, probe time.Duration) error {
 	// Short probe — if the picker root isn't in the AX tree we're already past
 	// it (on Home), so this is a cheap no-op on the common path.
-	if _, err := a.waitForAccessibilityID(ctx, sessID, "server-picker-screen", 4*time.Second); err != nil {
+	if _, err := a.waitForAccessibilityID(ctx, sessID, "server-picker-screen", probe); err != nil {
 		return nil
 	}
 	if err := a.tapByAccessibilityID(ctx, sessID, "server-add-by-url"); err != nil {
@@ -975,7 +1087,18 @@ func (a *AppiumLauncher) createSession(ctx context.Context, caps map[string]any)
 			"firstMatch":  []any{map[string]any{}},
 		},
 	}
-	raw, err := a.doRequest(ctx, "POST", "/session", body)
+	// The session-create POST must NOT be abandoned mid-flight. If the caller's
+	// ctx is interrupted here (timeout/pkill/Ctrl-C during setup), appium may
+	// still create the session server-side — the sim goes busy — but a cancelled
+	// POST means we never learn its id, so nothing can ever DELETE it: an orphaned
+	// device-farm slot the backstop can't see (it registers only AFTER the id is
+	// stored). WithoutCancel lets the POST finish so we capture the id; the
+	// interrupt then unwinds through the normal cleanup (discardSession /
+	// registerLauncher → backstop), which frees the slot. Keeps a 120s cap so a
+	// genuinely wedged create still fails instead of hanging.
+	createCtx, cancelCreate := context.WithTimeout(context.WithoutCancel(ctx), 120*time.Second)
+	defer cancelCreate()
+	raw, err := a.doRequest(createCtx, "POST", "/session", body)
 	if err != nil {
 		return "", "", err
 	}

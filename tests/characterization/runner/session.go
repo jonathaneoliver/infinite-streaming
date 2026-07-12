@@ -80,7 +80,11 @@ func (s *Session) CloseViaUI(ctx context.Context) error {
 // session end (the ClickHouse archive is unaffected — it streams independently).
 // Best-effort; call in a test's cleanup after CloseViaUI, before Launcher.Close().
 func (s *Session) Release(ctx context.Context) error {
-	if s == nil || s.PlayerID == "" {
+	if s == nil {
+		return nil
+	}
+	unregisterSession(s) // proxy slot being freed; drop from the backstop set
+	if s.PlayerID == "" {
 		return nil
 	}
 	_, err := runHarnessOn(ctx, s.ServerURL, "players", "rm", "--yes", s.PlayerID)

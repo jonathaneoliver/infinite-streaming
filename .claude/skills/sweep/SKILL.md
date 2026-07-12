@@ -1,6 +1,6 @@
 ---
 name: sweep
-description: Drive the automated fault-injection sweep (issue #772, docs/sweep-design.md) — the unattended claim→apply→probe→analyze→isolate→promote loop over the ClickHouse-master queue. Invoke under /goal ("drive the sweep until backlog is empty"), or for a single hand-run iteration. Each clean run is a mechanical oracle check (no model call); the LLM only reasons on a notable/aberration hit — picking which axes to flip for isolation and writing the finding. Runs on the Mac with the sims (drives appium/adb), against the test-dev deploy.
+description: Drive the automated fault-injection sweep (issue #772, docs/sweep-design.md) — the unattended claim→apply→probe→analyze→isolate→promote loop over the ClickHouse-master queue. Invoke under /goal ("drive the sweep until backlog is empty"), or for a single hand-run iteration. To drain fast, run the CONCURRENT streaming pool (`harness sweep run --concurrent`, #950) — one worker per free Fleet sim, N experiments at once — then investigate the hits; the serial loop is for single hand-runs. Each clean run is a mechanical oracle check (no model call); the LLM only reasons on a notable/aberration hit — picking which axes to flip for isolation and writing the finding. Runs on the Mac with the sims (drives appium/adb), against the test-dev deploy.
 last_reviewed: 2026-06-14
 ---
 
@@ -25,6 +25,29 @@ On the **Mac with the sims + attached devices** (the probe drives appium/adb/WDA
 - **`fault`** — explicit error-recovery: `4xx/5xx`, `corrupted`, `connection_refused`, `dns_failure`, `rate_limiting`, transport `drop`/`reject`, `request_*_hang`. Oracle: the recovery-expected envelope (a fault the player should survive isn't a finding; failing to recover is).
 
 Seed one class at a time: `harness sweep seed --class config` (default) or `--class fault`. Findings are namespaced `sig:<class>-…` so they never dedup-collide. Default to `config` unless explicitly chasing error-recovery.
+
+## Fast path — drain the backlog CONCURRENTLY (the streaming pool, #950)
+
+When you have **several booted Fleet sims**, don't hand-run the serial loop below one experiment at a time — run the **streaming pool**, which packs independent experiments across every free farm device at once (issue #946 / #950). One worker per free sim; each claims the top serviceable experiment for *its* platform, boots+pins the sim, drives `TestSweepProbe` (server pinned via `-is.server_url` — no sim-seeding needed), waits for ingest, and analyzes → verdict. **Barrierless:** a sim grabs the next item the instant it frees, so N sims run N experiments simultaneously. Runs until the serviceable backlog is dry (or `--max-experiments`).
+
+```
+harness sweep run --concurrent                       # drain: one worker per free sim
+harness sweep run --concurrent --dry-run             # show the roster + serviceable set + worker count, claim nothing
+harness sweep run --concurrent --max-experiments 3   # bounded smoke test (claims exactly 3)
+harness sweep run --concurrent --serviceable iphone  # narrow to platform tokens the caller can run now
+```
+- **Device-gated (#949):** each worker only claims work its platform can service; an experiment whose device is absent is never claimed (it waits in backlog). `--serviceable a,b` narrows the whole pool to a token subset; default is derived from the live free roster (`harness devices --free`).
+- **No double-claim:** each worker claims under a unique owner (base + device), so the server-side arbitration hands every sim a *distinct* experiment.
+- **Bounds:** `--max-devices N` caps the pool below the free count; `--max-experiments N` stops after N total (0 = drain). `--duration-s` sets each play window.
+- **What it does / doesn't:** it runs the **mechanical** phase in parallel — claim → boot → probe → analyze → verdict → record (steps 1–3 of the loop, for N sims at once). It does **NOT** do the investigate→isolate→promote reasoning (step 4). After the pool drains, read the hits and reason on each:
+  ```
+  harness sweep ls found          # the notable/aberration hits the pool bucketed
+  harness sweep agenda            # next action per experiment (isolate → promote → needs-human)
+  ```
+  Then do **step 4** below per confirmed hit. So the shape is: **pool the mechanical sweep across all sims → investigate the hits sequentially** — the same split `qe-offhours` uses, just with a parallel mechanical phase.
+- **Prereqs:** the device farm up (`bash tools/appium-device-farm/farm.sh status`), Fleet sims booted (`boot-pool.sh`), and a clean roster (`farm.sh unblock` clears sims left busy by a killed run). Verified live end-to-end: 3 Fleet sims streaming 3 distinct experiments concurrently → 3 verdicts.
+
+Use the **serial loop below** for a single hand-run iteration, for a platform with only one device, or when debugging one recipe.
 
 ## The loop (one iteration)
 

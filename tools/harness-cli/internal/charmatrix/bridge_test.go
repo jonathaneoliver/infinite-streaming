@@ -122,6 +122,52 @@ groups:
 	}
 }
 
+// TestBridgeDeviceRequirementRoundTrip: the #949 device-requirement fields
+// (real / device_udid / device_alias) survive Arm → Experiment → Arm intact, so
+// an arm pinned to a specific device keeps that pin through the queue.
+func TestBridgeDeviceRequirementRoundTrip(t *testing.T) {
+	tr := true
+	arm := &Arm{
+		Platform:    "iphone",
+		Real:        &tr,
+		DeviceUDID:  "00008120-000242DE1152201E",
+		DeviceAlias: "jonathans-iphone",
+	}
+	e := arm.ToExperiment()
+	if e.RequireReal == nil || !*e.RequireReal {
+		t.Errorf("RequireReal lost: %v", e.RequireReal)
+	}
+	if e.DeviceUDID != arm.DeviceUDID || e.DeviceAlias != arm.DeviceAlias {
+		t.Errorf("device udid/alias lost: %q / %q", e.DeviceUDID, e.DeviceAlias)
+	}
+	back := ArmFromExperiment(e)
+	if back.Real == nil || !*back.Real {
+		t.Errorf("Real lost on the way back: %v", back.Real)
+	}
+	if back.DeviceUDID != arm.DeviceUDID || back.DeviceAlias != arm.DeviceAlias {
+		t.Errorf("device udid/alias lost on the way back: %q / %q", back.DeviceUDID, back.DeviceAlias)
+	}
+	// The clone must be a distinct pointer (no aliasing the experiment's field).
+	if back.Real == e.RequireReal {
+		t.Errorf("Real should be a fresh *bool, not aliased to the experiment's")
+	}
+}
+
+// TestBridgeStartModeRoundTrip: start_mode (#946) survives Arm→Experiment→Arm.
+func TestBridgeStartModeRoundTrip(t *testing.T) {
+	e := (&Arm{Platform: "ipad-sim", StartMode: "warm"}).ToExperiment()
+	if e.StartMode != "warm" {
+		t.Fatalf("StartMode lost to Experiment: %q", e.StartMode)
+	}
+	if got := ArmFromExperiment(e); got.StartMode != "warm" {
+		t.Fatalf("StartMode lost from Experiment: %q", got.StartMode)
+	}
+	// Empty stays empty (⇒ cold default), never serialized to a literal.
+	if (&Arm{Platform: "ipad-sim"}).ToExperiment().StartMode != "" {
+		t.Errorf("unset StartMode should stay empty")
+	}
+}
+
 // TestBridgeMarshalDeterministic: the same spec marshals byte-identically twice
 // (golden tests depend on this — yaml.v3 sorts map keys).
 func TestBridgeMarshalDeterministic(t *testing.T) {

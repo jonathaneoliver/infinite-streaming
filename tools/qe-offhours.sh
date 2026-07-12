@@ -90,6 +90,7 @@ if [ "${QE_SELFTEST:-0}" = 1 ]; then
   if [ -n "$pid" ]; then
     log=$(mktemp)
     env CHAR_PLAYER_ID="$pid" HARNESS_BASE_URL="$HARNESS_BASE_URL" LAUNCH_MODE=appium \
+        CHAR_SWEEP_SERVER_URL="$HARNESS_BASE_URL" \
         CHAR_CONTENT="$CONTENT" CHAR_SWEEP_DURATION_S="$DURATION" CHARACTERIZATION_DEVICE_UDID="$SIM_UDID" \
         go test ./tests/characterization/modes -run TestSweepProbe -count=1 -v -timeout 6m >"$log" 2>&1
     grep -E "playing for|SWEEP PROBE|play_id:|session-viewer:|PASS|FAIL" "$log"
@@ -107,7 +108,33 @@ if [ "${QE_SELFTEST:-0}" = 1 ]; then
   exit 0
 fi
 
-# --- the loop ----------------------------------------------------------------
+# --- concurrent mode (QE_CONCURRENT=1): drain mechanically in PARALLEL --------
+# Instead of the serial loop below, run the streaming pool (#950): one worker per
+# free Fleet sim, each claiming+probing+analyzing a distinct experiment at once,
+# until the serviceable backlog is dry. Then investigate the hits it bucketed
+# (the LLM-reasoned step the pool doesn't do) exactly as the serial loop would —
+# so overnight the mechanical phase scales with sim count, not 1-at-a-time.
+if [ "${QE_CONCURRENT:-0}" = 1 ]; then
+  echo "$(date) CONCURRENT drain: streaming pool over the free farm sims"
+  pool_args="--concurrent --duration-s $DURATION --owner $OWNER"
+  [ -n "${QE_MAX_EXPERIMENTS:-}" ] && pool_args="$pool_args --max-experiments $QE_MAX_EXPERIMENTS"
+  [ -n "${QE_SERVICEABLE:-}" ]     && pool_args="$pool_args --serviceable $QE_SERVICEABLE"
+  # shellcheck disable=SC2086
+  harness sweep run $pool_args
+  # Investigate each hit the pool routed to found/ (mechanical drain already done).
+  if [ "${QE_NO_CLAUDE:-0}" != 1 ]; then
+    for exp_id in $(harness --json sweep ls found 2>/dev/null | jq -r '.items[]?.exp_id' 2>/dev/null); do
+      [ -z "$exp_id" ] && continue
+      echo "$(date) hit — dispatching claude to investigate $exp_id"
+      "$CLAUDE" -p "You are the QE Lab overnight investigator. The concurrent sweep pool bucketed experiment $exp_id as a hit on the test-dev deploy ($HARNESS_BASE_URL; pass --insecure --base to harness). Do ONLY the investigate step of the sweep skill: recall findings+memory; annotate; insert a one-axis isolation fan via 'harness sweep isolate'; promote a deduped Issue via 'harness sweep promote'. Do NOT drive any probe yourself." \
+        --dangerously-skip-permissions || echo "claude investigate exited non-zero"
+    done
+  fi
+  echo "================ $(date) qe-offhours concurrent drain done ================"
+  exit 0
+fi
+
+# --- the loop (serial: one experiment at a time) ------------------------------
 # iters counts every claim (incl. skips); runs counts items actually driven
 # (probed + analyzed). QE_RUN_TARGET stops after N driven items.
 iters=0; runs=0
@@ -168,7 +195,7 @@ while [ "$iters" -lt "$MAX_ITERS" ] && [ "$(time_left)" -gt 360 ]; do  # need >6
   # drive the probe (mechanical; no model call)
   log=$(mktemp)
   env CHAR_PLAYER_ID="$player_id" HARNESS_BASE_URL="$HARNESS_BASE_URL" LAUNCH_MODE="$launch" \
-      CHAR_SWEEP_PLATFORM="$platform" \
+      CHAR_SWEEP_PLATFORM="$platform" CHAR_SWEEP_SERVER_URL="$HARNESS_BASE_URL" \
       CHAR_CONTENT="$CONTENT" CHAR_SWEEP_DURATION_S="$DURATION" CHARACTERIZATION_DEVICE_UDID="$device" \
       ${segment:+CHAR_SWEEP_SEGMENT="$segment"} \
       ${pattern:+CHAR_SWEEP_PATTERN="$pattern" CHAR_SWEEP_STEP_S="$step" CHAR_SWEEP_MARGIN="$margin"} \

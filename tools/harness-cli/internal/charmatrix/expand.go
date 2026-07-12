@@ -40,6 +40,7 @@ var axisKeys = map[string]bool{
 	"platform":                  true,
 	"content":                   true,
 	"server":                    true,
+	"start_mode":                true,
 	"mode":                      true,
 	"class":                     true,
 	"duration_s":                true,
@@ -200,6 +201,63 @@ func ExpandWithRunID(spec *Spec, runID string) ([]*Arm, error) {
 	return arms, nil
 }
 
+// clone deep-copies an arm via a JSON round-trip, so rep-instances never alias
+// each other's pointer fields (Real, Shape, Fault, …). JSON is used rather than a
+// hand-written field copy so a newly-added Arm field is cloned automatically
+// (the dotted is.*/proxy.* tags round-trip as literal keys). A marshal error is
+// impossible for a well-formed Arm; on the theoretical failure it returns a
+// shallow copy so replication still proceeds.
+func (a *Arm) clone() *Arm {
+	raw, err := json.Marshal(a)
+	if err != nil {
+		cp := *a
+		return &cp
+	}
+	var out Arm
+	if err := json.Unmarshal(raw, &out); err != nil {
+		cp := *a
+		return &cp
+	}
+	return &out
+}
+
+// ReplicateReps fans each arm out into its `reps` execution-instances (#951), so
+// "1 config × N iterations" is a SPEC concept the engine runs, not a queue-only
+// concept (the sweep's ConfirmationReps). Each instance gets a distinct ID
+// (<id>/repK), a shared RepGroup (= the pre-replication ID) that ties the batch
+// together downstream, and its 0-based RepIndex; its own Reps is reset to 1 so a
+// replicated instance is never re-replicated.
+//
+// reps ≤ 1 leaves an arm untouched (one instance), so a spec that sets no reps
+// expands byte-for-byte as before — this pass is a no-op until an author opts in.
+//
+// parallel specs are returned UNCHANGED: reps don't apply to a synchronized
+// fleet comparison (all arms share one bandwidth timeline under the ≤4-arm HOME
+// barrier — you can't run 3×4 arms in one synchronized group). Reps for parallel
+// work ride the streaming pool executor (#950), which calls this itself per pack.
+func ReplicateReps(arms []*Arm, parallel bool) []*Arm {
+	if parallel {
+		return arms
+	}
+	out := make([]*Arm, 0, len(arms))
+	for _, a := range arms {
+		reps := a.Reps
+		if reps <= 1 {
+			out = append(out, a)
+			continue
+		}
+		for k := 0; k < reps; k++ {
+			inst := a.clone()
+			inst.RepGroup = a.ID
+			inst.RepIndex = k
+			inst.ID = fmt.Sprintf("%s/rep%d", a.ID, k)
+			inst.Reps = 1 // an instance is one execution; don't re-replicate
+			out = append(out, inst)
+		}
+	}
+	return out
+}
+
 // ToExperiment compiles the arm into the server-side recipe of record. The
 // server live offset (proxy.live_offset) routes to the manifest hold-back
 // (ContentManipulation); the client live offset (is.live_offset) stays a client
@@ -211,6 +269,10 @@ func (a *Arm) ToExperiment() *sweep.Experiment {
 		ID:                  a.ID,
 		Class:               sweep.Class(a.Class),
 		Platform:            a.Platform,
+		RequireReal:         a.Real,
+		DeviceUDID:          a.DeviceUDID,
+		DeviceAlias:         a.DeviceAlias,
+		StartMode:           a.StartMode,
 		LaunchMode:          sweep.LaunchModeAppium,
 		Protocol:            a.Protocol,
 		Content:             a.Content,
@@ -221,6 +283,7 @@ func (a *Arm) ToExperiment() *sweep.Experiment {
 		Reps:                a.Reps,
 		Kind:                sweep.KindHypothesis, // a matrix is a planned A/B sweep, not a seed/isolation
 		Group:               a.Group,
+		RepGroup:            a.RepGroup,
 		Arm:                 sweep.Arm(a.Role),
 		Shape:               cloneShape(a.Shape),
 		Fault:               cloneFault(a.Fault),
@@ -389,6 +452,9 @@ func validateArm(a *Arm) error {
 	}
 	if a.Role != "" && a.Role != string(sweep.ArmControl) && a.Role != string(sweep.ArmVariant) {
 		return fmt.Errorf("role %q invalid (control|variant)", a.Role)
+	}
+	if a.StartMode != "" && a.StartMode != string(sweep.StartModeCold) && a.StartMode != string(sweep.StartModeWarm) {
+		return fmt.Errorf("start_mode %q invalid (cold|warm)", a.StartMode)
 	}
 	switch a.VariantOrder {
 	case "", "default", "ascending", "descending":

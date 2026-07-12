@@ -242,6 +242,12 @@ const sweepRowSelect = `exp_id, class, %s AS status, kind, platform, protocol, m
 func handleSweepClaim(w http.ResponseWriter, r *http.Request, cfg config) {
 	var post struct {
 		Owner string `json:"owner"`
+		// Serviceable is the set of platform tokens the caller can run RIGHT NOW —
+		// the capabilities its farm-allocated devices satisfy (#948/#949). When
+		// non-empty, only backlog experiments whose platform is in this set are
+		// eligible, so work requiring an absent device is never claimed (scenario
+		// 3's availability gate). Empty ⇒ no gate (legacy behaviour: claim anything).
+		Serviceable []string `json:"serviceable,omitempty"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&post); err != nil && err != io.EOF {
 		http.Error(w, "decode body: "+err.Error(), http.StatusBadRequest)
@@ -252,9 +258,10 @@ func handleSweepClaim(w http.ResponseWriter, r *http.Request, cfg config) {
 		http.Error(w, "owner is required", http.StatusBadRequest)
 		return
 	}
+	serviceable := trimStrings(post.Serviceable)
 	ctx := r.Context()
 	for try := 0; try < 6; try++ {
-		candID, raw, err := sweepSelectCandidate(ctx, cfg)
+		candID, raw, err := sweepSelectCandidate(ctx, cfg, serviceable)
 		if err != nil {
 			http.Error(w, "select candidate: "+err.Error(), http.StatusBadGateway)
 			return
@@ -297,7 +304,17 @@ func handleSweepClaim(w http.ResponseWriter, r *http.Request, cfg config) {
 // sweepSelectCandidate returns the top-scored backlog experiment that isn't
 // already claimed and whose platform/protocol/class/mode aren't disabled in
 // sweep_scope (the dashboard control plane).
-func sweepSelectCandidate(ctx context.Context, cfg config) (id, raw string, err error) {
+func sweepSelectCandidate(ctx context.Context, cfg config, serviceable []string) (id, raw string, err error) {
+	// The serviceable gate (#949): when the caller passes a non-empty platform
+	// allow-list, only experiments it can run right now are eligible. Built as a
+	// parameterized Array(String) predicate so a platform token can't inject SQL.
+	// Empty list ⇒ no predicate (unchanged legacy behaviour).
+	var params map[string]string
+	serviceablePred := ""
+	if len(serviceable) > 0 {
+		serviceablePred = "  AND platform IN {serviceable:Array(String)}\n"
+		params = map[string]string{"serviceable": chStringArrayParam(serviceable)}
+	}
 	// Exclude only RECENTLY-claimed exp_ids (the in-flight race window). An older
 	// claim row must not exclude forever — else a reaped or re-seeded experiment
 	// could never be re-claimed. A claim that actually won leaves status='running'
@@ -310,9 +327,10 @@ func sweepSelectCandidate(ctx context.Context, cfg config) (id, raw string, err 
 		  AND protocol NOT IN (SELECT value FROM infinite_streaming.sweep_scope FINAL WHERE dimension='protocol' AND enabled=0)
 		  AND class    NOT IN (SELECT value FROM infinite_streaming.sweep_scope FINAL WHERE dimension='class'    AND enabled=0)
 		  AND mode     NOT IN (SELECT value FROM infinite_streaming.sweep_scope FINAL WHERE dimension='mode'     AND enabled=0)
-		ORDER BY score DESC, exp_id
+` + serviceablePred +
+		`		ORDER BY score DESC, exp_id
 		LIMIT 1`
-	body, err := chQueryBytes(ctx, cfg, q, nil)
+	body, err := chQueryBytes(ctx, cfg, q, params)
 	if err != nil {
 		return "", "", err
 	}
@@ -461,4 +479,36 @@ func strOrDefault(v, d string) string {
 		return d
 	}
 	return v
+}
+
+// trimStrings trims whitespace and drops empties from a string slice — used to
+// clean a caller-supplied serviceable platform list before it gates the claim.
+func trimStrings(in []string) []string {
+	var out []string
+	for _, s := range in {
+		if t := strings.TrimSpace(s); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// chStringArrayParam formats a []string as a ClickHouse Array(String) parameter
+// value for HTTP {name:Array(String)} substitution: ['a','b'] with backslash-
+// escaped quotes/backslashes so an element can't break out of the literal.
+func chStringArrayParam(vals []string) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, v := range vals {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		esc := strings.ReplaceAll(v, `\`, `\\`)
+		esc = strings.ReplaceAll(esc, `'`, `\'`)
+		b.WriteByte('\'')
+		b.WriteString(esc)
+		b.WriteByte('\'')
+	}
+	b.WriteByte(']')
+	return b.String()
 }

@@ -153,7 +153,7 @@ func runTransientShockOnDevice(t *testing.T, p runner.Platform, dev runner.Devic
 		// Resume starts nothing. Retry resume → heartbeat until the play comes up.
 		var herr error
 		for attempt := 1; attempt <= 3; attempt++ {
-			if rerr := appium.ResumePlayback(setupCtx, *picked); rerr != nil {
+			if rerr := resumePinnedContent(setupCtx, appium, *picked); rerr != nil {
 				t.Logf("resume attempt %d: %v", attempt, rerr)
 			}
 			if herr = s.WaitForHeartbeat(setupCtx, 50*time.Second); herr == nil {

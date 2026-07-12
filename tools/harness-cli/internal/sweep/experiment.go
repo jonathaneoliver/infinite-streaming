@@ -56,6 +56,34 @@ func (e *Experiment) LaunchModeOrDefault() string {
 	return e.LaunchMode
 }
 
+// StartMode is the app-startup behaviour an experiment measures (#946) — a
+// first-class characterization axis, orthogonal to the appium-session plumbing.
+//
+//   - cold (default): the app is killed + relaunched, so playback starts from a
+//     fresh AVPlayer — empty buffers, no ABR history, cold decoder. The startup
+//     QoE (TTFF, first-frame rung) reflects a genuine cold start.
+//   - warm: the app stays running and a new play is started from the home
+//     screen, so warm buffers / ABR history / decoder state carry over — a
+//     different (usually faster) startup that a cold relaunch never sees.
+//
+// warm requires a warm appium session (config #3); cold can use either session
+// plumbing (fresh or warm) — the session reuse is out-of-band from playback.
+type StartMode string
+
+const (
+	StartModeCold StartMode = "cold"
+	StartModeWarm StartMode = "warm"
+)
+
+// StartModeOrDefault treats an empty StartMode as cold (the isolation-preserving
+// default — every rep independent).
+func (e *Experiment) StartModeOrDefault() StartMode {
+	if e.StartMode == "" {
+		return StartModeCold
+	}
+	return StartMode(e.StartMode)
+}
+
 // Kind is what produced an experiment and how aggressively the scheduler
 // should prioritise it (§5). isolation/bisect/hypothesis come from a hit;
 // seed is the broad starter set.
@@ -189,14 +217,32 @@ type Experiment struct {
 	Status    Status `json:"status,omitempty"` // lifecycle bucket; authoritative on the CH column, stamped onto the struct by Store.List
 
 	// --- the recipe (matrix axes) ---
-	Class               Class                `json:"class,omitempty"`       // config (default) | fault — the sweep tier
-	Platform            string               `json:"platform"`              // ipad-sim | iphone | appletv | androidtv | web
-	LaunchMode          string               `json:"launch_mode,omitempty"` // how the probe launches the app: appium (the only mode TestSweepProbe supports). Stamped at creation; the runner passes it as LAUNCH_MODE.
-	Protocol            string               `json:"protocol"`              // hls | dash
-	Content             string               `json:"content"`               // fixed to insane_new for now
-	Segment             string               `json:"segment,omitempty"`     // master variant the probe requests via -is.segment: s2 | s6 | ll. Empty = app default (s6). Drives the segment×live-offset matrix (#793).
-	Muted               *bool                `json:"muted,omitempty"`       // #838 mute audio; nil = app default-mutes. Rides config-on-connect (bootstrap app_config.muted) so the per-arm value reaches the client off GET /api/sessions.
-	Mode                string               `json:"mode"`                  // steps | pyramid | downshift_severity | …
+	Class      Class  `json:"class,omitempty"`       // config (default) | fault — the sweep tier
+	Platform   string `json:"platform"`              // ipad-sim | iphone | appletv | androidtv | web
+	LaunchMode string `json:"launch_mode,omitempty"` // how the probe launches the app: appium (the only mode TestSweepProbe supports). Stamped at creation; the runner passes it as LAUNCH_MODE.
+	// Job selects which pool runner executes this item: "" (default) = the sweep
+	// probe (config-on-connect → TestSweepProbe → label oracle); "char" = run the
+	// named characterization Mode (Test<Mode><Platform>) scored by its OWN
+	// assertions. Lets one pool drain a mixed char+sweep backlog (Q1/Q2). Char
+	// items are in-memory only — not persisted to ClickHouse.
+	Job string `json:"job,omitempty"`
+
+	// --- device requirement beyond platform (#949) ---
+	// The dispatcher matches these against the live farm roster (#948) to decide
+	// serviceability (scenario 3's availability gate). Platform is the coarse gate
+	// (the server-side --serviceable claim filter is platform-level); these refine
+	// it. RequireReal: nil = either sim or hardware, true = hardware only, false =
+	// simulator only. DeviceUDID / DeviceAlias pin a specific device — e.g. a real
+	// "jonathans-iphone" — so the arm runs on THAT device or waits in backlog.
+	RequireReal         *bool                `json:"require_real,omitempty"`
+	DeviceUDID          string               `json:"device_udid,omitempty"`
+	DeviceAlias         string               `json:"device_alias,omitempty"`
+	StartMode           string               `json:"start_mode,omitempty"` // cold (default) relaunches the app; warm resumes a new play in the running app (#946)
+	Protocol            string               `json:"protocol"`             // hls | dash
+	Content             string               `json:"content"`              // fixed to insane_new for now
+	Segment             string               `json:"segment,omitempty"`    // master variant the probe requests via -is.segment: s2 | s6 | ll. Empty = app default (s6). Drives the segment×live-offset matrix (#793).
+	Muted               *bool                `json:"muted,omitempty"`      // #838 mute audio; nil = app default-mutes. Rides config-on-connect (bootstrap app_config.muted) so the per-arm value reaches the client off GET /api/sessions.
+	Mode                string               `json:"mode"`                 // steps | pyramid | downshift_severity | …
 	DurationS           int                  `json:"duration_s,omitempty"`
 	Fault               *Fault               `json:"fault,omitempty"` // fault-class only
 	Shape               *Shape               `json:"shape,omitempty"`

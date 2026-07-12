@@ -93,6 +93,11 @@ func cmdCharMatrix(client *api.Client, args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
+	// Fan each arm into its `reps` execution-instances (#951) so a spec that sets
+	// reps runs each cell N times, tied by a shared rep_group. A no-op when no arm
+	// sets reps>1. Parallel/synchronized specs are returned unchanged (reps ride
+	// the streaming executor, #950); this replication drives the sequential path.
+	arms = charmatrix.ReplicateReps(arms, spec.Parallel)
 
 	// --validate: the spec loaded + expanded cleanly. Report and stop — quiet
 	// pass/fail for the test-author skill's fast loop and CI, no network, no
@@ -501,6 +506,16 @@ type farmDevice struct {
 	UDID string `json:"udid"`
 	Host string `json:"host"`
 	Busy bool   `json:"busy"`
+	// Capability + availability fields (issue #948). The farm's /device
+	// response carries these alongside udid/host/busy; the reap path ignores
+	// them, but availableDevices() reads them to build the serviceable roster.
+	Offline     bool   `json:"offline"`
+	UserBlocked bool   `json:"userBlocked"`
+	RealDevice  bool   `json:"realDevice"`
+	Platform    string `json:"platform"` // "ios" | "tvos" | "android"
+	SDK         string `json:"sdk"`      // OS/SDK version, e.g. "26.5"
+	Name        string `json:"name"`
+	State       string `json:"state"` // sims: "Booted"/"Shutdown"; real devices: absent
 }
 
 // reapDeviceFarm poll-unblocks the device-farm devices THIS run acquired (udids,

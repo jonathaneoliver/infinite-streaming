@@ -176,7 +176,7 @@ func runRampupOnDevice(t *testing.T, p runner.Platform, dev runner.Device, bars 
 			t.Logf("HOME barrier released — starting playback")
 		}
 
-		if err := appium.ResumePlayback(setupCtx, *picked); err != nil {
+		if err := resumePinnedContent(setupCtx, appium, *picked); err != nil {
 			t.Fatalf("ResumePlayback: %v", err)
 		}
 		if err := s.WaitForHeartbeat(setupCtx, 90*time.Second); err != nil {

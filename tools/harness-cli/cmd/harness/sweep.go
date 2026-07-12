@@ -84,6 +84,16 @@ Subcommands:
                            group/pattern (control masters; variants bind). Reuses
                            the char-matrix fleet path. --dry-run prints the
                            RunPlan. Singletons stay on the single-device probe.
+  run --concurrent [--serviceable toks] [--max-devices N] [--dry-run]
+       [--rep-batch N --start-mode cold|warm]
+                           STREAMING POOL (#950): pack independent experiments
+                           across every free farm device — one worker per device,
+                           barrierless, each claims serviceable work until its
+                           platform's backlog is dry. --rep-batch N runs each
+                           claimed experiment as an N-rep warm rep-loop in ONE
+                           session (#946): --start-mode warm resumes each play in
+                           place (~1s bring-up) vs cold relaunches (~9s). --dry-run
+                           prints the roster + serviceable set + worker count.
   isolate <id> --flip axis=value [--flip …]
                            materialise an OFAT isolation fan off a confirmed
                            hit (control + one variant per flip) into backlog/.
@@ -117,6 +127,8 @@ func cmdSweep(client *api.Client, args []string, asJSON bool) error {
 		return cmdSweepExport(client, args[1:], asJSON)
 	case "run-fan":
 		return cmdSweepRunFan(client, args[1:], asJSON)
+	case "run":
+		return cmdSweepRun(client, args[1:], asJSON)
 	case "status":
 		return cmdSweepStatus(client, args[1:], asJSON)
 	case "ls":
@@ -224,6 +236,7 @@ func cmdSweepAdd(client *api.Client, args []string, asJSON bool) error {
 	segment := fs.String("segment", "", "master variant the probe requests: s2 | s6 | ll (empty = app default s6)")
 	durationS := fs.Int("duration-s", 0, "per-run window in seconds (0 = runner/probe default)")
 	reps := fs.Int("reps", 1, "confirmation reps requested")
+	startMode := fs.String("start-mode", "", "cold|warm (#946): with reps>1, the pool runs it as a warm rep-loop — warm resumes each play in place, cold relaunches. Empty = cold")
 	why := fs.String("why", "", "rationale recorded on the row (why this test)")
 	id := fs.String("id", "", "explicit experiment id (default: auto manual-… with a unique stamp)")
 	// shape (config-class network motion)
@@ -244,6 +257,9 @@ func cmdSweepAdd(client *api.Client, args []string, asJSON bool) error {
 	if c != sweep.ClassConfig && c != sweep.ClassFault {
 		return fmt.Errorf("invalid --class %q: config|fault", *class)
 	}
+	if *startMode != "" && *startMode != string(sweep.StartModeCold) && *startMode != string(sweep.StartModeWarm) {
+		return fmt.Errorf("invalid --start-mode %q: cold|warm", *startMode)
+	}
 	clip := sweep.ContentOrDefault(*content)
 
 	e := &sweep.Experiment{
@@ -258,6 +274,7 @@ func cmdSweepAdd(client *api.Client, args []string, asJSON bool) error {
 		DurationS:  *durationS,
 		Kind:       sweep.KindManual,
 		Reps:       *reps,
+		StartMode:  *startMode,
 		Depth:      0,
 		Why:        "manual_add",
 		WhyText:    *why,
@@ -700,6 +717,7 @@ func cmdSweepNext(client *api.Client, args []string, asJSON bool) error {
 	depthFirst := fs.Bool("depth-first", true, "prefer non-seed work (peek only; --claim uses server score order)")
 	claim := fs.Bool("claim", false, "atomically claim the top eligible experiment (server-side)")
 	owner := fs.String("owner", "", "owner id to stamp on claim")
+	serviceable := fs.String("serviceable", "", "comma-separated platform tokens the caller can run now (e.g. ipad-sim,iphone); with --claim, the server only returns work whose platform is serviceable — an experiment needing an absent device is never claimed (#949)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -716,7 +734,7 @@ func cmdSweepNext(client *api.Client, args []string, asJSON bool) error {
 		if *owner == "" {
 			return errors.New("--claim requires --owner")
 		}
-		if pick, err = s.ClaimNext(*owner); err != nil {
+		if pick, err = s.ClaimNext(*owner, splitCSV(*serviceable)...); err != nil {
 			return fmt.Errorf("claim: %w", err)
 		}
 	} else {

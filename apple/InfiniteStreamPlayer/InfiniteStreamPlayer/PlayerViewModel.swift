@@ -86,8 +86,9 @@ final class PlayerViewModel: ObservableObject {
     /// Makes the startup pick deterministic, the primary lever for the
     /// order × forced-first-variant experiment (#683, pairs with #682).
     @Published var startsOnFirstEligibleVariant: Bool = false
-    /// Stream URL goes through the per-session go-proxy port. Off → API port.
-    @Published var localProxy: Bool = true
+    /// On-device LocalHTTPProxy for the stream URL. Default OFF (opt-in): the
+    /// load path re-derives this from the flag, defaulting off when unset.
+    @Published var localProxy: Bool = false
     /// Auto-retry the current stream on non-codec player errors. Default OFF for
     /// now: the recovery ladder's #814 pre-retry re-cap trusts the iOS throughput
     /// estimate, which over-reads on a throttled path and re-caps ABR ABOVE the
@@ -209,6 +210,28 @@ final class PlayerViewModel: ObservableObject {
     // it lowercase here keeps the wire + LocalProxy logs matching everything
     // downstream with no case-folding needed (see canonicalV2ID).
     private var currentPlayID: String = UUID().uuidString.lowercased()
+
+    /// Short session id for the diagnostic HUD (#946): the first 8 chars of the
+    /// player_id and current play_id, so an operator watching a wall of sims can
+    /// read the id straight off the screen and match it to the harness output
+    /// (which references sessions by the same 8-char prefixes). player_id is
+    /// stable per session; play_id updates on the next HUD redraw after a rotate.
+    var hudShortIDs: String {
+        "\(playerId.prefix(8))·\(currentPlayID.prefix(8))"
+    }
+
+    /// The port the stream is actually served from — the per-session go-proxy
+    /// port AFTER the 302 redirect (e.g. 21081 → 21281), read live from AVMetrics
+    /// once a request completes. Falls back to the base playback port
+    /// (pre-redirect) until then. Shown as its own HUD row (#946).
+    var hudPort: String {
+        if #available(iOS 18.0, *),
+           let sub = avMetricsSubscriber as? AVMetricsSubscriber,
+           let served = sub.servedPort() {
+            return String(served)
+        }
+        return activeServer.flatMap { URL(string: $0.playbackURL)?.port }.map(String.init) ?? "?"
+    }
 
     /// #621 — the play_id whose `play_start` boundary has already been
     /// emitted. startPlayback's fresh branch compares against this so a
@@ -1031,18 +1054,19 @@ final class PlayerViewModel: ObservableObject {
         playIdMintedAt = Date()
         playIdLastActivityAt = .distantPast
         // Session playback ALWAYS routes through the shaped go-proxy port
-        // (playbackURL). The `localProxy` flag only toggles the ON-DEVICE
-        // LocalHTTPProxy in startPlayback (rewrite-through-127.0.0.1 vs direct),
-        // NOT whether traffic is shaped. Previously localProxy=false fell back to
-        // the unshaped content port, conflating "no on-device proxy" with "no
-        // throttle" — so a localProxy-off test was silently unthrottled.
+        // (throughGoProxy: true → playbackURL). The separate on-device
+        // LocalHTTPProxy (PlayerViewModel.localProxy) toggles the
+        // rewrite-through-127.0.0.1 hop in startPlayback, NOT whether traffic is
+        // shaped. Previously this arg fell back to the unshaped content port,
+        // conflating "no on-device proxy" with "no throttle" — so a
+        // LocalHTTPProxy-off test was silently unthrottled (#862).
         var url = StreamURLBuilder.playbackURL(
             server: server,
             contentName: selectedContent,
             protocolOption: streamProtocol,
             segment: segment,
             playerId: playerId,
-            localProxy: true
+            throughGoProxy: true
         )
         guard let resolved = url else { return }
         // k3s-dev content port (40000) doesn't accept ?player_id= —
@@ -2404,11 +2428,15 @@ final class PlayerViewModel: ObservableObject {
         allow4K          = d.object(forKey: Self.flag4K) as? Bool ?? true
         // Present (launch-arg or persisted) → coerce: d.bool parses BOTH the
         // NSArgumentDomain STRING ("false"/"true") and a persisted NSNumber.
-        // Absent → default ON. (Plain `as? Bool` silently ignored the launch-arg
-        // string and always fell back to true, so -is.flag.local_proxy false was inert.)
+        // Absent → default OFF. LocalHTTPProxy is opt-in: characterization forces
+        // it off (and reset_advanced wipes the persisted flag), and it breaks the
+        // AVPlayer cold-start bitrate estimate (localhost) — so an app with no
+        // saved preference should NOT silently re-enable it. (Plain `as? Bool`
+        // silently ignored the launch-arg string and always fell back, so
+        // -is.flag.local_proxy false was inert.)
         localProxy = d.object(forKey: Self.flagLocalProxy) != nil
             ? d.bool(forKey: Self.flagLocalProxy)
-            : true
+            : false
         // Default OFF when unset (see autoRecovery decl). d.bool returns false when
         // the key is absent in every domain, and parses both a persisted NSNumber
         // and an NSArgumentDomain launch-arg string (`-is.flag.auto_recovery true`).

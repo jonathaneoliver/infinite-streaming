@@ -109,6 +109,7 @@ func cmdSweepRunFan(client *api.Client, args []string, asJSON bool) error {
 	fs := flag.NewFlagSet("sweep run-fan", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "build + print the fleet RunPlan; bootstrap nothing, launch no devices")
 	durationS := fs.Int("duration-s", 0, "shared play window in seconds (0 = longest arm's, default 60)")
+	reserve := fs.Bool("reserve", false, "atomically reserve the fan's N device slots on the farm before running (#952) — blocks them so the streaming pool (#950) can't steal one mid-comparison; the fleet then drives exactly the reserved devices, released when done")
 	charDir := fs.String("char-dir", envOrDefault("CHAR_DIR", "tests/characterization"), "path to the characterization Go module (drives the fleet probe)")
 	if err := fs.Parse(rest); err != nil {
 		return err
@@ -145,6 +146,30 @@ func cmdSweepRunFan(client *api.Client, args []string, asJSON bool) error {
 
 	rl := runLevelFromEnv()
 	window := fanWindow(fan, *durationS)
+
+	// --reserve (#952): atomically block the fan's N device slots on the farm so a
+	// concurrent streaming pool (#950) can't take one mid-comparison, then drive
+	// the fleet PINNED to exactly those devices (non-DF: CHAR_FLEET_UDIDS +
+	// CHAR_DEVICE_FARM=0, autoboot on). A blocked device is out of the pool's Free
+	// set, so the reservation is the mutual-exclusion. Released on exit.
+	var reserveEnv []string
+	if *reserve && !*dryRun {
+		want := fan[0].Platform
+		match := func(d DeviceCapability) bool {
+			return len(intersectTokens(sweepPlatformsForDevice(d), []string{want})) > 0
+		}
+		udids, rerr := reserveDevices(deviceFarmBaseURL(), len(fan), match)
+		if rerr != nil {
+			return fmt.Errorf("reserve fleet slots for %q: %w", parent, rerr)
+		}
+		defer releaseDevices(deviceFarmBaseURL(), udids)
+		reserveEnv = []string{
+			"CHAR_FLEET_UDIDS=" + strings.Join(udids, ","),
+			"CHAR_DEVICE_FARM=0",
+			"CHAR_FLEET_AUTOBOOT=1",
+		}
+		fmt.Fprintf(os.Stderr, "reserved %d fleet slot(s) for %q: %s\n", len(udids), parent, strings.Join(udids, ", "))
+	}
 
 	if *dryRun {
 		// Placeholder player_ids so the plan is fully populated for inspection;
@@ -198,6 +223,10 @@ func cmdSweepRunFan(client *api.Client, args []string, asJSON bool) error {
 		fmt.Fprintf(os.Stderr, "bootstrapped arm %d/%d: %s (player_id=%s)\n", i+1, len(fan), e.ID, pid)
 	}
 
+	// reserveEnv (if --reserve) rides at the END of armEnv so its CHAR_DEVICE_FARM=0
+	// / CHAR_FLEET_UDIDS win over any os.Environ()/.env values in the fleet
+	// subprocess (Go's exec dedupes env keeping the last occurrence).
+	armEnv = append(armEnv, reserveEnv...)
 	plan := buildFanRunPlan(fan, playerIDs, rl, client.BaseURL, "", window)
 	if err := driveFleet(client, fan[0].Platform, len(fan), window, *charDir, armEnv, plan.Arms); err != nil {
 		return fmt.Errorf("fleet run: %w", err)

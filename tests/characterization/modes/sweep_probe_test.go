@@ -47,6 +47,12 @@ func TestSweepProbe(t *testing.T) {
 		durationS = 60
 	}
 
+	// Bring-up clock (#946): from probe start to first-frame-ready is the cost
+	// that warm-session / warm-start shrink. Emit it as a parseable PROBE_TIMING
+	// line so the pool can attribute bring-up vs play and show the cold/warm delta.
+	probeStart := time.Now()
+	t.Logf("PROBE_TIMING started_at=%s", probeStart.UTC().Format(time.RFC3339Nano))
+
 	mode, launcher, err := runner.PickMode()
 	if err != nil {
 		t.Skipf("PickMode: %v", err)
@@ -56,7 +62,13 @@ func TestSweepProbe(t *testing.T) {
 		t.Skipf("sweep probe requires -launch-mode=appium (got %s)", mode)
 	}
 
-	setupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	// Derive from interruptContext() (the #853 SIGINT/SIGTERM handler) so a
+	// killed/timed-out run (timeout(1), pkill, Ctrl-C, CLI-forwarded signal)
+	// cancels setup and unwinds into t.Cleanup below — which DELETEs the appium
+	// session. Without this the default signal handler terminates the process
+	// before Cleanup runs, leaking the WDA session and wedging the sim busy for
+	// the next run (see reference_leaked_appium_session_masquerades_as_flake).
+	setupCtx, cancel := context.WithTimeout(interruptContext(), 3*time.Minute)
 	defer cancel()
 
 	// Pick the booted device for this platform (honouring an explicit UDID).
@@ -92,7 +104,12 @@ func TestSweepProbe(t *testing.T) {
 	// combination matrix (#793). The arg construction is shared with the
 	// `harness char matrix` runner via runner.ProbeLaunchArgs (#811).
 	args := runner.ProbeLaunchArgs(runner.ProbeConfig{
-		PlayerID:           playerID,
+		PlayerID: playerID,
+		// Pin the server on startup via -is.server_url (#942) when provided, so the
+		// probe never depends on the sim's saved server (fragile: an unseeded sim
+		// hits the picker; a plist-seed can be clobbered by cfprefsd). NSArgumentDomain
+		// outranks UserDefaults, so this wins regardless of the sim's state.
+		ServerURL:          strings.TrimSpace(os.Getenv("CHAR_SWEEP_SERVER_URL")),
 		Content:            strings.TrimSpace(os.Getenv("CHAR_CONTENT")),
 		Segment:            strings.TrimSpace(os.Getenv("CHAR_SWEEP_SEGMENT")),
 		LiveOffsetS:        strings.TrimSpace(os.Getenv("CHAR_SWEEP_LIVE_OFFSET")),
@@ -116,6 +133,12 @@ func TestSweepProbe(t *testing.T) {
 		defer cancel()
 		_ = sess.CloseViaUI(cleanupCtx) // clean client play_end
 		_ = sess.Release(cleanupCtx)    // delete the proxy session, free the slot
+		// DELETE the appium/WDA session too — otherwise the device-farm keeps the
+		// sim busy=true after every run (kill OR clean exit), wedging the next run
+		// with "create session: context deadline exceeded". Close() uses its own
+		// context.Background(), so it still runs when the interrupt cancelled
+		// setupCtx above. Idempotent (clears the session map).
+		_ = appium.Close()
 	})
 	// When CHAR_CONTENT pins a clip, tap that clip's specific tile rather than
 	// the continue-watching hero (which races the catalogue load and can land on
@@ -131,6 +154,12 @@ func TestSweepProbe(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("ResumePlayback: %v", rerr)
 	}
+	// Bring-up done: session created + app launched + playback started. This is
+	// the wall-time warm-session (reuse the appium/WDA session) and warm-start
+	// (don't relaunch the app) each cut into — logged so the pool can report the
+	// cold-vs-warm delta per experiment.
+	bringupMs := time.Since(probeStart).Milliseconds()
+	t.Logf("PROBE_TIMING bringup_ms=%d", bringupMs)
 
 	// Drive the bandwidth motion for a config-class pattern recipe: once the
 	// master is fetched (variants known), arm the pattern — the same path the
@@ -151,7 +180,13 @@ func TestSweepProbe(t *testing.T) {
 	// Let it play. The recipe (content/shape/transfer) is already live, so this
 	// window is what the oracle later reads.
 	t.Logf("playing for %ds…", durationS)
-	time.Sleep(time.Duration(durationS) * time.Second)
+	select {
+	case <-time.After(time.Duration(durationS) * time.Second):
+	case <-interruptContext().Done():
+		// Interrupted mid-play — return promptly so t.Cleanup releases the
+		// appium session instead of the process being killed under the sleep.
+		t.Logf("interrupted during play window — releasing session")
+	}
 
 	playID, err := sess.CurrentPlayID(context.Background())
 	if err != nil {
