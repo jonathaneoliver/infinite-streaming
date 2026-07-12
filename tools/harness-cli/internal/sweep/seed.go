@@ -76,9 +76,13 @@ var faultRecipes = []seedRecipe{
 
 // narrowPlatforms / fullPlatforms — the active sweep is **iOS-sim only** for
 // now; --full is reserved for when the other platforms come online.
+// The default rig is Fleet iPhone 15 simulators, which the farm services under
+// the `iphone-sim` token (sweepPlatformsForDevice) — `ipad-sim` is a literal
+// iPad simulator (nobody runs it) and seeding it mislabels the work so the
+// natural `--serviceable iphone-sim` claim path can't match it.
 var (
-	narrowPlatforms = []string{"ipad-sim"}
-	fullPlatforms   = []string{"ipad-sim", "iphone", "appletv", "androidtv"}
+	narrowPlatforms = []string{"iphone-sim"}
+	fullPlatforms   = []string{"iphone-sim", "iphone", "appletv", "androidtv"}
 	// Protocol is **HLS only** for now — the probe plays the app's default
 	// (HLS) and protocol selection isn't wired in yet. DASH returns when it is.
 	seedProtocols = []string{"hls"}
