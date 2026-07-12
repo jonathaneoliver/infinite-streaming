@@ -220,6 +220,12 @@ type Experiment struct {
 	Class      Class  `json:"class,omitempty"`       // config (default) | fault — the sweep tier
 	Platform   string `json:"platform"`              // ipad-sim | iphone | appletv | androidtv | web
 	LaunchMode string `json:"launch_mode,omitempty"` // how the probe launches the app: appium (the only mode TestSweepProbe supports). Stamped at creation; the runner passes it as LAUNCH_MODE.
+	// Job selects which pool runner executes this item: "" (default) = the sweep
+	// probe (config-on-connect → TestSweepProbe → label oracle); "char" = run the
+	// named characterization Mode (Test<Mode><Platform>) scored by its OWN
+	// assertions. Lets one pool drain a mixed char+sweep backlog (Q1/Q2). Char
+	// items are in-memory only — not persisted to ClickHouse.
+	Job string `json:"job,omitempty"`
 
 	// --- device requirement beyond platform (#949) ---
 	// The dispatcher matches these against the live farm roster (#948) to decide

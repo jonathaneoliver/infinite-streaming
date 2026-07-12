@@ -98,8 +98,15 @@ func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 	repBatch := fs.Int("rep-batch", 0, "run each claimed experiment as an N-rep batch in ONE warm appium session (#946), instead of a single cold probe; 0/1 = single play")
 	startMode := fs.String("start-mode", "cold", "rep-batch start mode: cold (relaunch the app per rep) | warm (resume-in-place, no relaunch — warm buffers/ABR)")
 	dryRun := fs.Bool("dry-run", false, "print the free roster + serviceable set + planned worker count; claim nothing")
+	charModes := fs.String("char-modes", "", "ALSO run these characterization modes on the pool (comma list: rampup,pyramid,downshift_severity,…), each scored by its OWN assertions, mixed with the sweep backlog (Q2). Empty = sweep only")
+	charPlatforms := fs.String("char-platforms", "", "optional claim filter for --char-modes items (comma list of FARM tokens: iphone, iphone-sim, ipad-sim, appletv, androidtv); empty = run on any free device. The test VARIANT (…IPadSim/…IPhone) is derived from the device, not this")
+	charReps := fs.Int("char-reps", 1, "reps per char mode×platform item")
+	charOnly := fs.Bool("char-only", false, "run ONLY the --char-modes items, skip the sweep backlog (Q1)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *charOnly && strings.TrimSpace(*charModes) == "" {
+		return errors.New("--char-only requires --char-modes")
 	}
 	if !*concurrent {
 		return errors.New("harness sweep run currently implements only --concurrent (the streaming pool, #950); pass --concurrent")
@@ -148,6 +155,32 @@ func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 			}
 			fmt.Printf("  %-38s %-6s → %s%s\n", d.UDID, d.Platform, strings.Join(toks, ","), marker)
 		}
+		if ml := splitCSV(*charModes); len(ml) > 0 {
+			items, cerr := charWorkItems(ml, splitCSV(*charPlatforms), *charReps, strings.TrimSpace(*content))
+			if cerr != nil {
+				return cerr
+			}
+			mode := "mixed with the sweep backlog (Q2)"
+			if *charOnly {
+				mode = "char-only, sweep backlog skipped (Q1)"
+			}
+			filt := *charPlatforms
+			if strings.TrimSpace(filt) == "" {
+				filt = "any"
+			}
+			fmt.Printf("char items: %d [%s × filter:%s × %drep] — %s\n", len(items), *charModes, filt, *charReps, mode)
+			// Show the variant each item would run on the first free device (the
+			// variant is per-device: sim → …IPadSim, real iPhone → …IPhone).
+			for _, it := range items {
+				variant := "(per device)"
+				if len(free) > 0 {
+					if tn, terr := charTestName(it.Mode, runnerPlatformForDevice(free[0])); terr == nil {
+						variant = tn + " on " + runnerPlatformForDevice(free[0])
+					}
+				}
+				fmt.Printf("  %-26s → %s\n", it.ID, variant)
+			}
+		}
 		return nil
 	}
 
@@ -178,6 +211,27 @@ func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 	runner := makeSweepPoolRunner(client, s, *charDir, strings.TrimSpace(*content),
 		*durationS, *ingestWaitS, *confirmReps, override, *repBatch, *startMode)
 
+	// Claimer selection (Q1/Q2): with --char-modes, inject char work items — alone
+	// (--char-only = Q1) or ahead of the sweep backlog (mixed = Q2). The router in
+	// the runner dispatches each item by Job.
+	var claimer poolClaimer = s
+	if ml := splitCSV(*charModes); len(ml) > 0 {
+		items, cerr := charWorkItems(ml, splitCSV(*charPlatforms), *charReps, strings.TrimSpace(*content))
+		if cerr != nil {
+			return cerr
+		}
+		cc := &charClaimer{items: items}
+		mixNote := "mixed with the sweep backlog"
+		if *charOnly {
+			claimer = cc
+			mixNote = "char-only (sweep backlog skipped)"
+		} else {
+			claimer = &combinedClaimer{char: cc, base: s}
+		}
+		fmt.Fprintf(os.Stderr, "pool: injecting %d char item(s) [%s × %s] — %s\n",
+			len(items), *charModes, *charPlatforms, mixNote)
+	}
+
 	fmt.Fprintf(os.Stderr, "streaming pool: %d worker(s) over %s\n", len(free), client.BaseURL)
 	// Cancel the whole pool (and each in-flight probe subprocess) on Ctrl-C /
 	// SIGTERM. This is REQUIRED for the leak-hardening: the probe subprocesses run
@@ -188,7 +242,7 @@ func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	runStart := time.Now()
-	outcomes := runStreamingPool(ctx, s, free, own, override, *maxExperiments, runner)
+	outcomes := runStreamingPool(ctx, claimer, free, own, override, *maxExperiments, runner)
 	wallMs := time.Since(runStart).Milliseconds()
 	fmt.Print(summarizePool(outcomes, wallMs))
 	return nil
@@ -199,6 +253,12 @@ func cmdSweepRun(client *api.Client, args []string, asJSON bool) error {
 // session, drive the probe pinned to the device, wait for ingest, analyze.
 func makeSweepPoolRunner(client *api.Client, s *sweep.Store, charDir, contentDefault string, durationS, ingestWaitS, confirmReps int, override []string, repBatch int, startMode string) poolRunner {
 	return func(ctx context.Context, e *sweep.Experiment, dev DeviceCapability) (out poolOutcome) {
+		// Router (Q1/Q2): a char work item runs the named mode test scored by its
+		// own assertions; everything else is the sweep probe below. Both share this
+		// pool's device orchestration + hardened subprocess launch.
+		if e.Job == "char" {
+			return runCharModeCapture(ctx, client.BaseURL, charDir, e, dev, durationS)
+		}
 		expStart := time.Now()
 		out = poolOutcome{ExpID: e.ID, Device: dev.UDID, StartedAt: expStart.UTC().Format(time.RFC3339)}
 		defer func() { out.TotalMs = time.Since(expStart).Milliseconds() }()

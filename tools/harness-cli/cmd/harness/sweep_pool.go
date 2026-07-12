@@ -177,6 +177,14 @@ func runStreamingPool(ctx context.Context, claimer poolClaimer, devices []Device
 	for _, dev := range devices {
 		dev := dev
 		tokens := sweepPlatformsForDevice(dev)
+		// Also let this worker claim work keyed on its RUNNER platform — what the
+		// device runs AS (every iOS sim runs as ipad-sim, per runnerPlatformForDevice).
+		// This is what matches char items (keyed on the runner platform, e.g.
+		// TestRampupIPadSim) to a Fleet iPhone 15 sim whose raw sweep tokens are
+		// iphone-sim/iphone; it also lets a sim claim ipad-sim sweep work it can run.
+		if rp := runnerPlatformForDevice(dev); rp != "" && !containsToken(tokens, rp) {
+			tokens = append(tokens, rp)
+		}
 		if len(allow) > 0 {
 			tokens = intersectTokens(tokens, allow)
 		}
