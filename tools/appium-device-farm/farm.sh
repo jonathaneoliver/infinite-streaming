@@ -34,6 +34,11 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 DF_PORT="${DF_PORT:-4723}"
 DF_POOL_MATCH="${DF_POOL_MATCH:-Fleet}"
 DF_POOL_COUNT="${DF_POOL_COUNT:-4}"
+# Operator-designated non-Fleet sims that ARE legit pool members (e.g. an iPad
+# sim for ipad-sim work). Comma/space-separated UDIDs — the SAME allow-list
+# boot-pool.sh honours. These are kept by the foreign-purge (never deleted),
+# and booted / status-checked / torn down alongside the Fleet sims.
+DF_POOL_EXTRA_UDIDS="${DF_POOL_EXTRA_UDIDS:-}"
 DF_WARM_WDA="${DF_WARM_WDA:-1}"
 BASE="http://localhost:${DF_PORT}"
 DF_LOG="${DF_LOG:-/tmp/appium-df-${DF_PORT}.log}"
@@ -51,6 +56,12 @@ APP_BUILD_LOG="${DF_APP_DERIVED:-/tmp/iphone-sim-build}"; APP_BUILD_LOG="/tmp/df
 
 df_up()       { curl -s -m3 "${BASE}/status" >/dev/null 2>&1; }
 fleet_udids() { xcrun simctl list devices 2>/dev/null | grep -F "$DF_POOL_MATCH" | grep -oE '[0-9A-F]{8}-[0-9A-F-]{27}'; }
+# extra_udids — the DF_POOL_EXTRA_UDIDS allow-list, normalised to one UDID/line.
+extra_udids() { printf '%s' "$DF_POOL_EXTRA_UDIDS" | tr ', ' '\n\n' | grep -oE '[0-9A-F]{8}-[0-9A-F-]{27}'; }
+# pool_udids — the FULL pool: Fleet-name-matched sims PLUS the extra allow-list,
+# deduped. This (not fleet_udids) is the "keep" set for the foreign-purge, so a
+# designated iPad sim is allowed, never purged.
+pool_udids() { { fleet_udids; extra_udids; } | awk 'NF && !seen[$0]++'; }
 
 # Kill the DF stack but PRESERVE the real-iPhone tunnel + the MCP server.
 kill_farm() {
@@ -114,7 +125,7 @@ start_df() {
 }
 
 shutdown_sims() {
-	for u in $(fleet_udids); do
+	for u in $(pool_udids); do
 		xcrun simctl shutdown "$u" 2>/dev/null && echo "  shutdown ${u:0:8}" || true
 	done
 }
@@ -124,7 +135,7 @@ shutdown_sims() {
 # "App … unknown". Shut every non-pool iPhone/iPad sim down so the DF roster is
 # exactly the pool. (Fleet sims are re-booted by boot-pool right after.)
 shutdown_foreign_sims() {
-	keep=$(fleet_udids | tr '\n' '|' | sed 's/|$//')
+	keep=$(pool_udids | tr '\n' '|' | sed 's/|$//')
 	[ -z "$keep" ] && keep='__none__'
 	xcrun simctl list devices booted 2>/dev/null \
 		| grep -iE 'iphone|ipad' \
@@ -164,7 +175,7 @@ PY
 # Terminate the player app on every pool sim — stop in-flight playback before
 # teardown. Harmless if the app isn't running.
 terminate_apps() {
-	for u in $(fleet_udids); do
+	for u in $(pool_udids); do
 		xcrun simctl terminate "$u" "$APP_BUNDLE" 2>/dev/null && echo "  stopped app on ${u:0:8}" || true
 	done
 }
@@ -203,7 +214,7 @@ PY
 # devices and the Fleet sims are NEVER touched. Destructive, but the deleted sims
 # are recreatable defaults. Restarts the DF afterward to flush its cached roster.
 delete_foreign_sims() {
-	keep=$(fleet_udids | tr '\n' '|' | sed 's/|$//'); [ -z "$keep" ] && keep='__none__'
+	keep=$(pool_udids | tr '\n' '|' | sed 's/|$//'); [ -z "$keep" ] && keep='__none__'
 	n=0
 	for u in $(xcrun simctl list devices available 2>/dev/null | grep -iE 'iphone|ipad' | grep -oE '[0-9A-F]{8}-[0-9A-F-]{27}'); do
 		printf '%s' "$u" | grep -qE "$keep" && continue
@@ -228,7 +239,7 @@ clear_external_display() {
 	osascript -e 'tell application "Simulator" to quit' 2>/dev/null || true
 	sleep 1
 	n=0
-	for u in $(fleet_udids); do
+	for u in $(pool_udids); do
 		if /usr/libexec/PlistBuddy -c "Delete :DevicePreferences:${u}:SimulatorExternalDisplay" "$plist" 2>/dev/null; then n=$((n+1)); fi
 	done
 	killall cfprefsd 2>/dev/null || true
@@ -242,7 +253,8 @@ boot_pool() {
 		( tail -n0 -F "$APP_BUILD_LOG" 2>/dev/null | sed 's/^/  [app-build] /' ) & tailpid=$!
 	fi
 	DF_BUILD_APP="${1:-0}" DF_WARM_WDA="$DF_WARM_WDA" DF_POOL_MATCH="$DF_POOL_MATCH" \
-		DF_POOL_COUNT="$DF_POOL_COUNT" DF_PORT="$DF_PORT" "${SCRIPT_DIR}/boot-pool.sh"
+		DF_POOL_COUNT="$DF_POOL_COUNT" DF_POOL_EXTRA_UDIDS="$DF_POOL_EXTRA_UDIDS" \
+		DF_PORT="$DF_PORT" "${SCRIPT_DIR}/boot-pool.sh"
 	[ -n "$tailpid" ] && kill "$tailpid" 2>/dev/null || true
 }
 
@@ -262,13 +274,13 @@ for x in ds:
 PY
 	fi
 	echo "--- booted ${DF_POOL_MATCH} sims + app installed? ---"
-	for u in $(fleet_udids); do
+	for u in $(pool_udids); do
 		st=$(xcrun simctl list devices 2>/dev/null | grep "$u" | grep -oE 'Booted|Shutdown' | head -1)
 		app=$(xcrun simctl listapps "$u" 2>/dev/null | grep -c 'com.jeoliver.InfiniteStreamPlayer' || true)
 		echo "  ${u:0:8}  ${st:-?}  app=$([ "${app:-0}" -gt 0 ] && echo yes || echo NO)"
 	done
 	echo "--- foreign booted sims (poison the pool → 'app unknown') ---"
-	keep=$(fleet_udids | tr '\n' '|' | sed 's/|$//'); [ -z "$keep" ] && keep='__none__'
+	keep=$(pool_udids | tr '\n' '|' | sed 's/|$//'); [ -z "$keep" ] && keep='__none__'
 	fc=$(xcrun simctl list devices booted 2>/dev/null | grep -iE 'iphone|ipad' | grep -oE '[0-9A-F]{8}-[0-9A-F-]{27}' | grep -cvE "$keep" || true)
 	if [ "${fc:-0}" -gt 0 ]; then echo "  !! ${fc} non-Fleet iOS sim(s) booted → 'farm reset' clears them"; else echo "  none (pool is clean)"; fi
 	echo "--- preserved processes ---"

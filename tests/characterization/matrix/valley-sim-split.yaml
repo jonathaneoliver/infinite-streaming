@@ -1,0 +1,17 @@
+# Parallel VALLEY test across two sim MODELS — one iphone-sim + one ipad-sim,
+# running simultaneously. Valley = high→low→high (the inverse of pyramid); it
+# starts high, so no startup rate cap is needed. Exercises the iphone-sim /
+# ipad-sim split end-to-end: discovery, per-arm platform claim, correct labels.
+#
+#   harness char matrix tests/characterization/matrix/valley-sim-split.yaml
+#
+# Needs one booted iphone-sim AND one booted ipad-sim in the farm.
+name: valley-sim-split
+class: config
+parallel: true
+duration_s: 90
+defaults:
+  content: insane_newer_p200_h264
+  proxy.shape: { pattern: valley, step_seconds: 12 }
+axes:
+  platform: [iphone-sim, ipad-sim]
