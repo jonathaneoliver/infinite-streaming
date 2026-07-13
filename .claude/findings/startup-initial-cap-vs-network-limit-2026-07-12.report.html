@@ -23,6 +23,7 @@
     --line:#1e2a35; --accent:#2fd4c8; --accent-ink:#54e0d6;
     --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);}
   *{box-sizing:border-box}
+  html,body{max-width:100%;overflow-x:hidden}
   body{margin:0;background:var(--bg);color:var(--ink);
     font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.55;-webkit-font-smoothing:antialiased}
   .mono{font-family:ui-monospace,"SF Mono",Menlo,"Cascadia Code",monospace;font-variant-numeric:tabular-nums}
@@ -57,7 +58,10 @@
   .slink{color:var(--accent-ink);text-decoration:none;border-bottom:1px solid transparent}
   .slink:hover{border-bottom-color:var(--accent-ink)}
   .slink:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
-  .resbar{display:flex;height:16px;width:240px;border-radius:4px;overflow:hidden;border:1px solid var(--line);vertical-align:middle}
+  .resbar{display:flex;height:12px;width:190px;border-radius:3px;overflow:hidden;border:1px solid var(--line)}
+  .resstack{display:flex;flex-direction:column;gap:3px}
+  .resrow{display:flex;align-items:center;gap:6px}
+  .reslbl{font:600 9px ui-monospace,monospace;color:var(--ink-2);width:9px;text-align:center}
   .resbar>span{display:block;height:100%}
   .foot{margin-top:44px;border-top:1px solid var(--line);padding-top:22px;color:var(--ink-2);font-size:13.5px;max-width:86ch}
   .foot h3{color:var(--ink);font-size:14px;letter-spacing:.04em;text-transform:uppercase;margin:18px 0 8px}
@@ -133,7 +137,7 @@ function shifts(m){const u=m.shifts_up||0,d=m.shifts_down||0;
   return `${u?u+'↑':''}${d?' '+d+'↓':''}`.trim();}
 
 function row(arm,m){
-  if(!m) return `<tr><td class="l">${arm}</td><td class="l muted" colspan="11">no data</td></tr>`;
+  if(!m) return `<tr><td class="l">${arm}</td><td class="l muted" colspan="10">no data</td></tr>`;
   const vs=m.vstart==null?null:m.vstart/1000, ttff=m.ttff==null?null:m.ttff/1000;
   const url=m.play_id?`${BASE}/dashboard/session-viewer.html?player_id=${m.player_id}&play_id=${m.play_id}`:null;
   const armcell=url?`<a class="slink" href="${url}" target="_blank" rel="noopener" title="open session viewer">${arm}&nbsp;↗</a>`:arm;
@@ -147,15 +151,14 @@ function row(arm,m){
     `<td class="mono"><span class="heat" style="background:${effHeat(m.quality_pct)}">${m.quality_pct==null?'—':Math.round(m.quality_pct)+'%'}</span></td>`+
     `<td class="mono">${m.stalls||0}</td>`+
     `<td class="mono">${shifts(m)}</td>`+
-    `<td class="l">${resBar(m.fetched_residency)}</td>`+
-    `<td class="l">${resBar(m.residency)}</td></tr>`;
+    `<td class="l"><div class="resstack"><div class="resrow"><span class="reslbl">F</span>${resBar(m.fetched_residency)}</div><div class="resrow"><span class="reslbl">S</span>${resBar(m.residency)}</div></div></td></tr>`;
 }
 function render(){
   const seg=document.getElementById('segments'); seg.innerHTML='';
   for(const [sk,sname] of SEGS){
     const d=DATA[sk]||{}; let rows='';
     for(const [lk,lname] of LIMITS){
-      rows+=`<tr class="grp"><td colspan="12">${lname}</td></tr>`;
+      rows+=`<tr class="grp"><td colspan="11">${lname}</td></tr>`;
       for(const c of CAPS) rows+=row('cap '+(c==='0'?'off':c), d[`${lk}|${c}`]);
     }
     seg.insertAdjacentHTML('beforeend',
@@ -163,7 +166,7 @@ function render(){
       `<p class="lead">Grouped by network limit; each shows the five initial-cap arms. Arm names link to the session viewer ↗. New columns at the right.</p>`+
       `<div class="tablewrap"><table><thead><tr>`+
       `<th class="l">arm</th><th>TTFF s</th><th>Video-start s</th><th>Fetched</th><th>Shown</th><th>Var @60s</th>`+
-      `<th>Settle s</th><th>Startup-eff</th><th>Stalls</th><th>Shifts</th><th class="l">Fetched</th><th class="l">Shown</th>`+
+      `<th>Settle s</th><th>Startup-eff</th><th>Stalls</th><th>Shifts</th><th class="l">Residency &nbsp;(F=fetched · S=shown)</th>`+
       `</tr></thead><tbody>${rows}</tbody></table></div>`);
   }
 }
