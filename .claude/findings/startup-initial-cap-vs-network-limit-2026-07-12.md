@@ -106,8 +106,19 @@ operating range of interest).
   (segment/limit/cap + the metrics, 60 rows).
 
 ## Caveats
-- **n=1 per cell** — the levels (8× wedge win, segment-length effect) are big
-  enough to be real; exact seconds jitter across reps. Confirm trends at reps ≥ 3.
+- **n=1 per cell — run-to-run variation now measured (reps=3, 180 plays; see
+  `startup-variation-reps3-2026-07-12.txt` + `.data.tsv`):**
+  - **startup-efficiency is very reproducible** (median CoV **1.9%**) — trust it.
+  - **video-start / TTFF jitter ~±10%** (median CoV 10.4% / 10.8%) — far below the
+    effects read here (8× wedge, 3× segment), so conclusions hold; treat exact
+    seconds as ±10–40%.
+  - **settle-time is noisy** (median CoV **35%**, p90 130%) — directional only.
+  - **the ABR's chosen rung is non-deterministic** — shown-rung agrees across all
+    3 reps in only **63%** of cells (first-fetched 70%, var@60s 82%); a single
+    run's start-rung can flip.
+  - **fragile regime: 2 Mbps + high cap** — those cells swing wildly (s1 2/cap16
+    video-start = 7/9/76 s across reps, CoV 104%); n=1 there is unreliable.
+    Everywhere else n=1 is fine for the levels reported.
 - **iphone-sim only.** ipad-sim was dropped for speed; an earlier 2-sim s6 run
   showed iphone-sim ≈ ipad-sim on startup. The **real iPhone** wedges the
   synchronized fleet barrier in a multi-cell sweep — single runs work, back-to-back
