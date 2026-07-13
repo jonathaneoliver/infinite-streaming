@@ -20,11 +20,29 @@ cap** (`is.peak_bitrate_mbps`), and the **segment length**. Key results
    regardless (5–9 s on s6/s2), and a **cap at/above the link (8/16 Mbps) adds
    stalls**; the network, not rung selection, is the bottleneck.
 
+5. **The cap is not free on a constrained link:** a second derived metric —
+   **startup-efficiency** (bitrate-utilization: time-weighted delivered bitrate
+   over the first 60 s, buffering = 0, ÷ the achievable rung) — shows the cap
+   *lowers* delivered quality where there's a big rung gap to climb (s6 8 Mbps:
+   off 87% → cap-1 83% → cap-2 80%), because it slows the climb to the ceiling.
+   So the cap trades faster-video-start for slower-to-full-quality.
+
 Tag: **confirmed** (iphone-sim, n=1/cell).
 
-Metric note: **TTFF ≠ time-to-video-playback.** `video_first_frame_time_ms` (first
-frame *decoded*) is a few seconds even in the wedge; the pain is
-`video_start_time_ms` (playhead *moving*, `timeControlStatus == .playing`).
+Derived-metric definitions & labels:
+- **TTFF ≠ time-to-video.** `video_first_frame_time_ms` (frame *decoded*) is a few
+  seconds even in the wedge; the felt startup is `video_start_time_ms` (playhead
+  *moving*, `timeControlStatus == .playing`).
+- **time-to-settle** = seconds to first reach `variant@60s` (the ABR climb length).
+- **startup-efficiency** = the bitrate-utilization % above. It is an **engineering
+  proxy, NOT a perceptual QoE score** — bitrate isn't perception (ladders are
+  logarithmic, VMAF saturates). The rigorous session-quality standards are
+  **ITU-T P.1203/P.1204** (parametric MOS) and **VMAF**; video-start time itself
+  *is* an industry-standard metric (CTA-2066 / CMCD).
+
+Full per-cell metrics (all seven columns) live in the companion `.data.tsv` and
+the rendered report (heatmap of video-start + startup-efficiency, both themes):
+published Artifact `startup-report-v1`.
 
 ## The matrices
 Sweep: **network limit** (`proxy.shape.rate_mbps`) × **initial cap**
