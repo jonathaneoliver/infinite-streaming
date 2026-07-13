@@ -66,6 +66,7 @@
   .sortchain{font:600 11px ui-monospace,monospace;display:flex;gap:6px;align-items:center;flex-wrap:wrap;color:var(--ink-2)}
   .sortchain .sc{background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:2px 9px;color:var(--accent-ink);cursor:grab}
   .sortchain .sc:active{cursor:grabbing}
+  .sortchain .scd{cursor:pointer;padding:0 2px} .sortchain .scd:hover{color:var(--ink)}
   .sortchain .scx{color:var(--ink-2);cursor:pointer;margin-left:2px;font-weight:700}
   .sortchain .scx:hover{color:var(--warn,#c26a00)}
   .sortchain a{color:var(--ink-2)}
@@ -155,7 +156,7 @@ function selKey(pl,pa){return pl+'~'+pa;}
 function runsCell(r){
   const a=(r.plays||[]).map((p,i)=>{ if(!p.play) return '';
     const sel=selected.has(selKey(p.player,p.play))?' sel':'';
-    return `<a class="run${sel}" data-player="${p.player}" data-play="${p.play}" data-t0="${p.t0||''}" data-t1="${p.t1||''}" href="${BASE}/dashboard/session-viewer.html?player_id=${p.player}&play_id=${p.play}" target="_blank" rel="noopener" title="run ${i+1} (best→worst) · click: open · Alt/⌥-click: select for cross-row compare">${'¹²³'[i]||(i+1)}</a>`;}).join('');
+    return `<a class="run${sel}" data-player="${p.player}" data-play="${p.play}" data-t0="${p.t0||''}" data-t1="${p.t1||''}" href="${BASE}/dashboard/session-viewer.html?player_id=${p.player}&play_id=${p.play}" rel="noopener" title="run ${i+1} (best→worst) · click: open · Alt/⌥-click: select for cross-row compare">${'¹²³'[i]||(i+1)}</a>`;}).join('');
   const cmp=r.compare_url?` <a class="replinks" style="font-size:12px" href="${r.compare_url}" target="_blank" rel="noopener" title="compare this row's ${r.n} runs overlaid">⇄</a>`:'';
   return `<span class="replinks">${a}</span>${cmp}`;}
 function resStack(r){return `<div class="resstack"><div class="resrow"><span class="reslbl">F</span>${resBar(r.fetched_residency)}</div><div class="resrow"><span class="reslbl">S</span>${resBar(r.residency)}</div></div>`;}
@@ -254,7 +255,7 @@ function render(){
   document.getElementById('tbl').innerHTML=`<thead>${headerHTML(cols)}</thead><tbody>${body}</tbody>`;
   const el=document.getElementById('sortchain');
   el.innerHTML='Sort: '+(sortKeys.length?sortKeys.map((s,i)=>{const c=COLS.find(x=>x.k===s.k);
-    return `<span class="sc" draggable="true" data-si="${i}" title="drag to reorder priority">${i+1}. ${c?c.lbl:s.k} ${DIR[s.dir]} <span class="scx" data-si="${i}" title="remove level">×</span></span>`;}).join('')
+    return `<span class="sc" draggable="true" data-si="${i}" title="drag to reorder priority">${i+1}. ${c?c.lbl:s.k} <span class="scd" data-si="${i}" title="flip direction">${DIR[s.dir]}</span> <span class="scx" data-si="${i}" title="remove level">×</span></span>`;}).join('')
     :'<span class="sc" style="cursor:default">none</span>')+' <a href="#" id="sortreset">reset</a>';
   const fc=document.getElementById('fcount'); if(fc) fc.textContent=`showing ${shown.length} of ${ROWS.length}`;
 }
@@ -266,17 +267,27 @@ document.addEventListener('click',e=>{
     renderFilters(); render(); return;}
   const scx=e.target.closest('.scx');
   if(scx){e.preventDefault(); sortKeys.splice(+scx.dataset.si,1); render(); return;}
+  const scd=e.target.closest('.scd');
+  if(scd){e.preventDefault(); sortKeys[+scd.dataset.si].dir*=-1; render(); return;}
   const th=e.target.closest('th.sortable');
   if(th){const k=th.dataset.k,idx=sortKeys.findIndex(s=>s.k===k);
-    if(e.shiftKey){ if(idx>=0) sortKeys[idx].dir*=-1; else sortKeys.push({k,dir:1}); }
-    else { if(sortKeys.length===1&&idx===0) sortKeys[0].dir*=-1; else sortKeys=[{k,dir:1}]; }
+    // in the chain already → just flip its direction (keep the list + position);
+    // not in the chain → shift-click adds a level, plain click starts a fresh single sort.
+    if(idx>=0) sortKeys[idx].dir*=-1;
+    else if(e.shiftKey) sortKeys.push({k,dir:1});
+    else sortKeys=[{k,dir:1}];
     render(); return;}
   if(e.target.id==='sortreset'){e.preventDefault(); sortKeys=DEFAULT_SORT.map(s=>({...s})); render(); return;}
   const run=e.target.closest('a.run');
-  if(run&&e.altKey){e.preventDefault(); const k=selKey(run.dataset.player,run.dataset.play);
-    if(selected.has(k)){selected.delete(k);run.classList.remove('sel');}
-    else{selected.set(k,{player:run.dataset.player,play:run.dataset.play,t0:run.dataset.t0,t1:run.dataset.t1});run.classList.add('sel');}
-    updateSel();}
+  if(run){e.preventDefault();  // take control: never let the anchor navigate on a plain left-click
+    if(e.altKey){const k=selKey(run.dataset.player,run.dataset.play);
+      if(selected.has(k)){selected.delete(k);run.classList.remove('sel');}
+      else{selected.set(k,{player:run.dataset.player,play:run.dataset.play,t0:run.dataset.t0,t1:run.dataset.t1});run.classList.add('sel');}
+      updateSel();
+    } else {
+      window.open(run.getAttribute('href'),'_blank','noopener');  // plain click opens the session
+    }
+    return;}
 });
 // drag the sort-chain chips left/right to reorder sort priority
 let dragSi=null;
