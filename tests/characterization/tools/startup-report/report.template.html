@@ -64,7 +64,10 @@
   .controls{display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin:14px 0 8px}
   .chint{font-size:12.5px;color:var(--ink-2)}
   .sortchain{font:600 11px ui-monospace,monospace;display:flex;gap:6px;align-items:center;flex-wrap:wrap;color:var(--ink-2)}
-  .sortchain .sc{background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:2px 9px;color:var(--accent-ink)}
+  .sortchain .sc{background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:2px 9px;color:var(--accent-ink);cursor:grab}
+  .sortchain .sc:active{cursor:grabbing}
+  .sortchain .scx{color:var(--ink-2);cursor:pointer;margin-left:2px;font-weight:700}
+  .sortchain .scx:hover{color:var(--warn,#c26a00)}
   .sortchain a{color:var(--ink-2)}
   th.sortable{cursor:pointer;user-select:none} th.sortable:hover{color:var(--ink)}
   th .ind{font-size:9px;margin-left:3px;color:var(--accent-ink);vertical-align:middle}
@@ -77,6 +80,13 @@
   .selbar button{font:600 12px ui-monospace,monospace;border:1px solid var(--line);background:var(--panel-2);color:var(--ink);border-radius:8px;padding:6px 12px;cursor:pointer}
   .selbar button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
   .selbar button:disabled{opacity:.4;cursor:default}
+  .filters{display:flex;flex-wrap:wrap;gap:12px 22px;align-items:center;margin:16px 0 4px;padding:12px 15px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px}
+  .fgroup{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .flab{font:600 10.5px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2)}
+  .fchip{font:600 11px ui-monospace,monospace;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:14px;padding:3px 11px;cursor:pointer}
+  .fchip:hover{border-color:var(--accent)}
+  .fchip.off{opacity:.45;text-decoration:line-through}
+  .fcount{font:600 11px ui-monospace,monospace;color:var(--ink-2);margin-left:auto}
 </style>
 
 <button class="toggle" id="tgl" aria-label="Toggle theme">◐ theme</button>
@@ -100,6 +110,7 @@
     </dl>
   </div>
 
+  <div class="filters" id="filters"></div>
   <div class="controls">
     <span class="chint">Click a column to sort · <strong>Shift-click</strong> to add sort levels (group-by) · <strong>Alt/⌥-click</strong> a run to select it across rows, then Compare</span>
     <span id="sortchain" class="sortchain"></span>
@@ -176,6 +187,28 @@ const DEFAULT_SORT=[{k:'platform',dir:1},{k:'limit',dir:-1},{k:'cap',dir:1},{k:'
 let sortKeys=DEFAULT_SORT.map(s=>({...s}));
 const selected=new Map(); // player~play -> {player,play,t0,t1}
 
+// ---- filters: same 4 axes. each holds a Set of the VALUES currently shown (all on by default)
+const FILTERS=[
+  {k:'platform',lbl:'Platform',val:r=>r.platform,label:r=>r.platform,sort:r=>r.platform==='iphone'?0:1},
+  {k:'cap',lbl:'Initial variant cap',val:r=>r.cap,label:r=>r.cap_label,sort:r=>r.cap_sort},
+  {k:'seg',lbl:'Segment',val:r=>r.seg,label:r=>r.seg_s+'s',sort:r=>-r.seg_s},
+  {k:'limit',lbl:'Network limit',val:r=>r.limit,label:r=>r.limit_label,sort:r=>-r.limit_sort},
+];
+const fopts={}, filters={};
+for(const f of FILTERS){
+  const m=new Map();
+  for(const r of ROWS){const v=f.val(r); if(!m.has(v)) m.set(v,{val:v,label:f.label(r),sort:f.sort(r)});}
+  fopts[f.k]=[...m.values()].sort((a,b)=>a.sort-b.sort);
+  filters[f.k]=new Set(fopts[f.k].map(o=>o.val));
+}
+function passFilter(r){return FILTERS.every(f=>filters[f.k].has(f.val(r)));}
+function renderFilters(){
+  document.getElementById('filters').innerHTML=FILTERS.map(f=>
+    `<div class="fgroup"><span class="flab">${f.lbl}</span>`+
+    fopts[f.k].map(o=>`<button class="fchip${filters[f.k].has(o.val)?'':' off'}" data-axis="${f.k}" data-val="${o.val}">${o.label}</button>`).join('')+
+    `</div>`).join('')+`<span class="fcount" id="fcount"></span>`;
+}
+
 function sortRows(rows){
   return rows.slice().sort((a,b)=>{
     for(const {k,dir} of sortKeys){
@@ -188,8 +221,19 @@ function sortRows(rows){
     }
     return 0;});
 }
-function headerHTML(){
-  return '<tr>'+COLS.map(c=>{
+const AXIS_KEYS=['platform','cap','seg','limit'];
+// The 4 category columns reorder to follow the sort priority: axis keys that
+// are in the sort chain lead (in that order), remaining axes keep their default
+// order, then runs + metrics + residency stay put.
+function orderedCols(){
+  const inSort=sortKeys.map(s=>s.k).filter(k=>AXIS_KEYS.includes(k));
+  const axisOrder=[...inSort,...AXIS_KEYS.filter(k=>!inSort.includes(k))];
+  const axisCols=axisOrder.map(k=>COLS.find(c=>c.k===k));
+  const rest=COLS.filter(c=>!AXIS_KEYS.includes(c.k));
+  return [...axisCols,...rest];
+}
+function headerHTML(cols){
+  return '<tr>'+cols.map(c=>{
     if(!c.sort) return `<th class="${c.l?'l':''}">${c.lbl}</th>`;
     const i=sortKeys.findIndex(s=>s.k===c.k);
     const ind=i>=0?`<span class="ind">${DIR[sortKeys[i].dir]}${sortKeys.length>1?(i+1):''}</span>`:'';
@@ -197,20 +241,31 @@ function headerHTML(){
   }).join('')+'</tr>';
 }
 function render(){
-  const rows=sortRows(ROWS);
+  const cols=orderedCols();
+  const shown=ROWS.filter(passFilter);
+  const rows=sortRows(shown);
   const pk=sortKeys[0]&&COLS.find(c=>c.k===sortKeys[0].k);
   let prev=null,body='';
   for(const r of rows){
     let sep='';
     if(pk&&pk.sort){const v=pk.sort(r); if(prev!==null&&v!==prev) sep='grpsep'; prev=v;}
-    body+=`<tr class="${sep}">`+COLS.map(c=>`<td class="${c.l?'l':''}">${c.cell(r)}</td>`).join('')+'</tr>';
+    body+=`<tr class="${sep}">`+cols.map(c=>`<td class="${c.l?'l':''}">${c.cell(r)}</td>`).join('')+'</tr>';
   }
-  document.getElementById('tbl').innerHTML=`<thead>${headerHTML()}</thead><tbody>${body}</tbody>`;
+  document.getElementById('tbl').innerHTML=`<thead>${headerHTML(cols)}</thead><tbody>${body}</tbody>`;
   const el=document.getElementById('sortchain');
-  el.innerHTML='Sort: '+sortKeys.map((s,i)=>{const c=COLS.find(x=>x.k===s.k);return `<span class="sc">${i+1}. ${c?c.lbl:s.k} ${DIR[s.dir]}</span>`;}).join('')+' <a href="#" id="sortreset">reset</a>';
+  el.innerHTML='Sort: '+(sortKeys.length?sortKeys.map((s,i)=>{const c=COLS.find(x=>x.k===s.k);
+    return `<span class="sc" draggable="true" data-si="${i}" title="drag to reorder priority">${i+1}. ${c?c.lbl:s.k} ${DIR[s.dir]} <span class="scx" data-si="${i}" title="remove level">×</span></span>`;}).join('')
+    :'<span class="sc" style="cursor:default">none</span>')+' <a href="#" id="sortreset">reset</a>';
+  const fc=document.getElementById('fcount'); if(fc) fc.textContent=`showing ${shown.length} of ${ROWS.length}`;
 }
 // delegated: header sort (click=single, shift-click=add level), run alt-select
 document.addEventListener('click',e=>{
+  const fchip=e.target.closest('.fchip');
+  if(fchip){const ax=fchip.dataset.axis,v=fchip.dataset.val;
+    if(filters[ax].has(v)) filters[ax].delete(v); else filters[ax].add(v);
+    renderFilters(); render(); return;}
+  const scx=e.target.closest('.scx');
+  if(scx){e.preventDefault(); sortKeys.splice(+scx.dataset.si,1); render(); return;}
   const th=e.target.closest('th.sortable');
   if(th){const k=th.dataset.k,idx=sortKeys.findIndex(s=>s.k===k);
     if(e.shiftKey){ if(idx>=0) sortKeys[idx].dir*=-1; else sortKeys.push({k,dir:1}); }
@@ -223,6 +278,15 @@ document.addEventListener('click',e=>{
     else{selected.set(k,{player:run.dataset.player,play:run.dataset.play,t0:run.dataset.t0,t1:run.dataset.t1});run.classList.add('sel');}
     updateSel();}
 });
+// drag the sort-chain chips left/right to reorder sort priority
+let dragSi=null;
+document.addEventListener('dragstart',e=>{const sc=e.target.closest('.sc[draggable]');
+  if(sc){dragSi=+sc.dataset.si; e.dataTransfer.effectAllowed='move'; sc.style.opacity='.5';}});
+document.addEventListener('dragend',e=>{const sc=e.target.closest('.sc[draggable]'); if(sc) sc.style.opacity='';});
+document.addEventListener('dragover',e=>{ if(e.target.closest('.sc[draggable]')){e.preventDefault(); e.dataTransfer.dropEffect='move';}});
+document.addEventListener('drop',e=>{const sc=e.target.closest('.sc[draggable]');
+  if(sc&&dragSi!=null){e.preventDefault(); const to=+sc.dataset.si;
+    if(to!==dragSi){const [m]=sortKeys.splice(dragSi,1); sortKeys.splice(to,0,m); render();} dragSi=null;}});
 function updateSel(){
   const n=selected.size;
   document.getElementById('selcount').textContent=`${n} run${n===1?'':'s'} selected`;
@@ -261,5 +325,5 @@ function reproPanel(){
 document.getElementById('tgl').addEventListener('click',()=>{const cur=document.documentElement.getAttribute('data-theme');
   document.documentElement.setAttribute('data-theme',cur==='dark'?'light':cur==='light'?'dark':(matchMedia('(prefers-color-scheme:dark)').matches?'light':'dark'));render();reproPanel();});
 matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>{render();reproPanel();});
-render(); reproPanel(); updateSel();
+renderFilters(); render(); reproPanel(); updateSel();
 </script>
