@@ -95,8 +95,10 @@ operating range of interest).
   `proxy.shape.rate_mbps` is server-side tc. Non-grouped (independent per-arm caps).
 - Metrics via `harness query events <play_id>`: `video_first_frame_time_ms`,
   `video_start_time_ms`, `stalling_count`, rendition at first `state=playing`
-  (start rung), rendition nearest t0+60 s (variant@60s). Raw play_ids in the
-  companion `.data.tsv` (segment/limit/cap/play_id, 75 rows).
+  (start rung), rendition nearest t0+60 s (variant@60s), time-to-first-reach that
+  rung (time-to-settle), and the buffering-aware bitrate-utilization integral
+  (startup-efficiency). Companion `.data.tsv` = all seven metrics per cell
+  (segment/limit/cap + the metrics, 60 rows).
 
 ## Caveats
 - **n=1 per cell** — the levels (8× wedge win, segment-length effect) are big
