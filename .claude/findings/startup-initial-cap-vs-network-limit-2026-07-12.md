@@ -42,7 +42,7 @@ Derived-metric definitions & labels:
 
 Full per-cell metrics (all seven columns) live in the companion `.data.tsv` and
 the rendered report (heatmap of video-start + startup-efficiency, both themes):
-published Artifact `startup-report-v1`.
+the self-contained report `startup-initial-cap-vs-network-limit-2026-07-12.report.html` (open in a browser).
 
 ## The matrices
 Sweep: **network limit** (`proxy.shape.rate_mbps`) × **initial cap**
