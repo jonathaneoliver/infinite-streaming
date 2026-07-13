@@ -33,7 +33,12 @@ Derived-metric definitions & labels:
 - **TTFF ≠ time-to-video.** `video_first_frame_time_ms` (frame *decoded*) is a few
   seconds even in the wedge; the felt startup is `video_start_time_ms` (playhead
   *moving*, `timeControlStatus == .playing`).
-- **time-to-settle** = seconds to first reach `variant@60s` (the ABR climb length).
+- **time-to-settle** = seconds **from video-start** to first reach `variant@60s`
+  (the ABR climb length; over-selecting cells settle ≈ 0).
+- **shifts** = rung changes during the climb (↑ up / ↓ down; down = non-monotonic).
+- **residency** = % of the first 60 s spent buffering, then at each rung — the raw
+  dwell distribution that startup-efficiency summarizes (rendered as a stacked bar
+  in the report).
 - **startup-efficiency** = the bitrate-utilization % above. It is an **engineering
   proxy, NOT a perceptual QoE score** — bitrate isn't perception (ladders are
   logarithmic, VMAF saturates). The rigorous session-quality standards are
