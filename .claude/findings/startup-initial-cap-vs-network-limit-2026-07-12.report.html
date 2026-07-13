@@ -83,6 +83,7 @@
     <dl>
       <dt>Video-start / Settle / TTFF</dt><dd>mean seconds, with min–max of the 3 reps beneath.</dd>
       <dt>Fetched / Shown / Var@60s</dt><dd>the modal rung; <span class="warn">⚠</span> = reps disagreed (hover for the values).</dd>
+      <dt>Stalls / Shifts↑</dt><dd>mean rebuffers and mean up-rung changes during the climb (min–max beneath).</dd>
       <dt>Startup-eff</dt><dd>mean bitrate-utilization % over 60 s (buffering=0 ÷ achievable rung). Engineering proxy, not a QoE score.</dd>
       <dt>±CoV</dt><dd>video-start coefficient of variation across reps — the stability signal. green ≤10% · amber ≤25% · red &gt;25%.</dd>
       <dt>Residency</dt><dd>mean of the 3 reps: F=fetched (requested, no buffer band), S=shown (displayed; hatched=buffering). Dark→bright = low→high bitrate.</dd>
@@ -127,26 +128,29 @@ function resBar(res){if(!res||!res.length)return '<span class="muted">—</span>
   const s=res.map(x=>{const lbl=x.rung==='buffer'?'buffering':x.rung+' Mbps';const h=x.rung==='buffer'?'background-image:repeating-linear-gradient(45deg,transparent 0 3px,rgba(0,0,0,.14) 3px 6px);':'';return `<span title="${lbl}: ${x.pct}%" style="width:${x.pct}%;background:${rungColor(x.rung)};${h}"></span>`;}).join('');
   return `<span class="resbar">${s}</span>`;}
 function rowFor(arm,m){
-  if(!m) return `<tr><td class="l">${arm}</td><td class="l muted" colspan="9">no data</td></tr>`;
+  if(!m) return `<tr><td class="l">${arm}</td><td class="l muted" colspan="11">no data</td></tr>`;
   return `<tr><td class="l">${arm}${repLinks(m.plays)}</td>`+
     `<td>${num(m.video_start,vsHeat)}</td>`+
+    `<td>${num(m.ttff,null)}</td>`+
     `<td>${cat(m.fetched)}</td>`+
     `<td>${cat(m.shown)}</td>`+
     `<td>${cat(m.var60)}</td>`+
     `<td>${num(m.settle,null)}</td>`+
     `<td>${num(m.startup_eff,effHeat)}</td>`+
+    `<td>${num(m.stalls,null)}</td>`+
+    `<td>${num(m.shifts_up,null)}</td>`+
     `<td>${covBadge(m.video_start)}</td>`+
     `<td class="l"><div class="resstack"><div class="resrow"><span class="reslbl">F</span>${resBar(m.fetched_residency)}</div><div class="resrow"><span class="reslbl">S</span>${resBar(m.residency)}</div></div></td></tr>`;
 }
 function render(){
   const seg=document.getElementById('segments'); seg.innerHTML='';
   for(const [sk,sname] of SEGS){const d=DATA[sk]||{};let rows='';
-    for(const [lk,lname] of LIMITS){rows+=`<tr class="grp"><td colspan="9">${lname}</td></tr>`;
+    for(const [lk,lname] of LIMITS){rows+=`<tr class="grp"><td colspan="12">${lname}</td></tr>`;
       for(const c of CAPS) rows+=rowFor('cap '+(c==='0'?'off':c), d[`${lk}|${c}`]);}
     seg.insertAdjacentHTML('beforeend',
       `<h2>${sname}<span class="tag mono">${sk}</span></h2>`+
       `<div class="tablewrap"><table><thead><tr>`+
-      `<th class="l">arm · runs</th><th>Video-start s</th><th>Fetched</th><th>Shown</th><th>Var@60s</th><th>Settle s</th><th>Startup-eff</th><th>±CoV</th><th class="l">Residency (F/S, mean)</th>`+
+      `<th class="l">arm · runs</th><th>Video-start s</th><th>TTFF s</th><th>Fetched</th><th>Shown</th><th>Var@60s</th><th>Settle s</th><th>Startup-eff</th><th>Stalls</th><th>Shifts↑</th><th>±CoV</th><th class="l">Residency (F/S, mean)</th>`+
       `</tr></thead><tbody>${rows}</tbody></table></div>`);}
 }
 // reproducibility panel — computed from the data
