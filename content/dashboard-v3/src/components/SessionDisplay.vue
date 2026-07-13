@@ -247,14 +247,20 @@ const compareSiblings = computed<CompareSibling[]>(() => {
 // Starts within ALIGN_TOLERANCE_MS are treated as "same time" (a live group
 // launches with sub-second stagger) and left un-shifted.
 const ALIGN_TOLERANCE_MS = 2000;
-function earliestTs(stream: Stream<Record<string, unknown>>): number | null {
+function spanTs(stream: Stream<Record<string, unknown>>): [number, number] | null {
   // Reading epoch + version establishes the reactive deps so this recomputes
-  // as rows stream in; inRange returns ascending rows, so [0] is the earliest.
+  // as rows stream in; inRange returns ascending rows, so [0]/[last] bound it.
   void stream.epoch.value; void stream.version.value;
   const rows = stream.inRange(0, Number.MAX_SAFE_INTEGER);
   if (!rows.length) return null;
-  const t = tsOfRow(rows[0]);
-  return Number.isFinite(t) ? t : null;
+  const a = tsOfRow(rows[0]);
+  const b = tsOfRow(rows[rows.length - 1]);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  return [a, b];
+}
+function earliestTs(stream: Stream<Record<string, unknown>>): number | null {
+  const s = spanTs(stream);
+  return s ? s[0] : null;
 }
 const compareAlign = computed<CompareAlign>(() => {
   const offsets = new Map<string, number>();
@@ -279,6 +285,24 @@ const compareAlignSpread = computed(() => {
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   return `${m}m ${s % 60}s`;
+});
+// Fitted x-axis view for aligned compare (#963). The fetch window (fromMs/
+// toMs) stays wide so every sibling loads, but once aligned the data occupies
+// only [activeStart, activeStart + longest play span] — so scale the VIEW to
+// that instead of the full wall-clock span. Recomputes as data streams in
+// (then goes quiet on a static archive, so it doesn't fight user pan/zoom).
+const compareAlignView = computed<{ min: number; max: number } | null>(() => {
+  if (!compareAlign.value.enabled) return null;
+  const active = spanTs(timeseries.events);
+  if (!active) return null;
+  const aStart = active[0];
+  let maxSpan = active[1] - active[0];
+  for (const sib of compareSiblings.value) {
+    const s = spanTs(sib.stream);
+    if (s) maxSpan = Math.max(maxSpan, s[1] - s[0]);
+  }
+  const pad = Math.max(1000, maxSpan * 0.04); // a little breathing room at the edges
+  return { min: aStart - pad, max: aStart + maxSpan + pad };
 });
 
 // The active session's own compare identity — tag `S<display_id>` (so it
@@ -757,6 +781,18 @@ watch(
   },
   { immediate: true },
 );
+
+// Once compare sessions are aligned to a common start (#963), fit the x-axis
+// VIEW to the aligned data extent. The fetch window (fromMs/toMs) stays wide
+// so every sibling loads, but after the shift the data only occupies ~one
+// play's span — so scale the view to that instead of the full wall-clock
+// span. Data-driven: tracks the extent as rows stream in, then goes quiet on
+// a static archive so it doesn't fight later operator pan/zoom. The fitted
+// min ≈ the earliest cached sample, so it never trips the refetch-on-pan
+// widening above.
+watch(compareAlignView, (v) => {
+  if (v) coord.setRange({ min: v.min, max: v.max });
+});
 
 // Live-edge anchor. `coord.lastSampleMs` is the brush's live-follow
 // target (effectiveRange.max) AND the rail's right edge. It used to be
