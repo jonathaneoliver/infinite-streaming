@@ -72,7 +72,7 @@ import {
 } from '@/composables/useLifecycleMarkers';
 import { useCompareMode } from '@/composables/useCompareMode';
 import { useGroupSiblings } from '@/composables/useGroupSiblings';
-import { CompareContextKey, sessionDash, type CompareSibling, type CompareSeriesIdentity } from '@/composables/useCompareContext';
+import { CompareContextKey, sessionDash, type CompareSibling, type CompareSeriesIdentity, type CompareAlign } from '@/composables/useCompareContext';
 import CompareSeriesSource from '@/components/CompareSeriesSource.vue';
 import CompareSessionLegend from '@/components/CompareSessionLegend.vue';
 import { chRowToPlayerRecord, tsOfRow } from '@/composables/chRowAdapter';
@@ -237,6 +237,50 @@ const compareSiblings = computed<CompareSibling[]>(() => {
       avmetricsStream: siblingAvmetrics.value.get(s.playerId),
     }));
 });
+// ---- Compare-mode start-time alignment (issue #963) --------------------
+// Each session's playback start = the ts of its earliest sample. When the
+// active session and its siblings didn't start together (e.g. sequential
+// reps of the same cell, minutes apart), shift each sibling so its start
+// lands on the active session's start — an elapsed-time overlay that lines
+// them up. The active session is the reference (offset 0) so its lifecycle/
+// event markers and the x-axis stay truthful; only sibling line data moves.
+// Starts within ALIGN_TOLERANCE_MS are treated as "same time" (a live group
+// launches with sub-second stagger) and left un-shifted.
+const ALIGN_TOLERANCE_MS = 2000;
+function earliestTs(stream: Stream<Record<string, unknown>>): number | null {
+  // Reading epoch + version establishes the reactive deps so this recomputes
+  // as rows stream in; inRange returns ascending rows, so [0] is the earliest.
+  void stream.epoch.value; void stream.version.value;
+  const rows = stream.inRange(0, Number.MAX_SAFE_INTEGER);
+  if (!rows.length) return null;
+  const t = tsOfRow(rows[0]);
+  return Number.isFinite(t) ? t : null;
+}
+const compareAlign = computed<CompareAlign>(() => {
+  const offsets = new Map<string, number>();
+  if (!compareEnabled.value) return { enabled: false, maxOffsetMs: 0, offsets };
+  const primaryStart = earliestTs(timeseries.events);
+  if (primaryStart == null) return { enabled: false, maxOffsetMs: 0, offsets };
+  let maxAbs = 0;
+  for (const sib of compareSiblings.value) {
+    const start = earliestTs(sib.stream);
+    if (start == null) continue;
+    const off = start - primaryStart; // ms to SUBTRACT from this sibling's x
+    offsets.set(sib.playerId, off);
+    maxAbs = Math.max(maxAbs, Math.abs(off));
+  }
+  const enabled = maxAbs > ALIGN_TOLERANCE_MS;
+  return { enabled, maxOffsetMs: maxAbs, offsets: enabled ? offsets : new Map() };
+});
+// Human "3m 12s" for the warning banner.
+const compareAlignSpread = computed(() => {
+  const ms = compareAlign.value.maxOffsetMs;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s`;
+});
+
 // The active session's own compare identity — tag `S<display_id>` (so it
 // reads as one of the grouped sessions) and a SOLID line (empty dash) to
 // stand out from the dashed siblings. Charts build their primary `series`
@@ -281,6 +325,7 @@ provide(CompareContextKey, {
   self: compareSelf,
   siblings: compareSiblings,
   view: compareView,
+  align: compareAlign,
 });
 
 // Defensive: only adopt usePlayer's canonical-case id when it
@@ -1889,6 +1934,20 @@ function skipToEnd() {
         :sessions="compareSessions"
         :view="compareView"
       />
+      <!-- Elapsed-time alignment warning (#963): shown when the compared
+           sessions started at different wall-clock times and the charts have
+           shifted the siblings onto the active session's start to line them
+           up. Flags that external conditions weren't shared across the runs. -->
+      <div v-if="compareEnabled && compareAlign.enabled" class="align-warning" role="note">
+        <span class="aw-icon" aria-hidden="true">⚠</span>
+        <span>
+          <strong>Aligned to a common start (elapsed time).</strong>
+          These sessions ran up to <strong>{{ compareAlignSpread }}</strong> apart, so
+          the siblings are shifted onto this session's start to line up the charts.
+          They didn’t share network / CDN / server-load conditions on the wall
+          clock — treat differences as run-to-run, not directly comparable in time.
+        </span>
+      </div>
       <!-- Lifecycle vertical-line toggles — govern the restart / play-start /
            play-end lines drawn across every chart AND the events timeline.
            Per-type, persisted; reason / play_id / status show on line hover. -->
@@ -2181,6 +2240,20 @@ function skipToEnd() {
   background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 6px;
   padding: 5px 10px; margin: 0 0 10px;
 }
+/* Elapsed-time alignment warning (#963) */
+.align-warning {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: 12px; line-height: 1.45; color: #7c4a03;
+  background: #fff7ed; border: 1px solid #fdba74; border-radius: 6px;
+  padding: 8px 11px; margin: 8px 0 10px;
+}
+.align-warning strong { color: #7c2d12; font-weight: 650; }
+.align-warning .aw-icon { font-size: 14px; line-height: 1.2; flex: 0 0 auto; }
+@media (prefers-color-scheme: dark) {
+  .align-warning { color: #fcd9b0; background: #2a1a08; border-color: #7c4a03; }
+  .align-warning strong { color: #fde3c4; }
+}
+
 .test-run-chip .trc-icon { font-size: 13px; }
 .test-run-chip .trc-key { font-weight: 600; color: #334155; }
 .test-run-chip .trc-scenario { font-weight: 600; color: #0f766e; }
