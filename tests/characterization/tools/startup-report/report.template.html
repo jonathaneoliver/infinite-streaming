@@ -1,4 +1,4 @@
-<title>iOS Startup Characterization — cap × limit × segment (reps=3)</title>
+<title>iOS Startup Characterization — initial variant cap × limit × segment (reps=3)</title>
 <style>
   :root{--bg:#f4f6f8;--panel:#ffffff;--panel-2:#eef1f4;--ink:#12181f;--ink-2:#4a5763;
     --line:#d9e0e6;--accent:#0e9aa7;--accent-ink:#0b7d88;
@@ -67,8 +67,8 @@
 <div class="wrap">
   <header class="top">
     <div class="eyebrow">AVPlayer · iphone-sim · 3 reps/cell · 180 plays</div>
-    <h1>Video startup — cap × limit × segment, with run-to-run variation</h1>
-    <p class="sub">Every cell run 3×. Numbers are the <strong>mean</strong> with the <strong>min–max range</strong> beneath; the <strong>±CoV</strong> badge colors each cell by how reproducible it was (green = stable, red = jittery). Rung columns flag <span class="warn">⚠</span> when the reps disagree. Click ¹²³ to open each run.</p>
+    <h1>Video startup — initial variant cap × limit × segment, with run-to-run variation</h1>
+    <p class="sub">Every cell run 3×. Each block is one <strong>network limit</strong>; its rows are the <strong>initial variant cap</strong> (<code>is.peak_bitrate_mbps</code> — the startup ceiling on ABR rung selection). Numbers are the <strong>mean</strong> with the <strong>min–max range</strong> beneath; the <strong>±CoV</strong> badge colors each cell by how reproducible it was (green = stable, red = jittery). Rung columns flag <span class="warn">⚠</span> when the reps disagree. Click ¹²³ to open each run.</p>
     <div class="repro" id="repro"></div>
   </header>
 
@@ -143,11 +143,11 @@ function render(){
   const seg=document.getElementById('segments'); seg.innerHTML='';
   for(const [sk,sname] of SEGS){const d=DATA[sk]||{};let rows='';
     for(const [lk,lname] of LIMITS){rows+=`<tr class="grp"><td colspan="12">${lname}</td></tr>`;
-      for(const c of CAPS) rows+=rowFor('cap '+(c==='0'?'off':c), d[`${lk}|${c}`]);}
+      for(const c of CAPS) rows+=rowFor((c==='0'?'off':c+' Mbps'), d[`${lk}|${c}`]);}
     seg.insertAdjacentHTML('beforeend',
       `<h2>${sname}<span class="tag mono">${sk}</span></h2>`+
       `<div class="tablewrap"><table><thead><tr>`+
-      `<th class="l">arm · runs</th><th>Video-start s</th><th>TTFF s</th><th>Fetched</th><th>Shown</th><th>Var@60s</th><th>Settle s</th><th>Startup-eff</th><th>Stalls</th><th>Shifts↑</th><th>±CoV</th><th class="l">Residency (F/S, mean)</th>`+
+      `<th class="l">initial variant cap · runs</th><th>Video-start s</th><th>TTFF s</th><th>Fetched</th><th>Shown</th><th>Var@60s</th><th>Settle s</th><th>Startup-eff</th><th>Stalls</th><th>Shifts↑</th><th>±CoV</th><th class="l">Residency (F/S, mean)</th>`+
       `</tr></thead><tbody>${rows}</tbody></table></div>`);}
 }
 // reproducibility panel — computed from the data
@@ -166,7 +166,7 @@ function reproPanel(){
     ['var@60s agree',agreeOf('var60')+'%','settled rung is stable'],
   ];
   document.getElementById('repro').innerHTML=
-    `<h3>Run-to-run reproducibility</h3><p class="rsub">Median across cells (CoV = stdev/mean over the 3 reps). Fragile regime: 2 Mbps + high cap — worst video-start swing <span class="m">${worst}</span>.</p>`+
+    `<h3>Run-to-run reproducibility</h3><p class="rsub">Median across cells (CoV = stdev/mean over the 3 reps). Fragile regime: 2 Mbps + high initial variant cap — worst video-start swing <span class="m">${worst}</span>.</p>`+
     `<div class="rgrid">`+stats.map(([k,v,d])=>`<div class="rstat"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('')+`</div>`;
 }
 document.getElementById('tgl').addEventListener('click',()=>{const cur=document.documentElement.getAttribute('data-theme');
