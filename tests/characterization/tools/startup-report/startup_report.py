@@ -15,7 +15,7 @@ Queried events are cached to <maps>/.metrics_cache.json keyed by play_id, so
 re-rendering (e.g. after a template tweak) is instant. Delete the cache to re-pull.
 
 Usage:
-  startup_report.py [--maps DIR] [--reps N] [--segs s6,s2,s1] [--limits 0,16,8,2]
+  startup_report.py [--maps DIR] [--reps N] [--segs s6,s2,s1] [--limits 0,20,16,8,2]
                     [--caps 0,1,2,8,16] [--out FILE] [--host URL] [--no-cache]
 
 Derived metrics (per play): video-start (playhead moving), TTFF (first frame
@@ -290,7 +290,7 @@ def main():
     ap.add_argument("--maps", default=default_maps, help="dir with rep{N}_seg_{seg}.tsv + play_player_map.tsv")
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--segs", default="s6,s2,s1")
-    ap.add_argument("--limits", default="0,16,8,2")
+    ap.add_argument("--limits", default="0,20,16,8,2")
     ap.add_argument("--caps", default="0,1,2,8,16")
     ap.add_argument("--host", default="https://dev.jeoliver.com:21000")
     ap.add_argument("--template", default=os.path.join(here, "report.template.html"))
