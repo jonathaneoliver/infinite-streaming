@@ -1,0 +1,176 @@
+<title>iOS Startup Characterization — cap × limit × segment (reps=3)</title>
+<style>
+  :root{--bg:#f4f6f8;--panel:#ffffff;--panel-2:#eef1f4;--ink:#12181f;--ink-2:#4a5763;
+    --line:#d9e0e6;--accent:#0e9aa7;--accent-ink:#0b7d88;
+    --shadow:0 1px 2px rgba(16,32,40,.06),0 8px 24px rgba(16,32,40,.05);}
+  @media (prefers-color-scheme:dark){:root{--bg:#0b0f14;--panel:#111820;--panel-2:#0e141b;--ink:#e6edf3;--ink-2:#93a4b3;
+    --line:#1e2a35;--accent:#2fd4c8;--accent-ink:#54e0d6;--shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);}}
+  :root[data-theme="light"]{--bg:#f4f6f8;--panel:#ffffff;--panel-2:#eef1f4;--ink:#12181f;--ink-2:#4a5763;
+    --line:#d9e0e6;--accent:#0e9aa7;--accent-ink:#0b7d88;--shadow:0 1px 2px rgba(16,32,40,.06),0 8px 24px rgba(16,32,40,.05);}
+  :root[data-theme="dark"]{--bg:#0b0f14;--panel:#111820;--panel-2:#0e141b;--ink:#e6edf3;--ink-2:#93a4b3;
+    --line:#1e2a35;--accent:#2fd4c8;--accent-ink:#54e0d6;--shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);}
+  *{box-sizing:border-box} html,body{max-width:100%;overflow-x:hidden}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .mono{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-variant-numeric:tabular-nums}
+  .wrap{max-width:1240px;margin:0 auto;padding:clamp(20px,4vw,56px) clamp(16px,4vw,40px) 80px}
+  header.top{border-bottom:1px solid var(--line);padding-bottom:26px;margin-bottom:28px}
+  .eyebrow{font:600 12px/1.2 ui-monospace,monospace;letter-spacing:.16em;text-transform:uppercase;color:var(--accent-ink)}
+  h1{font-size:clamp(26px,4.4vw,40px);line-height:1.08;margin:14px 0 8px;font-weight:680;letter-spacing:-.02em;text-wrap:balance;max-width:22ch}
+  .sub{color:var(--ink-2);font-size:clamp(15px,1.6vw,17px);max-width:74ch;margin:0}
+  .repro{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:24px 0 8px;box-shadow:var(--shadow)}
+  .repro h3{margin:0 0 4px;font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent-ink)}
+  .repro .rsub{color:var(--ink-2);font-size:13.5px;margin:0 0 14px}
+  .rgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .rstat{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--panel-2)}
+  .rstat .k{font:600 10.5px ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2)}
+  .rstat .v{font-size:22px;font-weight:680;margin-top:6px}
+  .rstat .v small{font-size:12px;color:var(--ink-2);font-weight:500}
+  .rstat .d{font-size:11.5px;color:var(--ink-2);margin-top:4px}
+  .legend{background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:15px 18px;margin:16px 0 8px}
+  .legend h3{margin:0 0 9px;font-size:12.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2)}
+  .legend dl{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;margin:0;font-size:13px}
+  .legend dt{font-weight:640;color:var(--ink)} .legend dd{margin:0;color:var(--ink-2)}
+  h2{font-size:20px;font-weight:660;margin:38px 0 6px;display:flex;align-items:baseline;gap:12px}
+  h2 .tag{font:600 12px/1 ui-monospace,monospace;color:var(--accent-ink);border:1px solid var(--line);padding:4px 8px;border-radius:6px}
+  .lead{color:var(--ink-2);max-width:78ch;margin:2px 0 14px;font-size:14px}
+  .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);margin:8px 0;background:var(--panel)}
+  table{border-collapse:collapse;width:100%;font-size:12.5px;min-width:940px}
+  thead th{position:sticky;top:0;background:var(--panel);text-align:right;padding:10px 11px;font:600 10.5px/1.2 ui-monospace,monospace;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-2);border-bottom:1px solid var(--line);white-space:nowrap}
+  thead th.l{text-align:left}
+  tbody td{padding:7px 11px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:middle}
+  tbody td.l{text-align:left}
+  tbody tr:last-child td{border-bottom:none}
+  .grp td{background:var(--panel-2);font:600 11px/1 ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);padding:7px 11px}
+  .m{font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;font-weight:600}
+  .rng{display:block;font:500 10px ui-monospace,monospace;color:var(--ink-2)}
+  .heat{border-radius:5px;padding:2px 7px;display:inline-block;min-width:44px;text-align:center;color:var(--ink);font-weight:600}
+  .muted{color:var(--ink-2)}
+  .warn{color:#c26a00;font-weight:700} @media(prefers-color-scheme:dark){.warn{color:#f0a850}}
+  :root[data-theme="dark"] .warn{color:#f0a850} :root[data-theme="light"] .warn{color:#c26a00}
+  .badge{display:inline-block;min-width:40px;text-align:center;border-radius:20px;padding:2px 9px;font:600 11px ui-monospace,monospace}
+  .replinks{font:600 10px ui-monospace,monospace}
+  .replinks a{color:var(--accent-ink);text-decoration:none;padding:0 1px}
+  .replinks a:hover{text-decoration:underline}
+  .resbar{display:flex;height:11px;width:180px;border-radius:3px;overflow:hidden;border:1px solid var(--line)}
+  .resbar>span{display:block;height:100%}
+  .resstack{display:flex;flex-direction:column;gap:3px}
+  .resrow{display:flex;align-items:center;gap:6px}
+  .reslbl{font:600 9px ui-monospace,monospace;color:var(--ink-2);width:9px;text-align:center}
+  .foot{margin-top:42px;border-top:1px solid var(--line);padding-top:22px;color:var(--ink-2);font-size:13px;max-width:88ch}
+  .foot h3{color:var(--ink);font-size:13.5px;letter-spacing:.04em;text-transform:uppercase;margin:16px 0 7px}
+  code{font-family:ui-monospace,monospace;background:var(--panel-2);padding:1px 5px;border-radius:4px;font-size:.92em}
+  .toggle{position:fixed;top:14px;right:14px;background:var(--panel);border:1px solid var(--line);color:var(--ink-2);border-radius:8px;padding:7px 11px;font:600 12px ui-monospace,monospace;cursor:pointer;box-shadow:var(--shadow)}
+  .toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+
+<button class="toggle" id="tgl" aria-label="Toggle theme">◐ theme</button>
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">AVPlayer · iphone-sim · 3 reps/cell · 180 plays</div>
+    <h1>Video startup — cap × limit × segment, with run-to-run variation</h1>
+    <p class="sub">Every cell run 3×. Numbers are the <strong>mean</strong> with the <strong>min–max range</strong> beneath; the <strong>±CoV</strong> badge colors each cell by how reproducible it was (green = stable, red = jittery). Rung columns flag <span class="warn">⚠</span> when the reps disagree. Click ¹²³ to open each run.</p>
+    <div class="repro" id="repro"></div>
+  </header>
+
+  <div class="legend">
+    <h3>Columns</h3>
+    <dl>
+      <dt>Video-start / Settle / TTFF</dt><dd>mean seconds, with min–max of the 3 reps beneath.</dd>
+      <dt>Fetched / Shown / Var@60s</dt><dd>the modal rung; <span class="warn">⚠</span> = reps disagreed (hover for the values).</dd>
+      <dt>Stalls / Shifts↑</dt><dd>mean rebuffers and mean up-rung changes during the climb (min–max beneath).</dd>
+      <dt>Startup-eff</dt><dd>mean bitrate-utilization % over 60 s (buffering=0 ÷ achievable rung). Engineering proxy, not a QoE score.</dd>
+      <dt>±CoV</dt><dd>video-start coefficient of variation across reps — the stability signal. green ≤10% · amber ≤25% · red &gt;25%.</dd>
+      <dt>Residency</dt><dd>mean of the 3 reps: F=fetched (requested, no buffer band), S=shown (displayed; hatched=buffering). Dark→bright = low→high bitrate.</dd>
+    </dl>
+  </div>
+
+  <div id="segments"></div>
+
+  <div class="foot">
+    <h3>Method</h3>
+    <p>iphone-sim, 90 s plays, content <code>insane_newer_p200_h264</code> (ladder 360p→2160p). Each cell run <strong>3 times</strong> (180 plays), 4 cells in parallel across 4 Fleet sims. Metrics from <code>harness query events</code>; residency/startup-eff integrate the rendition series over the first 60 s (non-playing = 0). CoV = stdev/mean across the 3 reps.</p>
+    <h3>Reading it</h3>
+    <p><strong>Startup-eff is a bitrate-utilization proxy, not a perceptual QoE score</strong> (ITU-T P.1203/P.1204 and VMAF are the rigorous alternatives; video-start time is industry-standard, CTA-2066/CMCD). The <strong>0.8 Mbps</strong> limit row is omitted (out of range).</p>
+  </div>
+</div>
+
+<script>
+const DATA = __DATA__;
+const LIMITS=[["0","uncapped"],["16","16 Mbps"],["8","8 Mbps"],["2","2 Mbps"]];
+const CAPS=["0","1","2","8","16"];
+const SEGS=[["s6","6-second segments"],["s2","2-second segments"],["s1","1-second segments"]];
+const RUNGS=[0.988,1.542,2.409,3.774,5.822,9.05,14.085,21.859,33.808];
+const BASE="https://dev.jeoliver.com:21000";
+const isDark=()=>document.documentElement.getAttribute('data-theme')==='dark'||(matchMedia('(prefers-color-scheme:dark)').matches&&document.documentElement.getAttribute('data-theme')!=='light');
+function lerpHeat(t){t=Math.max(0,Math.min(1,t));const h=4+(150-4)*t;const d=isDark();return `hsla(${h}, ${d?55:62}%, ${d?42:78}%, ${d?.30:.55})`;}
+const effHeat=p=>p==null?'transparent':lerpHeat(p/100);
+const vsHeat=s=>s==null?'transparent':lerpHeat(1-Math.min(s,10)/10);
+function covColor(c){const d=isDark();const t=c<=10?1:c>=40?0:1-(c-10)/30;const h=4+(150-4)*t;return `hsla(${h}, ${d?58:60}%, ${d?40:82}%, ${d?.55:.8})`;}
+function num(o,heat){ if(!o) return '<span class="muted">—</span>';
+  const bg=heat?heat(o.mean):null; const inner=`<span class="m">${o.mean.toFixed(1)}</span><span class="rng">${o.min.toFixed(1)}–${o.max.toFixed(1)}</span>`;
+  return bg?`<span class="heat" style="background:${bg}">${inner}</span>`:inner;}
+function cat(o){ if(!o) return '<span class="muted">—</span>';
+  const trim=x=>(x+'').replace(/(\.\d*?)0+$/,'$1').replace(/\.$/,'');
+  const v=trim(o.mode); if(o.agree) return `<span class="m">${v}</span>`;
+  const lo=trim(Math.min(...o.vals)), hi=trim(Math.max(...o.vals));
+  return `<span class="m warn" title="reps: ${o.vals.join(', ')}">${v}&nbsp;⚠</span><span class="rng">${lo}–${hi}</span>`;}
+function covBadge(o){ if(!o) return '<span class="muted">—</span>';
+  return `<span class="badge" style="background:${covColor(o.cov)}">±${Math.round(o.cov)}%</span>`;}
+function repLinks(plays){ if(!plays||!plays.length) return '';
+  const a=plays.map((p,i)=>p.play?`<a href="${BASE}/dashboard/session-viewer.html?player_id=${p.player}&play_id=${p.play}" target="_blank" rel="noopener" title="open rep ${i+1}">${'¹²³'[i]||(i+1)}</a>`:'').join('');
+  return ` <span class="replinks">${a}</span>`;}
+function cmpLink(m){ return m.compare_url?` <a class="replinks" style="font-size:12px" href="${m.compare_url}" target="_blank" rel="noopener" title="compare all ${m.n} runs overlaid">⇄</a>`:'';}
+function rungColor(r){const d=isDark();if(r==='buffer')return d?'#39424d':'#cdd5dc';const i=RUNGS.indexOf(r),t=i<0?0:i/(RUNGS.length-1);return `hsl(188, ${42+t*38}%, ${d?(22+t*40):(80-t*46)}%)`;}
+function resBar(res){if(!res||!res.length)return '<span class="muted">—</span>';
+  const s=res.map(x=>{const lbl=x.rung==='buffer'?'buffering':x.rung+' Mbps';const h=x.rung==='buffer'?'background-image:repeating-linear-gradient(45deg,transparent 0 3px,rgba(0,0,0,.14) 3px 6px);':'';return `<span title="${lbl}: ${x.pct}%" style="width:${x.pct}%;background:${rungColor(x.rung)};${h}"></span>`;}).join('');
+  return `<span class="resbar">${s}</span>`;}
+function rowFor(arm,m){
+  if(!m) return `<tr><td class="l">${arm}</td><td class="l muted" colspan="11">no data</td></tr>`;
+  return `<tr><td class="l">${arm}${repLinks(m.plays)}${cmpLink(m)}</td>`+
+    `<td>${num(m.video_start,vsHeat)}</td>`+
+    `<td>${num(m.ttff,null)}</td>`+
+    `<td>${cat(m.fetched)}</td>`+
+    `<td>${cat(m.shown)}</td>`+
+    `<td>${cat(m.var60)}</td>`+
+    `<td>${num(m.settle,null)}</td>`+
+    `<td>${num(m.startup_eff,effHeat)}</td>`+
+    `<td>${num(m.stalls,null)}</td>`+
+    `<td>${num(m.shifts_up,null)}</td>`+
+    `<td>${covBadge(m.video_start)}</td>`+
+    `<td class="l"><div class="resstack"><div class="resrow"><span class="reslbl">F</span>${resBar(m.fetched_residency)}</div><div class="resrow"><span class="reslbl">S</span>${resBar(m.residency)}</div></div></td></tr>`;
+}
+function render(){
+  const seg=document.getElementById('segments'); seg.innerHTML='';
+  for(const [sk,sname] of SEGS){const d=DATA[sk]||{};let rows='';
+    for(const [lk,lname] of LIMITS){rows+=`<tr class="grp"><td colspan="12">${lname}</td></tr>`;
+      for(const c of CAPS) rows+=rowFor('cap '+(c==='0'?'off':c), d[`${lk}|${c}`]);}
+    seg.insertAdjacentHTML('beforeend',
+      `<h2>${sname}<span class="tag mono">${sk}</span></h2>`+
+      `<div class="tablewrap"><table><thead><tr>`+
+      `<th class="l">arm · runs</th><th>Video-start s</th><th>TTFF s</th><th>Fetched</th><th>Shown</th><th>Var@60s</th><th>Settle s</th><th>Startup-eff</th><th>Stalls</th><th>Shifts↑</th><th>±CoV</th><th class="l">Residency (F/S, mean)</th>`+
+      `</tr></thead><tbody>${rows}</tbody></table></div>`);}
+}
+// reproducibility panel — computed from the data
+function reproPanel(){
+  const all=[]; for(const seg of Object.values(DATA)) for(const c of Object.values(seg)) if(c) all.push(c);
+  const med=(xs)=>{xs=xs.filter(x=>x!=null).sort((a,b)=>a-b);return xs.length?xs[Math.floor(xs.length/2)]:0;};
+  const covOf=k=>med(all.map(c=>c[k]&&c[k].cov));
+  const agreeOf=k=>{const t=all.filter(c=>c[k]);return Math.round(100*t.filter(c=>c[k].agree).length/t.length);};
+  const worst=all.filter(c=>c.video_start).sort((a,b)=>b.video_start.cov-a.video_start.cov).slice(0,3)
+    .map(c=>`${c.video_start.vals.join('/')}s`).join(' · ');
+  const stats=[
+    ['startup-eff CoV',covOf('startup_eff').toFixed(0)+'%','reproducible — trust at n=1'],
+    ['video-start CoV',covOf('video_start').toFixed(0)+'%','typical run-to-run jitter'],
+    ['settle CoV',covOf('settle').toFixed(0)+'%','noisy — directional only'],
+    ['shown-rung agree',agreeOf('shown')+'%','reps pick the same rung'],
+    ['var@60s agree',agreeOf('var60')+'%','settled rung is stable'],
+  ];
+  document.getElementById('repro').innerHTML=
+    `<h3>Run-to-run reproducibility</h3><p class="rsub">Median across cells (CoV = stdev/mean over the 3 reps). Fragile regime: 2 Mbps + high cap — worst video-start swing <span class="m">${worst}</span>.</p>`+
+    `<div class="rgrid">`+stats.map(([k,v,d])=>`<div class="rstat"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('')+`</div>`;
+}
+document.getElementById('tgl').addEventListener('click',()=>{const cur=document.documentElement.getAttribute('data-theme');
+  document.documentElement.setAttribute('data-theme',cur==='dark'?'light':cur==='light'?'dark':(matchMedia('(prefers-color-scheme:dark)').matches?'light':'dark'));render();reproPanel();});
+matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>{render();reproPanel();});
+render(); reproPanel();
+</script>
