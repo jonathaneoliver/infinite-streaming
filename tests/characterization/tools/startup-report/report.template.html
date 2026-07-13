@@ -12,7 +12,7 @@
   *{box-sizing:border-box} html,body{max-width:100%;overflow-x:hidden}
   body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.55;-webkit-font-smoothing:antialiased}
   .mono{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-variant-numeric:tabular-nums}
-  .wrap{max-width:1240px;margin:0 auto;padding:clamp(20px,4vw,56px) clamp(16px,4vw,40px) 80px}
+  .wrap{max-width:none;margin:0;padding:clamp(20px,4vw,56px) clamp(16px,3vw,32px) 80px}
   header.top{border-bottom:1px solid var(--line);padding-bottom:26px;margin-bottom:28px}
   .eyebrow{font:600 12px/1.2 ui-monospace,monospace;letter-spacing:.16em;text-transform:uppercase;color:var(--accent-ink)}
   h1{font-size:clamp(26px,4.4vw,40px);line-height:1.08;margin:14px 0 8px;font-weight:680;letter-spacing:-.02em;text-wrap:balance;max-width:22ch}
@@ -96,7 +96,7 @@
 
 <script>
 const DATA = __DATA__;
-const LIMITS=[["0","uncapped"],["20","20 Mbps"],["16","16 Mbps"],["8","8 Mbps"],["2","2 Mbps"]];
+const LIMITS=[["0","unlimited"],["20","20 Mbps"],["16","16 Mbps"],["8","8 Mbps"],["2","2 Mbps"]];
 const CAPS=["0","1","2","8","16"];
 const SEGS=[["s6","6-second segments"],["s2","2-second segments"],["s1","1-second segments"]];
 const RUNGS=[0.988,1.542,2.409,3.774,5.822,9.05,14.085,21.859,33.808];
@@ -125,8 +125,8 @@ function resBar(res){if(!res||!res.length)return '<span class="muted">—</span>
   const s=res.map(x=>{const lbl=x.rung==='buffer'?'buffering':x.rung+' Mbps';const h=x.rung==='buffer'?'background-image:repeating-linear-gradient(45deg,transparent 0 3px,rgba(0,0,0,.14) 3px 6px);':'';return `<span title="${lbl}: ${x.pct}%" style="width:${x.pct}%;background:${rungColor(x.rung)};${h}"></span>`;}).join('');
   return `<span class="resbar">${s}</span>`;}
 function rowFor(arm,m){
-  if(!m) return `<tr><td class="l">${arm}</td><td class="l muted" colspan="11">no data</td></tr>`;
-  return `<tr><td class="l">${arm}${repLinks(m.plays)}${cmpLink(m)}</td>`+
+  if(!m) return `<tr><td class="l">${arm}</td><td class="l muted" colspan="12">no data</td></tr>`;
+  return `<tr><td class="l">${arm}</td><td class="l">${repLinks(m.plays)}${cmpLink(m)}</td>`+
     `<td>${num(m.video_start,vsHeat)}</td>`+
     `<td>${num(m.ttff,null)}</td>`+
     `<td>${cat(m.fetched)}</td>`+
@@ -142,12 +142,12 @@ function rowFor(arm,m){
 function render(){
   const seg=document.getElementById('segments'); seg.innerHTML='';
   for(const [sk,sname] of SEGS){const d=DATA[sk]||{};let rows='';
-    for(const [lk,lname] of LIMITS){rows+=`<tr class="grp"><td colspan="12">${lname}</td></tr>`;
+    for(const [lk,lname] of LIMITS){rows+=`<tr class="grp"><td colspan="13">Network limit: ${lname}</td></tr>`;
       for(const c of CAPS) rows+=rowFor((c==='0'?'off':c+' Mbps'), d[`${lk}|${c}`]);}
     seg.insertAdjacentHTML('beforeend',
       `<h2>${sname}<span class="tag mono">${sk}</span></h2>`+
       `<div class="tablewrap"><table><thead><tr>`+
-      `<th class="l">initial variant cap · runs</th><th>Video-start s</th><th>TTFF s</th><th>Fetched</th><th>Shown</th><th>Var@60s</th><th>Settle s</th><th>Startup-eff</th><th>Stalls</th><th>Shifts↑</th><th>±CoV</th><th class="l">Residency (F/S, mean)</th>`+
+      `<th class="l">initial variant cap</th><th class="l">runs</th><th>Video-start s</th><th>TTFF s</th><th>Fetched</th><th>Shown</th><th>Var@60s</th><th>Settle s</th><th>Startup-eff</th><th>Stalls</th><th>Shifts↑</th><th>±CoV</th><th class="l">Residency (F/S, mean)</th>`+
       `</tr></thead><tbody>${rows}</tbody></table></div>`);}
 }
 // reproducibility panel — computed from the data
