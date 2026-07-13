@@ -194,8 +194,54 @@ def load_rep_map(path):
     return out
 
 
-def build_data(maps, reps, segs, limits, caps, host, use_cache):
-    # play_id -> player_id (for session-viewer links)
+SEG_S = {"s6": 6, "s2": 2, "s1": 1}
+
+
+def _limit_label(L):
+    return "unlimited" if L == "0" else "%s Mbps" % L
+
+
+def _cap_label(C):
+    return "off" if C == "0" else "%s Mbps" % C
+
+
+def aggregate_cell(ms, player, host):
+    """ms = list of (play_id, metrics_dict). Returns the aggregated cell dict."""
+    cell = {"n": len(ms),
+            "plays": [{"play": p, "player": player.get(p, ""),
+                       "t0": m.get("t_start"), "t1": m.get("t_end")} for p, m in ms]}
+    for disp, key, sc in CONT:
+        vals = [m.get(key) * sc for _, m in ms if m.get(key) is not None]
+        if vals:
+            mean = st.mean(vals)
+            cov = 100 * st.pstdev(vals) / mean if mean else 0.0
+            cell[disp] = {"vals": [round(v, 2) for v in vals], "mean": round(mean, 2),
+                          "min": round(min(vals), 2), "max": round(max(vals), 2),
+                          "cov": round(cov, 1)}
+    for disp, key in CAT:
+        vals = [m.get(key) for _, m in ms if m.get(key) is not None]
+        if vals:
+            cell[disp] = {"vals": vals, "mode": Counter(vals).most_common(1)[0][0],
+                          "agree": len(set(vals)) == 1}
+    cell["residency"] = avg_resid([m.get("residency", []) for _, m in ms])
+    cell["fetched_residency"] = avg_resid([m.get("fetched_residency", []) for _, m in ms])
+    # compare URL: overlay all reps in session-viewer (?compare=player~play~idx,...)
+    starts = [m.get("t_start") for _, m in ms if m.get("t_start")]
+    ends = [m.get("t_end") for _, m in ms if m.get("t_end")]
+    if len(ms) >= 2 and starts and ends and all(player.get(p) for p, _ in ms):
+        raw = ",".join("%s~%s~%d" % (player[p], p, i + 1) for i, (p, _) in enumerate(ms))
+        comp = raw.replace("~", "%7E").replace(",", "%2C")
+        p0 = ms[0][0]
+        cell["compare_url"] = ("%s/dashboard/session-viewer.html"
+            "?player_id=%s&play_id=%s&from=%s&to=%s&compare=%s"
+            % (host, player[p0], p0, min(starts), max(ends), comp))
+    return cell
+
+
+def build_rows(maps, reps, segs, limits, caps, host, use_cache):
+    """Flat list of row dicts across platforms — one per (platform, seg, limit,
+    cap) cell that has data. Each row carries the axis fields + their numeric
+    sort keys + the aggregated metrics."""
     player = {}
     mp = os.path.join(maps, "play_player_map.tsv")
     if os.path.exists(mp):
@@ -219,66 +265,56 @@ def build_data(maps, reps, segs, limits, caps, host, use_cache):
         cache[play] = m           # cache None too — a dead play won't re-query every run
         return m
 
-    def rep_files(rep, seg):
-        # rep{n}_seg_{seg}.tsv, with startup_seg_{seg}.tsv as the n=1 fallback.
-        cand = os.path.join(maps, "rep%d_seg_%s.tsv" % (rep, seg))
-        if os.path.exists(cand):
-            return cand
-        return os.path.join(maps, "startup_seg_%s.tsv" % seg)
+    def sim_files(seg):
+        # rep{1..reps}_seg_{seg}.tsv, with startup_seg_{seg}.tsv as the n=1 fallback.
+        fs = [os.path.join(maps, "rep%d_seg_%s.tsv" % (r, seg)) for r in range(1, reps + 1)]
+        if any(os.path.exists(f) for f in fs):
+            return fs
+        return [os.path.join(maps, "startup_seg_%s.tsv" % seg)]
 
-    out = {}
-    for seg in segs:
-        rep_maps = {r: load_rep_map(rep_files(r, seg)) for r in range(1, reps + 1)}
-        out[seg] = {}
-        for L in limits:
-            for C in caps:
-                plays = [rep_maps[r].get((L, C)) for r in range(1, reps + 1)]
-                plays = [p for p in plays if p and p != "NONE"]
-                ms = [(p, metrics_cached(p)) for p in plays]
-                ms = [(p, m) for p, m in ms if m]
-                if not ms:
-                    out[seg]["%s|%s" % (L, C)] = None
-                    continue
-                cell = {"n": len(ms),
-                        "plays": [{"play": p, "player": player.get(p, "")} for p, _ in ms]}
-                for disp, key, sc in CONT:
-                    vals = [m.get(key) * sc for _, m in ms if m.get(key) is not None]
-                    if vals:
-                        mean = st.mean(vals)
-                        cov = 100 * st.pstdev(vals) / mean if mean else 0.0
-                        cell[disp] = {"vals": [round(v, 2) for v in vals], "mean": round(mean, 2),
-                                      "min": round(min(vals), 2), "max": round(max(vals), 2),
-                                      "cov": round(cov, 1)}
-                for disp, key in CAT:
-                    vals = [m.get(key) for _, m in ms if m.get(key) is not None]
-                    if vals:
-                        cell[disp] = {"vals": vals, "mode": Counter(vals).most_common(1)[0][0],
-                                      "agree": len(set(vals)) == 1}
-                cell["residency"] = avg_resid([m.get("residency", []) for _, m in ms])
-                cell["fetched_residency"] = avg_resid([m.get("fetched_residency", []) for _, m in ms])
-                # compare URL: overlay all reps in session-viewer (?compare=player~play~idx,...)
-                starts = [m.get("t_start") for _, m in ms if m.get("t_start")]
-                ends = [m.get("t_end") for _, m in ms if m.get("t_end")]
-                if len(ms) >= 2 and starts and ends and all(player.get(p) for p, _ in ms):
-                    raw = ",".join("%s~%s~%d" % (player[p], p, i + 1) for i, (p, _) in enumerate(ms))
-                    comp = raw.replace("~", "%7E").replace(",", "%2C")
-                    p0 = ms[0][0]
-                    cell["compare_url"] = ("%s/dashboard/session-viewer.html"
-                        "?player_id=%s&play_id=%s&from=%s&to=%s&compare=%s"
-                        % (host, player[p0], p0, min(starts), max(ends), comp))
-                out[seg]["%s|%s" % (L, C)] = cell
+    # (platform label, per-seg -> list of rep-map files). Real hardware is n=1.
+    platforms = [
+        ("iphone-sim", sim_files),
+        ("iphone", lambda seg: [os.path.join(maps, "real_seg_%s.tsv" % seg)]),
+    ]
+
+    rows = []
+    for plabel, files_for in platforms:
+        for seg in segs:
+            rep_maps = [load_rep_map(f) for f in files_for(seg) if os.path.exists(f)]
+            if not rep_maps:
+                continue
+            for L in limits:
+                for C in caps:
+                    plays = [rm.get((L, C)) for rm in rep_maps]
+                    plays = [p for p in plays if p and p != "NONE"]
+                    ms = [(p, metrics_cached(p)) for p in plays]
+                    ms = [(p, m) for p, m in ms if m]
+                    if not ms:
+                        continue
+                    # order runs best -> worst by video-start (fastest startup
+                    # first), None last. So ¹ is the best run and the compare
+                    # list / start-of-row player_id is the best play.
+                    ms.sort(key=lambda pm: (pm[1].get("vstart") is None, pm[1].get("vstart") or 0))
+                    row = {"platform": plabel,
+                           "seg": seg, "seg_s": SEG_S.get(seg, 0),
+                           "limit": L, "limit_label": _limit_label(L),
+                           "limit_sort": 1e9 if L == "0" else float(L),
+                           "cap": C, "cap_label": _cap_label(C), "cap_sort": float(C)}
+                    row.update(aggregate_cell(ms, player, host))
+                    rows.append(row)
 
     if use_cache:
         try:
             json.dump(cache, open(cache_path, "w"))
         except Exception:
             pass
-    return out
+    return rows
 
 
-def render(data, template_path, out_path):
+def render(rows, template_path, out_path):
     tmpl = open(template_path).read()
-    html = tmpl.replace("__DATA__", json.dumps(data))
+    html = tmpl.replace("__DATA__", json.dumps(rows))
     open(out_path, "w").write(html)
 
 
@@ -298,13 +334,13 @@ def main():
     ap.add_argument("--no-cache", action="store_true", help="ignore + overwrite the metrics cache")
     a = ap.parse_args()
 
-    data = build_data(a.maps, a.reps, a.segs.split(","), a.limits.split(","),
+    rows = build_rows(a.maps, a.reps, a.segs.split(","), a.limits.split(","),
                       a.caps.split(","), a.host, not a.no_cache)
-    n = sum(1 for seg in data.values() for c in seg.values() if c)
-    if n == 0:
+    if not rows:
         sys.exit("no cells resolved — check --maps %s (rep*_seg_*.tsv present?)" % a.maps)
-    render(data, a.template, a.out)
-    print("wrote %s  (%d cells across %d segments, reps=%d)" % (a.out, n, len(data), a.reps))
+    render(rows, a.template, a.out)
+    plats = sorted({r["platform"] for r in rows})
+    print("wrote %s  (%d rows across platforms: %s)" % (a.out, len(rows), ", ".join(plats)))
 
 
 if __name__ == "__main__":

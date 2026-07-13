@@ -1,4 +1,4 @@
-<title>iOS Startup Characterization — initial variant cap × limit × segment (reps=3)</title>
+<title>iOS Startup Characterization — cap × network limit × segment × platform</title>
 <style>
   :root{--bg:#f4f6f8;--panel:#ffffff;--panel-2:#eef1f4;--ink:#12181f;--ink-2:#4a5763;
     --line:#d9e0e6;--accent:#0e9aa7;--accent-ink:#0b7d88;
@@ -61,14 +61,30 @@
   code{font-family:ui-monospace,monospace;background:var(--panel-2);padding:1px 5px;border-radius:4px;font-size:.92em}
   .toggle{position:fixed;top:14px;right:14px;background:var(--panel);border:1px solid var(--line);color:var(--ink-2);border-radius:8px;padding:7px 11px;font:600 12px ui-monospace,monospace;cursor:pointer;box-shadow:var(--shadow)}
   .toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .controls{display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin:14px 0 8px}
+  .chint{font-size:12.5px;color:var(--ink-2)}
+  .sortchain{font:600 11px ui-monospace,monospace;display:flex;gap:6px;align-items:center;flex-wrap:wrap;color:var(--ink-2)}
+  .sortchain .sc{background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:2px 9px;color:var(--accent-ink)}
+  .sortchain a{color:var(--ink-2)}
+  th.sortable{cursor:pointer;user-select:none} th.sortable:hover{color:var(--ink)}
+  th .ind{font-size:9px;margin-left:3px;color:var(--accent-ink);vertical-align:middle}
+  tr.grpsep td{border-top:2px solid var(--accent)}
+  a.run{cursor:pointer;border-radius:4px;padding:0 2px}
+  a.run.sel{background:var(--accent);color:#fff;text-decoration:none;outline:1px solid var(--accent)}
+  .selbar{position:fixed;right:18px;bottom:18px;display:flex;gap:10px;align-items:center;background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:12px;padding:10px 14px;z-index:30}
+  .selbar[hidden]{display:none}
+  #selcount{font:600 12px ui-monospace,monospace;color:var(--ink-2)}
+  .selbar button{font:600 12px ui-monospace,monospace;border:1px solid var(--line);background:var(--panel-2);color:var(--ink);border-radius:8px;padding:6px 12px;cursor:pointer}
+  .selbar button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .selbar button:disabled{opacity:.4;cursor:default}
 </style>
 
 <button class="toggle" id="tgl" aria-label="Toggle theme">◐ theme</button>
 <div class="wrap">
   <header class="top">
     <div class="eyebrow">AVPlayer · iphone-sim · 3 reps/cell · 180 plays</div>
-    <h1>Video startup — initial variant cap × limit × segment, with run-to-run variation</h1>
-    <p class="sub">Every cell run 3×. Each block is one <strong>network limit</strong>; its rows are the <strong>initial variant cap</strong> (<code>is.peak_bitrate_mbps</code> — the startup ceiling on ABR rung selection). Numbers are the <strong>mean</strong> with the <strong>min–max range</strong> beneath; the <strong>±CoV</strong> badge colors each cell by how reproducible it was (green = stable, red = jittery). Rung columns flag <span class="warn">⚠</span> when the reps disagree. Click ¹²³ to open each run.</p>
+    <h1>Video startup — initial variant cap × network limit × segment × platform</h1>
+    <p class="sub">One <strong>sortable</strong> row per cell. The <strong>initial variant cap</strong> is <code>is.peak_bitrate_mbps</code> — the startup ceiling on ABR rung selection. <strong>iphone-sim</strong> cells are the <strong>mean of 3 reps</strong> (min–max range beneath; the <strong>±CoV</strong> badge = reproducibility, green = stable / red = jittery); the real <strong>iphone</strong> is n=1. Rung columns flag <span class="warn">⚠</span> when reps disagree. Runs are ordered <strong>best→worst</strong> (fastest video-start = ¹).</p>
     <div class="repro" id="repro"></div>
   </header>
 
@@ -84,21 +100,28 @@
     </dl>
   </div>
 
-  <div id="segments"></div>
+  <div class="controls">
+    <span class="chint">Click a column to sort · <strong>Shift-click</strong> to add sort levels (group-by) · <strong>Alt/⌥-click</strong> a run to select it across rows, then Compare</span>
+    <span id="sortchain" class="sortchain"></span>
+  </div>
+  <div class="tablewrap"><table id="tbl"></table></div>
+  <div id="selbar" class="selbar" hidden>
+    <span id="selcount">0 runs selected</span>
+    <button id="selcompare" class="primary" disabled>Compare selected ⇄</button>
+    <button id="selclear">Clear</button>
+  </div>
 
   <div class="foot">
     <h3>Method</h3>
-    <p>iphone-sim, 90 s plays, content <code>insane_newer_p200_h264</code> (ladder 360p→2160p). Each cell run <strong>3 times</strong> (180 plays), 4 cells in parallel across 4 Fleet sims. Metrics from <code>harness query events</code>; residency/startup-eff integrate the rendition series over the first 60 s (non-playing = 0). CoV = stdev/mean across the 3 reps.</p>
+    <p>90 s plays, content <code>insane_newer_p200_h264</code> (ladder 360p→2160p). <strong>iphone-sim</strong>: each cell run 3× (4 cells in parallel across 4 Fleet sims); <strong>iphone</strong> (real hardware): n=1. Metrics from <code>harness query events</code>; residency/startup-eff integrate the rendition series over the first 60 s (non-playing = 0). CoV = stdev/mean across the 3 reps. Click a column to sort; Shift-click to add sort levels (group-by); Alt/⌥-click a run to select it, then <em>Compare selected</em> to overlay runs from any rows.</p>
     <h3>Reading it</h3>
-    <p><strong>Startup-eff is a bitrate-utilization proxy, not a perceptual QoE score</strong> (ITU-T P.1203/P.1204 and VMAF are the rigorous alternatives; video-start time is industry-standard, CTA-2066/CMCD). The <strong>0.8 Mbps</strong> limit row is omitted (out of range).</p>
+    <p><strong>Startup-eff is a bitrate-utilization proxy, not a perceptual QoE score</strong> (ITU-T P.1203/P.1204 and VMAF are the rigorous alternatives; video-start time is industry-standard, CTA-2066/CMCD). The <strong>0.8 Mbps</strong> limit row is omitted (out of range). The real iphone was swept before the 20 Mbps limit was added, so it has no 20 Mbps rows.</p>
   </div>
 </div>
 
 <script>
-const DATA = __DATA__;
-const LIMITS=[["0","unlimited"],["20","20 Mbps"],["16","16 Mbps"],["8","8 Mbps"],["2","2 Mbps"]];
-const CAPS=["0","1","2","8","16"];
-const SEGS=[["s6","6-second segments"],["s2","2-second segments"],["s1","1-second segments"]];
+const ROWS = __DATA__;
+const trim=x=>(x+'').replace(/(\.\d*?)0+$/,'$1').replace(/\.$/,'');
 const RUNGS=[0.988,1.542,2.409,3.774,5.822,9.05,14.085,21.859,33.808];
 const BASE="https://dev.jeoliver.com:21000";
 const isDark=()=>document.documentElement.getAttribute('data-theme')==='dark'||(matchMedia('(prefers-color-scheme:dark)').matches&&document.documentElement.getAttribute('data-theme')!=='light');
@@ -107,55 +130,121 @@ const effHeat=p=>p==null?'transparent':lerpHeat(p/100);
 const vsHeat=s=>s==null?'transparent':lerpHeat(1-Math.min(s,10)/10);
 function covColor(c){const d=isDark();const t=c<=10?1:c>=40?0:1-(c-10)/30;const h=4+(150-4)*t;return `hsla(${h}, ${d?58:60}%, ${d?40:82}%, ${d?.55:.8})`;}
 function num(o,heat){ if(!o) return '<span class="muted">—</span>';
-  const bg=heat?heat(o.mean):null; const inner=`<span class="m">${o.mean.toFixed(1)}</span><span class="rng">${o.min.toFixed(1)}–${o.max.toFixed(1)}</span>`;
+  const bg=heat?heat(o.mean):null;
+  const rng=(o.min===o.max)?'':`<span class="rng">${o.min.toFixed(1)}–${o.max.toFixed(1)}</span>`;
+  const inner=`<span class="m">${o.mean.toFixed(1)}</span>${rng}`;
   return bg?`<span class="heat" style="background:${bg}">${inner}</span>`:inner;}
 function cat(o){ if(!o) return '<span class="muted">—</span>';
-  const trim=x=>(x+'').replace(/(\.\d*?)0+$/,'$1').replace(/\.$/,'');
   const v=trim(o.mode); if(o.agree) return `<span class="m">${v}</span>`;
   const lo=trim(Math.min(...o.vals)), hi=trim(Math.max(...o.vals));
   return `<span class="m warn" title="reps: ${o.vals.join(', ')}">${v}&nbsp;⚠</span><span class="rng">${lo}–${hi}</span>`;}
 function covBadge(o){ if(!o) return '<span class="muted">—</span>';
   return `<span class="badge" style="background:${covColor(o.cov)}">±${Math.round(o.cov)}%</span>`;}
-function repLinks(plays){ if(!plays||!plays.length) return '';
-  const a=plays.map((p,i)=>p.play?`<a href="${BASE}/dashboard/session-viewer.html?player_id=${p.player}&play_id=${p.play}" target="_blank" rel="noopener" title="open rep ${i+1}">${'¹²³'[i]||(i+1)}</a>`:'').join('');
-  return ` <span class="replinks">${a}</span>`;}
-function cmpLink(m){ return m.compare_url?` <a class="replinks" style="font-size:12px" href="${m.compare_url}" target="_blank" rel="noopener" title="compare all ${m.n} runs overlaid">⇄</a>`:'';}
+function selKey(pl,pa){return pl+'~'+pa;}
+function runsCell(r){
+  const a=(r.plays||[]).map((p,i)=>{ if(!p.play) return '';
+    const sel=selected.has(selKey(p.player,p.play))?' sel':'';
+    return `<a class="run${sel}" data-player="${p.player}" data-play="${p.play}" data-t0="${p.t0||''}" data-t1="${p.t1||''}" href="${BASE}/dashboard/session-viewer.html?player_id=${p.player}&play_id=${p.play}" target="_blank" rel="noopener" title="run ${i+1} (best→worst) · click: open · Alt/⌥-click: select for cross-row compare">${'¹²³'[i]||(i+1)}</a>`;}).join('');
+  const cmp=r.compare_url?` <a class="replinks" style="font-size:12px" href="${r.compare_url}" target="_blank" rel="noopener" title="compare this row's ${r.n} runs overlaid">⇄</a>`:'';
+  return `<span class="replinks">${a}</span>${cmp}`;}
+function resStack(r){return `<div class="resstack"><div class="resrow"><span class="reslbl">F</span>${resBar(r.fetched_residency)}</div><div class="resrow"><span class="reslbl">S</span>${resBar(r.residency)}</div></div>`;}
 function rungColor(r){const d=isDark();if(r==='buffer')return d?'#39424d':'#cdd5dc';const i=RUNGS.indexOf(r),t=i<0?0:i/(RUNGS.length-1);return `hsl(188, ${42+t*38}%, ${d?(22+t*40):(80-t*46)}%)`;}
 function resBar(res){if(!res||!res.length)return '<span class="muted">—</span>';
   const s=res.map(x=>{const lbl=x.rung==='buffer'?'buffering':x.rung+' Mbps';const h=x.rung==='buffer'?'background-image:repeating-linear-gradient(45deg,transparent 0 3px,rgba(0,0,0,.14) 3px 6px);':'';return `<span title="${lbl}: ${x.pct}%" style="width:${x.pct}%;background:${rungColor(x.rung)};${h}"></span>`;}).join('');
   return `<span class="resbar">${s}</span>`;}
-function rowFor(arm,m){
-  if(!m) return `<tr><td class="l">${arm}</td><td class="l muted" colspan="12">no data</td></tr>`;
-  return `<tr><td class="l">${arm}</td><td class="l">${repLinks(m.plays)}${cmpLink(m)}</td>`+
-    `<td>${num(m.video_start,vsHeat)}</td>`+
-    `<td>${num(m.ttff,null)}</td>`+
-    `<td>${cat(m.fetched)}</td>`+
-    `<td>${cat(m.shown)}</td>`+
-    `<td>${cat(m.var60)}</td>`+
-    `<td>${num(m.settle,null)}</td>`+
-    `<td>${num(m.startup_eff,effHeat)}</td>`+
-    `<td>${num(m.stalls,null)}</td>`+
-    `<td>${num(m.shifts_up,null)}</td>`+
-    `<td>${covBadge(m.video_start)}</td>`+
-    `<td class="l"><div class="resstack"><div class="resrow"><span class="reslbl">F</span>${resBar(m.fetched_residency)}</div><div class="resrow"><span class="reslbl">S</span>${resBar(m.residency)}</div></div></td></tr>`;
+// ---- columns: k=sort/id, lbl=header, l=left-align, sort=accessor (null=not sortable), cell=renderer
+const COLS=[
+  {k:'platform',lbl:'Platform',l:1,sort:r=>r.platform,cell:r=>r.platform},
+  {k:'cap',lbl:'Initial variant cap',l:1,sort:r=>r.cap_sort,cell:r=>r.cap_label},
+  {k:'seg',lbl:'Segment',l:1,sort:r=>r.seg_s,cell:r=>r.seg_s+'s'},
+  {k:'limit',lbl:'Network limit',l:1,sort:r=>r.limit_sort,cell:r=>r.limit_label},
+  {k:'runs',lbl:'Runs',l:1,sort:null,cell:runsCell},
+  {k:'video_start',lbl:'Video-start s',sort:r=>r.video_start&&r.video_start.mean,cell:r=>num(r.video_start,vsHeat)},
+  {k:'ttff',lbl:'TTFF s',sort:r=>r.ttff&&r.ttff.mean,cell:r=>num(r.ttff,null)},
+  {k:'fetched',lbl:'Fetched',sort:r=>r.fetched&&r.fetched.mode,cell:r=>cat(r.fetched)},
+  {k:'shown',lbl:'Shown',sort:r=>r.shown&&r.shown.mode,cell:r=>cat(r.shown)},
+  {k:'var60',lbl:'Var@60s',sort:r=>r.var60&&r.var60.mode,cell:r=>cat(r.var60)},
+  {k:'settle',lbl:'Settle s',sort:r=>r.settle&&r.settle.mean,cell:r=>num(r.settle,null)},
+  {k:'startup_eff',lbl:'Startup-eff',sort:r=>r.startup_eff&&r.startup_eff.mean,cell:r=>num(r.startup_eff,effHeat)},
+  {k:'stalls',lbl:'Stalls',sort:r=>r.stalls&&r.stalls.mean,cell:r=>num(r.stalls,null)},
+  {k:'shifts_up',lbl:'Shifts↑',sort:r=>r.shifts_up&&r.shifts_up.mean,cell:r=>num(r.shifts_up,null)},
+  {k:'cov',lbl:'±CoV',sort:r=>r.video_start&&r.video_start.cov,cell:r=>covBadge(r.video_start)},
+  {k:'residency',lbl:'Residency (F/S, mean)',l:1,sort:null,cell:resStack},
+];
+const DIR={'1':'▲','-1':'▼'};
+const DEFAULT_SORT=[{k:'platform',dir:1},{k:'limit',dir:-1},{k:'cap',dir:1},{k:'seg',dir:-1}];
+let sortKeys=DEFAULT_SORT.map(s=>({...s}));
+const selected=new Map(); // player~play -> {player,play,t0,t1}
+
+function sortRows(rows){
+  return rows.slice().sort((a,b)=>{
+    for(const {k,dir} of sortKeys){
+      const col=COLS.find(c=>c.k===k); if(!col||!col.sort) continue;
+      let va=col.sort(a), vb=col.sort(b);
+      if(va==null&&vb==null) continue;
+      if(va==null) return 1; if(vb==null) return -1;
+      const c=(typeof va==='string'||typeof vb==='string')?(''+va).localeCompare(''+vb):(va-vb);
+      if(c) return c<0?-dir:dir;
+    }
+    return 0;});
+}
+function headerHTML(){
+  return '<tr>'+COLS.map(c=>{
+    if(!c.sort) return `<th class="${c.l?'l':''}">${c.lbl}</th>`;
+    const i=sortKeys.findIndex(s=>s.k===c.k);
+    const ind=i>=0?`<span class="ind">${DIR[sortKeys[i].dir]}${sortKeys.length>1?(i+1):''}</span>`:'';
+    return `<th class="sortable ${c.l?'l':''}" data-k="${c.k}">${c.lbl}${ind}</th>`;
+  }).join('')+'</tr>';
 }
 function render(){
-  const seg=document.getElementById('segments'); seg.innerHTML='';
-  for(const [sk,sname] of SEGS){const d=DATA[sk]||{};let rows='';
-    for(const [lk,lname] of LIMITS){rows+=`<tr class="grp"><td colspan="13">Network limit: ${lname}</td></tr>`;
-      for(const c of CAPS) rows+=rowFor((c==='0'?'off':c+' Mbps'), d[`${lk}|${c}`]);}
-    seg.insertAdjacentHTML('beforeend',
-      `<h2>${sname}<span class="tag mono">${sk}</span></h2>`+
-      `<div class="tablewrap"><table><thead><tr>`+
-      `<th class="l">initial variant cap</th><th class="l">runs</th><th>Video-start s</th><th>TTFF s</th><th>Fetched</th><th>Shown</th><th>Var@60s</th><th>Settle s</th><th>Startup-eff</th><th>Stalls</th><th>Shifts↑</th><th>±CoV</th><th class="l">Residency (F/S, mean)</th>`+
-      `</tr></thead><tbody>${rows}</tbody></table></div>`);}
+  const rows=sortRows(ROWS);
+  const pk=sortKeys[0]&&COLS.find(c=>c.k===sortKeys[0].k);
+  let prev=null,body='';
+  for(const r of rows){
+    let sep='';
+    if(pk&&pk.sort){const v=pk.sort(r); if(prev!==null&&v!==prev) sep='grpsep'; prev=v;}
+    body+=`<tr class="${sep}">`+COLS.map(c=>`<td class="${c.l?'l':''}">${c.cell(r)}</td>`).join('')+'</tr>';
+  }
+  document.getElementById('tbl').innerHTML=`<thead>${headerHTML()}</thead><tbody>${body}</tbody>`;
+  const el=document.getElementById('sortchain');
+  el.innerHTML='Sort: '+sortKeys.map((s,i)=>{const c=COLS.find(x=>x.k===s.k);return `<span class="sc">${i+1}. ${c?c.lbl:s.k} ${DIR[s.dir]}</span>`;}).join('')+' <a href="#" id="sortreset">reset</a>';
 }
-// reproducibility panel — computed from the data
+// delegated: header sort (click=single, shift-click=add level), run alt-select
+document.addEventListener('click',e=>{
+  const th=e.target.closest('th.sortable');
+  if(th){const k=th.dataset.k,idx=sortKeys.findIndex(s=>s.k===k);
+    if(e.shiftKey){ if(idx>=0) sortKeys[idx].dir*=-1; else sortKeys.push({k,dir:1}); }
+    else { if(sortKeys.length===1&&idx===0) sortKeys[0].dir*=-1; else sortKeys=[{k,dir:1}]; }
+    render(); return;}
+  if(e.target.id==='sortreset'){e.preventDefault(); sortKeys=DEFAULT_SORT.map(s=>({...s})); render(); return;}
+  const run=e.target.closest('a.run');
+  if(run&&e.altKey){e.preventDefault(); const k=selKey(run.dataset.player,run.dataset.play);
+    if(selected.has(k)){selected.delete(k);run.classList.remove('sel');}
+    else{selected.set(k,{player:run.dataset.player,play:run.dataset.play,t0:run.dataset.t0,t1:run.dataset.t1});run.classList.add('sel');}
+    updateSel();}
+});
+function updateSel(){
+  const n=selected.size;
+  document.getElementById('selcount').textContent=`${n} run${n===1?'':'s'} selected`;
+  document.getElementById('selcompare').disabled=n<2;
+  document.getElementById('selbar').hidden=n===0;
+}
+function compareSelected(){
+  const items=[...selected.values()]; if(items.length<2) return;
+  const starts=items.map(x=>x.t0).filter(Boolean).sort();
+  const ends=items.map(x=>x.t1).filter(Boolean).sort();
+  const comp=items.map((x,i)=>`${x.player}~${x.play}~${i+1}`).join(',').replace(/~/g,'%7E').replace(/,/g,'%2C');
+  const from=starts[0]||'',to=ends[ends.length-1]||'';
+  window.open(`${BASE}/dashboard/session-viewer.html?player_id=${items[0].player}&play_id=${items[0].play}&from=${from}&to=${to}&compare=${comp}`,'_blank','noopener');
+}
+document.getElementById('selcompare').addEventListener('click',compareSelected);
+document.getElementById('selclear').addEventListener('click',()=>{selected.clear();updateSel();render();});
+// reproducibility panel — median across the n≥3 (iphone-sim) cells
 function reproPanel(){
-  const all=[]; for(const seg of Object.values(DATA)) for(const c of Object.values(seg)) if(c) all.push(c);
+  const all=ROWS.filter(r=>r.n>=3);
   const med=(xs)=>{xs=xs.filter(x=>x!=null).sort((a,b)=>a-b);return xs.length?xs[Math.floor(xs.length/2)]:0;};
   const covOf=k=>med(all.map(c=>c[k]&&c[k].cov));
-  const agreeOf=k=>{const t=all.filter(c=>c[k]);return Math.round(100*t.filter(c=>c[k].agree).length/t.length);};
+  const agreeOf=k=>{const t=all.filter(c=>c[k]);return t.length?Math.round(100*t.filter(c=>c[k].agree).length/t.length):0;};
   const worst=all.filter(c=>c.video_start).sort((a,b)=>b.video_start.cov-a.video_start.cov).slice(0,3)
     .map(c=>`${c.video_start.vals.join('/')}s`).join(' · ');
   const stats=[
@@ -166,11 +255,11 @@ function reproPanel(){
     ['var@60s agree',agreeOf('var60')+'%','settled rung is stable'],
   ];
   document.getElementById('repro').innerHTML=
-    `<h3>Run-to-run reproducibility</h3><p class="rsub">Median across cells (CoV = stdev/mean over the 3 reps). Fragile regime: 2 Mbps + high initial variant cap — worst video-start swing <span class="m">${worst}</span>.</p>`+
+    `<h3>Run-to-run reproducibility</h3><p class="rsub">Median across the n=3 iphone-sim cells (CoV = stdev/mean over the 3 reps). Fragile regime: 2 Mbps + high initial variant cap — worst video-start swing <span class="m">${worst}</span>.</p>`+
     `<div class="rgrid">`+stats.map(([k,v,d])=>`<div class="rstat"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('')+`</div>`;
 }
 document.getElementById('tgl').addEventListener('click',()=>{const cur=document.documentElement.getAttribute('data-theme');
   document.documentElement.setAttribute('data-theme',cur==='dark'?'light':cur==='light'?'dark':(matchMedia('(prefers-color-scheme:dark)').matches?'light':'dark'));render();reproPanel();});
 matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>{render();reproPanel();});
-render(); reproPanel();
+render(); reproPanel(); updateSel();
 </script>
