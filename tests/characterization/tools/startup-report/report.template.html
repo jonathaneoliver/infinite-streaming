@@ -353,13 +353,19 @@ const ABERRANT_TH=10; // seconds — a wedged startup
 // rungs. Shown beneath the session's own value so you see how far it deviated.
 function grpRef(k,g){
   if(!g) return null;
-  const rng=(o,suf)=>o?`${Number((+o.min).toFixed(1))}–${Number((+o.max).toFixed(1))}${suf||''}`:null;
+  const med=o=>{ if(!o) return null; if(!o.vals||!o.vals.length) return o.mean; const v=o.vals.slice().sort((a,b)=>a-b); return v[Math.floor(v.length/2)]; };
   const m1=x=>x==null?null:Number((+x).toFixed(1));
-  if(k==='video_start') return rng(g.video_start,'s');
-  if(k==='ttff') return rng(g.ttff,'s');
-  if(k==='settle') return rng(g.settle,'s');
-  if(k==='startup_eff') return g.startup_eff?`${Math.round(g.startup_eff.min)}–${Math.round(g.startup_eff.max)}%`:null;
-  if(k==='stalls') return rng(g.stalls);
+  // median · min–max range (median is robust to the wedge tail); a degenerate
+  // range (min==max, e.g. n=1) collapses to just the single value.
+  const mr=(o,suf)=>{ if(!o) return null; suf=suf||'';
+    if(o.min===o.max) return `${m1(o.min)}${suf}`;
+    return `${m1(med(o))} · ${m1(o.min)}–${m1(o.max)}${suf}`; };
+  if(k==='video_start') return mr(g.video_start,'s');
+  if(k==='ttff') return mr(g.ttff,'s');
+  if(k==='settle') return mr(g.settle,'s');
+  if(k==='startup_eff'){ const o=g.startup_eff; if(!o) return null;
+    return o.min===o.max?Math.round(o.min)+'%':`${Math.round(med(o))} · ${Math.round(o.min)}–${Math.round(o.max)}%`; }
+  if(k==='stalls') return mr(g.stalls);
   if(k==='shifts') return (g.fetch_shifts&&g.display_shifts)?`${m1(g.fetch_shifts.mean)}/${m1(g.display_shifts.mean)}`:null;
   if(k==='fetched') return g.fetched?trim(g.fetched.mode):null;
   if(k==='shown') return g.shown?trim(g.shown.mode):null;
@@ -378,7 +384,7 @@ function aberrantPanel(){
     const g=gidx[[r.platform,r.boundary||'cold',r.seg,r.limit,r.cap].join('|')];
     return '<tr>'+cols.map(c=>{
       const ref=grpRef(c.k,g);
-      const refHtml=(ref!=null&&ref!=='')?`<span class="rng" title="group range (min–max)${g?' · n='+g.n:''}">grp ${ref}</span>`:'';
+      const refHtml=(ref!=null&&ref!=='')?`<span class="rng" title="group median · min–max range${g?' · n='+g.n:''}">grp ${ref}</span>`:'';
       return `<td class="${c.l?'l':''}">${c.cell(r)}${refHtml}</td>`;
     }).join('')+'</tr>';
   }).join('');
