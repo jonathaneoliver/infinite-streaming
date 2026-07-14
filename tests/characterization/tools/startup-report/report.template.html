@@ -112,6 +112,7 @@
     </dl>
   </div>
 
+  <div id="aberrant"></div>
   <div class="filters" id="filters"></div>
   <div class="controls">
     <span class="chint">Click a column to sort · <strong>Shift-click</strong> to add sort levels (group-by) · <strong>Alt/⌥-click</strong> a run to select it across rows, then Compare</span>
@@ -190,7 +191,7 @@ const COLS=[
   {k:'residency',lbl:'Residency (F/S, mean)',l:1,sort:null,cell:resStack},
 ];
 const DIR={'1':'▲','-1':'▼'};
-const DEFAULT_SORT=[{k:'seg',dir:1},{k:'limit',dir:-1},{k:'cap',dir:-1},{k:'platform',dir:1}];
+const DEFAULT_SORT=[{k:'seg',dir:1},{k:'boundary',dir:1},{k:'limit',dir:-1},{k:'cap',dir:-1},{k:'platform',dir:1}];
 let sortKeys=DEFAULT_SORT.map(s=>({...s}));
 const selected=new Map(); // player~play -> {player,play,t0,t1}
 
@@ -340,8 +341,27 @@ function reproPanel(){
     `<h3>Run-to-run reproducibility</h3><p class="rsub">Median across the n=3 iphone-sim cells (CoV = stdev/mean over the 3 reps). Fragile regime: 2 Mbps + high initial variant cap — worst video-start swing <span class="m">${worst}</span>.</p>`+
     `<div class="rgrid">`+stats.map(([k,v,d])=>`<div class="rstat"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('')+`</div>`;
 }
+// Aberrant-plays drill-through table (separate from the main table). Lists every
+// INDIVIDUAL run that wedged (video-start >= threshold), worst-first, each linking
+// straight to its session. Computed from the per-rep vals + play_ids (plays and
+// video_start.vals are both ordered best->worst, so they pair by index).
+const ABERRANT_TH=10; // seconds — a wedged startup
+function aberrantPanel(){
+  const cols=orderedCols();
+  // Aberrant = a cell with at least one wedged run (video-start >= threshold),
+  // worst-first. Same columns as the main table; the ¹²³ / ⇄ links drill in.
+  const cells=ROWS.filter(r=>r.video_start && r.video_start.max>=ABERRANT_TH)
+                  .sort((a,b)=>b.video_start.max-a.video_start.max);
+  const el=document.getElementById('aberrant');
+  if(!cells.length){ el.innerHTML=''; return; }
+  const hdr='<tr>'+cols.map(c=>`<th class="${c.l?'l':''}">${c.lbl}</th>`).join('')+'</tr>';
+  const body=cells.map(r=>'<tr>'+cols.map(c=>`<td class="${c.l?'l':''}">${c.cell(r)}</td>`).join('')+'</tr>').join('');
+  el.innerHTML=`<h2>Aberrant cells <span class="tag mono">max video-start ≥ ${ABERRANT_TH}s · ${cells.length}</span></h2>`+
+    `<p class="lead">Cells with at least one wedged run (video-start ≥ ${ABERRANT_TH}s), worst first — same columns as the main table below. Use the ¹²³ / ⇄ links to drill into the runs.</p>`+
+    `<div class="tablewrap"><table><thead>${hdr}</thead><tbody>${body}</tbody></table></div>`;
+}
 document.getElementById('tgl').addEventListener('click',()=>{const cur=document.documentElement.getAttribute('data-theme');
-  document.documentElement.setAttribute('data-theme',cur==='dark'?'light':cur==='light'?'dark':(matchMedia('(prefers-color-scheme:dark)').matches?'light':'dark'));render();reproPanel();});
-matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>{render();reproPanel();});
-renderFilters(); render(); reproPanel(); updateSel();
+  document.documentElement.setAttribute('data-theme',cur==='dark'?'light':cur==='light'?'dark':(matchMedia('(prefers-color-scheme:dark)').matches?'light':'dark'));render();reproPanel();aberrantPanel();});
+matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>{render();reproPanel();aberrantPanel();});
+renderFilters(); render(); reproPanel(); aberrantPanel(); updateSel();
 </script>
