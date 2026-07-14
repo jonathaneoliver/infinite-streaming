@@ -212,7 +212,21 @@ def _limit_label(L):
 
 
 def _cap_label(C):
-    return "off" if C == "0" else "%s Mbps" % C
+    if C == "0":
+        return "off"
+    if C == "first":
+        return "1st variant"  # is.starts_first_variant — join on the bottom rung
+    return "%s Mbps" % C
+
+
+def _cap_sort(C):
+    # "off" = no cap = most permissive (biggest). "first" = forced bottom rung =
+    # the most restrictive startup lever, so it sorts smallest.
+    if C == "0":
+        return 1e9
+    if C == "first":
+        return 0.5
+    return float(C)
 
 
 def aggregate_cell(ms, player, host):
@@ -258,7 +272,7 @@ def session_row(play, m, plat, bnd, seg, L, C, player):
     row = {"platform": plat, "boundary": bnd, "boundary_sort": 0 if bnd == "cold" else 1,
            "seg": seg, "seg_s": SEG_S.get(seg, 0),
            "limit": L, "limit_label": _limit_label(L), "limit_sort": 1e9 if L == "0" else float(L),
-           "cap": C, "cap_label": _cap_label(C), "cap_sort": 1e9 if C == "0" else float(C),
+           "cap": C, "cap_label": _cap_label(C), "cap_sort": _cap_sort(C),
            "n": 1,
            "plays": [{"play": play, "player": player.get(play, ""),
                       "t0": m.get("t_start"), "t1": m.get("t_end")}]}
@@ -353,7 +367,7 @@ def build_rows(maps, reps, segs, limits, caps, host, use_cache):
                            "cap": C, "cap_label": _cap_label(C),
                            # "off" = no cap = the most permissive ceiling, so it
                            # sorts as a very big value (like "unlimited" for limit).
-                           "cap_sort": 1e9 if C == "0" else float(C)}
+                           "cap_sort": _cap_sort(C)}
                     row.update(aggregate_cell(ms, player, host))
                     rows.append(row)
                     collect_aberrant(ms, plabel, "cold", seg, L, C)
@@ -383,7 +397,7 @@ def build_rows(maps, reps, segs, limits, caps, host, use_cache):
                    "limit": L, "limit_label": _limit_label(L),
                    "limit_sort": 1e9 if L == "0" else float(L),
                    "cap": C, "cap_label": _cap_label(C),
-                   "cap_sort": 1e9 if C == "0" else float(C)}
+                   "cap_sort": _cap_sort(C)}
             row.update(aggregate_cell(ms, player, host))
             collect_aberrant(ms, plat, bnd, seg, L, C)
             k = (plat, bnd, seg, L, C)
