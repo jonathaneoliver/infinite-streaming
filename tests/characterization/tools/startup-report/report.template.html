@@ -352,25 +352,23 @@ const ABERRANT_TH=10; // seconds — a wedged startup
 // the min–max RANGE for continuous (the wedge sits at the top of it), mode for
 // rungs. Shown beneath the session's own value so you see how far it deviated.
 function grpRef(k,g){
-  if(!g) return null;
+  if(!g || g.n<=1) return null; // a single-session group adds nothing — no 2nd row
   const med=o=>{ if(!o) return null; if(!o.vals||!o.vals.length) return o.mean; const v=o.vals.slice().sort((a,b)=>a-b); return v[Math.floor(v.length/2)]; };
   const m1=x=>x==null?null:Number((+x).toFixed(1));
-  // median · min–max range (median is robust to the wedge tail); a degenerate
-  // range (min==max, e.g. n=1) collapses to just the single value.
-  const mr=(o,suf)=>{ if(!o) return null; suf=suf||'';
-    if(o.min===o.max) return `${m1(o.min)}${suf}`;
-    return `${m1(med(o))} · ${m1(o.min)}–${m1(o.max)}${suf}`; };
+  // median · min–max range; if the group is a single distinct value (min==max)
+  // there's nothing to add, so no 2nd row.
+  const mr=(o,suf)=>{ if(!o||o.min===o.max) return null; suf=suf||''; return `${m1(med(o))} · ${m1(o.min)}–${m1(o.max)}${suf}`; };
   if(k==='video_start') return mr(g.video_start,'s');
   if(k==='ttff') return mr(g.ttff,'s');
   if(k==='settle') return mr(g.settle,'s');
-  if(k==='startup_eff'){ const o=g.startup_eff; if(!o) return null;
-    return o.min===o.max?Math.round(o.min)+'%':`${Math.round(med(o))} · ${Math.round(o.min)}–${Math.round(o.max)}%`; }
+  if(k==='startup_eff'){ const o=g.startup_eff; if(!o||o.min===o.max) return null;
+    return `${Math.round(med(o))} · ${Math.round(o.min)}–${Math.round(o.max)}%`; }
   if(k==='stalls') return mr(g.stalls);
-  if(k==='shifts') return (g.fetch_shifts&&g.display_shifts)?`${m1(g.fetch_shifts.mean)}/${m1(g.display_shifts.mean)}`:null;
-  if(k==='fetched') return g.fetched?trim(g.fetched.mode):null;
-  if(k==='shown') return g.shown?trim(g.shown.mode):null;
-  if(k==='var60') return g.var60?trim(g.var60.mode):null;
-  if(k==='cov') return g.video_start?'±'+Math.round(g.video_start.cov)+'%':null;
+  if(k==='shifts') return (g.fetch_shifts&&g.display_shifts&&(g.fetch_shifts.cov||g.display_shifts.cov))?`${m1(g.fetch_shifts.mean)}/${m1(g.display_shifts.mean)}`:null;
+  if(k==='fetched') return (g.fetched&&!g.fetched.agree)?`${trim(Math.min(...g.fetched.vals))}–${trim(Math.max(...g.fetched.vals))}`:null;
+  if(k==='shown') return (g.shown&&!g.shown.agree)?`${trim(Math.min(...g.shown.vals))}–${trim(Math.max(...g.shown.vals))}`:null;
+  if(k==='var60') return (g.var60&&!g.var60.agree)?`${trim(Math.min(...g.var60.vals))}–${trim(Math.max(...g.var60.vals))}`:null;
+  if(k==='cov') return (g.video_start&&g.video_start.cov)?'±'+Math.round(g.video_start.cov)+'%':null;
   return null;
 }
 function aberrantPanel(){
