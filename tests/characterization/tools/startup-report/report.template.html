@@ -134,7 +134,9 @@
 </div>
 
 <script>
-const ROWS = __DATA__;
+const DATA = __DATA__;
+const ROWS = Array.isArray(DATA)?DATA:DATA.rows;
+const ABERRANT = Array.isArray(DATA)?[]:(DATA.aberrant||[]);
 const trim=x=>(x+'').replace(/(\.\d*?)0+$/,'$1').replace(/\.$/,'');
 const RUNGS=[0.988,1.542,2.409,3.774,5.822,9.05,14.085,21.859,33.808];
 const BASE="https://dev.jeoliver.com:21000";
@@ -348,16 +350,14 @@ function reproPanel(){
 const ABERRANT_TH=10; // seconds — a wedged startup
 function aberrantPanel(){
   const cols=orderedCols();
-  // Aberrant = a cell with at least one wedged run (video-start >= threshold),
-  // worst-first. Same columns as the main table; the ¹²³ / ⇄ links drill in.
-  const cells=ROWS.filter(r=>r.video_start && r.video_start.max>=ABERRANT_TH)
-                  .sort((a,b)=>b.video_start.max-a.video_start.max);
   const el=document.getElementById('aberrant');
-  if(!cells.length){ el.innerHTML=''; return; }
+  if(!ABERRANT.length){ el.innerHTML=''; return; }
+  // ABERRANT is one row per INDIVIDUAL wedged session (n=1), pre-sorted worst
+  // first. Same columns as the main table; the ¹ link opens that exact session.
   const hdr='<tr>'+cols.map(c=>`<th class="${c.l?'l':''}">${c.lbl}</th>`).join('')+'</tr>';
-  const body=cells.map(r=>'<tr>'+cols.map(c=>`<td class="${c.l?'l':''}">${c.cell(r)}</td>`).join('')+'</tr>').join('');
-  el.innerHTML=`<h2>Aberrant cells <span class="tag mono">max video-start ≥ ${ABERRANT_TH}s · ${cells.length}</span></h2>`+
-    `<p class="lead">Cells with at least one wedged run (video-start ≥ ${ABERRANT_TH}s), worst first — same columns as the main table below. Use the ¹²³ / ⇄ links to drill into the runs.</p>`+
+  const body=ABERRANT.map(r=>'<tr>'+cols.map(c=>`<td class="${c.l?'l':''}">${c.cell(r)}</td>`).join('')+'</tr>').join('');
+  el.innerHTML=`<h2>Aberrant sessions <span class="tag mono">video-start ≥ ${ABERRANT_TH}s · ${ABERRANT.length}</span></h2>`+
+    `<p class="lead">One line per <strong>individual</strong> wedged run (not aggregated), worst first — same columns as the main table below. The ¹ link opens that exact session.</p>`+
     `<div class="tablewrap"><table><thead>${hdr}</thead><tbody>${body}</tbody></table></div>`;
 }
 document.getElementById('tgl').addEventListener('click',()=>{const cur=document.documentElement.getAttribute('data-theme');

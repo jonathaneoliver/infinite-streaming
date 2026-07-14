@@ -248,6 +248,34 @@ def aggregate_cell(ms, player, host):
     return cell
 
 
+ABERRANT_S = 10.0  # video-start >= this (s) = a wedged session, listed individually
+
+
+def session_row(play, m, plat, bnd, seg, L, C, player):
+    """One INDIVIDUAL session as a row (n=1), each metric a scalar wrapped in the
+    same {mean,min,max,cov}/{mode,vals,agree} shape the column renderers expect —
+    so the aberrant table can reuse the exact same columns as the main table."""
+    row = {"platform": plat, "boundary": bnd, "boundary_sort": 0 if bnd == "cold" else 1,
+           "seg": seg, "seg_s": SEG_S.get(seg, 0),
+           "limit": L, "limit_label": _limit_label(L), "limit_sort": 1e9 if L == "0" else float(L),
+           "cap": C, "cap_label": _cap_label(C), "cap_sort": 1e9 if C == "0" else float(C),
+           "n": 1,
+           "plays": [{"play": play, "player": player.get(play, ""),
+                      "t0": m.get("t_start"), "t1": m.get("t_end")}]}
+    for disp, key, sc in CONT:
+        v = m.get(key)
+        if v is not None:
+            v = round(v * sc, 2)
+            row[disp] = {"vals": [v], "mean": v, "min": v, "max": v, "cov": 0.0}
+    for disp, key in CAT:
+        v = m.get(key)
+        if v is not None:
+            row[disp] = {"vals": [v], "mode": v, "agree": True}
+    row["residency"] = m.get("residency", [])
+    row["fetched_residency"] = m.get("fetched_residency", [])
+    return row
+
+
 def build_rows(maps, reps, segs, limits, caps, host, use_cache):
     """Flat list of row dicts across platforms — one per (platform, seg, limit,
     cap) cell that has data. Each row carries the axis fields + their numeric
@@ -291,6 +319,13 @@ def build_rows(maps, reps, segs, limits, caps, host, use_cache):
     ]
 
     rows = []
+    aberrant = []  # one row per wedged INDIVIDUAL session (video-start >= ABERRANT_S)
+
+    def collect_aberrant(ms, plat, bnd, seg, L, C):
+        for p_, m_ in ms:
+            if (m_.get("vstart") or 0) / 1000.0 >= ABERRANT_S:
+                aberrant.append(session_row(p_, m_, plat, bnd, seg, L, C, player))
+
     for plabel, files_for in platforms:
         for seg in segs:
             rep_maps = [load_rep_map(f) for f in files_for(seg) if os.path.exists(f)]
@@ -321,6 +356,7 @@ def build_rows(maps, reps, segs, limits, caps, host, use_cache):
                            "cap_sort": 1e9 if C == "0" else float(C)}
                     row.update(aggregate_cell(ms, player, host))
                     rows.append(row)
+                    collect_aberrant(ms, plabel, "cold", seg, L, C)
 
     # Extra plays with an explicit boundary (e.g. channel_change convergence).
     # File: extra_plays.tsv, lines: platform<TAB>boundary<TAB>seg<TAB>limit<TAB>cap<TAB>play_id.
@@ -349,6 +385,7 @@ def build_rows(maps, reps, segs, limits, caps, host, use_cache):
                    "cap": C, "cap_label": _cap_label(C),
                    "cap_sort": 1e9 if C == "0" else float(C)}
             row.update(aggregate_cell(ms, player, host))
+            collect_aberrant(ms, plat, bnd, seg, L, C)
             k = (plat, bnd, seg, L, C)
             if k in idx:
                 rows[idx[k]] = row
@@ -360,12 +397,14 @@ def build_rows(maps, reps, segs, limits, caps, host, use_cache):
             json.dump(cache, open(cache_path, "w"))
         except Exception:
             pass
-    return rows
+    # aberrant worst-first
+    aberrant.sort(key=lambda r: -(r.get("video_start", {}).get("mean", 0)))
+    return {"rows": rows, "aberrant": aberrant}
 
 
-def render(rows, template_path, out_path):
+def render(data, template_path, out_path):
     tmpl = open(template_path).read()
-    html = tmpl.replace("__DATA__", json.dumps(rows))
+    html = tmpl.replace("__DATA__", json.dumps(data))
     open(out_path, "w").write(html)
 
 
@@ -385,13 +424,14 @@ def main():
     ap.add_argument("--no-cache", action="store_true", help="ignore + overwrite the metrics cache")
     a = ap.parse_args()
 
-    rows = build_rows(a.maps, a.reps, a.segs.split(","), a.limits.split(","),
+    data = build_rows(a.maps, a.reps, a.segs.split(","), a.limits.split(","),
                       a.caps.split(","), a.host, not a.no_cache)
-    if not rows:
+    if not data["rows"]:
         sys.exit("no cells resolved — check --maps %s (rep*_seg_*.tsv present?)" % a.maps)
-    render(rows, a.template, a.out)
-    plats = sorted({r["platform"] for r in rows})
-    print("wrote %s  (%d rows across platforms: %s)" % (a.out, len(rows), ", ".join(plats)))
+    render(data, a.template, a.out)
+    plats = sorted({r["platform"] for r in data["rows"]})
+    print("wrote %s  (%d rows, %d aberrant sessions, platforms: %s)"
+          % (a.out, len(data["rows"]), len(data["aberrant"]), ", ".join(plats)))
 
 
 if __name__ == "__main__":
