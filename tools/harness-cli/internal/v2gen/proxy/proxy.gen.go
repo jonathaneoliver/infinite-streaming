@@ -1641,7 +1641,7 @@ type PlayerMetrics struct {
 	// VideoQualityAvgPct Same log-bitrate formula as video_quality_60s_pct but over the lifetime of the play. Computed by iOS from AVPlayerItem.accessLog().
 	VideoQualityAvgPct *float32 `json:"video_quality_avg_pct,omitempty"`
 
-	// VideoQualityPct video_bitrate_mbps as a percentage of the top variant in the active manifest (snapshot)
+	// VideoQualityPct Log-bitrate (Weber-Fechner) quality of the snapshot video_bitrate_mbps on the active manifest ladder: log(mbps/min)/log(max/min), clamped to a 0.20 floor. Shares the model with video_quality_60s_pct / video_quality_avg_pct (unset for single-rung ladders).
 	VideoQualityPct *float32 `json:"video_quality_pct,omitempty"`
 	VideoResolution *string  `json:"video_resolution,omitempty"`
 

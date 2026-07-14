@@ -9878,11 +9878,22 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		setDefault("loop_count_server", 0)
 		setDefault("player_metrics_loop_count_player", 0)
 		setDefault("player_metrics_loop_count_delta", 0)
-		bestMbps := bestVariantMbps(session)
+		// Perceptual (Weber-Fechner) video quality: the played bitrate's
+		// position on the ladder measured in log space, so doubling the
+		// bitrate near the top barely moves the score while the bottom
+		// rungs spread out. Mirrors the iOS log-bitrate model in
+		// PlayerViewModel.swift (qualityWeightForBitrate), including the
+		// 0.20 baseline floor, so this server snapshot metric and the iOS
+		// avg/60s metrics share one model. NB: the ladder here is the full
+		// advertised manifest; iOS uses its post-cap *selectable* peaks, so
+		// the two agree in shape, not to the decimal. A single-rung ladder
+		// leaves the field unset (the log ratio is undefined).
 		videoMbps := getFloat(session, "player_metrics_video_bitrate_mbps")
-		if bestMbps > 0 && videoMbps > 0 {
-			quality := (videoMbps / bestMbps) * 100
-			session["player_metrics_video_quality_pct"] = math.Round(quality*100) / 100
+		if minMbps, maxMbps, ok := variantMbpsRange(session); ok && videoMbps > 0 {
+			const qualityFloor = 0.20 // matches PlayerViewModel.qualityBaselineFloor
+			weight := math.Log(videoMbps/minMbps) / math.Log(maxMbps/minMbps)
+			weight = math.Max(qualityFloor, math.Min(1.0, weight))
+			session["player_metrics_video_quality_pct"] = math.Round(weight*100*100) / 100
 		} else {
 			delete(session, "player_metrics_video_quality_pct")
 		}
@@ -10365,21 +10376,27 @@ func inferServerVideoRendition(session SessionData, filename string, isManifest,
 	}
 }
 
-func bestVariantMbps(session SessionData) float64 {
-	variants := getManifestVariants(session)
-	if len(variants) == 0 {
-		return 0
-	}
-	maxBandwidth := 0
-	for _, variant := range variants {
+// variantMbpsRange returns the min and max declared BANDWIDTH across the
+// active manifest ladder, in Mbps. ok is false unless there are at least
+// two distinct positive-bandwidth rungs — the log-quality ratio is
+// undefined for a single-rung ladder (log(max/min) would be 0).
+func variantMbpsRange(session SessionData) (minMbps, maxMbps float64, ok bool) {
+	minBandwidth, maxBandwidth := 0, 0
+	for _, variant := range getManifestVariants(session) {
+		if variant.Bandwidth <= 0 {
+			continue
+		}
+		if minBandwidth == 0 || variant.Bandwidth < minBandwidth {
+			minBandwidth = variant.Bandwidth
+		}
 		if variant.Bandwidth > maxBandwidth {
 			maxBandwidth = variant.Bandwidth
 		}
 	}
-	if maxBandwidth <= 0 {
-		return 0
+	if minBandwidth <= 0 || maxBandwidth <= minBandwidth {
+		return 0, 0, false
 	}
-	return float64(maxBandwidth) / 1_000_000
+	return float64(minBandwidth) / 1_000_000, float64(maxBandwidth) / 1_000_000, true
 }
 
 func nowISO() string {
