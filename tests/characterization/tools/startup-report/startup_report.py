@@ -300,7 +300,10 @@ def build_rows(maps, reps, segs, limits, caps, host, use_cache):
                            "seg": seg, "seg_s": SEG_S.get(seg, 0),
                            "limit": L, "limit_label": _limit_label(L),
                            "limit_sort": 1e9 if L == "0" else float(L),
-                           "cap": C, "cap_label": _cap_label(C), "cap_sort": float(C)}
+                           "cap": C, "cap_label": _cap_label(C),
+                           # "off" = no cap = the most permissive ceiling, so it
+                           # sorts as a very big value (like "unlimited" for limit).
+                           "cap_sort": 1e9 if C == "0" else float(C)}
                     row.update(aggregate_cell(ms, player, host))
                     rows.append(row)
 
