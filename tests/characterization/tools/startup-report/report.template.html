@@ -189,7 +189,7 @@ const COLS=[
   {k:'residency',lbl:'Residency (F/S, mean)',l:1,sort:null,cell:resStack},
 ];
 const DIR={'1':'▲','-1':'▼'};
-const DEFAULT_SORT=[{k:'platform',dir:1},{k:'limit',dir:-1},{k:'cap',dir:1},{k:'seg',dir:-1}];
+const DEFAULT_SORT=[{k:'seg',dir:1},{k:'limit',dir:-1},{k:'cap',dir:-1},{k:'platform',dir:1}];
 let sortKeys=DEFAULT_SORT.map(s=>({...s}));
 const selected=new Map(); // player~play -> {player,play,t0,t1}
 
