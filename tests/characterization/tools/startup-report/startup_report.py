@@ -272,10 +272,12 @@ def build_rows(maps, reps, segs, limits, caps, host, use_cache):
             return fs
         return [os.path.join(maps, "startup_seg_%s.tsv" % seg)]
 
-    # (platform label, per-seg -> list of rep-map files). Real hardware is n=1.
+    # (platform label, per-seg -> list of rep-map files). Real hardware runs
+    # serially; each pass is a separate real{N}_seg file (rep 1 = real_seg).
     platforms = [
         ("iphone-sim", sim_files),
-        ("iphone", lambda seg: [os.path.join(maps, "real_seg_%s.tsv" % seg)]),
+        ("iphone", lambda seg: [os.path.join(maps, "real_seg_%s.tsv" % seg),
+                                os.path.join(maps, "real2_seg_%s.tsv" % seg)]),
     ]
 
     rows = []
