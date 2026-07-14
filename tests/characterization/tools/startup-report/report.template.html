@@ -172,6 +172,7 @@ function resBar(res){if(!res||!res.length)return '<span class="muted">—</span>
 // ---- columns: k=sort/id, lbl=header, l=left-align, sort=accessor (null=not sortable), cell=renderer
 const COLS=[
   {k:'platform',lbl:'Platform',l:1,sort:r=>r.platform,cell:r=>r.platform},
+  {k:'boundary',lbl:'Boundary',l:1,sort:r=>r.boundary_sort,cell:r=>r.boundary||'cold'},
   {k:'cap',lbl:'Initial variant cap',l:1,sort:r=>r.cap_sort,cell:r=>r.cap_label},
   {k:'seg',lbl:'Segment',l:1,sort:r=>r.seg_s,cell:r=>r.seg_s+'s'},
   {k:'limit',lbl:'Network limit',l:1,sort:r=>r.limit_sort,cell:r=>r.limit_label},
@@ -196,6 +197,7 @@ const selected=new Map(); // player~play -> {player,play,t0,t1}
 // ---- filters: same 4 axes. each holds a Set of the VALUES currently shown (all on by default)
 const FILTERS=[
   {k:'platform',lbl:'Platform',val:r=>r.platform,label:r=>r.platform,sort:r=>r.platform==='iphone'?0:1},
+  {k:'boundary',lbl:'Boundary',val:r=>r.boundary||'cold',label:r=>r.boundary||'cold',sort:r=>r.boundary_sort||0},
   {k:'cap',lbl:'Initial variant cap',val:r=>r.cap,label:r=>r.cap_label,sort:r=>r.cap_sort},
   {k:'seg',lbl:'Segment',val:r=>r.seg,label:r=>r.seg_s+'s',sort:r=>-r.seg_s},
   {k:'limit',lbl:'Network limit',val:r=>r.limit,label:r=>r.limit_label,sort:r=>-r.limit_sort},
@@ -227,7 +229,7 @@ function sortRows(rows){
     }
     return 0;});
 }
-const AXIS_KEYS=['platform','cap','seg','limit'];
+const AXIS_KEYS=['platform','boundary','cap','seg','limit'];
 // The 4 category columns reorder to follow the sort priority: axis keys that
 // are in the sort chain lead (in that order), remaining axes keep their default
 // order, then runs + metrics + residency stay put.

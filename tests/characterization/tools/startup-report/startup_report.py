@@ -309,6 +309,9 @@ def build_rows(maps, reps, segs, limits, caps, host, use_cache):
                     # list / start-of-row player_id is the best play.
                     ms.sort(key=lambda pm: (pm[1].get("vstart") is None, pm[1].get("vstart") or 0))
                     row = {"platform": plabel,
+                           # the grid is all cold (app_cold) — each cell is a fresh
+                           # app launch; channel_change rows come from extra_plays below.
+                           "boundary": "cold", "boundary_sort": 0,
                            "seg": seg, "seg_s": SEG_S.get(seg, 0),
                            "limit": L, "limit_label": _limit_label(L),
                            "limit_sort": 1e9 if L == "0" else float(L),
@@ -318,6 +321,39 @@ def build_rows(maps, reps, segs, limits, caps, host, use_cache):
                            "cap_sort": 1e9 if C == "0" else float(C)}
                     row.update(aggregate_cell(ms, player, host))
                     rows.append(row)
+
+    # Extra plays with an explicit boundary (e.g. channel_change convergence).
+    # File: extra_plays.tsv, lines: platform<TAB>boundary<TAB>seg<TAB>limit<TAB>cap<TAB>play_id.
+    # All plays sharing (platform,boundary,seg,limit,cap) aggregate into one row.
+    # A row whose key matches a grid cell OVERRIDES it (richer sample wins).
+    extra_path = os.path.join(maps, "extra_plays.tsv")
+    if os.path.exists(extra_path):
+        groups = {}
+        for line in open(extra_path).read().splitlines():
+            p = line.split("\t")
+            if len(p) == 6 and p[5] and p[5] != "NONE":
+                groups.setdefault(tuple(p[:5]), []).append(p[5])
+        idx = {(r["platform"], r["boundary"], r["seg"], r["limit"], r["cap"]): i
+               for i, r in enumerate(rows)}
+        for (plat, bnd, seg, L, C), plays in groups.items():
+            ms = [(pl, metrics_cached(pl)) for pl in plays]
+            ms = [(pl, m) for pl, m in ms if m]
+            if not ms:
+                continue
+            ms.sort(key=lambda pm: (pm[1].get("vstart") is None, pm[1].get("vstart") or 0))
+            row = {"platform": plat, "boundary": bnd,
+                   "boundary_sort": 0 if bnd == "cold" else 1,
+                   "seg": seg, "seg_s": SEG_S.get(seg, 0),
+                   "limit": L, "limit_label": _limit_label(L),
+                   "limit_sort": 1e9 if L == "0" else float(L),
+                   "cap": C, "cap_label": _cap_label(C),
+                   "cap_sort": 1e9 if C == "0" else float(C)}
+            row.update(aggregate_cell(ms, player, host))
+            k = (plat, bnd, seg, L, C)
+            if k in idx:
+                rows[idx[k]] = row
+            else:
+                rows.append(row)
 
     if use_cache:
         try:
