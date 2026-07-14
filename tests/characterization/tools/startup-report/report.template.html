@@ -104,7 +104,8 @@
     <dl>
       <dt>Video-start / Settle / TTFF</dt><dd>mean seconds, with min–max of the 3 reps beneath.</dd>
       <dt>Fetched / Shown / Var@60s</dt><dd>the modal rung; <span class="warn">⚠</span> = reps disagreed (hover for the values).</dd>
-      <dt>Stalls / Shifts↑</dt><dd>mean rebuffers and mean up-rung changes during the climb (min–max beneath).</dd>
+      <dt>Stalls</dt><dd>mean rebuffers over the play (min–max beneath).</dd>
+      <dt>Shifts F/D</dt><dd>mean rung changes in the first 60 s — <strong>F</strong>etched (what ABR requested) / <strong>D</strong>isplayed (what played). Fetch often round-trips (cold-start over-select→correct) while display steps once.</dd>
       <dt>Startup-eff</dt><dd>mean bitrate-utilization % over 60 s (buffering=0 ÷ achievable rung). Engineering proxy, not a QoE score.</dd>
       <dt>±CoV</dt><dd>video-start coefficient of variation across reps — the stability signal. green ≤10% · amber ≤25% · red &gt;25%.</dd>
       <dt>Residency</dt><dd>mean of the 3 reps: F=fetched (requested, no buffer band), S=shown (displayed; hatched=buffering). Dark→bright = low→high bitrate.</dd>
@@ -152,6 +153,10 @@ function cat(o){ if(!o) return '<span class="muted">—</span>';
   return `<span class="m warn" title="reps: ${o.vals.join(', ')}">${v}&nbsp;⚠</span><span class="rng">${lo}–${hi}</span>`;}
 function covBadge(o){ if(!o) return '<span class="muted">—</span>';
   return `<span class="badge" style="background:${covColor(o.cov)}">±${Math.round(o.cov)}%</span>`;}
+function shiftsCell(r){ const f=r.fetch_shifts, d=r.display_shifts;
+  if(!f&&!d) return '<span class="muted">—</span>';
+  const one=(o,lbl)=>o?`<span class="m" title="${lbl} shifts: reps ${o.vals.join('/')}">${Number(o.mean.toFixed(1))}</span>`:'<span class="muted">–</span>';
+  return `${one(f,'fetch')}<span class="muted"> / </span>${one(d,'display')}`;}
 function selKey(pl,pa){return pl+'~'+pa;}
 function runsCell(r){
   const a=(r.plays||[]).map((p,i)=>{ if(!p.play) return '';
@@ -179,7 +184,7 @@ const COLS=[
   {k:'settle',lbl:'Settle s',sort:r=>r.settle&&r.settle.mean,cell:r=>num(r.settle,null)},
   {k:'startup_eff',lbl:'Startup-eff',sort:r=>r.startup_eff&&r.startup_eff.mean,cell:r=>num(r.startup_eff,effHeat)},
   {k:'stalls',lbl:'Stalls',sort:r=>r.stalls&&r.stalls.mean,cell:r=>num(r.stalls,null)},
-  {k:'shifts_up',lbl:'Shifts↑',sort:r=>r.shifts_up&&r.shifts_up.mean,cell:r=>num(r.shifts_up,null)},
+  {k:'shifts',lbl:'Shifts F/D',sort:r=>r.fetch_shifts&&r.fetch_shifts.mean,cell:shiftsCell},
   {k:'cov',lbl:'±CoV',sort:r=>r.video_start&&r.video_start.cov,cell:r=>covBadge(r.video_start)},
   {k:'residency',lbl:'Residency (F/S, mean)',l:1,sort:null,cell:resStack},
 ];

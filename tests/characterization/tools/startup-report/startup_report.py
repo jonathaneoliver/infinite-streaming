@@ -146,7 +146,15 @@ def metrics(play, host):
         hits = [e for (e, r, pl) in samples if pl and abs(r - var60) < 1e-6 and e >= vstart_s - 0.5]
         if hits:
             t_settle = max(0.0, min(hits) - vstart_s)
-    # shifts during the climb [video-start, settle], split up / down.
+    # rung-change counts over the first 60 s: FETCHED (active) variant vs
+    # DISPLAYED (playing) variant. The fetch profile often round-trips (cold-
+    # start over-select then correct) while the displayed variant steps once,
+    # so the two differ — showing both tells that story.
+    def _nshifts(seq):
+        return sum(1 for a, b in zip(seq, seq[1:]) if abs(b - a) > 1e-6)
+    fetch_shifts = _nshifts([r for (e, r) in active if e < 60])
+    display_shifts = _nshifts([r for (e, r, pl) in samples if pl and e < 60])
+    # up/down (displayed, over the climb) kept for reference
     up = dn = 0
     if var60 is not None and vstart_s is not None:
         end = (vstart_s + t_settle) if t_settle is not None else 60.0
@@ -159,6 +167,7 @@ def metrics(play, host):
     return dict(ttff=ttff, vstart=vstart, stalls=stalls, startrung=startrung,
                 first_fetched=first_fetched, var60=var60, t_settle=t_settle,
                 quality_pct=quality_pct, shifts_up=up, shifts_down=dn,
+                fetch_shifts=fetch_shifts, display_shifts=display_shifts,
                 residency=residency, fetched_residency=fetched_residency,
                 t_start=(tmin.strftime("%Y%m%dT%H%M%SZ") if tmin else None),
                 t_end=(tmax.strftime("%Y%m%dT%H%M%SZ") if tmax else None))
@@ -168,7 +177,8 @@ def metrics(play, host):
 # continuous metrics -> mean/min/max/cov ; categorical rungs -> mode/agree/vals
 CONT = [("video_start", "vstart", 0.001), ("ttff", "ttff", 0.001),
         ("startup_eff", "quality_pct", 1.0), ("settle", "t_settle", 1.0),
-        ("shifts_up", "shifts_up", 1.0), ("stalls", "stalls", 1.0)]
+        ("fetch_shifts", "fetch_shifts", 1.0), ("display_shifts", "display_shifts", 1.0),
+        ("stalls", "stalls", 1.0)]
 CAT = [("fetched", "first_fetched"), ("shown", "startrung"), ("var60", "var60")]
 
 
