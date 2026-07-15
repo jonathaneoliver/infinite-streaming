@@ -65,6 +65,12 @@ Optional Arguments:
   --time <seconds>       Limit video duration (e.g., --time 30 for 30 seconds)
   --force-software       Force software encoding (default behavior)
   --force-hardware       Force hardware encoding via VideoToolbox (macOS)
+  --two-pass             Two-pass software encode (libx264/libx265). Pass 1
+                         profiles complexity; pass 2 distributes bits to hit the
+                         -b:v target accurately while the tight VBV still holds
+                         peaks flat. Fixes the single-pass x265 average undershoot
+                         under a small bufsize (~17% low on HEVC — see #868).
+                         Roughly doubles encode time. Ignored for hardware/AV1.
   --max-res <resolution> Limit maximum resolution tier encoded
                          Valid: 360p, 540p, 720p, 1080p, 1440p, 2160p
                          Example: --max-res 1080p (skips 1440p, 2160p)
@@ -143,6 +149,9 @@ Examples:
   
   # Force hardware encoding (VideoToolbox, macOS)
   $0 --input video.mp4 --force-hardware
+
+  # Two-pass HEVC for accurate average bitrate (honest AVERAGE-BANDWIDTH)
+  $0 --input video.mp4 --codec hevc --two-pass
   
   # Enable padding with black frames
   $0 --input video.mp4 --padding
@@ -194,6 +203,7 @@ CODEC_SELECTION_EXPLICIT=false
 TIME_LIMIT=""  # Optional duration limit in seconds
 FORCE_SOFTWARE=false  # Force software encoding (disables hardware)
 FORCE_HARDWARE=false  # Force hardware encoding (VideoToolbox)
+TWO_PASS=false        # Two-pass software encode (libx264/libx265) for accurate avg
 HLS_FORMAT="fmp4"  # fmp4, ts, both
 PAD_TO_SEGMENT_BOUNDARY=false  # Padding is disabled by default
 MAX_RESOLUTION_HEIGHT=""  # Optional max resolution limit (e.g., "1080p")
@@ -275,6 +285,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --force-hardware)
             FORCE_HARDWARE=true
+            shift
+            ;;
+        --two-pass)
+            TWO_PASS=true
             shift
             ;;
         --no-padding)
@@ -360,6 +374,12 @@ case "$LADDER" in
         exit 1
         ;;
 esac
+
+# Two-pass only applies to software libx264/libx265. Hardware VideoToolbox and
+# AV1 (libsvtav1) fall back to single pass; warn so the flag isn't assumed active.
+if [[ "$TWO_PASS" == "true" ]] && [[ "$FORCE_HARDWARE" == "true" ]]; then
+    echo "Warning: --two-pass is ignored under --force-hardware (VideoToolbox is single-pass); use software encoding for two-pass."
+fi
 
 # Validate required arguments
 if [[ "$RESUME_MODE" == "false" ]] && [[ -z "$INPUT_FILE" ]]; then
@@ -2115,6 +2135,57 @@ select_resolution_tiers() {
 # Phase 3: Encode Variants
 ################################################################################
 
+# Two-pass software encode for libx264/libx265 (#868). Single-pass x265 under a
+# tight 0.25x VBV bufsize undershoots the -b:v target by ~17% because it has no
+# buffer to bank bits for complex scenes, which sags the achieved average well
+# below the advertised AVERAGE-BANDWIDTH and packs the ladder rungs together.
+# Two-pass fixes this: pass 1 profiles scene complexity into a stats file (muxed
+# output discarded via -f null), pass 2 distributes bits to hit the average
+# accurately while the SAME maxrate/bufsize VBV keeps peaks flat. Relies on bash
+# dynamic scope to read encode_variant's locals (filter, bitrate_kbps,
+# bufsize_kbps, preset, output_file, label). Args: <vcodec> <params_key>
+# <base_params> <vtag>.
+encode_two_pass_sw() {
+    local vcodec="$1"       # libx265 | libx264
+    local params_key="$2"   # x265-params | x264-params
+    local base_params="$3"  # keyint=...:scenecut=0:open-gop=0[:pools=...]
+    local vtag="$4"         # hvc1 | avc1
+    local maxrate_k="$((bitrate_kbps * MAXRATE_PERCENT / 100))k"
+    local passlog="$TEMP_DIR/${codec}_${label}_2pass.log"
+
+    log "  Two-pass: pass 1/2 (complexity analysis, output discarded)"
+    ffmpeg -i "$MEZZANINE" \
+           -vf "$filter" \
+           -c:v "$vcodec" \
+           -b:v "${bitrate_kbps}k" \
+           -maxrate "$maxrate_k" \
+           -bufsize "${bufsize_kbps}k" \
+           -preset "$preset" \
+           -threads 0 \
+           "-${params_key}" "${base_params}:pass=1:stats=${passlog}" \
+           -pix_fmt yuv420p \
+           -an \
+           -f null - \
+           -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+
+    log "  Two-pass: pass 2/2 (final encode to target average)"
+    ffmpeg -i "$MEZZANINE" \
+           -vf "$filter" \
+           -c:v "$vcodec" \
+           -b:v "${bitrate_kbps}k" \
+           -maxrate "$maxrate_k" \
+           -bufsize "${bufsize_kbps}k" \
+           -preset "$preset" \
+           -threads 0 \
+           "-${params_key}" "${base_params}:pass=2:stats=${passlog}" \
+           -tag:v "$vtag" \
+           -pix_fmt yuv420p \
+           -an \
+           -movflags empty_moov+default_base_moof -frag_duration 1000000 \
+           "$output_file" \
+           -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+}
+
 encode_variant() {
     local codec=$1
     local width=$2
@@ -2346,8 +2417,13 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -movflags empty_moov+default_base_moof -frag_duration 1000000 \
                    "$output_file" \
                    -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+        elif [ "$TWO_PASS" = true ]; then
+            # libx265 software, two-pass (accurate average — see encode_two_pass_sw)
+            encode_two_pass_sw libx265 x265-params \
+                "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0:pools=+:frame-threads=0" \
+                hvc1
         else
-            # libx265 software with bitrate control
+            # libx265 software with bitrate control (single pass)
             ffmpeg -i "$MEZZANINE" \
                    -vf "$filter" \
                    -c:v libx265 \
@@ -2382,8 +2458,13 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -movflags empty_moov+default_base_moof -frag_duration 1000000 \
                    "$output_file" \
                    -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+        elif [ "$TWO_PASS" = true ]; then
+            # libx264 software, two-pass (accurate average — see encode_two_pass_sw)
+            encode_two_pass_sw libx264 x264-params \
+                "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0" \
+                avc1
         else
-            # libx264 software with bitrate control
+            # libx264 software with bitrate control (single pass)
             ffmpeg -i "$MEZZANINE" \
                    -vf "$filter" \
                    -c:v libx264 \

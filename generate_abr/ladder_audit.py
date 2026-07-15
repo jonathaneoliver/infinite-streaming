@@ -152,24 +152,72 @@ def measure(base, playlist_uri, n=MEASURE_SEGMENTS):
 
 
 # ---- VMAF (ffmpeg libvmaf) -------------------------------------------------
-def measure_vmaf(base, variant_uri, ref, ref_w, ref_h, subsample, full):
-    """Pooled VMAF (mean / harmonic_mean / min) of a variant vs the mezzanine."""
+def probe_resolution(path):
+    """(width, height) of a video file via ffprobe, or None on failure."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        r = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height",
+             "-of", "csv=s=x:p=0", path],
+            capture_output=True, text=True, timeout=60)
+        w, h = r.stdout.strip().split("x")
+        return int(w), int(h)
+    except Exception:
+        return None
+
+
+def resolve_compare_res(spec, ref):
+    """Resolve a --vmaf-compare-res spec to (w, h) or None (== per-rung native).
+
+    spec: 'source' -> probe the mezzanine; 'native' -> None (each rung at its
+    own res, legacy behaviour); 'WxH' -> that fixed resolution.
+    """
+    if spec == "native":
+        return None
+    if spec == "source":
+        wh = probe_resolution(ref) if ref else None
+        if not wh:
+            raise SystemExit("--vmaf-compare-res source: could not probe reference resolution")
+        return wh
+    if "x" in spec:
+        w, h = spec.lower().split("x")
+        return int(w), int(h)
+    raise SystemExit(f"--vmaf-compare-res: expected 'source', 'native', or 'WxH' (got {spec!r})")
+
+
+def measure_vmaf(base, variant_uri, ref, cmp_w, cmp_h, subsample, full, model=None):
+    """Pooled VMAF (mean / harmonic_mean / min) of a variant vs the mezzanine.
+
+    Both the distorted variant AND the reference are scaled to the SAME
+    comparison resolution (cmp_w x cmp_h) before scoring. Passing a COMMON
+    comparison resolution for every rung (e.g. the source's native 4K) is what
+    makes VMAF comparable across the ladder: each rung is judged on how faithful
+    it is to the source at one fixed display resolution, so a higher-res rung
+    that preserves more detail legitimately scores higher. Scoring each rung at
+    its OWN native resolution instead (the pre-2026-07 default) compares every
+    rung against a different-difficulty target and produces false `inversion`
+    flags — a higher-res rung faces a harder reference, not a worse encode.
+    """
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return {"error": "ffmpeg not on PATH"}
     src = resolve(base, variant_uri)
     sub = "" if full else f"n_subsample={subsample}:"
+    mdl = f"model=version={model}:" if model else ""
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
         log = tf.name
     try:
         # input 0 = distorted variant, input 1 = reference mezzanine. Normalise
-        # BOTH to the ref resolution + yuv420p + SAR 1 + reset PTS so libvmaf
-        # never hits a dimension/format/SAR/timebase mismatch (the upscaled rungs
-        # otherwise died with "-22 Invalid argument / no packets"). libvmaf wants
-        # [distorted][reference].
-        flt = (f"[0:v]scale={ref_w}:{ref_h}:flags=bicubic,format=yuv420p,setsar=1,setpts=PTS-STARTPTS[dist];"
-               f"[1:v]scale={ref_w}:{ref_h}:flags=bicubic,format=yuv420p,setsar=1,setpts=PTS-STARTPTS[ref];"
-               f"[dist][ref]libvmaf={sub}log_fmt=json:log_path={log}")
+        # BOTH to the comparison resolution + yuv420p + SAR 1 + reset PTS so
+        # libvmaf never hits a dimension/format/SAR/timebase mismatch (the
+        # upscaled rungs otherwise died with "-22 Invalid argument / no
+        # packets"). libvmaf wants [distorted][reference].
+        flt = (f"[0:v]scale={cmp_w}:{cmp_h}:flags=bicubic,format=yuv420p,setsar=1,setpts=PTS-STARTPTS[dist];"
+               f"[1:v]scale={cmp_w}:{cmp_h}:flags=bicubic,format=yuv420p,setsar=1,setpts=PTS-STARTPTS[ref];"
+               f"[dist][ref]libvmaf={mdl}{sub}log_fmt=json:log_path={log}")
         cmd = [ffmpeg, "-nostdin", "-hide_banner", "-i", src, "-i", ref,
                "-lavfi", flt, "-f", "null", "-"]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
@@ -316,6 +364,14 @@ def main():
     ap.add_argument("--no-vmaf", action="store_true", help="skip VMAF even if --vmaf-ref given")
     ap.add_argument("--vmaf-full", action="store_true", help="VMAF every frame (no subsample)")
     ap.add_argument("--vmaf-subsample", type=int, default=VMAF_SUBSAMPLE)
+    ap.add_argument("--vmaf-compare-res", default="source",
+                    help="Common resolution to score every rung at: 'source' (probe "
+                         "the mezzanine, default — makes VMAF comparable across the "
+                         "ladder), 'native' (each rung at its own res, legacy — "
+                         "produces false inversion flags), or explicit 'WxH'.")
+    ap.add_argument("--vmaf-model", default=None,
+                    help="libvmaf model version (e.g. vmaf_4k_v0.6.1 for 4K-scored "
+                         "content). Default: ffmpeg's built-in 1080p model.")
     ap.add_argument("--segments", type=int, default=MEASURE_SEGMENTS)
     ap.add_argument("--json", action="store_true", help="print ladder_audit.json to stdout")
     ap.add_argument("--out", help="write ladder_audit.json here (default <dir>/ladder_audit.json for --dir)")
@@ -338,13 +394,20 @@ def main():
 
     # VMAF (encode-time only — needs the mezzanine; skip on live audits without a ref)
     do_vmaf = bool(args.vmaf_ref) and not args.no_vmaf
+    cmp_res = None
     if do_vmaf:
+        # Resolve a single COMMON comparison resolution for the whole ladder so
+        # VMAF is comparable across rungs (default: the source's native res).
+        # 'native' falls back to per-rung own-resolution scoring (legacy).
+        cmp_res = resolve_compare_res(args.vmaf_compare_res, args.vmaf_ref)
         for v in variants:
             wh = v["resolution"].split("x") if "x" in v["resolution"] else None
             if not wh:
                 continue
-            v["vmaf"] = measure_vmaf(base, v["uri"], args.vmaf_ref, wh[0], wh[1],
-                                     args.vmaf_subsample, args.vmaf_full)
+            cw, ch = cmp_res if cmp_res else (wh[0], wh[1])
+            v["vmaf"] = measure_vmaf(base, v["uri"], args.vmaf_ref, cw, ch,
+                                     args.vmaf_subsample, args.vmaf_full,
+                                     model=args.vmaf_model)
 
     variants.sort(key=lambda v: v["bw"])
     checks = run_checks(variants, (a_peak, a_avg))
@@ -360,6 +423,8 @@ def main():
         "source": base,
         "mode": "on-disk" if args.dir else "live",
         "vmaf": "subsampled" if (do_vmaf and not args.vmaf_full) else ("full" if do_vmaf else "off"),
+        "vmaf_compare_res": (f"{cmp_res[0]}x{cmp_res[1]}" if cmp_res else "native") if do_vmaf else None,
+        "vmaf_model": args.vmaf_model if do_vmaf else None,
         "audio_measured_bps": {"peak": round(a_peak), "avg": round(a_avg)},
         "variants": variants,
         "checks": checks,
