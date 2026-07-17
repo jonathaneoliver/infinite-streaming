@@ -60,8 +60,8 @@ func TestSeedNarrowConfigClass(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for _, e := range es {
-		if e.Platform != "ipad-sim" {
-			t.Fatalf("narrow seed must be ipad-sim only, got %s", e.Platform)
+		if e.Platform != "iphone-sim" {
+			t.Fatalf("narrow seed must be iphone-sim only, got %s", e.Platform)
 		}
 		if e.Class != ClassConfig {
 			t.Fatalf("config seed must be config-class, got %s", e.Class)

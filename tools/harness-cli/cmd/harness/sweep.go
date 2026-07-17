@@ -27,7 +27,7 @@ Subcommands:
                            populate backlog/ with the starter set.
                            --class config (default: realistic stream/network)
                            or fault (explicit-error recovery). --full widens
-                           past the narrow depth-first ipad-sim set. --contents
+                           past the narrow depth-first iphone-sim set. --contents
                            seeds the recipe set against each clip (default: the
                            .env CHAR_CONTENT single clip).
   add [flags]              enqueue ONE operator-authored experiment (kind=manual)
@@ -205,7 +205,7 @@ func cmdSweepSeed(client *api.Client, args []string, asJSON bool) error {
 	if asJSON {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"seeded": len(exps), "full": *full, "class": *class, "contents": clips})
 	}
-	mode := "narrow (depth-first, ipad-sim)"
+	mode := "narrow (depth-first, iphone-sim)"
 	if *full {
 		mode = "full (all platforms)"
 	}

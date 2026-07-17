@@ -138,7 +138,7 @@ As a **compare axis**, `server:` runs concurrent arms against *different* backen
 name: server-split
 parallel: true
 duration_s: 90
-defaults: { platform: ipad-sim, content: <clip> }
+defaults: { platform: iphone-sim, content: <clip> }
 groups:
   - id: srv
     control:  { server: https://dev.jeoliver.com:21000 }   # test-dev, full stack
