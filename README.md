@@ -5,6 +5,7 @@
 [![License](https://img.shields.io/badge/license-InfiniteStream-lightgrey)](LICENSE)
 [![GHCR](https://img.shields.io/badge/ghcr.io-infinite--streaming-2496ED?logo=docker&logoColor=white)](https://github.com/jonathaneoliver/infinite-streaming/pkgs/container/infinite-streaming)
 [![Stars](https://img.shields.io/github/stars/jonathaneoliver/infinite-streaming?style=flat&color=yellow)](https://github.com/jonathaneoliver/infinite-streaming/stargazers)
+[![Sponsor](https://img.shields.io/badge/%E2%98%95%20send%20me%20a%20coffee-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/jonathaneoliver)
 
 A Docker-based HLS/DASH test server for video players. Generates LL-HLS and LL-DASH streams (plus 2s and 6s segment variants) from short VOD content on a shared clock, and lets you inject deterministic, streaming-aware failures — HTTP errors, hung responses, corrupted segments, transport drops, bandwidth limits — on a per-session basis so player bugs become reproducible.
 
