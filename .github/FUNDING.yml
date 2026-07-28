@@ -1,0 +1,3 @@
+# Renders the "Sponsor" button at the top of the repo page.
+# GitHub only reads this file from the default branch.
+github: [jonathaneoliver]
