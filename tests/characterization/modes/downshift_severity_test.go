@@ -18,6 +18,7 @@ import (
 //
 // 60 s @ 8 Mbps → 120 s @ 1 Mbps.
 
+func TestDownshiftSeverityIPhoneSim(t *testing.T) { runDownshiftSeverity(t, runner.PlatformIPhoneSim) }
 func TestDownshiftSeverityIPadSim(t *testing.T)   { runDownshiftSeverity(t, runner.PlatformIPadSim) }
 func TestDownshiftSeverityIPhone(t *testing.T)    { runDownshiftSeverity(t, runner.PlatformIPhone) }
 func TestDownshiftSeverityAppleTV(t *testing.T)   { runDownshiftSeverity(t, runner.PlatformAppleTV) }

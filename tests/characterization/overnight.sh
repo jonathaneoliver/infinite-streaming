@@ -6,7 +6,7 @@
 # Usage:
 #   scripts/overnight.sh <platform>
 #
-# Platforms: ipad-sim, iphone, apple-tv, android-tv, web
+# Platforms: iphone-sim, ipad-sim, iphone, apple-tv, android-tv, web
 #
 # Artifacts:
 #   tests/characterization/artifacts/runs/<datetime>-<platform>/
@@ -23,11 +23,12 @@ set -u
 
 if [[ $# -lt 1 ]]; then
     echo "usage: $0 <platform>"
-    echo "platforms: ipad-sim iphone apple-tv android-tv web"
+    echo "platforms: iphone-sim ipad-sim iphone apple-tv android-tv web"
     exit 2
 fi
 
 case $1 in
+    iphone-sim) TEST_SUFFIX=IPhoneSim ;;
     ipad-sim)   TEST_SUFFIX=IPadSim ;;
     iphone)     TEST_SUFFIX=IPhone ;;
     apple-tv)   TEST_SUFFIX=AppleTV ;;
@@ -66,7 +67,7 @@ esac
 # Under Device Farm the sim pool must be booted (+ WDA warm) before the run so DF
 # can allocate. boot-pool.sh is iOS-sim specific; real hardware / web don't need
 # it. Best-effort — a warning there shouldn't abort the run.
-if [[ "$DF_ON" == "1" && "$PLATFORM" == "ipad-sim" ]]; then
+if [[ "$DF_ON" == "1" && "$PLATFORM" == *-sim ]]; then
     echo "Device Farm on — booting the sim pool (boot-pool.sh)…"
     "$REPO_ROOT/tools/appium-device-farm/boot-pool.sh" || echo "  boot-pool reported an issue (continuing)"
 fi

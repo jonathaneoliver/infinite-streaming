@@ -1,0 +1,397 @@
+<title>iOS Startup Characterization — cap × network limit × segment × platform</title>
+<style>
+  :root{--bg:#f4f6f8;--panel:#ffffff;--panel-2:#eef1f4;--ink:#12181f;--ink-2:#4a5763;
+    --line:#d9e0e6;--accent:#0e9aa7;--accent-ink:#0b7d88;
+    --shadow:0 1px 2px rgba(16,32,40,.06),0 8px 24px rgba(16,32,40,.05);}
+  @media (prefers-color-scheme:dark){:root{--bg:#0b0f14;--panel:#111820;--panel-2:#0e141b;--ink:#e6edf3;--ink-2:#93a4b3;
+    --line:#1e2a35;--accent:#2fd4c8;--accent-ink:#54e0d6;--shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);}}
+  :root[data-theme="light"]{--bg:#f4f6f8;--panel:#ffffff;--panel-2:#eef1f4;--ink:#12181f;--ink-2:#4a5763;
+    --line:#d9e0e6;--accent:#0e9aa7;--accent-ink:#0b7d88;--shadow:0 1px 2px rgba(16,32,40,.06),0 8px 24px rgba(16,32,40,.05);}
+  :root[data-theme="dark"]{--bg:#0b0f14;--panel:#111820;--panel-2:#0e141b;--ink:#e6edf3;--ink-2:#93a4b3;
+    --line:#1e2a35;--accent:#2fd4c8;--accent-ink:#54e0d6;--shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);}
+  *{box-sizing:border-box} html,body{max-width:100%;overflow-x:hidden}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .mono{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-variant-numeric:tabular-nums}
+  .wrap{max-width:none;margin:0;padding:clamp(20px,4vw,56px) clamp(16px,3vw,32px) 80px}
+  header.top{border-bottom:1px solid var(--line);padding-bottom:26px;margin-bottom:28px}
+  .eyebrow{font:600 12px/1.2 ui-monospace,monospace;letter-spacing:.16em;text-transform:uppercase;color:var(--accent-ink)}
+  h1{font-size:clamp(26px,4.4vw,40px);line-height:1.08;margin:14px 0 8px;font-weight:680;letter-spacing:-.02em;text-wrap:balance;max-width:22ch}
+  .sub{color:var(--ink-2);font-size:clamp(15px,1.6vw,17px);max-width:74ch;margin:0}
+  .repro{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:24px 0 8px;box-shadow:var(--shadow)}
+  .repro h3{margin:0 0 4px;font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent-ink)}
+  .repro .rsub{color:var(--ink-2);font-size:13.5px;margin:0 0 14px}
+  .rgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .rstat{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--panel-2)}
+  .rstat .k{font:600 10.5px ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2)}
+  .rstat .v{font-size:22px;font-weight:680;margin-top:6px}
+  .rstat .v small{font-size:12px;color:var(--ink-2);font-weight:500}
+  .rstat .d{font-size:11.5px;color:var(--ink-2);margin-top:4px}
+  .legend{background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:15px 18px;margin:16px 0 8px}
+  .legend h3{margin:0 0 9px;font-size:12.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2)}
+  .legend dl{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;margin:0;font-size:13px}
+  .legend dt{font-weight:640;color:var(--ink)} .legend dd{margin:0;color:var(--ink-2)}
+  h2{font-size:20px;font-weight:660;margin:38px 0 6px;display:flex;align-items:baseline;gap:12px}
+  h2 .tag{font:600 12px/1 ui-monospace,monospace;color:var(--accent-ink);border:1px solid var(--line);padding:4px 8px;border-radius:6px}
+  .lead{color:var(--ink-2);max-width:78ch;margin:2px 0 14px;font-size:14px}
+  .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);margin:8px 0;background:var(--panel)}
+  table{border-collapse:collapse;width:100%;font-size:12.5px;min-width:940px}
+  thead th{position:sticky;top:0;background:var(--panel);text-align:right;padding:10px 11px;font:600 10.5px/1.2 ui-monospace,monospace;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-2);border-bottom:1px solid var(--line);white-space:nowrap}
+  thead th.l{text-align:left}
+  tbody td{padding:7px 11px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:middle}
+  tbody td.l{text-align:left}
+  tbody tr:last-child td{border-bottom:none}
+  .grp td{background:var(--panel-2);font:600 11px/1 ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);padding:7px 11px;text-align:center}
+  .m{font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;font-weight:600}
+  .rng{display:block;font:500 10px ui-monospace,monospace;color:var(--ink-2)}
+  .heat{border-radius:5px;padding:2px 7px;display:inline-block;min-width:44px;text-align:center;color:var(--ink);font-weight:600}
+  .muted{color:var(--ink-2)}
+  .warn{color:#c26a00;font-weight:700} @media(prefers-color-scheme:dark){.warn{color:#f0a850}}
+  :root[data-theme="dark"] .warn{color:#f0a850} :root[data-theme="light"] .warn{color:#c26a00}
+  .badge{display:inline-block;min-width:40px;text-align:center;border-radius:20px;padding:2px 9px;font:600 11px ui-monospace,monospace}
+  .replinks{font:600 10px ui-monospace,monospace}
+  .replinks a{color:var(--accent-ink);text-decoration:none;padding:0 1px}
+  .replinks a:hover{text-decoration:underline}
+  .resbar{display:flex;height:11px;width:180px;border-radius:3px;overflow:hidden;border:1px solid var(--line)}
+  .resbar>span{display:block;height:100%}
+  .resstack{display:flex;flex-direction:column;gap:3px}
+  .resrow{display:flex;align-items:center;gap:6px}
+  .reslbl{font:600 9px ui-monospace,monospace;color:var(--ink-2);width:9px;text-align:center}
+  .foot{margin-top:42px;border-top:1px solid var(--line);padding-top:22px;color:var(--ink-2);font-size:13px;max-width:88ch}
+  .foot h3{color:var(--ink);font-size:13.5px;letter-spacing:.04em;text-transform:uppercase;margin:16px 0 7px}
+  code{font-family:ui-monospace,monospace;background:var(--panel-2);padding:1px 5px;border-radius:4px;font-size:.92em}
+  .toggle{position:fixed;top:14px;right:14px;background:var(--panel);border:1px solid var(--line);color:var(--ink-2);border-radius:8px;padding:7px 11px;font:600 12px ui-monospace,monospace;cursor:pointer;box-shadow:var(--shadow)}
+  .toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .controls{display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin:14px 0 8px}
+  .chint{font-size:12.5px;color:var(--ink-2)}
+  .sortchain{font:600 11px ui-monospace,monospace;display:flex;gap:6px;align-items:center;flex-wrap:wrap;color:var(--ink-2)}
+  .sortchain .sc{background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:2px 9px;color:var(--accent-ink);cursor:grab}
+  .sortchain .sc:active{cursor:grabbing}
+  .sortchain .scd{cursor:pointer;padding:0 2px} .sortchain .scd:hover{color:var(--ink)}
+  .sortchain .scx{color:var(--ink-2);cursor:pointer;margin-left:2px;font-weight:700}
+  .sortchain .scx:hover{color:var(--warn,#c26a00)}
+  .sortchain a{color:var(--ink-2)}
+  th.sortable{cursor:pointer;user-select:none} th.sortable:hover{color:var(--ink)}
+  th .ind{font-size:9px;margin-left:3px;color:var(--accent-ink);vertical-align:middle}
+  tr.grpsep td{border-top:2px solid var(--accent)}
+  a.run{cursor:pointer;border-radius:4px;padding:0 2px}
+  a.run.sel{background:var(--accent);color:#fff;text-decoration:none;outline:1px solid var(--accent)}
+  .selbar{position:fixed;right:18px;bottom:18px;display:flex;gap:10px;align-items:center;background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:12px;padding:10px 14px;z-index:30}
+  .selbar[hidden]{display:none}
+  #selcount{font:600 12px ui-monospace,monospace;color:var(--ink-2)}
+  .selbar button{font:600 12px ui-monospace,monospace;border:1px solid var(--line);background:var(--panel-2);color:var(--ink);border-radius:8px;padding:6px 12px;cursor:pointer}
+  .selbar button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .selbar button:disabled{opacity:.4;cursor:default}
+  .filters{display:flex;flex-wrap:wrap;gap:12px 22px;align-items:center;margin:16px 0 4px;padding:12px 15px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px}
+  .fgroup{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .flab{font:600 10.5px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2)}
+  .fchip{font:600 11px ui-monospace,monospace;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:14px;padding:3px 11px;cursor:pointer}
+  .fchip:hover{border-color:var(--accent)}
+  .fchip.off{opacity:.45;text-decoration:line-through}
+  .fcount{font:600 11px ui-monospace,monospace;color:var(--ink-2);margin-left:auto}
+</style>
+
+<button class="toggle" id="tgl" aria-label="Toggle theme">◐ theme</button>
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">AVPlayer · iphone-sim · 3 reps/cell · 180 plays</div>
+    <h1>Video startup — initial variant cap × network limit × segment × platform</h1>
+    <p class="sub">One <strong>sortable</strong> row per cell. The <strong>initial variant cap</strong> is <code>is.peak_bitrate_mbps</code> — the startup ceiling on ABR rung selection. <strong>iphone-sim</strong> cells are the <strong>mean of 3 reps</strong> (min–max range beneath; the <strong>±CoV</strong> badge = reproducibility, green = stable / red = jittery); the real <strong>iphone</strong> is n=1. Rung columns flag <span class="warn">⚠</span> when reps disagree. Runs are ordered <strong>best→worst</strong> (fastest video-start = ¹).</p>
+    <div class="repro" id="repro"></div>
+  </header>
+
+  <div class="legend">
+    <h3>Columns</h3>
+    <dl>
+      <dt>Video-start / Settle / TTFF</dt><dd>mean seconds, with min–max of the 3 reps beneath.</dd>
+      <dt>Fetched / Shown / Var@60s</dt><dd>the modal rung; <span class="warn">⚠</span> = reps disagreed (hover for the values).</dd>
+      <dt>Stalls</dt><dd>mean rebuffers over the play (min–max beneath).</dd>
+      <dt>Shifts F/D</dt><dd>mean rung changes in the first 60 s — <strong>F</strong>etched (what ABR requested) / <strong>D</strong>isplayed (what played). Fetch often round-trips (cold-start over-select→correct) while display steps once.</dd>
+      <dt>Startup-eff</dt><dd>mean bitrate-utilization % over 60 s (buffering=0 ÷ achievable rung). Engineering proxy, not a QoE score.</dd>
+      <dt>±CoV</dt><dd>video-start coefficient of variation across reps — the stability signal. green ≤10% · amber ≤25% · red &gt;25%.</dd>
+      <dt>Residency</dt><dd>mean of the 3 reps: F=fetched (requested, no buffer band), S=shown (displayed; hatched=buffering). Dark→bright = low→high bitrate.</dd>
+    </dl>
+  </div>
+
+  <div id="aberrant"></div>
+  <div class="filters" id="filters"></div>
+  <div class="controls">
+    <span class="chint">Click a column to sort · <strong>Shift-click</strong> to add sort levels (group-by) · <strong>Alt/⌥-click</strong> a run to select it across rows, then Compare</span>
+    <span id="sortchain" class="sortchain"></span>
+  </div>
+  <div class="tablewrap"><table id="tbl"></table></div>
+  <div id="selbar" class="selbar" hidden>
+    <span id="selcount">0 runs selected</span>
+    <button id="selcompare" class="primary" disabled>Compare selected ⇄</button>
+    <button id="selclear">Clear</button>
+  </div>
+
+  <div class="foot">
+    <h3>Method</h3>
+    <p>90 s plays, content <code>insane_newer_p200_h264</code> (ladder 360p→2160p). <strong>iphone-sim</strong>: each cell run 3× (4 cells in parallel across 4 Fleet sims); <strong>iphone</strong> (real hardware): n=1. Metrics from <code>harness query events</code>; residency/startup-eff integrate the rendition series over the first 60 s (non-playing = 0). CoV = stdev/mean across the 3 reps. Click a column to sort; Shift-click to add sort levels (group-by); Alt/⌥-click a run to select it, then <em>Compare selected</em> to overlay runs from any rows.</p>
+    <h3>Reading it</h3>
+    <p><strong>Startup-eff is a bitrate-utilization proxy, not a perceptual QoE score</strong> (ITU-T P.1203/P.1204 and VMAF are the rigorous alternatives; video-start time is industry-standard, CTA-2066/CMCD). The <strong>0.8 Mbps</strong> limit row is omitted (out of range). The real iphone was swept before the 20 Mbps limit was added, so it has no 20 Mbps rows.</p>
+  </div>
+</div>
+
+<script>
+const DATA = __DATA__;
+const ROWS = Array.isArray(DATA)?DATA:DATA.rows;
+const ABERRANT = Array.isArray(DATA)?[]:(DATA.aberrant||[]);
+const trim=x=>(x+'').replace(/(\.\d*?)0+$/,'$1').replace(/\.$/,'');
+const RUNGS=[0.988,1.542,2.409,3.774,5.822,9.05,14.085,21.859,33.808];
+const BASE="https://dev.jeoliver.com:21000";
+const isDark=()=>document.documentElement.getAttribute('data-theme')==='dark'||(matchMedia('(prefers-color-scheme:dark)').matches&&document.documentElement.getAttribute('data-theme')!=='light');
+function lerpHeat(t){t=Math.max(0,Math.min(1,t));const h=4+(150-4)*t;const d=isDark();return `hsla(${h}, ${d?55:62}%, ${d?42:78}%, ${d?.30:.55})`;}
+const effHeat=p=>p==null?'transparent':lerpHeat(p/100);
+const vsHeat=s=>s==null?'transparent':lerpHeat(1-Math.min(s,10)/10);
+function covColor(c){const d=isDark();const t=c<=10?1:c>=40?0:1-(c-10)/30;const h=4+(150-4)*t;return `hsla(${h}, ${d?58:60}%, ${d?40:82}%, ${d?.55:.8})`;}
+function num(o,heat){ if(!o) return '<span class="muted">—</span>';
+  const bg=heat?heat(o.mean):null;
+  const rng=(o.min===o.max)?'':`<span class="rng">${o.min.toFixed(1)}–${o.max.toFixed(1)}</span>`;
+  const inner=`<span class="m">${o.mean.toFixed(1)}</span>${rng}`;
+  return bg?`<span class="heat" style="background:${bg}">${inner}</span>`:inner;}
+function cat(o){ if(!o) return '<span class="muted">—</span>';
+  const v=trim(o.mode); if(o.agree) return `<span class="m">${v}</span>`;
+  const lo=trim(Math.min(...o.vals)), hi=trim(Math.max(...o.vals));
+  return `<span class="m warn" title="reps: ${o.vals.join(', ')}">${v}&nbsp;⚠</span><span class="rng">${lo}–${hi}</span>`;}
+function covBadge(o){ if(!o) return '<span class="muted">—</span>';
+  return `<span class="badge" style="background:${covColor(o.cov)}">±${Math.round(o.cov)}%</span>`;}
+function shiftsCell(r){ const f=r.fetch_shifts, d=r.display_shifts;
+  if(!f&&!d) return '<span class="muted">—</span>';
+  const one=(o,lbl)=>o?`<span class="m" title="${lbl} shifts: reps ${o.vals.join('/')}">${Number(o.mean.toFixed(1))}</span>`:'<span class="muted">–</span>';
+  return `${one(f,'fetch')}<span class="muted"> / </span>${one(d,'display')}`;}
+function selKey(pl,pa){return pl+'~'+pa;}
+function runsCell(r){
+  const a=(r.plays||[]).map((p,i)=>{ if(!p.play) return '';
+    const sel=selected.has(selKey(p.player,p.play))?' sel':'';
+    return `<a class="run${sel}" data-player="${p.player}" data-play="${p.play}" data-t0="${p.t0||''}" data-t1="${p.t1||''}" href="${BASE}/dashboard/session-viewer.html?player_id=${p.player}&play_id=${p.play}" rel="noopener" title="run ${i+1} (best→worst) · click: open · Alt/⌥-click: select for cross-row compare">${'¹²³'[i]||(i+1)}</a>`;}).join('');
+  const cmp=r.compare_url?` <a class="replinks" style="font-size:12px" href="${r.compare_url}" target="_blank" rel="noopener" title="compare this row's ${r.n} runs overlaid">⇄</a>`:'';
+  return `<span class="replinks">${a}</span>${cmp}`;}
+function resStack(r){return `<div class="resstack"><div class="resrow"><span class="reslbl">F</span>${resBar(r.fetched_residency)}</div><div class="resrow"><span class="reslbl">S</span>${resBar(r.residency)}</div></div>`;}
+function rungColor(r){const d=isDark();if(r==='buffer')return d?'#39424d':'#cdd5dc';const i=RUNGS.indexOf(r),t=i<0?0:i/(RUNGS.length-1);return `hsl(188, ${42+t*38}%, ${d?(22+t*40):(80-t*46)}%)`;}
+function resBar(res){if(!res||!res.length)return '<span class="muted">—</span>';
+  const s=res.map(x=>{const lbl=x.rung==='buffer'?'buffering':x.rung+' Mbps';const h=x.rung==='buffer'?'background-image:repeating-linear-gradient(45deg,transparent 0 3px,rgba(0,0,0,.14) 3px 6px);':'';return `<span title="${lbl}: ${x.pct}%" style="width:${x.pct}%;background:${rungColor(x.rung)};${h}"></span>`;}).join('');
+  return `<span class="resbar">${s}</span>`;}
+// ---- columns: k=sort/id, lbl=header, l=left-align, sort=accessor (null=not sortable), cell=renderer
+const COLS=[
+  {k:'platform',lbl:'Platform',l:1,sort:r=>r.platform,cell:r=>r.platform},
+  {k:'boundary',lbl:'Boundary',l:1,sort:r=>r.boundary_sort,cell:r=>r.boundary||'cold'},
+  {k:'cap',lbl:'Initial variant cap',l:1,sort:r=>r.cap_sort,cell:r=>r.cap_label},
+  {k:'seg',lbl:'Segment',l:1,sort:r=>r.seg_s,cell:r=>r.seg_s+'s'},
+  {k:'limit',lbl:'Network limit',l:1,sort:r=>r.limit_sort,cell:r=>r.limit_label},
+  {k:'runs',lbl:'Runs',l:1,sort:null,cell:runsCell},
+  {k:'ttff',lbl:'TTFF s',sort:r=>r.ttff&&r.ttff.mean,cell:r=>num(r.ttff,null)},
+  {k:'video_start',lbl:'Video-start s',sort:r=>r.video_start&&r.video_start.mean,cell:r=>num(r.video_start,vsHeat)},
+  {k:'fetched',lbl:'Fetched',sort:r=>r.fetched&&r.fetched.mode,cell:r=>cat(r.fetched)},
+  {k:'shown',lbl:'Shown',sort:r=>r.shown&&r.shown.mode,cell:r=>cat(r.shown)},
+  {k:'var60',lbl:'Var@60s',sort:r=>r.var60&&r.var60.mode,cell:r=>cat(r.var60)},
+  {k:'settle',lbl:'Settle s',sort:r=>r.settle&&r.settle.mean,cell:r=>num(r.settle,null)},
+  {k:'startup_eff',lbl:'Startup-eff',sort:r=>r.startup_eff&&r.startup_eff.mean,cell:r=>num(r.startup_eff,effHeat)},
+  {k:'stalls',lbl:'Stalls',sort:r=>r.stalls&&r.stalls.mean,cell:r=>num(r.stalls,null)},
+  {k:'shifts',lbl:'Shifts F/D',sort:r=>r.fetch_shifts&&r.fetch_shifts.mean,cell:shiftsCell},
+  {k:'cov',lbl:'±CoV',sort:r=>r.video_start&&r.video_start.cov,cell:r=>covBadge(r.video_start)},
+  {k:'residency',lbl:'Residency (F/S, mean)',l:1,sort:null,cell:resStack},
+];
+const DIR={'1':'▲','-1':'▼'};
+const DEFAULT_SORT=[{k:'seg',dir:1},{k:'boundary',dir:1},{k:'limit',dir:-1},{k:'cap',dir:-1},{k:'platform',dir:1}];
+let sortKeys=DEFAULT_SORT.map(s=>({...s}));
+const selected=new Map(); // player~play -> {player,play,t0,t1}
+
+// ---- filters: same 4 axes. each holds a Set of the VALUES currently shown (all on by default)
+const FILTERS=[
+  {k:'platform',lbl:'Platform',val:r=>r.platform,label:r=>r.platform,sort:r=>r.platform==='iphone'?0:1},
+  {k:'boundary',lbl:'Boundary',val:r=>r.boundary||'cold',label:r=>r.boundary||'cold',sort:r=>r.boundary_sort||0},
+  {k:'cap',lbl:'Initial variant cap',val:r=>r.cap,label:r=>r.cap_label,sort:r=>r.cap_sort},
+  {k:'seg',lbl:'Segment',val:r=>r.seg,label:r=>r.seg_s+'s',sort:r=>-r.seg_s},
+  {k:'limit',lbl:'Network limit',val:r=>r.limit,label:r=>r.limit_label,sort:r=>-r.limit_sort},
+];
+const fopts={}, filters={};
+for(const f of FILTERS){
+  const m=new Map();
+  for(const r of ROWS){const v=f.val(r); if(!m.has(v)) m.set(v,{val:v,label:f.label(r),sort:f.sort(r)});}
+  fopts[f.k]=[...m.values()].sort((a,b)=>a.sort-b.sort);
+  filters[f.k]=new Set(fopts[f.k].map(o=>o.val));
+}
+function passFilter(r){return FILTERS.every(f=>filters[f.k].has(f.val(r)));}
+function renderFilters(){
+  document.getElementById('filters').innerHTML=FILTERS.map(f=>
+    `<div class="fgroup"><span class="flab">${f.lbl}</span>`+
+    fopts[f.k].map(o=>`<button class="fchip${filters[f.k].has(o.val)?'':' off'}" data-axis="${f.k}" data-val="${o.val}">${o.label}</button>`).join('')+
+    `</div>`).join('')+`<span class="fcount" id="fcount"></span>`;
+}
+
+function sortRows(rows){
+  return rows.slice().sort((a,b)=>{
+    for(const {k,dir} of sortKeys){
+      const col=COLS.find(c=>c.k===k); if(!col||!col.sort) continue;
+      let va=col.sort(a), vb=col.sort(b);
+      if(va==null&&vb==null) continue;
+      if(va==null) return 1; if(vb==null) return -1;
+      const c=(typeof va==='string'||typeof vb==='string')?(''+va).localeCompare(''+vb):(va-vb);
+      if(c) return c<0?-dir:dir;
+    }
+    return 0;});
+}
+const AXIS_KEYS=['platform','boundary','cap','seg','limit'];
+// The 4 category columns reorder to follow the sort priority: axis keys that
+// are in the sort chain lead (in that order), remaining axes keep their default
+// order, then runs + metrics + residency stay put.
+function orderedCols(){
+  const inSort=sortKeys.map(s=>s.k).filter(k=>AXIS_KEYS.includes(k));
+  const axisOrder=[...inSort,...AXIS_KEYS.filter(k=>!inSort.includes(k))];
+  const axisCols=axisOrder.map(k=>COLS.find(c=>c.k===k));
+  const rest=COLS.filter(c=>!AXIS_KEYS.includes(c.k));
+  return [...axisCols,...rest];
+}
+function headerHTML(cols){
+  return '<tr>'+cols.map(c=>{
+    if(!c.sort) return `<th class="${c.l?'l':''}">${c.lbl}</th>`;
+    const i=sortKeys.findIndex(s=>s.k===c.k);
+    const ind=i>=0?`<span class="ind">${DIR[sortKeys[i].dir]}${sortKeys.length>1?(i+1):''}</span>`:'';
+    return `<th class="sortable ${c.l?'l':''}" data-k="${c.k}">${c.lbl}${ind}</th>`;
+  }).join('')+'</tr>';
+}
+function render(){
+  const cols=orderedCols();
+  const shown=ROWS.filter(passFilter);
+  const rows=sortRows(shown);
+  const pk=sortKeys[0]&&COLS.find(c=>c.k===sortKeys[0].k);
+  let prev=null,body='';
+  for(const r of rows){
+    let sep='';
+    if(pk&&pk.sort){const v=pk.sort(r); if(prev!==null&&v!==prev) sep='grpsep'; prev=v;}
+    body+=`<tr class="${sep}">`+cols.map(c=>`<td class="${c.l?'l':''}">${c.cell(r)}</td>`).join('')+'</tr>';
+  }
+  document.getElementById('tbl').innerHTML=`<thead>${headerHTML(cols)}</thead><tbody>${body}</tbody>`;
+  const el=document.getElementById('sortchain');
+  el.innerHTML='Sort: '+(sortKeys.length?sortKeys.map((s,i)=>{const c=COLS.find(x=>x.k===s.k);
+    return `<span class="sc" draggable="true" data-si="${i}" title="drag to reorder priority">${i+1}. ${c?c.lbl:s.k} <span class="scd" data-si="${i}" title="flip direction">${DIR[s.dir]}</span> <span class="scx" data-si="${i}" title="remove level">×</span></span>`;}).join('')
+    :'<span class="sc" style="cursor:default">none</span>')+' <a href="#" id="sortreset">reset</a>';
+  const fc=document.getElementById('fcount'); if(fc) fc.textContent=`showing ${shown.length} of ${ROWS.length}`;
+}
+// delegated: header sort (click=single, shift-click=add level), run alt-select
+document.addEventListener('click',e=>{
+  const fchip=e.target.closest('.fchip');
+  if(fchip){const ax=fchip.dataset.axis,v=fchip.dataset.val;
+    if(filters[ax].has(v)) filters[ax].delete(v); else filters[ax].add(v);
+    renderFilters(); render(); return;}
+  const scx=e.target.closest('.scx');
+  if(scx){e.preventDefault(); sortKeys.splice(+scx.dataset.si,1); render(); return;}
+  const scd=e.target.closest('.scd');
+  if(scd){e.preventDefault(); sortKeys[+scd.dataset.si].dir*=-1; render(); return;}
+  const th=e.target.closest('th.sortable');
+  if(th){const k=th.dataset.k,idx=sortKeys.findIndex(s=>s.k===k);
+    // in the chain already → just flip its direction (keep the list + position);
+    // not in the chain → shift-click adds a level, plain click starts a fresh single sort.
+    if(idx>=0) sortKeys[idx].dir*=-1;
+    else if(e.shiftKey) sortKeys.push({k,dir:1});
+    else sortKeys=[{k,dir:1}];
+    render(); return;}
+  if(e.target.id==='sortreset'){e.preventDefault(); sortKeys=DEFAULT_SORT.map(s=>({...s})); render(); return;}
+  const run=e.target.closest('a.run');
+  if(run){e.preventDefault();  // take control: never let the anchor navigate on a plain left-click
+    if(e.altKey){const k=selKey(run.dataset.player,run.dataset.play);
+      if(selected.has(k)){selected.delete(k);run.classList.remove('sel');}
+      else{selected.set(k,{player:run.dataset.player,play:run.dataset.play,t0:run.dataset.t0,t1:run.dataset.t1});run.classList.add('sel');}
+      updateSel();
+    } else {
+      window.open(run.getAttribute('href'),'_blank','noopener');  // plain click opens the session
+    }
+    return;}
+});
+// drag the sort-chain chips left/right to reorder sort priority
+let dragSi=null;
+document.addEventListener('dragstart',e=>{const sc=e.target.closest('.sc[draggable]');
+  if(sc){dragSi=+sc.dataset.si; e.dataTransfer.effectAllowed='move'; sc.style.opacity='.5';}});
+document.addEventListener('dragend',e=>{const sc=e.target.closest('.sc[draggable]'); if(sc) sc.style.opacity='';});
+document.addEventListener('dragover',e=>{ if(e.target.closest('.sc[draggable]')){e.preventDefault(); e.dataTransfer.dropEffect='move';}});
+document.addEventListener('drop',e=>{const sc=e.target.closest('.sc[draggable]');
+  if(sc&&dragSi!=null){e.preventDefault(); const to=+sc.dataset.si;
+    if(to!==dragSi){const [m]=sortKeys.splice(dragSi,1); sortKeys.splice(to,0,m); render();} dragSi=null;}});
+function updateSel(){
+  const n=selected.size;
+  document.getElementById('selcount').textContent=`${n} run${n===1?'':'s'} selected`;
+  document.getElementById('selcompare').disabled=n<2;
+  document.getElementById('selbar').hidden=n===0;
+}
+function compareSelected(){
+  const items=[...selected.values()]; if(items.length<2) return;
+  const starts=items.map(x=>x.t0).filter(Boolean).sort();
+  const ends=items.map(x=>x.t1).filter(Boolean).sort();
+  const comp=items.map((x,i)=>`${x.player}~${x.play}~${i+1}`).join(',').replace(/~/g,'%7E').replace(/,/g,'%2C');
+  const from=starts[0]||'',to=ends[ends.length-1]||'';
+  window.open(`${BASE}/dashboard/session-viewer.html?player_id=${items[0].player}&play_id=${items[0].play}&from=${from}&to=${to}&compare=${comp}`,'_blank','noopener');
+}
+document.getElementById('selcompare').addEventListener('click',compareSelected);
+document.getElementById('selclear').addEventListener('click',()=>{selected.clear();updateSel();render();});
+// reproducibility panel — median across the n≥3 (iphone-sim) cells
+function reproPanel(){
+  const all=ROWS.filter(r=>r.n>=3);
+  const med=(xs)=>{xs=xs.filter(x=>x!=null).sort((a,b)=>a-b);return xs.length?xs[Math.floor(xs.length/2)]:0;};
+  const covOf=k=>med(all.map(c=>c[k]&&c[k].cov));
+  const agreeOf=k=>{const t=all.filter(c=>c[k]);return t.length?Math.round(100*t.filter(c=>c[k].agree).length/t.length):0;};
+  const worst=all.filter(c=>c.video_start).sort((a,b)=>b.video_start.cov-a.video_start.cov).slice(0,3)
+    .map(c=>`${c.video_start.vals.join('/')}s`).join(' · ');
+  const stats=[
+    ['startup-eff CoV',covOf('startup_eff').toFixed(0)+'%','reproducible — trust at n=1'],
+    ['video-start CoV',covOf('video_start').toFixed(0)+'%','typical run-to-run jitter'],
+    ['settle CoV',covOf('settle').toFixed(0)+'%','noisy — directional only'],
+    ['shown-rung agree',agreeOf('shown')+'%','reps pick the same rung'],
+    ['var@60s agree',agreeOf('var60')+'%','settled rung is stable'],
+  ];
+  document.getElementById('repro').innerHTML=
+    `<h3>Run-to-run reproducibility</h3><p class="rsub">Median across the n=3 iphone-sim cells (CoV = stdev/mean over the 3 reps). Fragile regime: 2 Mbps + high initial variant cap — worst video-start swing <span class="m">${worst}</span>.</p>`+
+    `<div class="rgrid">`+stats.map(([k,v,d])=>`<div class="rstat"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('')+`</div>`;
+}
+// Aberrant-plays drill-through table (separate from the main table). Lists every
+// INDIVIDUAL run that wedged (video-start >= threshold), worst-first, each linking
+// straight to its session. Computed from the per-rep vals + play_ids (plays and
+// video_start.vals are both ordered best->worst, so they pair by index).
+const ABERRANT_TH=10; // seconds — a wedged startup
+// The group's spread for column k (the aggregated cell this session came from):
+// the min–max RANGE for continuous (the wedge sits at the top of it), mode for
+// rungs. Shown beneath the session's own value so you see how far it deviated.
+function grpRef(k,g){
+  if(!g || g.n<=1) return null; // a single-session group adds nothing — no 2nd row
+  const med=o=>{ if(!o) return null; if(!o.vals||!o.vals.length) return o.mean; const v=o.vals.slice().sort((a,b)=>a-b); return v[Math.floor(v.length/2)]; };
+  const m1=x=>x==null?null:Number((+x).toFixed(1));
+  // median · min–max range; if the group is a single distinct value (min==max)
+  // there's nothing to add, so no 2nd row.
+  const mr=(o,suf)=>{ if(!o||o.min===o.max) return null; suf=suf||''; return `${m1(med(o))} · ${m1(o.min)}–${m1(o.max)}${suf}`; };
+  if(k==='video_start') return mr(g.video_start,'s');
+  if(k==='ttff') return mr(g.ttff,'s');
+  if(k==='settle') return mr(g.settle,'s');
+  if(k==='startup_eff'){ const o=g.startup_eff; if(!o||o.min===o.max) return null;
+    return `${Math.round(med(o))} · ${Math.round(o.min)}–${Math.round(o.max)}%`; }
+  if(k==='stalls') return mr(g.stalls);
+  if(k==='shifts') return (g.fetch_shifts&&g.display_shifts&&(g.fetch_shifts.cov||g.display_shifts.cov))?`${m1(g.fetch_shifts.mean)}/${m1(g.display_shifts.mean)}`:null;
+  if(k==='fetched') return (g.fetched&&!g.fetched.agree)?`${trim(Math.min(...g.fetched.vals))}–${trim(Math.max(...g.fetched.vals))}`:null;
+  if(k==='shown') return (g.shown&&!g.shown.agree)?`${trim(Math.min(...g.shown.vals))}–${trim(Math.max(...g.shown.vals))}`:null;
+  if(k==='var60') return (g.var60&&!g.var60.agree)?`${trim(Math.min(...g.var60.vals))}–${trim(Math.max(...g.var60.vals))}`:null;
+  if(k==='cov') return (g.video_start&&g.video_start.cov)?'±'+Math.round(g.video_start.cov)+'%':null;
+  return null;
+}
+function aberrantPanel(){
+  const cols=orderedCols();
+  const el=document.getElementById('aberrant');
+  if(!ABERRANT.length){ el.innerHTML=''; return; }
+  // ABERRANT = one row per INDIVIDUAL wedged session (n=1), pre-sorted worst first.
+  const gidx={}; for(const r of ROWS) gidx[[r.platform,r.boundary||'cold',r.seg,r.limit,r.cap].join('|')]=r;
+  const hdr='<tr>'+cols.map(c=>`<th class="${c.l?'l':''}">${c.lbl}</th>`).join('')+'</tr>';
+  const body=ABERRANT.map(r=>{
+    const g=gidx[[r.platform,r.boundary||'cold',r.seg,r.limit,r.cap].join('|')];
+    return '<tr>'+cols.map(c=>{
+      const ref=grpRef(c.k,g);
+      const refHtml=(ref!=null&&ref!=='')?`<span class="rng" title="group median · min–max range${g?' · n='+g.n:''}">grp ${ref}</span>`:'';
+      return `<td class="${c.l?'l':''}">${c.cell(r)}${refHtml}</td>`;
+    }).join('')+'</tr>';
+  }).join('');
+  el.innerHTML=`<h2>Aberrant sessions <span class="tag mono">video-start ≥ ${ABERRANT_TH}s · ${ABERRANT.length}</span></h2>`+
+    `<p class="lead">One line per <strong>individual</strong> wedged run (not aggregated), worst first — same columns as the main table below, with the cell's <strong>group range</strong> (min–max, “grp”) beneath each metric so you see how far the run deviated. The ¹ link opens that exact session.</p>`+
+    `<div class="tablewrap"><table><thead>${hdr}</thead><tbody>${body}</tbody></table></div>`;
+}
+document.getElementById('tgl').addEventListener('click',()=>{const cur=document.documentElement.getAttribute('data-theme');
+  document.documentElement.setAttribute('data-theme',cur==='dark'?'light':cur==='light'?'dark':(matchMedia('(prefers-color-scheme:dark)').matches?'light':'dark'));render();reproPanel();aberrantPanel();});
+matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>{render();reproPanel();aberrantPanel();});
+renderFilters(); render(); reproPanel(); aberrantPanel(); updateSel();
+</script>

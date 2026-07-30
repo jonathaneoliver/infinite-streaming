@@ -88,6 +88,7 @@ func computeStartupCaps(bws map[string]runner.VariantBandwidth) []float64 {
 	return out
 }
 
+func TestStartupIPhoneSim(t *testing.T) { runStartup(t, runner.PlatformIPhoneSim) }
 func TestStartupIPadSim(t *testing.T)   { runStartup(t, runner.PlatformIPadSim) }
 func TestStartupIPhone(t *testing.T)    { runStartup(t, runner.PlatformIPhone) }
 func TestStartupAppleTV(t *testing.T)   { runStartup(t, runner.PlatformAppleTV) }

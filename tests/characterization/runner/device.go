@@ -7,13 +7,22 @@ import "fmt"
 type Platform string
 
 const (
-	PlatformIPhone    Platform = "iphone"    // real iOS device via xcrun devicectl
-	PlatformIPad      Platform = "ipad"      // iPadOS — real device or simulator
-	PlatformIPadSim   Platform = "ipad-sim"  // iPad simulator (xcrun simctl)
-	PlatformAppleTV   Platform = "appletv"   // tvOS real device via xcrun devicectl
-	PlatformAndroidTV Platform = "androidtv" // Android TV via adb
-	PlatformWeb       Platform = "web"       // browser via chromedp
+	PlatformIPhone    Platform = "iphone"     // real iOS device via xcrun devicectl
+	PlatformIPad      Platform = "ipad"       // iPadOS — real device or simulator
+	PlatformIPhoneSim Platform = "iphone-sim" // iPhone simulator (xcrun simctl)
+	PlatformIPadSim   Platform = "ipad-sim"   // iPad simulator (xcrun simctl)
+	PlatformAppleTV   Platform = "appletv"    // tvOS real device via xcrun devicectl
+	PlatformAndroidTV Platform = "androidtv"  // Android TV via adb
+	PlatformWeb       Platform = "web"        // browser via chromedp
 )
+
+// IsIOSSim reports whether p is an iOS simulator platform — an iPhone or iPad
+// sim. Both run under xcrun simctl / the Device Farm and share every
+// simulator-only code path (boot, server-seed, XCUITest caps); the split is only
+// about which device model the work lands on and how it's labelled.
+func (p Platform) IsIOSSim() bool {
+	return p == PlatformIPhoneSim || p == PlatformIPadSim
+}
 
 // LaunchMode picks the layer that brings the player up.
 type LaunchMode int
