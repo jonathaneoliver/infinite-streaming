@@ -395,7 +395,7 @@ spec:
     spec:
       containers:
       - name: clickhouse
-        image: clickhouse/clickhouse-server:26.5-alpine
+        image: clickhouse/clickhouse-server:26.7-alpine
         ports:
         - containerPort: 8123
         - containerPort: 9000
