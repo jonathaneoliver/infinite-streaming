@@ -1,0 +1,12 @@
+{
+  "name": "smashing-demo-tools",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Demo recorder for testing.html — drives a Valley shaping pattern against a real device and writes cue timings.",
+  "scripts": {
+    "record": "node record_valley.js"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}

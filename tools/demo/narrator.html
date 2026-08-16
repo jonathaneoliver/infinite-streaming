@@ -1,0 +1,530 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Narration editor</title>
+<style>
+  :root { --bg:#0b1020; --panel:#0f1b33; --line:#2a3a5e; --fg:#e6edf7; --dim:#8a9bb5; --accent:#4cc9f0; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  header { padding:10px 16px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; }
+  header b { color:var(--accent); font-weight:600; }
+  .wrap { display:flex; height:calc(100vh - 52px); }
+  .left { flex:1; padding:16px; min-width:0; }
+  .right { width:460px; border-left:1px solid var(--line); overflow-y:auto; }
+  .stage { position:relative; width:100%; background:#000; }
+  video { width:100%; display:block; }
+  /* The caption overlay sits over the video's reserved strip, scaled to however
+     large the video is being displayed — so what you see is where it burns. */
+  #cap { position:absolute; left:0; right:0; bottom:0; display:flex; align-items:center;
+         padding:0 32px; background:#0a1220; color:var(--fg); pointer-events:none;
+         white-space:pre-wrap; overflow:hidden; }
+  /* Timeline: cue markers over the segment bands, so a 39-minute video with 33
+     minutes of encoding is legible at a glance. */
+  .tl { position:relative; height:46px; margin-top:10px; background:#0a1428;
+        border:1px solid var(--line); border-radius:5px; cursor:pointer; user-select:none; }
+  .tl .seg { position:absolute; top:0; bottom:0; opacity:.30; }
+  .tl .seg.setup { background:#2a5bd7; } .tl .seg.encode { background:#8a6d2f; }
+  .tl .seg.outputs { background:#2f7d55; }
+  .tl .seglabel { position:absolute; top:2px; font-size:10px; color:#c8d4e8; pointer-events:none; }
+  .tl .mark { position:absolute; top:16px; width:3px; height:18px; background:var(--accent);
+              border-radius:1px; pointer-events:none; }
+  .tl .mark.stale { background:#e9c46a; } .tl .mark.del { background:#54607a; height:9px; top:25px; }
+  .tl .grip { position:absolute; top:0; bottom:0; width:9px; margin-left:-4px; cursor:ew-resize;
+              background:#e9c46a; opacity:.55; border-radius:2px; }
+  .tl .grip:hover { opacity:1; }
+  .tl .ffwd { position:absolute; top:0; bottom:0; pointer-events:none; border:1px dashed #e9c46a;
+              background:repeating-linear-gradient(45deg,rgba(233,196,106,.16) 0 6px,transparent 6px 12px); }
+  .tl .ffwdlabel { position:absolute; bottom:2px; font-size:10px; color:#e9c46a; pointer-events:none; }
+  .tl .head { position:absolute; top:0; bottom:0; width:2px; background:#fff; pointer-events:none; }
+  .cue { padding:9px 12px; border-bottom:1px solid #1b2540; cursor:pointer; }
+  .cue:hover { background:#152241; }
+  .cue.on { background:#17305c; }
+  .cue .meta { color:var(--dim); font-size:11px; display:flex; gap:10px; }
+  .cue .t { margin-top:3px; }
+  .cue textarea { width:100%; background:#0a1428; color:var(--fg); border:1px solid var(--line);
+                  border-radius:4px; padding:6px; font:inherit; resize:vertical; min-height:54px; }
+  .row { display:flex; gap:6px; margin-top:6px; align-items:center; }
+  button { background:#1b2b52; color:var(--fg); border:1px solid var(--line); border-radius:4px;
+           padding:4px 10px; cursor:pointer; font:inherit; }
+  button:hover { background:#24386a; }
+  button.primary { background:#2a5bd7; border-color:#3f6fe0; }
+  .ok { color:#6ab04c; } .warn { color:#e9c46a; } .bad { color:#e06c6c; }
+  .pill { font-size:11px; padding:1px 6px; border-radius:9px; border:1px solid var(--line); color:var(--dim); }
+  #log { font:11px/1.45 ui-monospace,Menlo,monospace; color:var(--dim); white-space:pre-wrap;
+         padding:8px 16px; border-top:1px solid var(--line); max-height:150px; overflow-y:auto; }
+</style></head>
+<body>
+<header>
+  <b>Narration editor</b>
+  <span id="proj" class="pill"></span>
+  <span style="flex:1"></span>
+  <span id="voices" class="pill" style="display:flex;gap:9px;align-items:center"></span>
+  <span id="ffwdinfo" class="pill">ffwd: none</span>
+  <button id="ffwdsuggest" title="Compress the longest stretch with no narration">Suggest FFWD</button>
+  <button id="ffwdclear">Clear FFWD</button>
+  <span id="queue" class="pill">queue: idle</span>
+  <button id="genstale">Generate all stale</button>
+  <label class="pill"><input type="checkbox" id="burn" checked> burn captions on export</label>
+  <span id="hprog" style="display:none;align-items:center;gap:8px;font-size:12px;color:var(--dim)">
+    <span id="hphase" style="color:var(--fg)"></span>
+    <span style="width:150px;height:8px;background:#0a1428;border:1px solid var(--line);border-radius:4px;display:inline-block;vertical-align:middle">
+      <span id="hbar" style="display:block;height:100%;width:0;background:var(--accent);border-radius:3px;transition:width .4s"></span>
+    </span>
+    <span id="hpct"></span>
+  </span>
+  <button class="primary" id="export">Export</button>
+</header>
+<div class="wrap">
+  <div class="left">
+    <div class="stage"><video id="v" src="/video" controls preload="metadata"></video><div id="cap"></div></div>
+    <div class="tl" id="tl"><div class="head" id="head" style="left:0"></div></div>
+    <div style="display:flex;justify-content:space-between;color:var(--dim);font-size:11px;margin-top:3px">
+      <span id="tnow">00:00</span><span id="tdur">--:--</span>
+    </div>
+    <div style="margin-top:8px;color:var(--dim);font-size:12px">
+      Click a cue to seek. Edits save on blur. <b>Speak</b> generates the voice for that line only.
+      Preview audio plays as you scrub — export re-renders nothing you have already heard.
+    </div>
+  </div>
+  <div class="right"><div id="ffwdpanel"></div><div id="list"></div></div>
+</div>
+<div id="prog" style="display:none;padding:8px 16px;border-top:1px solid var(--line)">
+  <div style="display:flex;gap:10px;font-size:12px;color:var(--dim)">
+    <b id="phase" style="color:var(--fg)"></b><span id="detail"></span>
+    <span style="flex:1"></span><span id="pct"></span>
+  </div>
+  <div style="height:8px;background:#0a1428;border:1px solid var(--line);border-radius:4px;margin-top:5px">
+    <div id="bar" style="height:100%;width:0;background:var(--accent);border-radius:3px;transition:width .4s"></div>
+  </div>
+  <div id="outpath" style="font-size:11px;color:var(--dim);margin-top:5px"></div>
+</div>
+<div id="log"></div>
+<script>
+let P = null, cues = [], playing = new Map(), lastIdx = -1;
+const V = document.getElementById('v'), CAP = document.getElementById('cap');
+
+// The TTS runs about this fast; used to warn about a line before it is generated.
+const SEC_PER_WORD = 0.37;
+
+async function load() {
+  P = await (await fetch('/api/project')).json();
+  cues = P.cues;
+  document.getElementById('proj').textContent = P.video + ' · ' + cues.length + ' cues';
+  document.getElementById('proj').title = 'in:  ' + P.videoPath + '\ncues: ' + P.cuesPath +
+    '\nout: ' + (P.outputs||{}).captioned;
+  document.getElementById('ffwdinfo').textContent = ffwdText();
+  renderVoices();
+  render();
+  renderFfwd();
+  sizeCaption();
+  drawTimeline();
+  // An export may already be running (page reloaded mid-run, or started from
+  // another tab). Without this the bar only appears if YOU pressed the button.
+  if (P.exporting) poll();
+}
+
+function sizeCaption() {
+  // Strip is P.strip px in the SOURCE video; scale to displayed size.
+  const scale = V.clientHeight && V.videoHeight ? V.clientHeight / V.videoHeight : 1;
+  const h = Math.max(28, Math.round((P?.strip || 130) * scale));
+  CAP.style.height = h + 'px';
+  CAP.style.fontSize = Math.max(11, Math.round(27 * scale)) + 'px';
+  CAP.style.padding = '0 ' + Math.round(32 * scale) + 'px';
+}
+addEventListener('resize', sizeCaption);
+V.addEventListener('loadedmetadata', () => { sizeCaption(); drawTimeline(); });
+
+function fmt(s) { return String(Math.floor(s/60)).padStart(2,'0') + ':' + String(Math.floor(s%60)).padStart(2,'0'); }
+
+function drawTimeline() {
+  const tl = document.getElementById('tl');
+  const dur = V.duration || 0;
+  if (!dur || !P) return;
+  [...tl.querySelectorAll('.seg,.mark,.seglabel')].forEach(e => e.remove());
+  for (const sg of (P.segments || [])) {
+    const d = document.createElement('div');
+    d.className = 'seg ' + sg.name;
+    d.style.left = (sg.from / dur * 100) + '%';
+    d.style.width = ((sg.to - sg.from) / dur * 100) + '%';
+    tl.appendChild(d);
+    const l = document.createElement('div');
+    l.className = 'seglabel';
+    l.style.left = 'calc(' + (sg.from / dur * 100) + '% + 4px)';
+    l.textContent = sg.name;
+    tl.appendChild(l);
+  }
+  for (const r of (P.ffwd || [])) {
+    const d = document.createElement('div');
+    d.className = 'ffwd';
+    d.dataset.idx = (P.ffwd || []).indexOf(r);
+    d.style.left = (r.from / dur * 100) + '%';
+    d.style.width = ((r.to - r.from) / dur * 100) + '%';
+    tl.appendChild(d);
+    const l = document.createElement('div');
+    l.className = 'ffwdlabel';
+    l.style.left = 'calc(' + (r.from / dur * 100) + '% + 4px)';
+    l.textContent = 'x' + (r.factor || 30);
+    tl.appendChild(l);
+    for (const edge of ['from', 'to']) {
+      const g = document.createElement('div');
+      g.className = 'grip';
+      g.dataset.edge = edge;
+      g.dataset.idx = (P.ffwd || []).indexOf(r);
+      g.style.left = (r[edge] / dur * 100) + '%';
+      g.title = 'drag to move the ' + edge + ' of the compressed range';
+      tl.appendChild(g);
+    }
+  }
+  cues.forEach((c, i) => {
+    const m = document.createElement('div');
+    m.className = 'mark' + (c.deleted ? ' del' : (c.audio ? '' : ' stale'));
+    m.style.left = (c.at / dur * 100) + '%';
+    m.title = '[' + i + '] ' + (c.text || '(deleted)');
+    tl.appendChild(m);
+  });
+  document.getElementById('tdur').textContent = fmt(dur);
+}
+
+// Click or drag anywhere on the bar to scrub.
+(function () {
+  const tl = document.getElementById('tl');
+  let dragging = false;
+  const seek = (ev) => {
+    const r = tl.getBoundingClientRect();
+    const x = Math.min(Math.max(ev.clientX - r.left, 0), r.width);
+    if (V.duration) V.currentTime = x / r.width * V.duration;
+  };
+  let grip = null;
+  tl.addEventListener('pointerdown', e => {
+    if (e.target.classList.contains('grip')) {
+      // Dragging an edge must not also scrub the video.
+      grip = { idx: +e.target.dataset.idx, edge: e.target.dataset.edge, el: e.target };
+      tl.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      return;
+    }
+    dragging = true; tl.setPointerCapture(e.pointerId); seek(e);
+  });
+  tl.addEventListener('pointermove', e => {
+    if (grip) {
+      const r = tl.getBoundingClientRect();
+      const x = Math.min(Math.max(e.clientX - r.left, 0), r.width);
+      const t = x / r.width * (V.duration || 1);
+      const range = P.ffwd[grip.idx];
+      // Keep the range sane while dragging: at least 10s wide, inside the video.
+      if (grip.edge === 'from') range.from = Math.min(t, range.to - 10);
+      else range.to = Math.max(t, range.from + 10);
+      grip.el.style.left = (range[grip.edge] / V.duration * 100) + '%';
+      const band = tl.querySelector('.ffwd[data-idx="' + grip.idx + '"]');
+      if (band) {
+        band.style.left = (range.from / V.duration * 100) + '%';
+        band.style.width = ((range.to - range.from) / V.duration * 100) + '%';
+      }
+      document.getElementById('ffwdinfo').textContent =
+        'ffwd: ' + fmt(range.from) + ' - ' + fmt(range.to) + ' x' + (range.factor||30);
+      return;
+    }
+    if (dragging) seek(e);
+  });
+  tl.addEventListener('pointerup', async e => {
+    tl.releasePointerCapture(e.pointerId);
+    if (grip) {
+      const range = P.ffwd[grip.idx];
+      // Warn rather than silently swallow: a cue inside the range is dropped.
+      const eaten = cues.filter(c => c.text && c.at > range.from && c.at < range.to);
+      if (eaten.length && !confirm(eaten.length + ' cue(s) now fall inside the compressed '
+            + 'range and will be dropped from the export. Keep this range?')) {
+        grip = null; await setFfwd(P.ffwd); return;
+      }
+      grip = null;
+      await setFfwd(P.ffwd);
+      return;
+    }
+    dragging = false;
+  });
+})();
+
+function renderFfwd() {
+  const el = document.getElementById('ffwdpanel');
+  const f = P.ffwd || [];
+  if (!f.length) { el.innerHTML = ''; return; }
+  el.innerHTML = f.map((r, n) => {
+    const room = (r.to - r.from) / (r.factor || 30);
+    return `<div class="cue" style="border-bottom:2px solid #e9c46a;background:#1a1608">
+      <div class="meta"><span>FFWD x${r.factor||30}</span>
+        <span>${fmt(r.from)} - ${fmt(r.to)}</span>
+        <span class="warn">${room.toFixed(0)}s on screen</span></div>
+      <div class="t"><textarea data-ffwd="${n}"
+        placeholder="narration for the compressed run (optional)">${(r.text||'').replace(/</g,'&lt;')}</textarea></div>
+      <div class="row"><button data-ffwdspeak="${n}">Speak</button>
+        <button data-ffwdfactor="${n}">Speed x${r.factor||30}</button>
+        <span style="flex:1"></span>
+        <button data-ffwddel="${n}">Remove</button></div>
+      <div style="color:var(--dim);font-size:11px;margin-top:4px">badge: ${r.label||'(none)'}</div>
+    </div>`;
+  }).join('');
+}
+function render() {
+  const el = document.getElementById('list');
+  el.innerHTML = cues.map((c,i) => {
+    const words = (c.text || '').trim().split(/\s+/).filter(Boolean).length;
+    const est = c.dur != null ? c.dur : words * SEC_PER_WORD;
+    let fit = '';
+    if (c.slot != null) {
+      const slack = c.slot - est;
+      fit = slack < 0
+        ? `<span class="bad">${slack.toFixed(1)}s over slot</span>`
+        : `<span class="${slack < 1 ? 'warn' : 'ok'}">+${slack.toFixed(1)}s slack</span>`;
+    }
+    if (c.deleted) {
+      return `<div class="cue" id="cue${i}" data-i="${i}" style="opacity:.5">
+        <div class="meta"><span>[${String(i).padStart(2,'0')}] ${fmt(c.at)}</span>
+          <span class="dim">deleted — no caption, no voice</span></div>
+        <div class="t"><textarea data-i="${i}" placeholder="type to restore this cue"></textarea></div>
+        <div class="row"><button data-speak="${i}">Speak</button>
+          <button data-seek="${i}">Seek</button></div></div>`;
+    }
+    const audio = c.audio
+      ? `<span class="ok">audio ${c.dur.toFixed(1)}s</span>`
+      : `<span class="warn">no audio</span>`;
+    return `<div class="cue" id="cue${i}" data-i="${i}">
+      <div class="meta"><span>[${String(i).padStart(2,'0')}] ${fmt(c.at)}</span>${audio}${fit}</div>
+      <div class="t"><textarea data-i="${i}">${(c.text||'').replace(/</g,'&lt;')}</textarea></div>
+      <div class="row">
+        <button data-speak="${i}">Speak</button>
+        <button data-play="${i}" ${c.audio?'':'disabled'}>Play</button>
+        <button data-seek="${i}">Seek</button>
+        <span style="flex:1"></span>
+        <button data-del="${i}" title="Remove this caption and its voice-over entirely">Delete</button>
+      </div></div>`;
+  }).join('');
+}
+
+document.getElementById('list').addEventListener('click', async (e) => {
+  const t = e.target;
+  if (t.dataset.seek != null) { V.currentTime = cues[+t.dataset.seek].at; V.play(); }
+  if (t.dataset.play != null) { const a = new Audio('/api/cues/'+t.dataset.play+'/audio?'+Date.now()); a.play(); }
+  if (t.dataset.del != null) {
+    const i = +t.dataset.del;
+    if (!confirm('Remove the caption AND voice-over for cue ' + i + '?')) return;
+    const r = await (await fetch('/api/cues/'+i, {method:'DELETE'})).json();
+    cues[i] = r; render();
+    return;
+  }
+  if (t.dataset.speak != null) {
+    const i = +t.dataset.speak; t.textContent = '…'; t.disabled = true;
+    const r = await (await fetch('/api/cues/'+i+'/voice', {method:'POST'})).json();
+    cues[i] = r; render();
+  }
+  const c = t.closest('.cue');
+  if (c && !t.dataset.speak && !t.dataset.play && !t.dataset.seek && t.tagName !== 'TEXTAREA') {
+    V.currentTime = cues[+c.dataset.i].at;
+  }
+});
+
+document.getElementById('ffwdpanel').addEventListener('blur', async (e) => {
+  if (e.target.tagName !== 'TEXTAREA') return;
+  const n = +e.target.dataset.ffwd;
+  const ranges = JSON.parse(JSON.stringify(P.ffwd));
+  ranges[n].text = e.target.value;
+  await setFfwd(ranges);
+  renderFfwd();
+}, true);
+document.getElementById('ffwdpanel').addEventListener('click', async (e) => {
+  if (e.target.dataset.ffwddel != null) {
+    const n = +e.target.dataset.ffwddel;
+    if (!confirm('Remove this fast-forward range?')) return;
+    const ranges = P.ffwd.filter((_, i) => i !== n);
+    await setFfwd(ranges); return;
+  }
+  if (e.target.dataset.ffwdfactor != null) {
+    const n = +e.target.dataset.ffwdfactor;
+    const f = prompt('Speed factor for this range:', P.ffwd[n].factor || 30);
+    if (!f) return;
+    const ranges = JSON.parse(JSON.stringify(P.ffwd));
+    ranges[n].factor = Number(f);
+    // No duration in the label: dragging the edges would silently make it a lie.
+    ranges[n].label = 'fast forward x' + f;
+    await setFfwd(ranges); return;
+  }
+  if (e.target.dataset.ffwdspeak == null) return;
+  const n = +e.target.dataset.ffwdspeak;
+  const t = (P.ffwd[n].text || '').trim();
+  if (!t) { alert('Write the narration first.'); return; }
+  e.target.textContent = '…'; e.target.disabled = true;
+  await fetch('/api/ffwd/voice', {method:'POST', headers:{'Content-Type':'application/json'},
+                                  body: JSON.stringify({text: t})});
+  e.target.textContent = 'Speak'; e.target.disabled = false;
+  new Audio('/api/ffwd/audio?t=' + encodeURIComponent(t) + '&r=' + Date.now()).play();
+});
+
+document.getElementById('list').addEventListener('blur', async (e) => {
+  if (e.target.tagName !== 'TEXTAREA') return;
+  const i = +e.target.dataset.i, text = e.target.value;
+  if (text === cues[i].text) return;
+  const r = await (await fetch('/api/cues/'+i, {method:'PUT', headers:{'Content-Type':'application/json'},
+                                                body: JSON.stringify({text})})).json();
+  cues[i] = r; render();          // audio is now stale for this cue only
+  tick();                          // the server queued it; watch it come back
+}, true);
+
+// Live caption + audio preview while scrubbing or playing.
+V.addEventListener('timeupdate', () => {
+  const t = V.currentTime;
+  let idx = -1;
+  for (let i = 0; i < cues.length; i++) {
+    const end = cues[i].holdMs ? cues[i].at + cues[i].holdMs/1000 : (cues[i+1]?.at ?? t+1);
+    if (t >= cues[i].at && t < end) { idx = i; break; }
+  }
+  CAP.textContent = idx >= 0 ? cues[idx].text : '';
+  if (V.duration) {
+    document.getElementById('head').style.left = (t / V.duration * 100) + '%';
+    document.getElementById('tnow').textContent = fmt(t);
+  }
+  if (idx !== lastIdx) {
+    document.querySelectorAll('.cue.on').forEach(e => e.classList.remove('on'));
+    if (idx >= 0) {
+      const e = document.getElementById('cue'+idx);
+      if (e) { e.classList.add('on'); e.scrollIntoView({block:'nearest'}); }
+      // play this cue's audio once, only when actually playing forward
+      if (!V.paused && cues[idx].audio && !playing.has(idx)) {
+        const a = new Audio('/api/cues/'+idx+'/audio');
+        a.play().catch(()=>{}); playing.set(idx, a);
+      }
+    }
+    lastIdx = idx;
+  }
+});
+V.addEventListener('seeking', () => { playing.forEach(a => a.pause()); playing.clear(); });
+
+function renderVoices() {
+  const el = document.getElementById('voices');
+  const vs = P.voices || [];
+  el.innerHTML = 'voices: ' + vs.map(v =>
+    `<label style="cursor:pointer"><input type="checkbox" data-voice="${v.key}"
+      ${v.selected ? 'checked' : ''} ${v.key === 'jonathan' ? 'disabled' : ''}
+      style="width:auto;min-width:auto"> <span data-hear="${v.key}"
+      title="hover to hear this voice">${v.title}</span></label>`).join(' ');
+}
+// Hover to audition. Delayed so sweeping the cursor across the row does not
+// fire five samples, and stopped on leave so they cannot overlap.
+let hearTimer = null, hearAudio = null;
+document.addEventListener('mouseover', (e) => {
+  const k = e.target.dataset && e.target.dataset.hear;
+  if (!k) return;
+  clearTimeout(hearTimer);
+  hearTimer = setTimeout(() => {
+    if (hearAudio) { hearAudio.pause(); hearAudio = null; }
+    hearAudio = new Audio('/api/voices/' + k + '/sample');
+    hearAudio.play().catch(() => {});
+  }, 350);
+});
+document.addEventListener('mouseout', (e) => {
+  if (!(e.target.dataset && e.target.dataset.hear)) return;
+  clearTimeout(hearTimer);
+  if (hearAudio) { hearAudio.pause(); hearAudio = null; }
+});
+
+document.addEventListener('change', async (e) => {
+  if (!e.target.dataset || e.target.dataset.voice == null) return;
+  // Order matters: the first selected voice becomes the DEFAULT audio track,
+  // so the catalog order is preserved rather than click order.
+  const keys = (P.voices || []).filter(v =>
+      v.key === 'jonathan' ||
+      document.querySelector(`[data-voice="${v.key}"]`).checked).map(v => v.key);
+  await fetch('/api/voices', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({keys})});
+  P = await (await fetch('/api/project')).json();
+  renderVoices();
+});
+
+function ffwdText() {
+  const f = P.ffwd || [];
+  if (!f.length) return 'ffwd: none';
+  const saved = f.reduce((a,r) => a + (r.to-r.from) - (r.to-r.from)/(r.factor||30), 0);
+  return 'ffwd: ' + f.length + ' range' + (f.length>1?'s':'') + ' · saves ' + Math.round(saved/60) + ' min';
+}
+async function setFfwd(ranges) {
+  await fetch('/api/ffwd', {method:'POST', headers:{'Content-Type':'application/json'},
+                            body: JSON.stringify({ranges})});
+  P = await (await fetch('/api/project')).json();
+  cues = P.cues;
+  document.getElementById('ffwdinfo').textContent = ffwdText();
+  render(); renderFfwd(); drawTimeline();
+}
+document.getElementById('ffwdsuggest').addEventListener('click', async () => {
+  const sug = P.ffwdSuggest;
+  if (!sug) { alert('No remaining stretch long enough to be worth compressing.'); return; }
+  const mins = ((sug.to - sug.from)/60).toFixed(1);
+  const f = prompt(`Compress ${mins} min of silence (${Math.round(sug.from)}s - ${Math.round(sug.to)}s).\nSpeed factor:`, sug.factor);
+  if (!f) return;
+  await setFfwd([...(P.ffwd || []), {...sug, factor: Number(f)}]);
+});
+document.getElementById('ffwdclear').addEventListener('click', () => setFfwd([]));
+
+document.getElementById('genstale').addEventListener('click', async () => {
+  const r = await (await fetch('/api/generate-stale', {method:'POST'})).json();
+  document.getElementById('queue').textContent = 'queued ' + r.queued;
+  tick();
+});
+
+// Poll while anything is queued or generating, so the list keeps up with the
+// background worker without the page having to guess when it finished.
+let ticking = false;
+async function tick() {
+  if (ticking) return; ticking = true;
+  try {
+    while (true) {
+      const p = await (await fetch('/api/project')).json();
+      cues = p.cues; render(); drawTimeline();
+      const q = p.queue || [], g = p.generating;
+      const el = document.getElementById('queue');
+      const pend = p.pending || {};
+      const pk = Object.keys(pend);
+      const bits = [];
+      if (g != null) bits.push('generating [' + String(g).padStart(2,'0') + ']');
+      if (q.length) bits.push(q.length + ' queued');
+      if (pk.length) bits.push(pk.length + ' waiting (' + Math.max(...pk.map(k=>pend[k])) + 's)');
+      el.textContent = bits.length ? bits.join(' · ') : 'queue: idle';
+      if (g == null && !q.length && !pk.length) break;
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  } finally { ticking = false; }
+}
+
+document.getElementById('export').addEventListener('click', async () => {
+  const b = document.getElementById('export');
+  b.disabled = true; b.textContent = 'Exporting…';
+  const burn = document.getElementById('burn').checked;
+  await fetch('/api/export', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({captions: burn})});
+  poll();
+});
+async function poll() {
+  const r = await (await fetch('/api/export/status')).json();
+  document.getElementById('log').textContent = r.log.join('\n');
+  const pr = document.getElementById('prog');
+  pr.style.display = (r.running || r.pct > 0) ? '' : 'none';
+  // Mirror it next to the button — the bottom panel is off-screen when the cue
+  // list is long, which is exactly when an export is worth watching.
+  const hp = document.getElementById('hprog');
+  hp.style.display = r.running ? 'inline-flex' : 'none';
+  document.getElementById('hphase').textContent = r.phase || '';
+  document.getElementById('hbar').style.width = (r.pct || 0) + '%';
+  document.getElementById('hpct').textContent = (r.pct || 0).toFixed(0) + '%';
+  document.getElementById('phase').textContent = r.phase || '';
+  document.getElementById('detail').textContent = r.detail || '';
+  document.getElementById('pct').textContent = (r.pct || 0).toFixed(0) + '%';
+  document.getElementById('bar').style.width = (r.pct || 0) + '%';
+  const o = P.outputs || {};
+  document.getElementById('outpath').textContent =
+    'writes: ' + (document.getElementById('burn').checked ? o.captioned : o.narrated);
+  const b = document.getElementById('export');
+  b.disabled = !!r.running;
+  b.textContent = r.running ? 'Exporting…' : 'Export';
+  if (r.running) setTimeout(poll, 1200);
+  else load();
+}
+load();
+tick();
+</script>
+</body></html>
