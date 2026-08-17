@@ -78,12 +78,43 @@ const PLAYER = process.env.PLAYER || '';          // pin a player_id
 // applied, the phone is left alone. Worth running before every real take —
 // it is the cheap version of finding out the device went idle.
 const DRY = process.env.DRY === '1';
+// CAPTIONS=1 draws the narration in the page. Rehearsals only — see __capInit.
+const CAPTIONS = process.env.CAPTIONS === '1';
 const USER = process.env.DEMO_USER || '';
 const PASS = process.env.DEMO_PASS || '';
 
 // A pattern this long has a lot of dead air. The recorder records everything;
 // the FFWD ranges in narrator_app.py compress the plateaus afterwards.
 const RUN_TIMEOUT_MS = Number(process.env.RUN_TIMEOUT_MS || 45 * 60 * 1000);
+
+// Which panels are unfolded for the take. Everything else in FOLD_KEYS is
+// folded, so the frame carries the two things the demo is about and nothing
+// else — Fault Injection in particular defaults to OPEN and is pure noise here.
+//
+// Done by seeding localStorage rather than clicking, because the page's own
+// `?open_folds=` deep-link can only force a panel OPEN, never closed. The
+// storage scheme is CollapsibleSection.vue's: testing_session_collapse_<key>.
+const FOLD_KEYS = [
+  'session-details', 'fault-injection', 'content-manipulation', 'server-timeouts',
+  'network-shaping', 'focus-window', 'player-metrics', 'player-state',
+  'bitrate-chart', 'network-log', 'play-log',
+];
+const FOLDS_OPEN = (process.env.FOLDS_OPEN
+  || 'network-shaping,bitrate-chart,player-state').split(',').map((s) => s.trim());
+
+// Chart legend groups switched off before the take. "Variant Bands" is the
+// twelve shaded avg→peak rung bands, which BandwidthChart shows by default.
+// Empty string keeps everything.
+const HIDE_LEGENDS = (process.env.HIDE_LEGENDS === undefined
+  ? 'Variant Bands' : process.env.HIDE_LEGENDS).split(',').map((s) => s.trim()).filter(Boolean);
+
+// Charts to render at double height (200px → 540px). Each MetricsLineChart owns
+// its own Expand toggle, persisted under dashboard_v3_chart_expand_<title>, so
+// this is seeded the same way as the folds. The panel-level ⤢ in
+// BitrateChartPanelToolbar is a DIFFERENT control and does not change height —
+// clicking it looked right and grew nothing.
+const EXPAND_CHARTS = (process.env.EXPAND_CHARTS === undefined
+  ? 'bandwidth' : process.env.EXPAND_CHARTS).split(',').map((s) => s.trim()).filter(Boolean);
 
 /* ─── page-side overlay ─────────────────────────────────────────────────
  * Cursor, click ring and spotlight box. Same shapes as the Encoder recorder
@@ -97,6 +128,36 @@ window.__ui = () => {
   mk('__pwring', 'position:fixed;left:0;top:0;width:34px;height:34px;margin:-6px 0 0 -6px;border:2px solid #4cc9f0;border-radius:50%;opacity:0;z-index:2147483646;pointer-events:none;transition:transform 420ms cubic-bezier(.4,.1,.2,1),opacity 300ms');
   mk('__pwbox', 'position:fixed;border:2px solid #4cc9f0;border-radius:6px;box-shadow:0 0 0 9999px rgba(3,7,15,.45),0 0 18px rgba(76,201,240,.6);opacity:0;z-index:2147483644;pointer-events:none;transition:all 420ms cubic-bezier(.4,.1,.2,1)');
 };
+/* Rehearsal-only caption strip (CAPTIONS=1).
+ *
+ * A real take draws NO caption in the page: the browser ends up as a
+ * sub-rectangle of the composite, so text burned in here would shrink and shift
+ * with the layout. render_layout.py reserves a strip on the composite instead
+ * and make_ass.py burns into that.
+ *
+ * But a rehearsal exists to check the NARRATION against the ACTION, and the raw
+ * webm carries no captions at all — which makes the one thing a rehearsal is
+ * for impossible to judge. So the strip is available, off by default, and
+ * should stay off for anything being composited. */
+window.__capInit = () => {
+  if (document.getElementById('__pwcap')) return;
+  document.body.style.paddingBottom = '130px';
+  const d = document.createElement('div');
+  d.id = '__pwcap';
+  d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;height:130px;'
+    + 'z-index:2147483645;display:flex;align-items:center;padding:0 32px;'
+    + 'pointer-events:none;background:linear-gradient(180deg,rgba(8,14,26,0),rgba(8,14,26,.97) 32%);'
+    + 'color:#e6edf7;font:500 19px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;'
+    + 'opacity:0;transition:opacity 250ms';
+  document.body.appendChild(d);
+};
+window.__say = (text) => {
+  const b = document.getElementById('__pwcap');
+  if (!b) return;
+  b.textContent = text;
+  b.style.opacity = text ? '1' : '0';
+};
+
 window.__moveCursor = (x, y) => { window.__ui();
   const t = 'translate(' + x + 'px,' + y + 'px)';
   document.getElementById('__pwcursor').style.transform = t;
@@ -108,14 +169,197 @@ window.__spot = (rect) => { window.__ui(); const b = document.getElementById('__
   b.style.left = (rect.x - 6) + 'px'; b.style.top = (rect.y - 6) + 'px';
   b.style.width = (rect.w + 12) + 'px'; b.style.height = (rect.h + 12) + 'px';
   b.style.opacity = '1'; };
-window.__rectOf = (sel) => {
-  const e = document.querySelector(sel); if (!e) return null;
+// These take (selector, index) rather than a single string. Playwright's
+// "sel >> nth=3" is LOCATOR syntax and is not a valid CSS selector, so passing
+// it through to querySelector throws — the index has to travel separately.
+window.__rectOf = (sel, i) => {
+  const e = document.querySelectorAll(sel)[i || 0]; if (!e) return null;
   const r = e.getBoundingClientRect();
   return { x: r.x, y: r.y, w: r.width, h: r.height };
 };
-window.__scrollTo = (sel) => {
-  const e = document.querySelector(sel); if (!e) return false;
-  e.scrollIntoView({ behavior: 'smooth', block: 'center' }); return true;
+window.__scrollTo = (sel, i, block) => {
+  const e = document.querySelectorAll(sel)[i || 0]; if (!e) return false;
+  e.scrollIntoView({ behavior: 'smooth', block: block || 'center' }); return true;
+};
+
+
+/* ── hand-drawn annotation ──────────────────────────────────────────────
+ * A marker-pen ellipse that draws itself on, holds, then fades. Two
+ * overlapping passes with per-vertex jitter is what separates it from a
+ * geometric ellipse — a clean <ellipse> reads as UI chrome, and the point of
+ * this is that it reads as someone pointing.
+ *
+ * Deterministic: the jitter comes from a seeded PRNG, so a re-record of the
+ * same take draws the same squiggle rather than a new one. */
+window.__scribInit = () => {
+  if (document.getElementById('__pwscrib')) return document.getElementById('__pwscrib');
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.id = '__pwscrib';
+  s.setAttribute('style', 'position:fixed;left:0;top:0;width:100vw;height:100vh;' +
+    'z-index:2147483643;pointer-events:none;overflow:visible');
+  document.body.appendChild(s);
+  return s;
+};
+window.__scribble = (o) => {
+  const svg = window.__scribInit();
+  const NS = 'http://www.w3.org/2000/svg';
+  let seed = (o.seed || 1) * 9301 + 49297;
+  const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+  const rx = o.rx || 60, ry = o.ry || 34;
+  let d = '';
+  // Two loops, the second offset — the way you actually circle something twice.
+  for (let loop = 0; loop < 2; loop++) {
+    const spin = loop * 0.45;                 // start the 2nd pass elsewhere
+    const grow = 1 + loop * 0.08;
+    for (let i = 0; i <= 26; i++) {
+      const a = spin + (i / 26) * Math.PI * 2 * 1.06;   // >1 turn = overshoot
+      const j = 0.90 + rnd() * 0.20;
+      const x = o.x + Math.cos(a) * rx * grow * j;
+      const y = o.y + Math.sin(a) * ry * grow * j;
+      d += (i === 0 && loop === 0 ? 'M' : 'L') + x.toFixed(1) + ' ' + y.toFixed(1) + ' ';
+    }
+  }
+  const p = document.createElementNS(NS, 'path');
+  p.setAttribute('d', d);
+  p.setAttribute('fill', 'none');
+  p.setAttribute('stroke', o.color || '#ff3b6b');
+  p.setAttribute('stroke-width', o.width || 3.5);
+  p.setAttribute('stroke-linecap', 'round');
+  p.setAttribute('stroke-linejoin', 'round');
+  svg.appendChild(p);
+  const len = p.getTotalLength();
+  p.style.strokeDasharray = len;
+  p.style.strokeDashoffset = len;
+  p.style.transition = 'stroke-dashoffset ' + (o.ms || 700) + 'ms ease-out';
+  requestAnimationFrame(() => { p.style.strokeDashoffset = '0'; });
+  return true;
+};
+window.__scribClear = () => {
+  const s = document.getElementById('__pwscrib');
+  if (s) while (s.firstChild) s.removeChild(s.firstChild);
+};
+
+/* Find the Chart.js instance carrying a named series. Resolving by LABEL
+ * rather than by canvas index means adding or reordering a chart in the stack
+ * does not silently move the annotation onto the wrong graph. */
+window.__chartByLabel = (label) => {
+  if (!window.Chart || !window.Chart.getChart) return null;
+  for (const c of document.querySelectorAll('canvas')) {
+    const ch = window.Chart.getChart(c);
+    if (ch && (ch.data.datasets || []).some((d) => d.label === label)) return { c, ch };
+  }
+  return null;
+};
+
+/* Circle an actual data point: the nearest sample of the named series to tMs. */
+window.__circleSeries = (label, tMs, opts) => {
+  const found = window.__chartByLabel(label);
+  if (!found) return null;
+  const { c, ch } = found;
+  const ds = ch.data.datasets.find((d) => d.label === label);
+  const pts = (ds.data || []).filter((p) => p && typeof p === 'object' && p.y != null);
+  if (!pts.length) return null;
+  let best = pts[0], bd = Infinity;
+  for (const p of pts) {
+    const px = p.x instanceof Date ? p.x.getTime() : Number(p.x);
+    const d = Math.abs(px - tMs);
+    if (d < bd) { bd = d; best = p; }
+  }
+  const bx = best.x instanceof Date ? best.x.getTime() : Number(best.x);
+  const rect = c.getBoundingClientRect();
+  // Clamp into the plot area. The interesting point is almost always the newest
+  // one, which sits hard against the live edge — an unclamped circle then spills
+  // off the right of the plot into empty page, pointing at nothing.
+  const a = ch.chartArea || { left: 0, right: c.clientWidth, top: 0, bottom: c.clientHeight };
+  const rx = (opts && opts.rx) || 60, ry = (opts && opts.ry) || 34;
+  const px = Math.min(Math.max(ch.scales.x.getPixelForValue(bx), a.left + rx), a.right - rx);
+  const py = Math.min(Math.max(ch.scales.y.getPixelForValue(best.y), a.top + ry), a.bottom - ry);
+  const x = rect.x + px, y = rect.y + py;
+  window.__scribble(Object.assign({ x, y }, opts || {}));
+  return { x, y, value: best.y };
+};
+
+/* Viewport coords of a Chart.js legend entry, by its text.
+ *
+ * The legend is drawn INSIDE the canvas, so there is no DOM node to click and
+ * no selector to write. Chart.js keeps legendHitBoxes parallel to legendItems,
+ * which is the only handle on where an entry actually is. Clicking the real
+ * entry (rather than calling setDatasetVisibility) is what makes the app record
+ * the choice through useLegendVisibility, so it survives a dataset rebuild. */
+window.__legendBox = (text) => {
+  for (const c of document.querySelectorAll('canvas')) {
+    const ch = window.Chart && window.Chart.getChart(c);
+    if (!ch || !ch.legend) continue;
+    const items = ch.legend.legendItems || [];
+    const boxes = ch.legend.legendHitBoxes || [];
+    for (let i = 0; i < items.length; i++) {
+      if (items[i] && items[i].text === text && boxes[i]) {
+        const r = c.getBoundingClientRect();
+        return { x: r.x + boxes[i].left + boxes[i].width / 2,
+                 y: r.y + boxes[i].top + boxes[i].height / 2,
+                 hidden: !!items[i].hidden };
+      }
+    }
+  }
+  return null;
+};
+
+/* Hide every dataset in a legend group directly.
+ *
+ * Clicking the real legend entry would be more faithful — it routes through the
+ * app's own useLegendVisibility store and survives a dataset rebuild. It is also
+ * unreliable here: the entry is drawn INSIDE the canvas, and once the chart is
+ * expanded to 540px the legend sits below the viewport, where a synthetic mouse
+ * click cannot reach it. Scrolling it into view then moves the chart out of
+ * frame. So set visibility through Chart.js instead and re-assert it as the run
+ * goes on, since this route does not persist across a rebuild. */
+window.__hideGroup = (group) => {
+  let hidden = 0;
+  for (const c of document.querySelectorAll('canvas')) {
+    const ch = window.Chart && window.Chart.getChart(c);
+    if (!ch) continue;
+    let touched = false;
+    (ch.data.datasets || []).forEach((d, i) => {
+      if (d._groupLegend !== group) return;
+      if (ch.isDatasetVisible(i)) { ch.setDatasetVisibility(i, false); touched = true; hidden++; }
+    });
+    if (touched) ch.update('none');
+  }
+  return hidden;
+};
+
+/* How many datasets of a legend group are currently drawn — used to CONFIRM the
+ * hide landed, rather than assuming it did. */
+window.__groupVisible = (group) => {
+  let shown = 0, total = 0;
+  for (const c of document.querySelectorAll('canvas')) {
+    const ch = window.Chart && window.Chart.getChart(c);
+    if (!ch) continue;
+    (ch.data.datasets || []).forEach((d, i) => {
+      if (d._groupLegend !== group) return;
+      total++;
+      if (ch.isDatasetVisible(i)) shown++;
+    });
+  }
+  return { shown, total };
+};
+
+/* Circle the newest item on the Player State timeline (vis-timeline renders
+ * DOM items, not a canvas, so there is no scale to query — the right-most
+ * item IS the most recent event). */
+window.__circleNewestEvent = (opts) => {
+  const items = [...document.querySelectorAll('.vis-item')];
+  if (!items.length) return null;
+  let best = null, bx = -Infinity;
+  for (const it of items) {
+    const r = it.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) continue;
+    if (r.x > bx) { bx = r.x; best = r; }
+  }
+  if (!best) return null;
+  const x = best.x + best.width / 2, y = best.y + best.height / 2;
+  window.__scribble(Object.assign({ x, y, rx: 46, ry: 30 }, opts || {}));
+  return { x, y };
 };
 `;
 
@@ -229,9 +473,17 @@ function phoneStop(dest) {
     console.log(`  ⚠ step ${STEP_SECONDS}s < buffer ${pm0.buffer_depth_s}s — the DISPLAYED variant will`);
     console.log('    trail the cap continuously and never settle between steps.');
   }
-  if (chosen.shape?.pattern) {
-    console.error('\n✗ This session already has a pattern applied. Clear it in the UI first,');
-    console.error('  or the take starts mid-descent with no settled "before".');
+  // Clearing a pattern does NOT remove the `pattern` object — it leaves
+  // {template: "sliders", steps: null} behind. Testing for the key's presence
+  // therefore reports "already applied" forever after the first take, so the
+  // test is for an ACTIVE pattern: a real template with steps in it.
+  const existing = chosen.shape?.pattern;
+  if (existing && existing.template && existing.template !== 'sliders'
+      && (existing.steps || []).length) {
+    console.error(`\n✗ This session already has a ${existing.template} pattern applied `
+      + `(${existing.steps.length} steps).`);
+    console.error('  The take would start mid-descent with no settled "before". Clear it with:');
+    console.error(`    harness shape ${pid} --clear-pattern`);
     process.exit(1);
   }
   console.log('──────────────────────────────────────────────────────────\n');
@@ -257,10 +509,52 @@ function phoneStop(dest) {
     recordVideo: { dir: OUT, size: { width: W, height: H } },
   });
   await ctx.addInitScript(INIT);
-  const page = await ctx.newPage();
+  // Runs before the app's own scripts, so CollapsibleSection reads these on
+  // first mount and the take never shows a fold opening on camera.
+  await ctx.addInitScript(([keys, open]) => {
+    for (const k of keys) {
+      try {
+        localStorage.setItem('testing_session_collapse_' + k,
+          open.includes(k) ? 'true' : 'false');
+      } catch { /* private mode — the folds just keep their defaults */ }
+    }
+  }, [FOLD_KEYS, FOLDS_OPEN]);
+  await ctx.addInitScript((charts) => {
+    for (const c of charts) {
+      try { localStorage.setItem('dashboard_v3_chart_expand_' + c, 'true'); } catch { /* ignore */ }
+    }
+  }, EXPAND_CHARTS);
 
-  /* 3. Cue plumbing --------------------------------------------------- */
-  let t0 = 0;                      // wall clock at recording start
+  // Phone first, then the page. Playwright starts the webm the moment the page
+  // is created, so the phone has to be rolling BEFORE that for the offset to
+  // come out positive — render_layout seeks INTO the phone recording to find
+  // the browser's t=0, and a negative seek is not a thing.
+  let phoneReadyAt = 0;
+  if (PHONE && process.env.ANNOTATE_TEST !== '1') {
+    console.log('starting QuickTime capture of the phone…');
+    phoneStart();
+    await sleep(1500);            // let QuickTime actually get going
+    phoneReadyAt = Date.now();
+  }
+
+  const page = await ctx.newPage();
+  // Recording is live from this instant — the setup that follows (navigate,
+  // pick the session, hide the bands) is IN the video, at the head.
+
+  /* 3. Cue plumbing ---------------------------------------------------
+   * t0 is set HERE, at page creation, because that is when the webm starts.
+   *
+   * It used to be set after setup finished, which quietly put every caption
+   * ahead of the picture by however long setup took — a couple of seconds when
+   * setup was fast, and up to half a minute once the legend lookup started
+   * polling for the chart to populate. The cue timings are the whole trick, so
+   * the clock has to be the video's clock. Setup simply occupies the head of
+   * the timeline now, as its own segment, where the FFWD range can compress it. */
+  let t0 = Date.now();
+  // Measured, not assumed: how far into the phone recording the browser's t=0
+  // falls. Still nudge it once per take — this only removes the guesswork about
+  // the launch order, not QuickTime's own start latency.
+  const phoneOffset = phoneReadyAt ? Math.max(0, (t0 - phoneReadyAt) / 1000) : 0;
   const cues = [];
   const layout = [];
   const segments = [];
@@ -274,6 +568,7 @@ function phoneStop(dest) {
     const at = now();
     cues.push({ at: Math.round(at * 1000) / 1000, text, holdMs, words: text.split(/\s+/).length });
     console.log(`  [${at.toFixed(1)}s] ${text}`);
+    if (CAPTIONS) page.evaluate((t) => window.__say(t), text).catch(() => {});
   }
 
   /** Record a layout change for render_layout.py. */
@@ -289,34 +584,71 @@ function phoneStop(dest) {
     segments.push({ name, from: at, to: at });
   }
 
-  async function moveTo(sel) {
-    const r = await page.evaluate((s) => window.__rectOf(s), sel);
+  async function moveTo(sel, i = 0) {
+    const r = await page.evaluate(([s, n]) => window.__rectOf(s, n), [sel, i]);
     if (!r) return null;
     await page.evaluate(([x, y]) => window.__moveCursor(x, y), [r.x + r.w / 2, r.y + r.h / 2]);
     await sleep(450);
     return r;
   }
-  async function spot(sel) {
-    await page.evaluate((s) => window.__scrollTo(s), sel);
+  // `block` is passed through to scrollIntoView. Defaults to 'center', but the
+  // pattern panel wants 'nearest': Apply sits directly above the generated
+  // 47-row rate table, so centring Apply drags the table up into frame. With
+  // 'nearest' an already-visible target does not scroll at all, and the view
+  // stays anchored on the top of the panel where the controls are.
+  async function spot(sel, i = 0, block = 'center') {
+    await page.evaluate(([s, n, b]) => window.__scrollTo(s, n, b), [sel, i, block]);
     await sleep(700);
-    const r = await page.evaluate((s) => window.__rectOf(s), sel);
+    const r = await page.evaluate(([s, n]) => window.__rectOf(s, n), [sel, i]);
     if (r) {
-      rects[sel] = r;
+      // Keyed by selector+index so a later crop preset can resolve the box this
+      // take actually had, rather than one recomputed against a changed layout.
+      rects[i ? `${sel}#${i}` : sel] = r;
       await page.evaluate((rr) => window.__spot(rr), r);
     }
     return r;
   }
   const unspot = () => page.evaluate(() => window.__spot(null));
 
-  async function clickSel(sel) {
-    await moveTo(sel);
+  /** Toggle a Chart.js legend entry off by clicking it, and verify it took.
+   *  Silent — this is stage dressing, not something the narration mentions. */
+  async function hideLegend(text) {
+    await page.evaluate(() => window.__scrollTo('canvas'));
+    await sleep(500);
+    // The legend does not exist until the chart has datasets, which waits on
+    // the first SSE payload. Looking too early finds nothing and silently
+    // leaves the bands on — poll instead of assuming the page is ready.
+    let box = null;
+    for (let i = 0; i < 30 && !box; i++) {
+      box = await page.evaluate((t) => window.__legendBox(t), text);
+      if (!box) await sleep(1000);
+    }
+    if (!box) { console.error(`  ⚠ legend "${text}" not found — leaving it visible`); return; }
+    await page.evaluate((t) => window.__hideGroup(t), text);
+    const after = await page.evaluate((t) => window.__groupVisible(t), text);
+    if (after.total && after.shown > 0) {
+      console.error(`  ⚠ legend "${text}" still showing ${after.shown}/${after.total}`);
+    } else {
+      console.log(`  legend "${text}" hidden (${after.total} series)`);
+    }
+  }
+
+  async function clickSel(sel, i = 0) {
+    await moveTo(sel, i);
     await page.evaluate(() => window.__clickPulse());
-    await page.click(sel);
+    await page.locator(sel).nth(i).click();
     await sleep(350);
   }
 
   /* 4. Open the page and select the device ---------------------------- */
+  mark('setup');
+  lay('web-full');
   await page.goto(PAGE_URL, { waitUntil: 'domcontentloaded' });
+  if (CAPTIONS) {
+    await page.evaluate(() => window.__capInit());
+    console.log('  CAPTIONS=1 — narration drawn in the page. Rehearsal only:');
+    console.log('  do not composite a take recorded this way.');
+  }
   await page.waitForSelector('.session-tab', { timeout: 30000 });
 
   // Match on display_id — the pill carries "Session #N", and N came from the
@@ -327,15 +659,39 @@ function phoneStop(dest) {
   await page.click(pillSel);
   await page.waitForSelector(`input[name="tpl-${pid}"]`, { timeout: 20000 });
 
-  /* 5. Start both recordings ------------------------------------------ */
-  if (PHONE) {
-    console.log('starting QuickTime capture of the phone…');
-    phoneStart();
-    await sleep(1500);            // let QuickTime actually get going
+  /* 5. Stage dressing -------------------------------------------------- */
+  // Clear the plot. BandwidthChart appends a shaded
+  // avg→peak band per variant with `hidden: false`, so twelve bands stripe the
+  // plot area by default. Useful at a desk, noise at video size.
+  for (const g of HIDE_LEGENDS) await hideLegend(g);
+  // ANNOTATE_TEST=1 exercises the annotation path against the live chart and
+  // screenshots the result, without recording or applying anything. The circle
+  // depends on Chart.js internals (legendHitBoxes, scales.getPixelForValue), so
+  // it is the one part that cannot be verified by reading the code.
+  if (process.env.ANNOTATE_TEST === '1') {
+    await page.evaluate(() => window.__scrollTo('canvas'));
+    await sleep(800);
+    const a = await page.evaluate((t) => window.__circleSeries('Fetching Variant', t, { seed: 7 }), Date.now());
+    const b = await page.evaluate((t) => window.__circleSeries('Displayed Variant', t, { seed: 21, color: '#a855f7' }), Date.now());
+    console.log('  Fetching Variant  ->', JSON.stringify(a));
+    console.log('  Displayed Variant ->', JSON.stringify(b));
+    await sleep(1500);
+    const shot = path.join(OUT, 'annotate-test.png');
+    await page.screenshot({ path: shot });
+    console.log('  wrote', shot);
+    await ctx.close(); await browser.close();
+    return;
   }
-  t0 = Date.now();
-  mark('setup');
-  lay('web-full');
+
+  // Anchor at the TOP of the pattern panel and stay there for the whole
+  // configure/settle/apply stretch — the generated rate table lives below the
+  // fold and never needs to come into frame.
+  await page.evaluate(() => window.__scrollTo('.template-row', 0, 'start'));
+  await sleep(600);
+
+  // Setup is over; the narration starts here. Its own segment, so
+  // narrator_app's FFWD can compress the head without touching the rest.
+  mark('intro');
 
   cue(`A real iPhone is playing a live low-latency HLS stream. `
     + `${pm0.device_model}, ${pm0.player_tech} ${pm0.player_tech_version}.`, 6000);
@@ -348,21 +704,39 @@ function phoneStop(dest) {
   await sleep(6000);
 
   /* 6. Configure the pattern -----------------------------------------
-   * ORDER MATTERS, and not for the obvious reason. onMaxStepChange and
-   * onStepSecondsChange both read `draft.template ?? 'ramp_up'` — so touching
-   * fill density or step duration BEFORE picking a template silently builds a
-   * ramp_up step table. It is corrected the moment Valley is picked, but any
-   * narration or spotlight in between would be describing the wrong pattern.
-   * So: configure everything first, in silence, then assert, then narrate. */
+   * ORDER MATTERS. Template FIRST: the Margin / Step duration / Fill density
+   * rows sit inside `v-if="activeTemplate !== 'sliders'"`, so they do not
+   * exist in the DOM until a template is picked. Reaching for them first is
+   * a 30s timeout on a locator that will never resolve.
+   *
+   * (Picking the template first is also what makes onMaxStepChange /
+   * onStepSecondsChange safe. Both read `draft.template ?? 'ramp_up'`, so with
+   * no template chosen they would build a ramp_up table under a valley label —
+   * unreachable through the UI precisely because those controls are hidden
+   * until a template exists, but the fallback is there in the source and is
+   * why the order is not arbitrary.)
+   *
+   * Picking Valley builds a first table at the DEFAULT fill (1.25 → 59 steps);
+   * the fill click then rebuilds it at 24 caps → 47 steps. Both tables are on
+   * screen briefly, which is exactly why nothing narrates or spotlights until
+   * the whole configuration has settled and the step count has been asserted. */
   mark('configure');
 
-  // Radio order follows MAX_STEP_CHOICES in NetworkShapingPattern.vue, where
-  // the "None" sentinel sits LAST, not first.
-  await clickSel(`input[name="fill-${pid}"] >> nth=${['1.125', '1.25', '1.375', 'none'].indexOf(FILL)}`);
-  await clickSel(`input[name="stps-${pid}"] >> nth=${[6, 12, 18, 24, 60, 120].indexOf(STEP_SECONDS)}`);
-  await clickSel(`input[name="mgn-${pid}"] >> nth=${[0, 5, 10, 25, 50].indexOf(MARGIN)}`);
-  // Valley last, so the final build is unambiguously a valley.
-  await clickSel(`input[name="tpl-${pid}"] >> nth=${5}`);
+  // Radio indices follow the *_CHOICES arrays in NetworkShapingPattern.vue.
+  // Note MAX_STEP_CHOICES puts the "None" sentinel LAST, not first.
+  const idxOf = (arr, v, what) => {
+    const i = arr.indexOf(v);
+    if (i < 0) throw new Error(`${what}: ${v} is not one of ${arr.join(', ')}`);
+    return i;
+  };
+  // Template first — the rest of the rows do not render until it is set.
+  await clickSel(`input[name="tpl-${pid}"]`,
+    idxOf(['sliders', 'square_wave', 'ramp_up', 'ramp_down', 'pyramid', 'valley', 'transient_shock'],
+          'valley', 'template'));
+  await page.waitForSelector(`input[name="fill-${pid}"]`, { timeout: 15000 });
+  await clickSel(`input[name="fill-${pid}"]`, idxOf(['1.125', '1.25', '1.375', 'none'], FILL, 'FILL'));
+  await clickSel(`input[name="stps-${pid}"]`, idxOf([6, 12, 18, 24, 60, 120], STEP_SECONDS, 'STEP_SECONDS'));
+  await clickSel(`input[name="mgn-${pid}"]`, idxOf([0, 5, 10, 25, 50], MARGIN, 'MARGIN'));
   await sleep(900);
 
   const stepCount = await page.locator('.step-row').count();
@@ -381,17 +755,19 @@ function phoneStop(dest) {
   const topCap = rates.length ? Math.max(...rates) : null;
   const floor = rates.length ? Math.min(...rates) : null;
 
-  await spot(`.template-row`);
+  await spot(`.template-row`, 0, 'nearest');
   cue(`Valley: hold the cap above the top variant, walk it all the way down, `
     + `then walk it back up.`, 6000);
   await sleep(6000);
   await unspot();
 
-  await spot('.steps');
+  // Deliberately NOT spotlighting `.steps`. The generated table is 47 rows of
+  // rates — accurate, and unreadable at video size. The same facts (count,
+  // ceiling, floor) are read out here and shown compactly by `.applied-summary`
+  // once the pattern is running.
   cue(`${stepCount} steps at ${STEP_SECONDS} seconds each — from `
     + `${fmtMbps(topCap)} megabits down to ${fmtMbps(floor)} and back.`, 6500);
   await sleep(6500);
-  await unspot();
 
   /* 7. Settle, then apply --------------------------------------------- */
   mark('settle');
@@ -408,11 +784,34 @@ function phoneStop(dest) {
   const rebuf0 = preM.buffering_count || 0;
 
   mark('descent');
-  await spot('button.apply');
+  await spot('button.apply', 0, 'nearest');
   cue('Applying the pattern.', 2500);
   await sleep(1800);
   await clickSel('button.apply');
   await unspot();
+
+  // Applying collapses the editor back to `.applied-summary`, which takes the
+  // 47-row step table off screen on its own — the compact running summary is
+  // what stays visible.
+  await spot('.applied-summary', 0, 'nearest');
+  await sleep(2500);
+  await unspot();
+
+  // Expand the chart panel. The stack renders at 200px per chart by default,
+  // which is fine on a desk and far too short once the browser is a
+  // sub-rectangle of a 1920x1080 frame.
+  // Height comes from the seeded expand state, not a click. Assert it anyway:
+  // a demo that quietly records 200px charts is the failure this step exists to
+  // avoid, and the seed silently doing nothing looks identical to it working.
+  const chartH = await page.evaluate(() => {
+    const c = document.querySelector('canvas'); return c ? Math.round(c.getBoundingClientRect().height) : 0;
+  });
+  console.log(`  bandwidth chart height ${chartH}px`);
+  if (EXPAND_CHARTS.includes('bandwidth') && chartH < 400) {
+    console.error('  ⚠ chart is not expanded (expected ~540px) — check EXPAND_CHARTS');
+  }
+  await page.evaluate(() => window.__scrollTo('canvas'));
+  await sleep(1200);
   lay('side-by-side');
 
   /* 8. Watch it happen -------------------------------------------------
@@ -428,8 +827,48 @@ function phoneStop(dest) {
   lastFetch = preM.fetching_resolution;
   lastDisp = preM.video_resolution;
 
+  /* Annotation queue. Circling a transition means scrolling a panel into view
+   * and drawing — around a second of work. Doing that inline would stall the
+   * poll loop, and at 6s steps a stalled loop misses transitions, so the
+   * annotation is queued and drained between polls instead. */
+  const pending = [];
+  let annotated = 0;
+  // OFF by default. The circles draw correctly on the right data point — see
+  // ANNOTATE_TEST=1 — but the overlay is position:fixed with viewport
+  // coordinates captured at draw time, so any scroll afterwards leaves the
+  // circle behind while the chart moves out from under it. Until it is anchored
+  // to the page (or redrawn on scroll) it points at nothing more often than not.
+  // ANNOTATE_SHIFTS=2 turns it back on.
+  const ANNOTATE_SHIFTS = Number(process.env.ANNOTATE_SHIFTS || 0);
+
+  async function drainAnnotations() {
+    while (pending.length && pending[0].at <= now()) {
+      const a = pending.shift();
+      try {
+        if (a.kind === 'chart') {
+          await page.evaluate(() => window.__scrollTo('canvas'));
+          await sleep(400);
+          const hit = await page.evaluate(
+            ([label, t, s, col]) => window.__circleSeries(label, t, { seed: s, color: col }),
+            [a.series, a.tMs, a.seed, a.color]);
+          if (!hit) console.error(`  ⚠ no "${a.series}" point to circle`);
+        } else if (a.kind === 'timeline') {
+          await page.evaluate(() => window.__scrollTo('.vis-timeline'));
+          await sleep(400);
+          await page.evaluate((s) => window.__circleNewestEvent({ seed: s }), a.seed);
+        } else if (a.kind === 'clear') {
+          await page.evaluate(() => window.__scribClear());
+          await page.evaluate(() => window.__scrollTo('canvas'));
+        }
+      } catch (e) {
+        console.error(`  ⚠ annotation (${a.kind}) failed: ${e.message}`);
+      }
+    }
+  }
+
   while (Date.now() - started < RUN_TIMEOUT_MS) {
     await sleep(POLL_MS);
+    await drainAnnotations();
     let rec;
     try {
       rec = await api(`/api/v2/players/${pid}`);
@@ -457,6 +896,26 @@ function phoneStop(dest) {
         + `what it FETCHES: ${from} to ${to}.`, 5000);
       lastFetch = m.fetching_resolution;
       lastCue = Date.now();
+
+      // Circle the first few downshifts on both surfaces — the bitrate chart
+      // (where the rung steps down) and the Player State timeline (where the
+      // event lands). Only the first few: an annotation on all 20-odd shifts
+      // stops reading as emphasis and starts reading as decoration.
+      //
+      // The series is "Fetching Variant" — the chart's own name for the rung
+      // being pulled (BandwidthChart.vue:561, off video_bitrate_mbps snapped to
+      // the nearest rung peak). Its sibling "Displayed Variant" gets circled
+      // separately when the change actually reaches the screen, which is the
+      // pair this demo exists to show.
+      if (down && annotated < ANNOTATE_SHIFTS) {
+        annotated++;
+        const seed = annotated * 137;
+        const t = now();
+        pending.push({ at: t + 0.5, kind: 'chart', series: 'Fetching Variant',
+                       color: '#ef4444', tMs: Date.now(), seed });
+        pending.push({ at: t + 4.5, kind: 'timeline', seed: seed + 11 });
+        pending.push({ at: t + 8.5, kind: 'clear' });
+      }
     }
 
     /* Displayed variant changed — the same decision reaching the screen, one
@@ -476,6 +935,14 @@ function phoneStop(dest) {
       cue(`Now it reaches the screen: ${from} to ${to}`
         + (lag != null ? `, ${lag.toFixed(0)} seconds after it started fetching that rung — `
           + `that gap is the buffer draining.` : '.'), 5000);
+      // Circle the arrival too, in the Displayed Variant's own colour — so the
+      // two circles on screen are the two halves of the same decision.
+      if (annotated && annotated <= ANNOTATE_SHIFTS) {
+        const t = now();
+        pending.push({ at: t + 0.4, kind: 'chart', series: 'Displayed Variant',
+                       color: '#a855f7', tMs: Date.now(), seed: annotated * 311 });
+        pending.push({ at: t + 6.0, kind: 'clear' });
+      }
       lastDisp = m.video_resolution;
       lastCue = Date.now();
     }
@@ -512,6 +979,23 @@ function phoneStop(dest) {
   }
 
   /* 9. Wrap up --------------------------------------------------------- */
+  // Clear the pattern before anything else. The recorder REFUSES to start when
+  // a pattern is already applied, so a take that left its own behind would
+  // block the next one — and leave the device throttled in the meantime. Done
+  // through the UI's own Clear button rather than the API, for the same reason
+  // everything else here goes through the DOM. CLEAR=0 keeps it running.
+  if (process.env.CLEAR !== '0') {
+    try {
+      // Two .clear buttons exist (applied-summary and step-actions); either
+      // one commits null, so take whichever is on screen.
+      await page.locator('button.clear').first().click({ timeout: 5000 });
+      console.log('  pattern cleared');
+    } catch (e) {
+      console.error('  ⚠ could not clear the pattern — clear it in the UI, or the');
+      console.error('    next take will refuse to start and the device stays throttled.');
+    }
+  }
+
   mark('wrap');
   lay('web-full');
   const fin = await api(`/api/v2/players/${pid}`);
@@ -549,7 +1033,8 @@ function phoneStop(dest) {
     // Sync between two independently-started recordings. This is the initial
     // guess: QuickTime's start latency after `phoneStart()` returned. Nudge it
     // in cues.json once per take until a visible reaction lines up.
-    phoneOffset: Number(process.env.PHONE_OFFSET || 0),
+    phoneOffset: process.env.PHONE_OFFSET !== undefined
+      ? Number(process.env.PHONE_OFFSET) : Math.round(phoneOffset * 1000) / 1000,
     playerId: pid,
     displayId: chosen.display_id,
     device: pm0.device_model,
