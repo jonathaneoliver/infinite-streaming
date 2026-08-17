@@ -27,8 +27,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"regexp"
 	"sort"
@@ -40,7 +42,7 @@ import (
 
 func main() {
 	var (
-		clip     = flag.String("clip", "", "content id to play (tapped as home-tile-<clip>); empty uses continue-watching")
+		clip     = flag.String("clip", "", "content name to play, e.g. fpv5_p200_h264_6s; empty uses continue-watching")
 		udid     = flag.String("udid", "", "device UDID; defaults to $CHARACTERIZATION_DEVICE_UDID, then $IPHONE_XCODE_ID")
 		platform = flag.String("platform", "iphone", "runner platform: iphone | ipad | ipad-sim | androidtv")
 		timeout  = flag.Duration("timeout", 6*time.Minute, "ceiling for launch-to-home")
@@ -80,6 +82,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Resolve BEFORE launching. A bad clip name should cost a second, not a
+	// three-minute WDA build followed by a silent fallback to the wrong video.
+	clipID, err := clipIDFromContent(ctx, harnessBase(), *clip)
+	if err != nil {
+		fatal("resolve clip: %v", err)
+	}
+	if *clip != "" {
+		fmt.Fprintf(os.Stderr, "clip %s → home-tile-%s\n", *clip, clipID)
+	}
+
 	fmt.Fprintf(os.Stderr, "launching %s to home…\n", dev)
 	sess, err := a.LaunchToHome(ctx, dev)
 	if err != nil {
@@ -113,7 +125,7 @@ func main() {
 			// Fresh context: the launch ceiling may already be spent, and the
 			// recorder decides when this happens — possibly minutes later.
 			pctx, pcancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			err := a.ResumePlaybackClip(pctx, dev, *clip)
+			err := a.ResumePlaybackClip(pctx, dev, clipID)
 			pcancel()
 			if err != nil {
 				fmt.Printf("ERR %v\n", err)
@@ -135,6 +147,52 @@ func main() {
 	_ = sess
 }
 
+// clipIDFromContent resolves a CONTENT NAME to the app's clipId — the string
+// the home tiles are actually identified by — by ASKING THE SERVER, which is
+// the same place the app gets it (Models.swift decodes `clip_id` and only
+// derives one when the server omits it).
+//
+// Deriving it locally is where this went wrong twice:
+//
+//   - Passing the raw name builds home-tile-fpv5_p200_h264_6s, which matches
+//     nothing. ResumePlaybackClip then times out after 30s and falls back to
+//     the continue-watching hero, streaming whatever that resolves to while
+//     reporting success — how a take asking for fpv5_p200_h264_6s recorded
+//     bucks_bunny_p200_h264.
+//   - modes.clipIDFromContent truncates at "_p200_", yielding "fpv5" for
+//     fpv5_p200_h264_6s. The server says "fpv5_6s". The segment suffix lives
+//     AFTER the codec, so truncating drops it and the tile misses again.
+//
+// A miss is never loud — it is always the wrong video, played confidently. So
+// this asks rather than guesses, and says so when it cannot.
+func clipIDFromContent(ctx context.Context, base, name string) (string, error) {
+	if name == "" {
+		return "", nil
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", base+"/api/content", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var items []struct {
+		Name   string `json:"name"`
+		ClipID string `json:"clip_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return "", fmt.Errorf("decode /api/content: %w", err)
+	}
+	for _, it := range items {
+		if strings.EqualFold(it.Name, name) && it.ClipID != "" {
+			return it.ClipID, nil
+		}
+	}
+	return "", fmt.Errorf("%q not in the catalogue (%d items)", name, len(items))
+}
+
 // accessibilityIDs pulls the `name=` attributes out of an XCUITest page-source
 // dump, deduped and sorted. XCUITest surfaces a view's accessibilityIdentifier
 // as `name` when no label overrides it, which is what "accessibility id"
@@ -151,6 +209,13 @@ func accessibilityIDs(xml string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func harnessBase() string {
+	if v := strings.TrimSpace(os.Getenv("HARNESS_BASE_URL")); v != "" {
+		return v
+	}
+	return "https://dev.jeoliver.com:21000"
 }
 
 func pick(devs []runner.Device, p runner.Platform, udid string) (runner.Device, bool) {
