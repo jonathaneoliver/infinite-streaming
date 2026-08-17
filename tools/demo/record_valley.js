@@ -87,6 +87,15 @@ const PASS = process.env.DEMO_PASS || '';
 // the FFWD ranges in narrator_app.py compress the plateaus afterwards.
 const RUN_TIMEOUT_MS = Number(process.env.RUN_TIMEOUT_MS || 45 * 60 * 1000);
 
+// Whole valley cycles to record. The proxy loops the step list forever, so the
+// take ends on a cycle boundary rather than a stopwatch — stopping mid-descent
+// is the one ending the video cannot have. At 47 steps × 6s a cycle is ~4.7
+// minutes, so 2 cycles is ~9.5 minutes of pattern plus the intro.
+const CYCLES = Number(process.env.CYCLES || 2);
+
+// How long to wait, on camera, for someone to start playback on the phone.
+const WAIT_PLAY_MS = Number(process.env.WAIT_PLAY_MS || 3 * 60 * 1000);
+
 // Which panels are unfolded for the take. Everything else in FOLD_KEYS is
 // folded, so the frame carries the two things the demo is about and nothing
 // else — Fault Injection in particular defaults to OPEN and is pure noise here.
@@ -390,9 +399,14 @@ function fmtMbps(v) {
 }
 
 /** "1 stall" / "2 stalls". pronounce.py's de-pluralising tail only covers
- *  hours/minutes/seconds, and these counts are read aloud. */
+ *  hours/minutes/seconds, and these counts are read aloud.
+ *
+ *  The -es case is not pedantry: "variant switch" pluralised by appending -s
+ *  produced "3 variant switchs", which a speech engine says exactly as written. */
 function plural(n, word) {
-  return `${n} ${word}${n === 1 ? '' : 's'}`;
+  if (n === 1) return `${n} ${word}`;
+  const es = /(s|x|z|ch|sh)$/.test(word);
+  return `${n} ${word}${es ? 'es' : 's'}`;
 }
 
 /* ─── QuickTime screen capture of the phone ─────────────────────────────
@@ -428,68 +442,51 @@ function phoneStop(dest) {
 (async () => {
   fs.mkdirSync(OUT, { recursive: true });
 
-  /* 1. Resolve the device -------------------------------------------- */
+  /* 1. Preflight: the panel must start EMPTY --------------------------
+   * The take opens on an empty Active Sessions list and a phone sitting on its
+   * home screen, so the session APPEARING is something the viewer watches
+   * happen. That means clearing any session still registered from a previous
+   * run before the camera rolls. */
   const list = await api('/api/v2/players');
   const items = list.items || [];
-  const candidates = items.filter((p) => {
-    const pm = p.player_metrics || p.current_play?.player_metrics || {};
-    return pm.source === 'ios';
-  });
-  const chosen = PLAYER
-    ? items.find((p) => p.id === PLAYER)
-    : candidates.find((p) => {
-        const pm = p.player_metrics || p.current_play?.player_metrics || {};
-        return pm.state === 'playing';
-      });
-
-  if (!chosen) {
-    console.error('No iOS session is playing. Sessions seen:');
-    for (const p of items) {
-      const pm = p.player_metrics || p.current_play?.player_metrics || {};
-      console.error(`  #${p.display_id}  ${p.id}  ${pm.source || '?'}  ${pm.device_model || '?'}  ${pm.state || '?'}`);
-    }
-    console.error('\nStart playback on the iPhone first — a shaping pattern applied to an');
-    console.error('idle session shapes nothing, and the take records a flat chart.');
-    process.exit(1);
-  }
-
-  const pid = chosen.id;
-  const pm0 = chosen.player_metrics || chosen.current_play?.player_metrics || {};
-  const variants = chosen.current_play?.manifest?.variants || [];
 
   console.log('── preflight ─────────────────────────────────────────────');
-  console.log(`  session      #${chosen.display_id}  ${pid}`);
-  console.log(`  device       ${pm0.device_model}  ${pm0.player_tech} ${pm0.player_tech_version}`);
-  console.log(`  content      ${pm0.content_name}`);
-  console.log(`  ladder       ${variants.length} variants`);
-  console.log(`  state        ${pm0.state}  buffer ${pm0.buffer_depth_s}s  offset ${pm0.live_offset_s}s`);
-  console.log(`  on rung      ${rungName(pm0.video_resolution)} (fetching ${rungName(pm0.fetching_resolution)})`);
-  console.log(`  pattern cfg  fill=${FILL} step=${STEP_SECONDS}s margin=${MARGIN}%`);
+  console.log(`  sessions     ${items.length} registered`);
+  for (const p of items) {
+    const pm = p.player_metrics || p.current_play?.player_metrics || {};
+    console.log(`   · #${p.display_id} ${p.id.slice(0, 8)} ${pm.source || '?'} `
+      + `${pm.device_model || '?'} ${pm.state || '?'}`);
+  }
 
-  // A step shorter than the buffer is the one configuration that quietly ruins
-  // the thing this demo exists to show, so say so rather than discover it in
-  // playback.
-  if (pm0.buffer_depth_s && STEP_SECONDS < pm0.buffer_depth_s) {
-    console.log(`  ⚠ step ${STEP_SECONDS}s < buffer ${pm0.buffer_depth_s}s — the DISPLAYED variant will`);
-    console.log('    trail the cap continuously and never settle between steps.');
+  if (items.length && !DRY) {
+    // v2 is the dashboard's own delete path. go-proxy has a separate v1
+    // DELETE /api/session/{id}; they do not share code, and the dashboard's
+    // list is what has to end up empty, so use the v2 one.
+    for (const p of items) {
+      const res = await fetch(`${BASE}/api/v2/players/${p.id}`, {
+        method: 'DELETE',
+        headers: USER ? { Authorization: 'Basic ' + Buffer.from(`${USER}:${PASS}`).toString('base64') } : {},
+      });
+      console.log(`  released #${p.display_id} → ${res.status}`);
+    }
+    await sleep(2000);
+    const after = await api('/api/v2/players');
+    const left = (after.items || []).length;
+    if (left) {
+      console.error(`\n✗ ${left} session(s) still registered after release.`);
+      console.error('  The app is probably still playing and re-registering. Put it on the');
+      console.error('  home screen (stop playback) and run again.');
+      process.exit(1);
+    }
+    console.log('  panel is empty');
   }
-  // Clearing a pattern does NOT remove the `pattern` object — it leaves
-  // {template: "sliders", steps: null} behind. Testing for the key's presence
-  // therefore reports "already applied" forever after the first take, so the
-  // test is for an ACTIVE pattern: a real template with steps in it.
-  const existing = chosen.shape?.pattern;
-  if (existing && existing.template && existing.template !== 'sliders'
-      && (existing.steps || []).length) {
-    console.error(`\n✗ This session already has a ${existing.template} pattern applied `
-      + `(${existing.steps.length} steps).`);
-    console.error('  The take would start mid-descent with no settled "before". Clear it with:');
-    console.error(`    harness shape ${pid} --clear-pattern`);
-    process.exit(1);
-  }
+
+  console.log(`  pattern cfg  fill=${FILL} step=${STEP_SECONDS}s margin=${MARGIN}% `
+    + `× ${CYCLES} cycle${CYCLES === 1 ? '' : 's'}`);
   console.log('──────────────────────────────────────────────────────────\n');
 
   if (DRY) {
-    console.log('DRY=1 — preflight only. Nothing recorded, no pattern applied.');
+    console.log('DRY=1 — preflight only. Nothing released, nothing recorded.');
     return;
   }
 
@@ -584,7 +581,22 @@ function phoneStop(dest) {
     segments.push({ name, from: at, to: at });
   }
 
+  /* The page-side helpers run these through document.querySelectorAll, so a
+   * Playwright-only selector reaches the browser as invalid CSS and throws
+   * something that names querySelector rather than the real mistake. Both
+   * `>> nth=` and `:has-text()` have already cost a take that way; fail here,
+   * naming the fix. Pass an index argument instead. */
+  function assertCss(sel) {
+    const bad = ['>>', ':has-text(', ':text(', ':nth-match('].find((t) => sel.includes(t));
+    if (bad) {
+      throw new Error(`selector "${sel}" uses Playwright-only syntax (${bad}) — `
+        + 'the page-side helpers need plain CSS. Resolve the index first and '
+        + 'pass it as the second argument.');
+    }
+  }
+
   async function moveTo(sel, i = 0) {
+    assertCss(sel);
     const r = await page.evaluate(([s, n]) => window.__rectOf(s, n), [sel, i]);
     if (!r) return null;
     await page.evaluate(([x, y]) => window.__moveCursor(x, y), [r.x + r.w / 2, r.y + r.h / 2]);
@@ -597,6 +609,7 @@ function phoneStop(dest) {
   // 'nearest' an already-visible target does not scroll at all, and the view
   // stays anchored on the top of the panel where the controls are.
   async function spot(sel, i = 0, block = 'center') {
+    assertCss(sel);
     await page.evaluate(([s, n, b]) => window.__scrollTo(s, n, b), [sel, i, block]);
     await sleep(700);
     const r = await page.evaluate(([s, n]) => window.__rectOf(s, n), [sel, i]);
@@ -649,15 +662,80 @@ function phoneStop(dest) {
     console.log('  CAPTIONS=1 — narration drawn in the page. Rehearsal only:');
     console.log('  do not composite a take recorded this way.');
   }
-  await page.waitForSelector('.session-tab', { timeout: 30000 });
+  await page.waitForSelector('.page-card', { timeout: 30000 });
+
+  /* 4a. The empty panel, then the session arriving --------------------- */
+  mark('empty');
+  await spot('.page-card', 0, 'start');
+  cue('Nothing is connected. The dashboard has no session to show.', 6000);
+  await sleep(6000);
+  await unspot();
+
+  cue('Starting playback on the phone.', 4000);
+
+  // Wait for the device to register itself. The recorder does NOT drive the
+  // phone — a hand starts playback, which is the honest version of what this
+  // screen is for, and it is what the QuickTime capture is pointed at.
+  console.log('\n  ⏳ waiting for a session to appear — START PLAYBACK ON THE IPHONE\n');
+  let chosen = null;
+  const waitUntil = Date.now() + WAIT_PLAY_MS;
+  while (Date.now() < waitUntil && !chosen) {
+    await sleep(1500);
+    const now2 = await api('/api/v2/players');
+    chosen = (now2.items || []).find((p) => {
+      if (PLAYER) return p.id === PLAYER;
+      const pm = p.player_metrics || p.current_play?.player_metrics || {};
+      return pm.source === 'ios';
+    }) || null;
+  }
+  if (!chosen) {
+    console.error('✗ no session appeared — nothing started playing.');
+    await ctx.close(); await browser.close();
+    process.exit(1);
+  }
+
+  const pid = chosen.id;
+  console.log(`  session #${chosen.display_id} ${pid} appeared at ${now().toFixed(1)}s`);
+  cue('There it is. The phone registered a session the moment it asked for the '
+    + 'first playlist.', 6000);
+  await sleep(5000);
 
   // Match on display_id — the pill carries "Session #N", and N came from the
-  // same API record we resolved the player from. Matching on the device or
-  // content tail would be ambiguous the moment a second iPhone connects.
+  // same API record. Matching on the device or content tail would be ambiguous
+  // the moment a second iPhone connects.
   const pillSel = `.session-tab:has-text("Session #${chosen.display_id}")`;
-  await page.waitForSelector(pillSel, { timeout: 15000 });
-  await page.click(pillSel);
-  await page.waitForSelector(`input[name="tpl-${pid}"]`, { timeout: 20000 });
+  await page.waitForSelector(pillSel, { timeout: 30000 });
+  // Resolve to a plain index. `:has-text()` is fine for Playwright's own
+  // waitForSelector, but clickSel drives the page-side cursor through
+  // querySelectorAll, which only speaks CSS.
+  const pills = page.locator('.session-tab');
+  const pillCount = await pills.count();
+  let pillIdx = -1;
+  for (let i = 0; i < pillCount; i++) {
+    const txt = await pills.nth(i).innerText();
+    if (txt.includes(`Session #${chosen.display_id}`)) { pillIdx = i; break; }
+  }
+  if (pillIdx < 0) {
+    console.error(`✗ no pill for Session #${chosen.display_id} among ${pillCount}`);
+    await ctx.close(); await browser.close();
+    process.exit(1);
+  }
+  await clickSel('.session-tab', pillIdx);
+  await page.waitForSelector(`input[name="tpl-${pid}"]`, { timeout: 30000 });
+
+  // Let the play establish itself before reading anything off it — the first
+  // seconds carry startup transients, and the tour narrates measured values.
+  await sleep(SETTLE_S * 1000);
+
+  const rec0 = await api(`/api/v2/players/${pid}`);
+  const pm0 = rec0.current_play?.player_metrics || rec0.player_metrics || {};
+  const variants = rec0.current_play?.manifest?.variants || [];
+  console.log(`  device ${pm0.device_model} · ${variants.length} variants · `
+    + `rung ${rungName(pm0.video_resolution)} · buffer ${pm0.buffer_depth_s}s`);
+  if (pm0.buffer_depth_s && STEP_SECONDS < pm0.buffer_depth_s) {
+    console.log(`  ⚠ step ${STEP_SECONDS}s < buffer ${pm0.buffer_depth_s}s — the DISPLAYED variant`);
+    console.log('    will trail the cap continuously and never settle between steps.');
+  }
 
   /* 5. Stage dressing -------------------------------------------------- */
   // Clear the plot. BandwidthChart appends a shaded
@@ -689,19 +767,40 @@ function phoneStop(dest) {
   await page.evaluate(() => window.__scrollTo('.template-row', 0, 'start'));
   await sleep(600);
 
-  // Setup is over; the narration starts here. Its own segment, so
-  // narrator_app's FFWD can compress the head without touching the rest.
-  mark('intro');
+  /* 5a. Tour the two panels this demo is about ------------------------- */
+  mark('tour');
+  lay('side-by-side');
 
-  cue(`A real iPhone is playing a live low-latency HLS stream. `
+  cue(`A real iPhone, playing a live low-latency HLS stream. `
     + `${pm0.device_model}, ${pm0.player_tech} ${pm0.player_tech_version}.`, 6000);
   await sleep(6000);
 
+  const asc = [...variants].sort((a, b) => a.bandwidth - b.bandwidth);
   cue(`The stream publishes ${variants.length} variants, from `
-    + `${rungName([...variants].sort((a, b) => a.bandwidth - b.bandwidth)[0].resolution)} to `
-    + `${rungName([...variants].sort((a, b) => b.bandwidth - a.bandwidth)[0].resolution)}. `
-    + `The player has settled on the top one.`, 6000);
+    + `${rungName(asc[0].resolution)} to ${rungName(asc[asc.length - 1].resolution)}.`, 6000);
   await sleep(6000);
+
+  // Player State — the event timeline. Everything quoted here is read back off
+  // the record, so the tour cannot describe a startup that did not happen.
+  await spot('.vis-timeline', 0, 'center');
+  cue(`Player State is the event timeline. First frame at `
+    + `${(pm0.first_frame_time_s ?? 0).toFixed(1)} seconds, `
+    + `${plural(pm0.profile_shift_count || 0, 'variant switch')} so far.`, 7000);
+  await sleep(7000);
+  await unspot();
+
+  // Bitrate chart — name the three series the rest of the demo depends on.
+  await spot('canvas', 0, 'center');
+  cue(`And the bitrate chart. Three lines matter: the cap we impose, the rung `
+    + `the player FETCHES, and the rung actually on SCREEN.`, 8000);
+  await sleep(8000);
+
+  cue(`Right now all three agree — ${rungName(pm0.video_resolution)}, `
+    + `buffer ${(pm0.buffer_depth_s ?? 0).toFixed(0)} seconds. Nothing is `
+    + `constraining it yet.`, 7000);
+  await sleep(7000);
+  await unspot();
+  lay('web-full');
 
   /* 6. Configure the pattern -----------------------------------------
    * ORDER MATTERS. Template FIRST: the Margin / Step duration / Fill density
@@ -821,7 +920,7 @@ function phoneStop(dest) {
   const started = Date.now();
   let lastStep = null, lastFetch = null, lastDisp = null;
   let troughDone = false, recovering = false;
-  let minCapSeen = Infinity, lastCue = 0;
+  let minCapSeen = Infinity, lastCue = 0, cycle = 0;
   const shifts = [];
 
   lastFetch = preM.fetching_resolution;
@@ -885,7 +984,31 @@ function phoneStop(dest) {
 
     // Pattern finished (or was cleared) — the shape drops its runtime fields.
     if (step == null && lastStep != null) break;
-    if (step != null) lastStep = step;
+
+    /* Cycle counting. The proxy's step loop is
+     *     stepIndex = (stepIndex + 1) % len(steps)
+     * so the pattern runs forever and a cycle boundary is simply the step index
+     * going BACKWARDS. Counting wraps is the only way to stop on whole cycles —
+     * a wall-clock timeout would cut mid-descent, which is the one place the
+     * video must not end. */
+    if (step != null) {
+      if (lastStep != null && step < lastStep) {
+        cycle++;
+        console.log(`  ── cycle ${cycle} complete at ${now().toFixed(1)}s ──`);
+        if (cycle >= CYCLES) {
+          cue(`That is ${plural(CYCLES, 'full cycle')} of the valley.`, 6000);
+          lastStep = step;
+          break;
+        }
+        cue(`Cycle ${cycle} done — the cap is back at the top and the player has `
+          + `recovered. Going round again.`, 7000);
+        lastCue = Date.now();
+        troughDone = false;                 // re-arm the per-cycle narration
+        recovering = false;
+        minCapSeen = Infinity;
+      }
+      lastStep = step;
+    }
 
     /* Fetched variant changed — the leading edge of an ABR decision. */
     if (m.fetching_resolution && m.fetching_resolution !== lastFetch) {
@@ -1002,7 +1125,10 @@ function phoneStop(dest) {
   const fm = fin.current_play?.player_metrics || fin.player_metrics || {};
   const downs = shifts.filter((s) => s.dir === 'down').length;
   const ups = shifts.filter((s) => s.dir === 'up').length;
-  cue(`${plural(shifts.length, 'variant change')} — ${downs} down, ${ups} back up. `
+  // A take cut short by RUN_TIMEOUT_MS never completes a cycle, and "Over 0
+  // cycles" is a sentence no one should have to hear.
+  cue(`${cycle ? `Over ${plural(cycle, 'cycle')}: ` : 'Partway through the first cycle: '}`
+    + `${plural(shifts.length, 'variant change')} — ${downs} down, ${ups} back up. `
     + `${plural((fm.stalling_count || 0) - stall0, 'stall')} and `
     + `${plural((fm.buffering_count || 0) - rebuf0, 'rebuffer')} across the whole valley.`, 9000);
   await sleep(9000);
