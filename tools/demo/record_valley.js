@@ -822,7 +822,31 @@ function phoneController() {
   const pm0 = rec0.current_play?.player_metrics || rec0.player_metrics || {};
   const variants = rec0.current_play?.manifest?.variants || [];
   console.log(`  device ${pm0.device_model} · ${variants.length} variants · `
-    + `rung ${rungName(pm0.video_resolution)} · buffer ${pm0.buffer_depth_s}s`);
+    + `rung ${rungName(pm0.video_resolution)} · buffer ${pm0.buffer_depth_s}s`
+    + ` · content ${pm0.content_name}`);
+
+  // Assert we are recording the clip we think we are.
+  //
+  // ResumePlaybackClip falls back to the continue-watching hero when its
+  // home-tile-<clip> does not render, and the hero resolves to the FEATURED
+  // clip until the catalogue finishes loading. Both substitutions report
+  // success. One of them already happened once: a run asked for
+  // fpv5_p200_h264_6s and played bucks_bunny_p200_h264.
+  //
+  // That is the worst failure this recorder can have. Every number in the
+  // narration — 12 variants, 234p to 2160p, the 47-step valley, the floor —
+  // is computed from the requested clip's ladder, so a substitution produces a
+  // take that describes one clip over footage of another, fluently and
+  // wrongly. Cheaper to lose the take here than to find out in the edit.
+  if (CONTENT && pm0.content_name && pm0.content_name !== CONTENT) {
+    console.error(`\n✗ playing ${pm0.content_name}, expected ${CONTENT}.`);
+    console.error('  The tile tap fell back to the continue-watching hero. Either put the');
+    console.error('  clip in the hero, or check the id with:');
+    console.error('    go run ./cmd/demo-device -list-tiles   (in tests/characterization)');
+    if (phone) phone.stop();
+    await ctx.close(); await browser.close();
+    process.exit(1);
+  }
   if (pm0.buffer_depth_s && STEP_SECONDS < pm0.buffer_depth_s) {
     console.log(`  ⚠ step ${STEP_SECONDS}s < buffer ${pm0.buffer_depth_s}s — the DISPLAYED variant`);
     console.log('    will trail the cap continuously and never settle between steps.');

@@ -30,6 +30,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -43,6 +45,7 @@ func main() {
 		platform = flag.String("platform", "iphone", "runner platform: iphone | ipad | ipad-sim | androidtv")
 		timeout  = flag.Duration("timeout", 6*time.Minute, "ceiling for launch-to-home")
 		list     = flag.Bool("list", false, "list discoverable devices and exit")
+		tiles    = flag.Bool("list-tiles", false, "launch to home, print the accessibility ids on screen, exit")
 	)
 	flag.Parse()
 
@@ -87,6 +90,19 @@ func main() {
 	// looks exactly like a device fault.
 	defer a.Close()
 
+	if *tiles {
+		src, err := a.PageSource(ctx, dev)
+		if err != nil {
+			fatal("page source: %v", err)
+		}
+		ids := accessibilityIDs(src)
+		fmt.Fprintf(os.Stderr, "%d identifiers on screen:\n", len(ids))
+		for _, id := range ids {
+			fmt.Println(id)
+		}
+		return
+	}
+
 	fmt.Printf("READY %s %s\n", dev.UDID, dev.Label)
 	os.Stdout.Sync()
 
@@ -117,6 +133,24 @@ func main() {
 		}
 	}
 	_ = sess
+}
+
+// accessibilityIDs pulls the `name=` attributes out of an XCUITest page-source
+// dump, deduped and sorted. XCUITest surfaces a view's accessibilityIdentifier
+// as `name` when no label overrides it, which is what "accessibility id"
+// locators match — so these are exactly the strings -clip can target.
+func accessibilityIDs(xml string) []string {
+	re := regexp.MustCompile(`name="([^"]+)"`)
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range re.FindAllStringSubmatch(xml, -1) {
+		if id := m[1]; !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func pick(devs []runner.Device, p runner.Platform, udid string) (runner.Device, bool) {
