@@ -51,6 +51,10 @@ KEYCHAIN_SERVICE="${KEYCHAIN_SERVICE:-smashing-cloudflare-dns}"
 CONTAINER="${TEST_CONTAINER:-test-dev-server}"
 REMOTE_DIR="${REMOTE_CERT_DIR:-test-dev/certs}"
 PORT="${TEST_HTTPS_PORT:-21000}"
+# go-proxy's control port and the first per-session port. Both terminate TLS
+# with the same certificate, independently of nginx, and are what the PLAYER
+# talks to — so they are the ports that decide whether playback works.
+PROXY_PORTS="${TEST_PROXY_PORTS:-21081 21181}"
 RENEW_DAYS="${RENEW_DAYS:-30}"
 
 CRT="$LEGO_PATH/certificates/$DOMAIN.crt"
@@ -70,7 +74,8 @@ say() { printf '%s\n' "$*"; }
 # Expiry as seen BY A CLIENT, not as recorded on disk — the file and what nginx
 # is actually serving can disagree, and only the served one matters.
 served_expiry() {
-    echo | openssl s_client -connect "$DOMAIN:$PORT" -servername "$DOMAIN" 2>/dev/null \
+    port="${1:-$PORT}"
+    echo | openssl s_client -connect "$DOMAIN:$port" -servername "$DOMAIN" 2>/dev/null \
         | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2
 }
 
@@ -87,37 +92,57 @@ deploy() {
     scp -q "$KEY" "$TEST_SSH:$REMOTE_DIR/localhost-key.pem"
     ssh "$TEST_SSH" "chmod 600 $REMOTE_DIR/localhost-key.pem"
 
-    # nginx runs inside the container against symlinks into the mounted dir, so
-    # a reload is enough; fall back to a container restart if it refuses.
-    if ! ssh "$TEST_SSH" "docker exec $CONTAINER nginx -s reload" 2>/dev/null; then
-        say "nginx -s reload failed — restarting $CONTAINER"
-        ssh "$TEST_SSH" "docker restart $CONTAINER" >/dev/null
-        sleep 8
-    fi
+    # RESTART, not `nginx -s reload`.
+    #
+    # nginx is not the only TLS terminator in this container. go-proxy serves
+    # the control port (21081) and every per-session port (21181-21881) with
+    # the same certificate, loaded into memory at startup — a signal to nginx
+    # does nothing for it.
+    #
+    # Reloading only nginx produces the worst possible half-fix, and it did:
+    # the dashboard and the catalogue came back (both :21000, nginx) while
+    # PLAYBACK stayed broken, because the player's media and session traffic go
+    # through go-proxy's ports, which were still presenting the expired chain
+    # for iOS to reject. Everything looked healthy from a browser.
+    #
+    # A restart drops connected sessions. That is the correct trade for a
+    # certificate change: they cannot survive it anyway.
+    say "restarting $CONTAINER (go-proxy holds the cert in memory too)…"
+    ssh "$TEST_SSH" "docker restart $CONTAINER" >/dev/null
+    sleep 15
 
     # nginx reloads gracefully: old workers keep answering until their existing
     # connections drain, so an immediate check can still be handed the OLD
     # certificate and report the deploy as failed when it worked. Poll.
+    # Verify EVERY terminator, not just nginx. Checking only :21000 is what let
+    # a half-deployed certificate look like a complete one.
     want=$(openssl x509 -in "$CRT" -noout -enddate | cut -d= -f2)
-    i=0
-    while [ "$i" -lt 10 ]; do
-        got=$(served_expiry || true)
-        [ "$got" = "$want" ] && break
-        i=$((i + 1))
-        sleep 2
-    done
+    rc=0
     say ""
-    say "served til  ${got:-unknown}"
-    if [ "$got" != "$want" ]; then
-        say "✗ still serving the old certificate after the reload."
-        say "  Try: ssh $TEST_SSH 'docker restart $CONTAINER'"
-        return 1
-    fi
-    say "✓ deployed"
+    for p in $PORT $PROXY_PORTS; do
+        i=0
+        got=""
+        while [ "$i" -lt 15 ]; do
+            got=$(served_expiry "$p" || true)
+            [ "$got" = "$want" ] && break
+            i=$((i + 1))
+            sleep 2
+        done
+        if [ "$got" = "$want" ]; then
+            say "  :$p  ✓ $got"
+        else
+            say "  :$p  ✗ ${got:-no answer}  (wanted $want)"
+            rc=1
+        fi
+    done
+    [ "$rc" = "0" ] && say "✓ deployed" || say "✗ deploy incomplete"
+    return "$rc"
 }
 
 say "domain      $DOMAIN:$PORT"
-say "served til  $(served_expiry || echo unknown)"
+for p in $PORT $PROXY_PORTS; do
+    say "served :$p  $(served_expiry "$p" || echo unknown)"
+done
 [ -f "$CRT" ] && say "local til   $(openssl x509 -in "$CRT" -noout -enddate | cut -d= -f2)"
 
 if [ "${CHECK:-0}" = "1" ]; then
