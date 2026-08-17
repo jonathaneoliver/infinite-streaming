@@ -96,6 +96,16 @@ const CYCLES = Number(process.env.CYCLES || 2);
 // How long to wait, on camera, for someone to start playback on the phone.
 const WAIT_PLAY_MS = Number(process.env.WAIT_PLAY_MS || 3 * 60 * 1000);
 
+// APPIUM=1 drives the phone instead of waiting for a hand: the app is brought
+// to its home screen before the camera rolls, and playback is started on cue
+// once the empty-panel narration has run. Makes the take reproducible.
+// Unset, the recorder waits for someone to tap play (which is fine, and is what
+// every rehearsal used).
+const APPIUM = process.env.APPIUM === '1';
+const CONTENT = process.env.CONTENT || 'fpv5_p200_h264_6s';
+const CHAR_DIR = process.env.CHAR_DIR
+  || path.join(__dirname, '..', '..', 'tests', 'characterization');
+
 // Which panels are unfolded for the take. Everything else in FOLD_KEYS is
 // folded, so the frame carries the two things the demo is about and nothing
 // else — Fault Injection in particular defaults to OPEN and is pure noise here.
@@ -424,8 +434,20 @@ function osa(...lines) {
 }
 
 function phoneStart() {
+  // Close anything already open FIRST. Selecting the iPhone leaves a movie
+  // recording window on screen, and `new movie recording` would then make a
+  // SECOND document — after which `document 1` is whichever QuickTime feels is
+  // frontmost, and stop/save could target the wrong one at the end of a
+  // twelve-minute take. The device choice survives the close; it is remembered
+  // per application, not per window.
   osa('tell application "QuickTime Player" to activate',
-      'tell application "QuickTime Player" to start (new movie recording)');
+      'tell application "QuickTime Player" to close every document saving no');
+  osa('tell application "QuickTime Player" to start (new movie recording)');
+  const n = osa('tell application "QuickTime Player" to count documents');
+  if (n.trim() !== '1') {
+    console.error(`  ⚠ QuickTime has ${n} documents open — expected exactly 1.`);
+    console.error('    stop/save at the end may target the wrong one.');
+  }
 }
 
 function phoneStop(dest) {
@@ -435,6 +457,50 @@ function phoneStop(dest) {
   spawnSync('sleep', ['2']);
   osa(`tell application "QuickTime Player" to save document 1 in POSIX file "${dest}"`,
       'tell application "QuickTime Player" to close document 1 saving no');
+}
+
+/* ─── phone control via Appium ──────────────────────────────────────────
+ * A long-lived `demo-device` child, not two commands: the Appium session lives
+ * in that process's memory, and the demo needs the app brought to home at one
+ * moment and playback started at a LATER one chosen by the recorder. Phases are
+ * sequenced over its stdin. See tests/characterization/cmd/demo-device. */
+function phoneController() {
+  const { spawn } = require('child_process');
+  const args = ['run', './cmd/demo-device', '-clip', CONTENT];
+  const child = spawn('go', args, { cwd: CHAR_DIR, stdio: ['pipe', 'pipe', 'inherit'] });
+  const waiters = [];
+  let buf = '';
+  child.stdout.on('data', (d) => {
+    buf += d.toString();
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (!line) continue;
+      console.log(`  [device] ${line}`);
+      for (let k = waiters.length - 1; k >= 0; k--) {
+        if (line.startsWith(waiters[k].prefix)) { waiters.splice(k, 1)[0].resolve(line); }
+        else if (line.startsWith('ERR')) { waiters.splice(k, 1)[0].reject(new Error(line)); }
+      }
+    }
+  });
+  const died = new Promise((_r, rej) =>
+    child.on('exit', (c) => rej(new Error(`demo-device exited (${c})`))));
+  return {
+    // Races the child dying, so a crashed launcher fails fast instead of
+    // hanging until the caller's timeout.
+    wait(prefix, ms) {
+      return Promise.race([
+        new Promise((resolve, reject) => {
+          waiters.push({ prefix, resolve, reject });
+          setTimeout(() => reject(new Error(`timed out waiting for ${prefix}`)), ms);
+        }),
+        died,
+      ]);
+    },
+    send(cmd) { child.stdin.write(cmd + '\n'); },
+    stop() { try { child.stdin.write('quit\n'); child.stdin.end(); } catch (e) { /* already gone */ } },
+  };
 }
 
 /* ─── main ──────────────────────────────────────────────────────────── */
@@ -447,6 +513,24 @@ function phoneStop(dest) {
    * home screen, so the session APPEARING is something the viewer watches
    * happen. That means clearing any session still registered from a previous
    * run before the camera rolls. */
+  // The app goes to its home screen BEFORE the sessions are released. The other
+  // order loses: releasing while the app is still playing just makes it
+  // re-register a second later, which is exactly the abort the preflight has to
+  // raise when a human forgets to stop playback first.
+  let phone = null;
+  if (APPIUM && !DRY) {
+    console.log('bringing the app to its home screen (Appium)…');
+    phone = phoneController();
+    try {
+      await phone.wait('READY', 6 * 60 * 1000);
+    } catch (e) {
+      console.error(`✗ ${e.message}`);
+      console.error('  Is the Appium server up? (appium, on localhost:4723)');
+      phone.stop();
+      process.exit(1);
+    }
+  }
+
   const list = await api('/api/v2/players');
   const items = list.items || [];
 
@@ -673,10 +757,17 @@ function phoneStop(dest) {
 
   cue('Starting playback on the phone.', 4000);
 
-  // Wait for the device to register itself. The recorder does NOT drive the
-  // phone — a hand starts playback, which is the honest version of what this
-  // screen is for, and it is what the QuickTime capture is pointed at.
-  console.log('\n  ⏳ waiting for a session to appear — START PLAYBACK ON THE IPHONE\n');
+  if (phone) {
+    // On cue, and only now — the empty panel had to be narrated first.
+    phone.send('play');
+    try {
+      await phone.wait('PLAYING', 2 * 60 * 1000);
+    } catch (e) {
+      console.error(`  ⚠ ${e.message} — falling back to waiting for a manual start`);
+    }
+  } else {
+    console.log('\n  ⏳ waiting for a session to appear — START PLAYBACK ON THE IPHONE\n');
+  }
   let chosen = null;
   const waitUntil = Date.now() + WAIT_PLAY_MS;
   while (Date.now() < waitUntil && !chosen) {
@@ -1179,5 +1270,10 @@ function phoneStop(dest) {
   console.log(`\nwrote ${cuesPath} — ${cues.length} cues, ${layout.length} layout marks`);
   console.log(`browser: ${videoPath}`);
   if (phonePath) console.log(`phone:   ${phonePath}`);
+  // Tear the Appium session down explicitly. Leaving it open wedges the next
+  // run with "create session deadline exceeded", which reads like a device
+  // fault rather than a leaked session from the run before.
+  if (phone) phone.stop();
+
   console.log('\nNext: set DEMO_DIR and run  python3 narrator_app.py');
 })().catch((e) => { console.error(e); process.exit(1); });
