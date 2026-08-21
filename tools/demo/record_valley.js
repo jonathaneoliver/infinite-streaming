@@ -1308,6 +1308,21 @@ function phoneController() {
   if (audioKbpsMeasured) console.log(`  audio rendition ~${audioKbpsMeasured} kbps`);
   else console.error('  ⚠ could not measure the audio rendition — its line will omit the figure');
 
+  /* The baseline cap every session gets before any pattern touches it.
+   *
+   * go-proxy applies INFINITE_STREAM_DEFAULT_RATE_MBPS to new sessions (#480).
+   * The code default is 0 = uncapped, but the deploys set it: override-dev.yml
+   * ships 100. So "no pattern running" does NOT mean "no shaping", and the
+   * narration should not imply an unthrottled link.
+   *
+   * Read rather than hardcoded, for the same reason the audio bitrate is
+   * measured — a figure quoted from a config file is a claim about a file, not
+   * about the server that is actually on camera. This is read at preflight,
+   * before the pattern is applied, which is the only moment it is observable. */
+  const baselineMbps = rec0.shape?.rate_mbps ?? null;
+  if (baselineMbps) console.log(`  baseline cap ${baselineMbps} Mbps (pre-pattern)`);
+  else console.error('  ⚠ no baseline cap visible — the Limit line will omit it');
+
   console.log(`  device ${pm0.device_model} · ${variants.length} variants · `
     + `rung ${rungName(pm0.video_resolution)} · buffer ${pm0.buffer_depth_s}s`
     + ` · content ${pm0.content_name}`);
@@ -1422,7 +1437,17 @@ function phoneController() {
   await tourSeries('Limit (rate_mbps)',
     'The Limit is the cap WE impose — enforced in the kernel on the proxy, not '
     + 'a suggestion to the player. Everything else on this chart is the player '
-    + 'reacting to it.');
+    + 'reacting to it. '
+    + 'And it never goes away. With no pattern running the server still holds '
+    + 'every session'
+    // Not fmtMbps(): that always keeps a decimal, and the baseline is a round
+    // config value. "one hundred point zero megabits" is a mouthful for 100.
+    + (baselineMbps
+      ? ` to ${Number.isInteger(baselineMbps) ? baselineMbps : fmtMbps(baselineMbps)} megabits`
+      : ' to a baseline cap')
+    + '. That is deliberate. An unthrottled link on the same machine would '
+    + 'flatter the player in ways no real viewer would ever see, so the floor '
+    + 'is set to something a remote server might plausibly give you.', 15000);
 
   await tourSeries('Fetching Variant',
     'Fetching Variant is the rung the player is pulling right now. It moves '
