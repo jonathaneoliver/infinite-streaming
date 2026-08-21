@@ -117,6 +117,97 @@ const DISPLAYED_MAX = Number(process.env.DISPLAYED_MAX || 3);
 // its 39; the chart shows the rest better than a voice can.
 const LIMIT_MAX = Number(process.env.LIMIT_MAX || 5);
 
+/* NARRATION DRIVEN BY THE SERVER'S OWN EVENT LABELS.
+ *
+ * The forwarder classifies every sample as it ingests it — qoe_labels.go and
+ * labels.go between them produce a vocabulary of ~29 <severity>=<event> tags,
+ * with thresholds in qoe_thresholds.go. It already detects downshift overshoot,
+ * downshift storms, conservative ABR, min-variant-stuck, throughput divergence,
+ * live-offset drift and startup-time breaches. Measured at 0.05s behind the
+ * proxy once its connect-time backfill drains, so it is live for our purposes.
+ *
+ * Each entry below carries three things, because they are three different
+ * questions:
+ *
+ *   say     what to narrate. Past tense — see `after`.
+ *   after   how long to WAIT before saying it. A label fires the instant the
+ *           condition is met, when the chart still shows one small kink. The
+ *           shape that makes it legible needs more line than that, so the
+ *           narration is held until the viewer can actually see what is being
+ *           described. Nothing to do with pipeline latency; a deliberate delay.
+ *   rank    how much this matters when several land at once. Severity comes
+ *           first (the server already ranks error > critical > warning > info);
+ *           rank breaks ties within a severity.
+ *   every   minimum gap between two narrations OF THE SAME KIND. Per-type,
+ *           not global: an overshoot and a stall are different observations and
+ *           should not silence each other, but the fifth overshoot in a minute
+ *           teaches nothing the first did not.
+ *
+ * Labels not listed here are recorded and never spoken. shift_up/shift_down,
+ * first_frame and play_start are deliberately absent — the recorder narrates
+ * those itself, off the metrics, and does not need them twice. timejump is
+ * absent because it fired 145 times in one take. */
+const LABEL_NARRATION = {
+  '*qoe_downshift_overshoot': {
+    rank: 3, after: 18, every: 300,
+    say: 'That drop went further than it had to. The player gave up more than '
+      + 'the limit actually took away, then climbed back — you can see the '
+      + 'notch in the fetched line where it overshot and corrected.',
+  },
+  '*qoe_downshift_storm': {
+    rank: 4, after: 20, every: 300,
+    say: 'That is a downshift storm — several drops in quick succession rather '
+      + 'than one considered step. The player is chasing an estimate that keeps '
+      + 'moving under it.',
+  },
+  '*qoe_abr_conservative': {
+    rank: 2, after: 25, every: 300,
+    say: 'Look at the gap that has opened between the limit and what the player '
+      + 'is fetching. There is headroom there it is not taking. Coming back up '
+      + 'is a risk — it has to spend buffer to find out whether the bandwidth '
+      + 'is really there — so it climbs slower than it fell.',
+  },
+  '*qoe_min_variant_stuck': {
+    rank: 2, after: 20, every: 300,
+    say: 'It has been parked on the bottom rung for a while now. There is '
+      + 'nowhere lower to go, so this is the floor of what the ladder can do '
+      + 'about a limit this tight.',
+  },
+  '*qoe_throughput_divergence': {
+    rank: 1, after: 15, every: 300,
+    say: 'The client and the server disagree about the throughput here. What '
+      + 'AVPlayer believes it is receiving has come apart from what the rate '
+      + 'limiter actually pushed — and the player makes its decisions on its '
+      + 'own number, not ours.',
+  },
+  '*qoe_live_offset_concerning': {
+    rank: 2, after: 15, every: 300,
+    say: 'The live offset is stretching. The player is falling behind the live '
+      + 'edge because it cannot fetch fast enough to keep up with the clock.',
+  },
+  'stall_frozen': {
+    rank: 9, after: 3, every: 120,
+    say: 'And there it stalls — the picture has stopped. The buffer ran dry '
+      + 'before the next segment arrived.',
+  },
+  'stall_segment': {
+    rank: 6, after: 5, every: 120,
+    say: 'A segment stall — the player waited on a segment that did not arrive '
+      + 'in time.',
+  },
+  '*qoe_vst_breach': {
+    rank: 5, after: 5, every: 600,
+    say: 'Video start time breached its threshold there — the time from asking '
+      + 'for playback to seeing a frame went past what we would accept.',
+  },
+};
+
+// Narrate from the server's labels at all. 0 falls back to the recorder's own
+// detectors, which cover less and duplicate what the server already computes.
+const LABELS = process.env.LABELS !== '0';
+// Blanket override for every `every` above, when a take wants more or less.
+const LABEL_COOLDOWN_S = Number(process.env.LABEL_COOLDOWN_S || 0);
+
 /* How many times each NOTABLE ABR behaviour gets narrated.
  *
  * Take 8 contained 5 over-downshifts, 6 multi-rung drops and several flapping
@@ -642,6 +733,75 @@ async function paintCheck(chromium) {
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* best effort */ }
   }
+}
+
+/** Subscribe to the forwarder's labelled event stream for one play.
+ *
+ *  Calls onLabel(severity, label, tsMs) for each label on each row, once.
+ *  Two things it has to get right:
+ *
+ *  BACKFILL. Connecting replays the play's history — 1041 rows against the
+ *  proxy's 92 in one minute of measuring — and those are minutes-old rows being
+ *  caught up, not live events. Narrating them would fire every label at once,
+ *  in the past, out of order. Rows stamped before the take began are dropped.
+ *
+ *  DEDUPE. The same condition can label consecutive samples, so a label is
+ *  taken once per (label, second) rather than once per row.
+ *
+ *  Never throws into the take: if the sidecar is absent the stream simply never
+ *  yields, and the caller keeps its own detectors. */
+async function subscribeLabels(playerId, playId, sinceMs, onLabel) {
+  const url = `${BASE}/analytics/api/v2/timeseries?streams=events`
+    + `&player_id=${encodeURIComponent(playerId)}`
+    + (playId ? `&play_id=${encodeURIComponent(playId)}` : '');
+  let res;
+  try {
+    res = await fetch(url, { headers: { accept: 'text/event-stream' } });
+  } catch (e) {
+    console.error(`  ⚠ label stream unavailable (${e.message}) — `
+      + 'falling back to the recorder\'s own detectors');
+    return false;
+  }
+  if (!res.ok || !res.body) {
+    console.error(`  ⚠ label stream returned ${res.status} — using own detectors`);
+    return false;
+  }
+  console.log('  label stream connected — narrating from the server\'s own '
+    + 'classification');
+
+  (async () => {
+    const seen = new Set();
+    let buf = '';
+    try {
+      for await (const chunk of res.body) {
+        buf += Buffer.from(chunk).toString('utf8');
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue;
+          let d;
+          try { d = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
+          const labels = d.labels;
+          if (!labels || !labels.length || !d.ts) continue;
+          // "2026-08-21 22:53:02.209" is UTC; Date.parse needs the marker.
+          const tsMs = Date.parse(d.ts.replace(' ', 'T') + 'Z');
+          if (!Number.isFinite(tsMs) || tsMs < sinceMs) continue;   // backfill
+          for (const raw of labels) {
+            const [sev, name] = String(raw).includes('=')
+              ? [String(raw).split('=')[0], String(raw).split('=').slice(1).join('=')]
+              : ['info', String(raw)];
+            const key = `${name}@${Math.floor(tsMs / 1000)}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            onLabel(sev, name, tsMs);
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`  ⚠ label stream ended: ${e.message}`);
+    }
+  })();
+  return true;
 }
 
 /** Measured audio bitrate of the stream's audio rendition, in kbps.
@@ -1489,6 +1649,19 @@ function phoneController() {
   const rec0 = await api(`/api/v2/players/${pid}`);
   const pm0 = rec0.current_play?.player_metrics || rec0.player_metrics || {};
   const variants = rec0.current_play?.manifest?.variants || [];
+  /* Subscribe to the server's own classification, scoped to THIS play.
+   *
+   * sinceMs is the take's own start: connecting replays the play's backfill,
+   * and narrating minutes-old rows would fire every label at once, in the past.
+   *
+   * Failure is not fatal — the analytics sidecar is optional and the live path
+   * does not depend on it, so a take without it simply falls back to the
+   * recorder's own (narrower) detectors. */
+  if (LABELS) {
+    labelsLive = await subscribeLabels(
+      pid, rec0.current_play?.id, t0, queueLabel);
+  }
+
   const audioKbpsMeasured = await audioKbps(rec0.current_play?.manifest?.master_url || '');
   if (audioKbpsMeasured) console.log(`  audio rendition ~${audioKbpsMeasured} kbps`);
   else console.error('  ⚠ could not measure the audio rendition — its line will omit the figure');
@@ -1838,6 +2011,10 @@ function phoneController() {
    * meaning when STEP_SECONDS changes, and "3 rungs" means something different
    * on a 5-rung ladder than on this 12-rung one. */
   const notableSeen = { overshoot: 0, plunge: 0, hunting: 0 };
+  // Set once the label stream connects. The recorder's own detectors keep
+  // RECORDING to notable[] either way, but stop narrating — the server's
+  // classification is broader and its thresholds are the configurable ones.
+  let labelsLive = false;
   const notable = [];      // recorded even when not narrated, for later analysis
   let lastHuntAt = -1e9;
 
@@ -1869,7 +2046,7 @@ function phoneController() {
       if (limitFlat && (hadRoom || back == null)) {
         notable.push({ kind: 'overshoot', at: cur.at, from: prev.from,
                        bottom: prev.to, back: cur.to, seconds: cur.at - prev.at });
-        if (notableSeen.overshoot < NOTABLE_MAX.overshoot) {
+        if (!labelsLive && notableSeen.overshoot < NOTABLE_MAX.overshoot) {
           notableSeen.overshoot += 1;
           cue(`That was an over-correction. It fell to ${prev.to}, then took `
             + `${cur.to} back ${(cur.at - prev.at).toFixed(0)} seconds later `
@@ -1895,7 +2072,7 @@ function phoneController() {
       if (skipped >= Math.max(2, Math.ceil(ladder * 0.25))) {
         notable.push({ kind: 'plunge', at: cur.at, from: cur.from,
                        to: cur.to, rungs: skipped });
-        if (notableSeen.plunge < NOTABLE_MAX.plunge) {
+        if (!labelsLive && notableSeen.plunge < NOTABLE_MAX.plunge) {
           notableSeen.plunge += 1;
           cue(`It just skipped ${skipped} rungs in one move, ${cur.from} `
             + `straight to ${cur.to}. That is what a player does when the `
@@ -1923,7 +2100,7 @@ function phoneController() {
         lastHuntAt = w[0].at;
         notable.push({ kind: 'hunting', at: cur.at,
                        path: w.map((x) => `${x.from}>${x.to}`).join(' ') });
-        if (notableSeen.hunting < NOTABLE_MAX.hunting) {
+        if (!labelsLive && notableSeen.hunting < NOTABLE_MAX.hunting) {
           notableSeen.hunting += 1;
           cue(`Watch it hunt — three changes in `
             + `${(w[2].at - w[0].at).toFixed(0)} seconds. The limit is sitting `
@@ -1938,6 +2115,69 @@ function phoneController() {
   let troughExplained = false;
   // The legend revisit fires once, at the first valley floor.
   let secondTourDone = false;
+
+  /* ---- narration scheduled from the server's labels --------------------
+   *
+   * Three separate problems, deliberately three separate mechanisms:
+   *
+   * WAIT FOR CONTEXT (`after`). A label fires the moment its condition is met,
+   * when the chart shows one small kink and nothing a viewer could point at.
+   * Held until the shape has drawn itself, then narrated in the past tense.
+   *
+   * COOL DOWN PER TYPE (`every`). Take 8 had five overshoots and six plunges.
+   * The first teaches something; the fifth is noise. Per-type, so a stall never
+   * silences an overshoot — they are different observations.
+   *
+   * PICK ONE WHEN THEY COLLIDE. Labels arrive in clusters — a single sample can
+   * carry shift_down and qoe_abr_conservative together, and a bad moment
+   * produces several within a second or two. Narrating all of them talks over
+   * the picture and over itself. Rank by the server's own severity first, then
+   * by the table's `rank`, and speak only the winner; the losers are recorded. */
+  const labelSpokenAt = {};     // label -> take-seconds when last narrated
+  const labelQueue = [];        // { name, sev, at, prio, say }
+  const SEV_RANK = { error: 40, critical: 30, warning: 20, info: 10, testing: 0 };
+  // Two narrations closer together than this are a collision, not a sequence.
+  const LABEL_COLLIDE_S = Number(process.env.LABEL_COLLIDE_S || 8);
+
+  function queueLabel(sev, name, tsMs) {
+    const spec = LABEL_NARRATION[name];
+    notable.push({ kind: 'label', at: (tsMs - t0) / 1000, label: name, sev });
+    if (!spec) return;                       // recorded, never spoken
+    const at = (tsMs - t0) / 1000 + spec.after;
+    const prio = (SEV_RANK[sev] || 0) + (spec.rank || 0);
+
+    /* Collision: keep the better of the two rather than queueing both. */
+    const clash = labelQueue.findIndex((q) => Math.abs(q.at - at) <= LABEL_COLLIDE_S);
+    if (clash >= 0) {
+      if (labelQueue[clash].prio >= prio) {
+        console.log(`  [label] ${name} yields to ${labelQueue[clash].name}`);
+        return;
+      }
+      console.log(`  [label] ${name} outranks ${labelQueue[clash].name}`);
+      labelQueue.splice(clash, 1);
+    }
+    labelQueue.push({ name, sev, at, prio, say: spec.say,
+                      every: LABEL_COOLDOWN_S || spec.every });
+  }
+
+  /** Drained by the poll loop. Cooldown is checked HERE, at speaking time, not
+   *  at queue time — a label queued during another one's cooldown may still be
+   *  outside it by the time its context delay has elapsed. */
+  function drainLabels() {
+    for (let i = labelQueue.length - 1; i >= 0; i -= 1) {
+      const q = labelQueue[i];
+      if (now() < q.at) continue;
+      labelQueue.splice(i, 1);
+      const last = labelSpokenAt[q.name];
+      if (last != null && now() - last < q.every) {
+        console.log(`  [label] ${q.name} suppressed — `
+          + `${(now() - last).toFixed(0)}s since the last one, needs ${q.every}s`);
+        continue;
+      }
+      labelSpokenAt[q.name] = now();
+      cue(q.say, 9000);
+    }
+  }
   let minCapSeen = Infinity, lastCue = 0, cycle = 0;
   const shifts = [];
 
@@ -1959,6 +2199,7 @@ function phoneController() {
   const ANNOTATE_SHIFTS = Number(process.env.ANNOTATE_SHIFTS || 0);
 
   async function drainAnnotations() {
+    drainLabels();
     while (pending.length && pending[0].at <= now()) {
       const a = pending.shift();
       try {
