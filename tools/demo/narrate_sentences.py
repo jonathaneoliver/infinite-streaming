@@ -26,7 +26,21 @@ VIDEO = os.environ.get("VIDEO", os.path.join(DEMO_DIR, "encoder-demo.mp4"))
 OUTV = os.environ.get("OUTV", os.path.join(DEMO_DIR, "encoder-demo-narrated-paced.mp4"))
 # The clip caches follow DEMO_DIR rather than living beside the script: this file
 # is in the repo now, and `sentences/` reached 214 wavs on one project.
-SENT = os.path.join(DEMO_DIR, "sentences")
+#
+# SENT_DIR moves the SENTENCE cache somewhere shared. Clips are keyed by a hash
+# of the sentence, so identical narration never needs generating twice — but
+# under DEMO_DIR that only ever helped WITHIN one take, and takes mostly repeat
+# each other. Re-recording regenerated ~150 clips at ~12s each to say the same
+# words in the same voice, roughly twenty minutes per take for nothing.
+#
+# Scoped by profile id, because the hash covers the text and not the voice:
+# two profiles saying the same sentence are different audio and must not
+# collide. Unset keeps the old per-take behaviour.
+_SENT_ROOT = os.environ.get("SENT_DIR")
+SENT = (os.path.join(_SENT_ROOT, PROFILE) if _SENT_ROOT
+        else os.path.join(DEMO_DIR, "sentences"))
+# Per-cue audio stays with the take: it is assembled from the clips with this
+# take's own timing, so it is not reusable across takes even when the text is.
 CUEW = os.path.join(DEMO_DIR, "cue-audio")
 
 GAP_MS = int(os.environ.get("GAP_MS", "300"))

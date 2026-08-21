@@ -1771,6 +1771,8 @@ function phoneController() {
   // explanation is worth making, once or twice — not on all 27 arrivals.
   let displayedNarrated = 0;
   let troughDone = false, recovering = false;
+  // The legend revisit fires once, at the first valley floor.
+  let secondTourDone = false;
   let minCapSeen = Infinity, lastCue = 0, cycle = 0;
   const shifts = [];
 
@@ -1806,6 +1808,31 @@ function phoneController() {
           await page.evaluate(() => window.__scrollTo('.vis-timeline'));
           await sleep(400);
           await page.evaluate((s) => window.__circleNewestEvent({ seed: s }), a.seed);
+        } else if (a.kind === 'tour2') {
+          /* Revisit the legend once the valley has actually been DRAWN.
+           *
+           * The first tour happens before the pattern runs, when every series
+           * is a flat line and the names are abstract. By the floor the chart
+           * has a shape worth pointing at: the limit's V, the fetched rung
+           * tracking it down, and the displayed rung trailing both. Same five
+           * names, but now they mean something on screen.
+           *
+           * Shorter holds than the opening tour — this is recognition, not
+           * introduction — and only the three series that make the shape. */
+          lay('side-by-side', { on: 'chart' });
+          await sleep(1200);
+          await tourSeries('Limit (rate_mbps)',
+            'There is the whole experiment in one line — the network limit '
+            + 'walked all the way down and is starting back up. Everything '
+            + 'else on this chart is a reaction to that V.', 7000);
+          await tourSeries('Fetching Variant',
+            'Fetching Variant hugs it on the way down. It sheds quality fast, '
+            + 'because falling behind the limit costs a stall and dropping a '
+            + 'rung only costs detail.', 7000);
+          await tourSeries('Displayed Variant',
+            'And Displayed Variant trails the whole way. The gap between these '
+            + 'two lines IS the buffer — widest where the limit fell fastest.', 7000);
+          await endTourHover();
         } else if (a.kind === 'say') {
           cue(a.text, 8000);
           lastCue = Date.now();
@@ -1963,6 +1990,12 @@ function phoneController() {
         + 'the difference to the picture. Licensing is why we are not using '
         + 'it. Either way, what we are here to watch is how the player BEHAVES '
         + 'as the ceiling moves — not how good 234p can look.' });
+      /* Only on the FIRST valley. By the second the audience has seen the
+       * shape, and pointing at it again would be padding. */
+      if (!secondTourDone) {
+        secondTourDone = true;
+        pending.push({ at: now() + 36.0, kind: 'tour2' });
+      }
     }
 
     /* Recovery begins — cap rising again past the floor. */
