@@ -212,6 +212,42 @@ const LABEL_NARRATION = {
     say: 'A segment stall — the player waited on a segment that did not arrive '
       + 'in time.',
   },
+  '*qoe_rate_cap_breach': {
+    /* The kernel-measured served rate went more than 1.25x over the applied
+     * cap (qoe_labels.go, RateCapBreachFactor).
+     *
+     * Worth being precise about, because the obvious reading is wrong: this is
+     * NOT the client over-reading. AVPlayer's own network_bitrate routinely
+     * reports 2-3x the cap on burst and that is a known quirk, which is exactly
+     * why the detector gates on nftables_bandwidth_mbps instead. So when this
+     * fires, more bytes really did move than we asked for.
+     *
+     * Point-in-time, so no stillTrue: the burst happened. Highest rank of the
+     * shaping labels — on a demo whose entire subject is a bandwidth limit,
+     * "the limit did not hold" outranks anything the player did about it. */
+    rank: 7, after: 10, every: 300,
+    say: 'The limiter just over-delivered — more bytes went through than the '
+      + 'cap allows. That is measured in the kernel, not reported by the '
+      + 'player, so it is not the over-read AVPlayer is known for. Usually it '
+      + 'is a burst at a step boundary, where the new rate takes effect a '
+      + 'fraction late.',
+  },
+  '*qoe_ladder_gap': {
+    /* The complement of abr_conservative, and the reason that label can be
+     * trusted: headroom exists, but no rung fits it, so the player staying put
+     * is CORRECT. Saying so once stops the whole demo reading as a list of the
+     * player's failings when the ladder is what ran out. */
+    rank: 1, after: 20, every: 600,
+    say: 'There is spare bandwidth here and the player is not using it — but '
+      + 'this time it is right not to. The next rung up costs more than the '
+      + 'headroom that just appeared, so there is nothing to climb to. That is '
+      + 'a gap in the ladder, not caution in the player.',
+    stillTrue: (m, sh) => {
+      const cap = sh?.pattern_rate_runtime_mbps;
+      const got = m?.video_bitrate_mbps;
+      return cap != null && got != null && got < cap * 0.8;
+    },
+  },
   '*qoe_vst_breach': {
     rank: 5, after: 5, every: 600,
     say: 'Video start time breached its threshold there — the time from asking '
