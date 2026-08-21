@@ -44,7 +44,26 @@ TRANSITION = float(os.environ.get("TRANSITION", "0.4"))
 CRF = os.environ.get("CRF", "18")
 PRESET = os.environ.get("PRESET", "medium")
 
-PRESETS = ("web-full", "phone-full", "side-by-side")
+# Span encoding. These files are intermediates — the crossfade chain re-encodes
+# every frame of them — so they want SPEED at a bitrate high enough not to show,
+# not the careful rate control the final pass deserves.
+# SPAN_HW=0 falls back to libx264 if VideoToolbox is unavailable or suspect.
+SPAN_HW = os.environ.get("SPAN_HW", "1") == "1"
+SPAN_BITRATE = os.environ.get("SPAN_BITRATE", "60M")
+
+
+def span_codec_args():
+    if SPAN_HW:
+        return ["-c:v", "h264_videotoolbox", "-b:v", SPAN_BITRATE,
+                "-pix_fmt", "yuv420p", "-r", "30"]
+    return ["-c:v", "libx264", "-crf", CRF, "-preset", "veryfast",
+            "-pix_fmt", "yuv420p", "-r", "30"]
+
+PRESETS = ("web-full", "web-pip", "phone-full", "side-by-side")
+
+# PiP size as a fraction of stage width, and its inset from the edges.
+PIP_FRAC = float(os.environ.get("PIP_FRAC", "0.24"))
+PIP_PAD = int(os.environ.get("PIP_PAD", "40"))
 
 
 def run(cmd, what):
@@ -74,6 +93,16 @@ def fit(sw, sh, bw, bh):
     return w, h
 
 
+def tall_capture(web):
+    """Is the browser source a full-height page capture rather than a viewport?
+
+    It changes how the box is computed. A viewport-shaped source is LETTERBOXED
+    into its box (fit); a full-page source is CROPPED to the box's aspect and
+    panned, so it fills the box exactly. Using fit() on a 3200x6800 page would
+    hand the dashboard a narrow column and waste most of the frame."""
+    return web[1] > web[0] * 1.6
+
+
 def place(preset, web, phone):
     """Resolve a preset to [(input_index, x, y, w, h), ...] on the stage.
 
@@ -81,12 +110,43 @@ def place(preset, web, phone):
     recording, in which case every preset degrades to web-full rather than
     rendering a black frame."""
     if phone is None or preset == "web-full":
+        if tall_capture(web):
+            return [(0, 0, 0, W, STAGE_H)]          # cropped+panned, fills the stage
         w, h = fit(web[0], web[1], W, STAGE_H)
         return [(0, (W - w) // 2, (STAGE_H - h) // 2, w, h)]
 
+    if preset == "web-pip":
+        # The browser is framed exactly as in web-full; the phone sits over it.
+        # Deliberately NOT shrinking the browser to make room — the inset covers
+        # a corner of a chart at worst, and rescaling the dashboard between
+        # web-full and web-pip would make the cut jump, which is the very thing
+        # the PiP exists to avoid.
+        if tall_capture(web):
+            base = [(0, 0, 0, W, STAGE_H)]
+        else:
+            w, h = fit(web[0], web[1], W, STAGE_H)
+            base = [(0, (W - w) // 2, (STAGE_H - h) // 2, w, h)]
+        pw, ph = fit(phone[0], phone[1], int(W * PIP_FRAC), int(STAGE_H * PIP_FRAC))
+        return base + [(1, W - pw - PIP_PAD, PIP_PAD, pw, ph)]
+
     if preset == "phone-full":
+        # Phone full-frame with the DASHBOARD inset top-right — the mirror of
+        # web-pip, and for the same reason: neither source should ever leave the
+        # frame. This preset runs at the trough, where the phone's picture
+        # degrading is the point; keeping the chart in shot lets the viewer see
+        # the cap sitting at its floor in the same moment, which is the pairing
+        # the whole demo is about.
         w, h = fit(phone[0], phone[1], W, STAGE_H)
-        return [(1, (W - w) // 2, (STAGE_H - h) // 2, w, h)]
+        base = [(1, (W - w) // 2, (STAGE_H - h) // 2, w, h)]
+        if tall_capture(web):
+            # A full-height page inset would be an unreadable ribbon, so the PiP
+            # takes a window of it, cropped and panned like any other browser
+            # box. pan_y decides which part — at the trough, the chart.
+            pw = int(W * PIP_FRAC) // 2 * 2
+            ph = int(pw * 0.55) // 2 * 2
+        else:
+            pw, ph = fit(web[0], web[1], int(W * PIP_FRAC), int(STAGE_H * PIP_FRAC))
+        return base + [(0, W - pw - PIP_PAD, PIP_PAD, pw, ph)]
 
     if preset == "side-by-side":
         # Two columns, with the split derived from the phone's own aspect rather
@@ -102,17 +162,51 @@ def place(preset, web, phone):
         want = int(STAGE_H * phone[0] / phone[1])
         right = min(want, W // 2) // 2 * 2
         left = W - right
-        ww, wh = fit(web[0], web[1], left, STAGE_H)
         pw, ph = fit(phone[0], phone[1], right, STAGE_H)
+        if tall_capture(web):
+            ww, wh, wx, wy = left, STAGE_H, 0, 0
+        else:
+            ww, wh = fit(web[0], web[1], left, STAGE_H)
+            wx, wy = (left - ww) // 2, (STAGE_H - wh) // 2
         return [
-            (0, (left - ww) // 2, (STAGE_H - wh) // 2, ww, wh),
+            (0, wx, wy, ww, wh),
             (1, left + (right - pw) // 2, (STAGE_H - ph) // 2, pw, ph),
         ]
 
     raise SystemExit("unknown layout preset %r (known: %s)" % (preset, ", ".join(PRESETS)))
 
 
-def render_span(web_path, phone_path, preset, start, dur, phone_offset, dest):
+PAN_SECS = float(os.environ.get("PAN_SECS", "1.2"))
+
+
+def pan_expr(keys, src_h, win_h, default):
+    """A crop-y expression from [(t_local, y_centre), ...] keyframes.
+
+    y values are CENTRES; crop wants the window top, so each is shifted by half
+    the window and clamped to the frame. Clamping per-keyframe rather than
+    around the whole expression keeps the arithmetic inside ffmpeg simple and
+    the result identical, since the ramp between two clamped values is itself
+    within range."""
+    lo, hi = 0, max(0, src_h - win_h)
+    top = lambda c: min(max(int(round(c - win_h / 2.0)), lo), hi)
+
+    if not keys:
+        return str(top(default if default is not None else src_h / 2.0))
+    ys = [top(y) for _t, y in keys]
+    if len(keys) == 1 or len(set(ys)) == 1:
+        return str(ys[0])
+
+    terms = [str(ys[0])]
+    for i in range(1, len(keys)):
+        d = ys[i] - ys[i - 1]
+        if d == 0:
+            continue
+        terms.append("%+d*clip((t-%.3f)/%.3f,0,1)" % (d, keys[i][0], PAN_SECS))
+    return "".join(terms)
+
+
+def render_span(web_path, phone_path, preset, start, dur, phone_offset, dest,
+                pan_y=None, pan_keys=None):
     """One span, one fixed layout, rendered to its own file."""
     web = probe(web_path)[:2]
     phone = probe(phone_path)[:2] if phone_path else None
@@ -127,13 +221,32 @@ def render_span(web_path, phone_path, preset, start, dur, phone_offset, dest):
     parts = ["color=c=black:s=%dx%d:d=%.3f,format=yuv420p[bg]" % (W, H, dur)]
     prev = "bg"
     for n, (idx, x, y, w, h) in enumerate(boxes):
-        parts.append("[%d:v]scale=%d:%d,setsar=1[s%d]" % (idx, w, h, n))
+        src_w, src_h = (web if idx == 0 else phone)
+        chain = ""
+        # A source much taller than its destination box is a full-height
+        # capture. Crop a full-width window whose aspect matches the box, at
+        # the requested vertical offset, instead of fitting the whole page in
+        # and rendering it unreadable.
+        if idx == 0 and tall_capture((src_w, src_h)):
+            win_h = int(round(src_w * h / float(w)))
+            win_h = min(win_h, src_h) // 2 * 2
+            # pan values are CENTRES of interest, not window tops: the window
+            # height depends on the destination box, which the recorder cannot
+            # know, but it does know which element it wants in shot.
+            # In phone-full the browser is a small INSET whose whole job is to
+            # keep the bandwidth chart visible beside the degrading picture. Its
+            # window is short (~1760px of a 6800px page), so following the
+            # per-cue pan drifts it off the chart and clips the bottom. Hold the
+            # span's own target — the chart centre — and ignore the cue moves.
+            keys = [] if preset == "phone-full" else (pan_keys or [])
+            expr = pan_expr(keys, src_h, win_h, pan_y)
+            chain = "crop=%d:%d:0:'%s'," % (src_w, win_h, expr)
+        parts.append("[%d:v]%sscale=%d:%d,setsar=1[s%d]" % (idx, chain, w, h, n))
         parts.append("[%s][s%d]overlay=x=%d:y=%d:shortest=0[o%d]" % (prev, n, x, y, n))
         prev = "o%d" % n
 
     cmd += ["-filter_complex", ";".join(parts), "-map", "[%s]" % prev,
-            "-an", "-c:v", "libx264", "-crf", CRF, "-preset", PRESET,
-            "-pix_fmt", "yuv420p", "-r", "30", dest]
+            "-an"] + span_codec_args() + [dest]
     run(cmd, "render span %s" % preset)
 
 
@@ -209,7 +322,11 @@ def main():
         a = float(m["at"])
         b = float(track[i + 1]["at"]) if i + 1 < len(track) else total
         if b - a > 0.05:                      # drop marks that were superseded instantly
-            bounds.append((a, b, m["preset"]))
+            # `y` is the top of the visible window in SOURCE pixels. The
+            # recorder writes it from the element rects it measured, so a
+            # framing decision refers to a real box on the page rather than a
+            # magic number.
+            bounds.append((a, b, m["preset"], m.get("y")))
 
     print("compositing %d spans, %dx%d (stage %d + strip %d)"
           % (len(bounds), W, H, STAGE_H, STRIP))
@@ -217,11 +334,22 @@ def main():
     tmp = tempfile.mkdtemp(prefix="layout-")
     spans, durs = [], []
     try:
-        for i, (a, b, preset) in enumerate(bounds):
+        for i, (a, b, preset, pan) in enumerate(bounds):
             dur = b - a
             dest = os.path.join(tmp, "span%03d.mp4" % i)
-            print("  [%2d] %-13s %7.2f → %7.2f  (%5.2fs)" % (i, preset, a, b, dur))
-            render_span(web_path, phone_path, preset, a, dur, phone_offset, dest)
+            keyn = len([c for c in (data.get("cues") or [])
+                        if c.get("pan") is not None and a <= c["at"] < b])
+            print("  [%2d] %-13s %7.2f → %7.2f  (%5.2fs)%s%s"
+                  % (i, preset, a, b, dur,
+                     "" if pan is None else "  pan y=%d" % pan,
+                     "  +%d moves" % keyn if keyn else ""))
+            keys = [(max(0.0, c["at"] - a), c["pan"])
+                    for c in (data.get("cues") or [])
+                    if c.get("pan") is not None and a <= c["at"] < b]
+            if keys and pan is not None and keys[0][0] > 0.01:
+                keys.insert(0, (0.0, pan))     # hold the span's own framing until the first cue
+            render_span(web_path, phone_path, preset, a, dur, phone_offset, dest,
+                        pan_y=pan, pan_keys=keys)
             spans.append(dest)
             durs.append(dur)
 
@@ -234,11 +362,30 @@ def main():
             shutil.rmtree(tmp, ignore_errors=True)
 
     # Rewrite the timings onto the composite's timeline.
-    tb = [(a, b) for (a, b, _p) in bounds]
+    tb = [(a, b) for (a, b, _p, _y) in bounds]
     data = dict(data)
     data["video"] = out
     data["sourceVideo"] = web_path
-    data["cues"] = [dict(c, at=round(remap(c["at"], tb), 3)) for c in data.get("cues", [])]
+    # Remap, then enforce monotonic order.
+    #
+    # Each cue's mapping is individually correct, but two cues emitted a
+    # fraction apart with a LAYOUT MARK between them land in different spans and
+    # have different crossfade offsets subtracted — so the later cue can come
+    # out earlier. Take 5 ended with its two wrap lines inverted that way, which
+    # in the finished video means the summary is spoken before the sentence it
+    # summarises.
+    #
+    # Clamping to the previous cue costs at most a few hundred milliseconds of
+    # drift on the offending pair and keeps the script in the order it was
+    # written.
+    cues_out, prev = [], -1.0
+    for c in data.get("cues", []):
+        t = round(remap(c["at"], tb), 3)
+        if t < prev:
+            t = prev
+        prev = t
+        cues_out.append(dict(c, at=t))
+    data["cues"] = cues_out
     data["segments"] = [dict(s, **{"from": round(remap(s["from"], tb), 3),
                                    "to": round(remap(s["to"], tb), 3)})
                         for s in data.get("segments", [])]

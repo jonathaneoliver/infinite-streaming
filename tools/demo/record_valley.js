@@ -72,12 +72,39 @@ const POLL_MS = Number(process.env.POLL_MS || 1000);
 const W = Number(process.env.W || 1600);
 const H = Number(process.env.H || 1000);
 
+// FULL-HEIGHT CAPTURE. The viewport is made tall enough to hold the whole
+// dashboard, so the recorder never scrolls and framing is chosen afterwards by
+// panning a window over the tall frame in render_layout.py.
+//
+// Two reasons that beats scrolling at record time. Framing stops being an
+// irreversible decision taken twelve minutes before anyone sees it, and
+// becomes data you can change without re-recording. And a scrolled page can no
+// longer ruin a take, because there is nothing to scroll.
+//
+// 0 keeps the old behaviour: viewport = H, and the recorder scrolls.
+const PAGE_H = Number(process.env.PAGE_H || 0);
+const TALL = PAGE_H > H;
+const VIEW_H = TALL ? PAGE_H : H;
+
+// 2x device pixels. At 1080p output the side-by-side layout scales the browser
+// to 0.60x, which is where axis labels and the legend stop being readable —
+// and rendering to 4K from a 1x capture only upscales: more pixels, no more
+// detail. Capturing at 2x puts REAL pixels behind a 4K frame.
+//
+// This multiplies with PAGE_H — the recorded frame is (W*DPR x VIEW_H*DPR).
+// Watch that product; past roughly 20 megapixels a frame the encoder suffers.
+const DPR = Number(process.env.DPR || 2);
+
 const PHONE = process.env.PHONE !== '0';          // drive QuickTime
 const PLAYER = process.env.PLAYER || '';          // pin a player_id
 // DRY=1 runs the preflight and stops. Nothing is recorded, no pattern is
 // applied, the phone is left alone. Worth running before every real take —
 // it is the cheap version of finding out the device went idle.
 const DRY = process.env.DRY === '1';
+// {left, top, right, bottom} for the QuickTime mirror window. Size does not
+// affect the capture, so this is purely about not covering the screen.
+// Empty to leave it where it is.
+const QT_BOUNDS = process.env.QT_BOUNDS === undefined ? '20, 60, 500, 280' : process.env.QT_BOUNDS;
 // CAPTIONS=1 draws the narration in the page. Rehearsals only — see __capInit.
 const CAPTIONS = process.env.CAPTIONS === '1';
 const USER = process.env.DEMO_USER || '';
@@ -121,11 +148,42 @@ const FOLD_KEYS = [
 const FOLDS_OPEN = (process.env.FOLDS_OPEN
   || 'network-shaping,bitrate-chart,player-state').split(',').map((s) => s.trim());
 
+// How each fold is spoken, and what it is FOR — the narration names the panel
+// and says why it is open or shut, which is the part a viewer cannot infer
+// from a collapsed header.
+const FOLD_SAY = {
+  'network-shaping': ['Network Shaping', 'where the cap gets set'],
+  'player-state': ['Player State', 'the event timeline'],
+  'bitrate-chart': ['the Bitrate Charts', 'what the player did about it'],
+  'fault-injection': ['Fault Injection', 'HTTP errors, hangs, corrupted responses'],
+  'content-manipulation': ['Content Manipulation', 'rewriting the manifest under the player'],
+  'server-timeouts': ['Server Timeouts', 'holding a connection open until it gives up'],
+  'network-log': ['the Network Log', 'every request the proxy handled'],
+  'play-log': ['the Play Log', 'all three streams on one scroll'],
+  'player-metrics': ['Player Metrics', 'the raw fields'],
+  'session-details': ['Session Details', 'the session\'s own identifiers'],
+  'focus-window': ['the Focus Window', 'scrubbing the archive'],
+};
+
+/** "A, B and C" — an Oxford-free list, because it is read aloud. */
+function speakList(items) {
+  if (items.length <= 1) return items[0] || '';
+  return items.slice(0, -1).join(', ') + ' and ' + items[items.length - 1];
+}
+
 // Chart legend groups switched off before the take. "Variant Bands" is the
 // twelve shaded avg→peak rung bands, which BandwidthChart shows by default.
 // Empty string keeps everything.
-const HIDE_LEGENDS = (process.env.HIDE_LEGENDS === undefined
-  ? 'Variant Bands' : process.env.HIDE_LEGENDS).split(',').map((s) => s.trim()).filter(Boolean);
+// Empty by default: the shaded avg->peak band per variant IS the ladder, and
+// seeing the Fetching / Displayed lines step between rungs is most of what the
+// chart is for. They were hidden for one take as visual noise and that was
+// wrong — without them the two variant lines move against a blank field and the
+// viewer has nothing to read the steps against.
+//
+// Note this is applied to the LIVE PAGE, so unlike framing it is baked into the
+// recording. Changing it needs a new take.
+const HIDE_LEGENDS = (process.env.HIDE_LEGENDS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
 
 // Charts to render at double height (200px → 540px). Each MetricsLineChart owns
 // its own Expand toggle, persisted under dashboard_v3_chart_expand_<title>, so
@@ -134,6 +192,16 @@ const HIDE_LEGENDS = (process.env.HIDE_LEGENDS === undefined
 // clicking it looked right and grew nothing.
 const EXPAND_CHARTS = (process.env.EXPAND_CHARTS === undefined
   ? 'bandwidth' : process.env.EXPAND_CHARTS).split(',').map((s) => s.trim()).filter(Boolean);
+
+// Collapse the left nav rail.
+const SIDEBAR_COLLAPSED = process.env.SIDEBAR_COLLAPSED !== '0';
+
+// Chart rolling window. The dashboard defaults to DEFAULT_FOCUS_MS = 10 min,
+// which spreads a 4.7-minute valley cycle over half the plot; 5 minutes frames
+// roughly one cycle. Unlike the folds and the expand state this is NOT
+// persisted — liveSpan is in-memory per player — so it cannot be seeded and has
+// to be driven the way the UI does it: Alt + wheel over the canvas.
+const FOCUS_MIN = Number(process.env.FOCUS_MIN || 5);
 
 /* ─── page-side overlay ─────────────────────────────────────────────────
  * Cursor, click ring and spotlight box. Same shapes as the Encoder recorder
@@ -196,6 +264,58 @@ window.__rectOf = (sel, i) => {
   const r = e.getBoundingClientRect();
   return { x: r.x, y: r.y, w: r.width, h: r.height };
 };
+/* Vertical centre of an element in DEVICE pixels, measured against the
+ * document rather than the viewport. Under a full-height capture nothing
+ * scrolls, so this is a fixed coordinate in the recorded frame — which is what
+ * lets the compositor pan to it afterwards. */
+/* Top and bottom of an element in DEVICE pixels, document-relative. Lets the
+ * recorder frame the UNION of two panels — "both of these on screen" — instead
+ * of centring on one and hoping the other fits. */
+window.__boundsOf = (sel, i, dpr) => {
+  const e = document.querySelectorAll(sel)[i || 0];
+  if (!e) return null;
+  const r = e.getBoundingClientRect();
+  const d = dpr || 1;
+  return { top: Math.round((r.top + window.scrollY) * d),
+           bottom: Math.round((r.bottom + window.scrollY) * d) };
+};
+
+/* A legend entry's full rect in viewport px, for the spotlight. __legendBox
+ * returns only a click point; parking a highlight on a series needs its box. */
+window.__legendRect = (text) => {
+  for (const c of document.querySelectorAll('canvas')) {
+    const ch = window.Chart && window.Chart.getChart(c);
+    if (!ch || !ch.legend) continue;
+    const items = ch.legend.legendItems || [];
+    const boxes = ch.legend.legendHitBoxes || [];
+    for (let i = 0; i < items.length; i++) {
+      if (items[i] && items[i].text === text && boxes[i]) {
+        const r = c.getBoundingClientRect();
+        return { x: r.x + boxes[i].left, y: r.y + boxes[i].top,
+                 w: boxes[i].width, h: boxes[i].height };
+      }
+    }
+  }
+  return null;
+};
+
+/* Latest value of a named series, so the tour can quote what it is showing
+ * rather than describe it in the abstract. */
+window.__seriesLatest = (label) => {
+  const f = window.__chartByLabel(label);
+  if (!f) return null;
+  const ds = f.ch.data.datasets.find((d) => d.label === label);
+  const pts = (ds && ds.data || []).filter((q) => q && typeof q === 'object' && q.y != null);
+  return pts.length ? pts[pts.length - 1].y : null;
+};
+
+window.__centreOf = (sel, i, dpr) => {
+  const e = document.querySelectorAll(sel)[i || 0];
+  if (!e) return null;
+  const r = e.getBoundingClientRect();
+  return Math.round((r.top + window.scrollY + r.height / 2) * (dpr || 1));
+};
+
 window.__scrollTo = (sel, i, block) => {
   const e = document.querySelectorAll(sel)[i || 0]; if (!e) return false;
   e.scrollIntoView({ behavior: 'smooth', block: block || 'center' }); return true;
@@ -408,6 +528,36 @@ function fmtMbps(v) {
   return v >= 10 ? v.toFixed(1) : v.toFixed(2);
 }
 
+/** Measured audio bitrate of the stream's audio rendition, in kbps.
+ *
+ *  Segment bytes over segment seconds. Includes container overhead, so it
+ *  reads a few percent above the encoder's target — which is the honest number
+ *  anyway, since those bytes are on the wire and count against the cap.
+ *
+ *  Returns null on any failure; the caller drops the figure rather than
+ *  guessing. */
+async function audioKbps(masterUrl) {
+  try {
+    const base = masterUrl.replace(/[^/]*$/, '');
+    const master = await (await fetch(`${BASE}/${masterUrl}`)).text();
+    const m = /URI="([^"]+audio[^"]*\.m3u8)"/i.exec(master);
+    if (!m) return null;
+    const mediaUrl = m[1].startsWith('/') ? m[1].slice(1) : base + m[1];
+    const media = await (await fetch(`${BASE}/${mediaUrl}`)).text();
+    const seg = /#EXTINF:([\d.]+),\s*\n(\S+)/.exec(media);
+    if (!seg) return null;
+    const dur = parseFloat(seg[1]);
+    const segUrl = seg[2].startsWith('/') ? seg[2].slice(1)
+      : mediaUrl.replace(/[^/]*$/, '') + seg[2];
+    const r = await fetch(`${BASE}/${segUrl}`);
+    const buf = await r.arrayBuffer();
+    if (!dur || !buf.byteLength) return null;
+    return Math.round((buf.byteLength * 8) / dur / 1000);
+  } catch (e) {
+    return null;
+  }
+}
+
 /** "1 stall" / "2 stalls". pronounce.py's de-pluralising tail only covers
  *  hours/minutes/seconds, and these counts are read aloud.
  *
@@ -448,15 +598,106 @@ function phoneStart() {
     console.error(`  ⚠ QuickTime has ${n} documents open — expected exactly 1.`);
     console.error('    stop/save at the end may target the wrong one.');
   }
+
+  // Assert the SOURCE, not just that a document exists.
+  //
+  // `natural dimensions` reports the capture size: 2556x1180 for this iPhone's
+  // screen, ~1920x1080 or 1280x720 for a camera. QuickTime's device chooser is
+  // not scriptable, so a restart can silently leave the wrong source selected
+  // and the take records a webcam for twelve minutes while everything else
+  // looks healthy.
+  //
+  // It populates a moment AFTER start, not immediately — polling rather than
+  // reading once is the difference between this check working and it reporting
+  // a false 0,0.
+  let dims = '';
+  for (let i = 0; i < 20; i++) {
+    dims = osa('tell application "QuickTime Player" to get natural dimensions of document 1').trim();
+    if (dims && !/^0,\s*0$/.test(dims)) break;
+    spawnSync('sleep', ['1']);
+  }
+  const [dw, dh] = dims.split(',').map((v) => Number(v.trim()));
+  if (!dw || !dh) {
+    throw new Error('QuickTime reports no capture source (natural dimensions 0,0) — '
+      + 'pick the iPhone in File > New Movie Recording');
+  }
+  console.log(`  phone source ${dw}x${dh}`);
+
+  // Shrink and park the mirror window. QuickTime captures the DEVICE at its
+  // native resolution, so the window is only a monitor — its size has no effect
+  // on the recording, and a full-size iPhone mirror otherwise sits across the
+  // screen for twelve minutes for no benefit.
+  //
+  // Not minimised: a windowed capture keeps rendering, and hiding it entirely
+  // removes the one way to notice mid-take that the phone has stopped.
+  if (QT_BOUNDS) {
+    try {
+      osa(`tell application "QuickTime Player" to set bounds of window 1 to {${QT_BOUNDS}}`);
+      console.log(`  phone window parked at {${QT_BOUNDS}}`);
+    } catch (e) {
+      console.error('  ⚠ could not resize the QuickTime window — harmless, carrying on');
+    }
+  }
+  // A landscape phone screen is wide and short; a webcam is ~16:9 at a much
+  // smaller width. Warn rather than throw: a different device is legitimate.
+  if (dw < 1500) {
+    console.error(`  ⚠ ${dw}x${dh} does not look like a phone screen — is a CAMERA selected?`);
+  }
 }
 
+/* Stop the capture and get the file where we want it.
+ *
+ * Two things about QuickTime make the obvious one-liner fail, and take1 lost
+ * its phone recording to both:
+ *
+ * 1. QuickTime Player IS SANDBOXED. `save … in POSIX file "<anywhere>"` fails
+ *    with "You don't have permission", and the modal that raises blocks the
+ *    AppleEvent — which surfaces 60s later as -1712 "AppleEvent timed out".
+ *    That misdiagnoses as a slow save, and a longer timeout does nothing.
+ *    ~/Movies is inside the sandbox's allowed set, so save there and let the
+ *    SHELL (not sandboxed) move the result.
+ *
+ * 2. `save` writes a .qtpxcomposition BUNDLE — a directory containing
+ *    `Movie Recording.mov` — not a flat file at the path you named. The inner
+ *    movie is the original capture, no re-encode, so lifting it out beats
+ *    `export`, which would transcode.
+ *
+ * `with timeout` stays: harmless, and a genuinely long finalise is plausible
+ * for a twelve-minute capture even once the permission problem is gone. */
 function phoneStop(dest) {
-  // `save` needs the document still open; `stop` finalises the capture.
+  const stage = path.join(os.homedir(), 'Movies', `demo-take-${Date.now()}.mov`);
+
   osa('tell application "QuickTime Player" to stop document 1');
   // QuickTime needs a beat between stop and save or it writes a 0-byte file.
-  spawnSync('sleep', ['2']);
-  osa(`tell application "QuickTime Player" to save document 1 in POSIX file "${dest}"`,
-      'tell application "QuickTime Player" to close document 1 saving no');
+  spawnSync('sleep', ['3']);
+  osa('tell application "QuickTime Player"',
+      '  with timeout of 900 seconds',
+      `    save document 1 in POSIX file "${stage}"`,
+      '  end timeout',
+      'end tell');
+  osa('tell application "QuickTime Player" to close every document saving no');
+
+  // Accept either shape — a flat file, or the bundle's inner movie.
+  const inner = path.join(`${stage}.qtpxcomposition`, 'Movie Recording.mov');
+  const src = fs.existsSync(stage) ? stage : (fs.existsSync(inner) ? inner : null);
+  if (!src) {
+    throw new Error(`QuickTime wrote neither ${stage} nor ${inner}`);
+  }
+  // copy+unlink, NOT rename: QuickTime must stage inside ~/Movies (its sandbox
+  // allows nothing else) while DEMO_DIR lives on an external drive, and
+  // rename() across filesystems fails EXDEV. That cost take 2 its automatic
+  // save — the recording was fine, the move was not.
+  fs.copyFileSync(src, dest);
+  fs.unlinkSync(src);
+  fs.rmSync(`${stage}.qtpxcomposition`, { recursive: true, force: true });
+
+  // Assert it is real. A 0-byte or truncated file here is worth failing on
+  // while the operator is still in the room.
+  const size = fs.statSync(dest).size;
+  if (size < 1_000_000) {
+    throw new Error(`phone recording is only ${size} bytes — capture did not take`);
+  }
+  console.log(`  phone recording ${(size / 1e9).toFixed(2)} GB → ${dest}`);
 }
 
 /* ─── phone control via Appium ──────────────────────────────────────────
@@ -525,7 +766,18 @@ function phoneController() {
       await phone.wait('READY', 6 * 60 * 1000);
     } catch (e) {
       console.error(`✗ ${e.message}`);
-      console.error('  Is the Appium server up? (appium, on localhost:4723)');
+      // The real-device path goes to :4799 (CHAR_IOS_DIRECT_APPIUM_URL), not
+      // the sim farm's :4723 — naming the wrong port sends the next person to
+      // check a server that was never involved.
+      console.error('  XCTDaemonErrorDomain Code=41 ("Not authorized for performing UI');
+      console.error('  testing actions") has TWO causes on the device, and they look');
+      console.error('  identical from here:');
+      console.error('    1. the iPhone is LOCKED');
+      console.error('    2. Settings > Developer > Enable UI Automation is OFF');
+      console.error('       (and Developer Mode on) — a reinstall can clear it');
+      console.error('  Then the host side:');
+      console.error('    3. appium on :4799   (curl -s localhost:4799/status)');
+      console.error('    4. go-ios tunnel up  (ios tunnel ls)');
       phone.stop();
       process.exit(1);
     }
@@ -584,10 +836,14 @@ function phoneController() {
   }
   const browser = await chromium.launch({ headless: false, args: [`--window-size=${W},${H}`] });
   const ctx = await browser.newContext({
-    viewport: { width: W, height: H },
+    viewport: { width: W, height: VIEW_H },
+    deviceScaleFactor: DPR,
     ignoreHTTPSErrors: true,
     httpCredentials: USER ? { username: USER, password: PASS } : undefined,
-    recordVideo: { dir: OUT, size: { width: W, height: H } },
+    // Record at the DEVICE pixel size, not the CSS size. Leaving this at the
+    // CSS viewport would downsample the 2x render straight back to 1x and
+    // throw away exactly the detail deviceScaleFactor was set to capture.
+    recordVideo: { dir: OUT, size: { width: W * DPR, height: VIEW_H * DPR } },
   });
   await ctx.addInitScript(INIT);
   // Runs before the app's own scripts, so CollapsibleSection reads these on
@@ -605,6 +861,12 @@ function phoneController() {
       try { localStorage.setItem('dashboard_v3_chart_expand_' + c, 'true'); } catch { /* ignore */ }
     }
   }, EXPAND_CHARTS);
+  // The nav rail costs ~250px of a 1600px-wide capture and carries nothing the
+  // demo refers to. ShellLayout persists its state under this key, so it is
+  // seeded like the folds rather than clicked — no collapse animation on camera.
+  await ctx.addInitScript((collapse) => {
+    try { localStorage.setItem('ismSidebarCollapsed', collapse ? '1' : '0'); } catch { /* ignore */ }
+  }, SIDEBAR_COLLAPSED);
 
   // Phone first, then the page. Playwright starts the webm the moment the page
   // is created, so the phone has to be rolling BEFORE that for the offset to
@@ -645,18 +907,67 @@ function phoneController() {
 
   /** Record a caption at the current time. `holdMs` is how long the recorder
    *  will dwell here — make_ass.py uses it only for the LAST cue. */
-  function cue(text, holdMs = 4000) {
+  /** `on` names a focus target, as for lay(). It becomes the cue's `pan`, and
+   *  the compositor moves the framing to it as the line is spoken — so the
+   *  view follows the narration instead of holding one crop for four minutes. */
+  function cue(text, holdMs = 4000, on = null) {
     const at = now();
-    cues.push({ at: Math.round(at * 1000) / 1000, text, holdMs, words: text.split(/\s+/).length });
+    const pan = on && focus[on] != null ? focus[on] : undefined;
+    cues.push({ at: Math.round(at * 1000) / 1000, text, holdMs,
+                ...(pan == null ? {} : { pan }),
+                words: text.split(/\s+/).length });
     console.log(`  [${at.toFixed(1)}s] ${text}`);
     if (CAPTIONS) page.evaluate((t) => window.__say(t), text).catch(() => {});
   }
 
-  /** Record a layout change for render_layout.py. */
+  /** Named vertical targets, in device pixels, filled in once the page has
+   *  settled. Under TALL capture the compositor pans to these instead of the
+   *  recorder scrolling to them. */
+  // `top` is seeded rather than measured, because the opening layout mark is
+  // written before the page has even loaded — measureFocus() cannot have run
+  // yet, and an unset target silently drops `y`, which is how take 2's opening
+  // beat ended up with no framing at all.
+  const focus = { top: 0 };
+
+  async function measureFocus() {
+    // 'top' is the TOP OF THE PAGE, not the centre of any element: .page-card
+    // wraps every panel, so its midpoint sits halfway down the document and
+    // framing the empty-sessions beat there shows the wrong thing entirely.
+    // 0 makes the compositor clamp the window to the top edge.
+    for (const [name, sel] of [['pattern', '.template-row'],
+                               ['timeline', '.vis-timeline'], ['chart', 'canvas']]) {
+      const y = await page.evaluate(([s2, d]) => window.__centreOf(s2, 0, d), [sel, DPR]);
+      if (y != null) focus[name] = y;
+    }
+    // Combined framings: centre the union so BOTH panels fit the window.
+    const tl = await page.evaluate((d) => window.__boundsOf('.vis-timeline', 0, d), DPR);
+    const bw = await page.evaluate((d) => window.__boundsOf('canvas', 0, d), DPR);
+    const bufIdx = await page.evaluate(() => {
+      // Find the buffer chart by its TITLE, not an index — the chart-stack
+      // order in SessionDisplay is not the order they render in.
+      const wraps = [...document.querySelectorAll('.canvas-wrap')];
+      for (let i = 0; i < wraps.length; i++) {
+        const head = wraps[i].parentElement && wraps[i].parentElement.innerText || '';
+        if (/Buffer/i.test(head.split('\n')[0] || '')) return i;
+      }
+      return 1;
+    });
+    const buf = await page.evaluate(([i, d]) => window.__boundsOf('canvas', i, d), [bufIdx, DPR]);
+    if (tl && bw) focus.state_chart = Math.round((tl.top + bw.bottom) / 2);
+    if (bw && buf) focus.chart_buffer = Math.round((bw.top + buf.bottom) / 2);
+
+    console.log('  focus targets (device px):',
+      Object.entries(focus).map(([k, v]) => `${k}=${v}`).join(' '));
+  }
+
+  /** Record a layout change for render_layout.py. `on` names a focus target;
+   *  it becomes the `y` the compositor centres its window on. */
   function lay(preset, extra = {}) {
     const at = Math.round(now() * 1000) / 1000;
-    layout.push({ at, preset, ...extra });
-    console.log(`  [${at.toFixed(1)}s] «layout ${preset}»`);
+    const { on, ...rest } = extra;
+    const y = on && focus[on] != null ? focus[on] : undefined;
+    layout.push({ at, preset, ...(y == null ? {} : { y }), ...rest });
+    console.log(`  [${at.toFixed(1)}s] «layout ${preset}${on ? ` @${on}` : ''}»`);
   }
 
   function mark(name) {
@@ -679,6 +990,14 @@ function phoneController() {
     }
   }
 
+  /** Scroll, unless the capture already holds the whole page. Leaving the
+   *  scroll calls in place and neutering them here keeps one code path for
+   *  both modes, rather than two that drift. */
+  async function maybeScroll(sel, i = 0, block = 'center') {
+    if (TALL) return;
+    await page.evaluate(([s2, n, b]) => window.__scrollTo(s2, n, b), [sel, i, block]);
+  }
+
   async function moveTo(sel, i = 0) {
     assertCss(sel);
     const r = await page.evaluate(([s, n]) => window.__rectOf(s, n), [sel, i]);
@@ -694,7 +1013,7 @@ function phoneController() {
   // stays anchored on the top of the panel where the controls are.
   async function spot(sel, i = 0, block = 'center') {
     assertCss(sel);
-    await page.evaluate(([s, n, b]) => window.__scrollTo(s, n, b), [sel, i, block]);
+    await maybeScroll(sel, i, block);
     await sleep(700);
     const r = await page.evaluate(([s, n]) => window.__rectOf(s, n), [sel, i]);
     if (r) {
@@ -706,6 +1025,119 @@ function phoneController() {
     return r;
   }
   const unspot = () => page.evaluate(() => window.__spot(null));
+
+  /** Zoom the charts' rolling window to roughly `minutes`, by the gesture the
+   *  UI documents: Alt + wheel over the plot.
+   *
+   *  This one cannot be seeded. Folds, chart height and the sidebar all persist
+   *  to localStorage, but `liveSpan` lives in useChartCoordination's in-memory
+   *  per-player state, so the only way in is the gesture.
+   *
+   *  MEASURED, not counted. The zoom factor per wheel tick is not documented
+   *  anywhere, so counting ticks would be guessing — and a take that quietly
+   *  recorded an 8-minute window because a tick moved differently is the kind
+   *  of failure you only notice in the edit. Read the axis back after each
+   *  step, stop when close enough, and say what was actually achieved.
+   *
+   *  The wheel's sign is discovered the same way: step once, see which way the
+   *  span moved, and flip if it went the wrong way. */
+  async function setFocusWindow(minutes) {
+    const target = minutes * 60 * 1000;
+    const sel = `input[name="panel-focus-span"][value="${minutes}"]`;
+
+    const span = () => page.evaluate(() => {
+      const f = window.__chartByLabel('Limit (rate_mbps)') || window.__chartByLabel('Fetching Variant');
+      return f ? f.ch.scales.x.max - f.ch.scales.x.min : null;
+    });
+
+    const before = await span();
+    try {
+      // 'attached', NOT the default 'visible': BitrateChartPanelToolbar styles
+      // the radios `.pill input { display: none }` and lets the label carry the
+      // appearance. Waiting for visibility times out on an element that is
+      // present and perfectly clickable with force.
+      await page.waitForSelector(sel, { timeout: 15000, state: 'attached' });
+    } catch (e) {
+      console.error(`  ⚠ no ${minutes}m window control — is the dashboard deployed?`);
+      console.error(`    window stays at ${before == null ? '?' : (before / 60000).toFixed(1)} min`);
+      return;
+    }
+    // A DOM click, not a synthetic mouse click. The radio is
+    // `.pill input { display: none }`, so it has no box — and Playwright's
+    // force: true skips the actionability CHECKS but still needs somewhere to
+    // click. el.click() dispatches straight to the element and fires the
+    // change handler Vue is listening for.
+    const clicked = await page.evaluate((s2) => {
+      const el = document.querySelector(s2);
+      if (!el) return false;
+      el.click();
+      return true;
+    }, sel);
+    if (!clicked) { console.error(`  ⚠ ${minutes}m control vanished before the click`); return; }
+    await sleep(1200);
+
+    const after = await span();
+    console.log(`  window ${before == null ? '?' : (before / 60000).toFixed(1)} min`
+      + ` → ${after == null ? '?' : (after / 60000).toFixed(1)} min (wanted ${minutes})`);
+    // Verify rather than assume the click landed — the whole point of moving
+    // off the gesture was to stop guessing what the chart did.
+    if (after == null || Math.abs(after - target) > target * 0.15) {
+      console.error(`  ⚠ window did not take — wanted ${minutes} min`);
+    }
+  }
+
+  /** Glide the cursor onto a named chart series in the legend, highlight it,
+   *  and hold while its line is spoken.
+   *
+   *  By NAME, not coordinates: the legend reflows as series are added and as
+   *  entries are struck through, so a remembered pixel offset points at the
+   *  wrong series the moment anything changes. __legendRect resolves the box
+   *  from Chart.js's own hit boxes, which is the same source the click path
+   *  uses.
+   *
+   *  Returns false when the series is not on the legend at all — a tour line
+   *  about a series nobody can see is worse than a missing line, so the caller
+   *  skips rather than narrating into empty space. */
+  async function tourSeries(label, sentence, holdMs = 8000) {
+    const rect = await page.evaluate((t) => window.__legendRect(t), label);
+    if (!rect) {
+      console.error(`  ⚠ series "${label}" not on the legend — skipping its line`);
+      return false;
+    }
+    const cx = Math.round(rect.x + rect.w / 2);
+    const cy = Math.round(rect.y + rect.h / 2);
+
+    // Drive the VISIBLE cursor there first so the move reads as deliberate,
+    // then put the real pointer on the same spot to fire the chart's own
+    // legend onHover — which bolds this series and dims the rest.
+    await page.evaluate(([x, y]) => window.__moveCursor(x, y), [cx, cy]);
+    await sleep(500);
+    await page.mouse.move(cx, cy, { steps: 12 });
+    await sleep(400);
+
+    // Confirm the highlight actually engaged rather than assuming the hover
+    // landed: the hovered series keeps its full border width while the others
+    // are reduced, so a spread of widths means the app responded.
+    const engaged = await page.evaluate((t) => {
+      const f = window.__chartByLabel(t);
+      if (!f) return false;
+      const ws = (f.ch.data.datasets || [])
+        .filter((d) => d.borderWidth != null)
+        .map((d) => d.borderWidth);
+      return new Set(ws).size > 1;
+    }, label);
+    if (!engaged) console.error(`  ⚠ legend hover did not highlight "${label}"`);
+
+    cue(sentence, holdMs);
+    await sleep(holdMs);
+    return true;
+  }
+
+  /** Move the pointer off the legend so the chart restores every series. */
+  async function endTourHover() {
+    await page.mouse.move(5, 5, { steps: 6 });
+    await sleep(400);
+  }
 
   /** Toggle a Chart.js legend entry off by clicking it, and verify it took.
    *  Silent — this is stage dressing, not something the narration mentions. */
@@ -739,7 +1171,7 @@ function phoneController() {
 
   /* 4. Open the page and select the device ---------------------------- */
   mark('setup');
-  lay('web-full');
+  lay('web-pip', { on: 'top' });   // focus.top is a constant 0, so this is safe pre-measure
   await page.goto(PAGE_URL, { waitUntil: 'domcontentloaded' });
   if (CAPTIONS) {
     await page.evaluate(() => window.__capInit());
@@ -755,6 +1187,11 @@ function phoneController() {
   await sleep(6000);
   await unspot();
 
+  // Both sources in frame BEFORE playback starts. The session appearing in an
+  // empty panel is the demo's first real beat, and it only reads if the phone
+  // that caused it is on screen at the same time — otherwise the viewer sees a
+  // row arrive in a list for no visible reason.
+  lay('side-by-side', { on: 'top' });
   cue('Starting playback on the phone.', 4000);
 
   if (phone) {
@@ -791,6 +1228,41 @@ function phoneController() {
     + 'first playlist.', 6000);
   await sleep(5000);
 
+  /* Name the panels before using them. Three are open; the rest are shut on
+   * purpose, and saying so stops the folded ones reading as broken.
+   *
+   * Phrased as separate sentences rather than a list: narrate_sentences.py
+   * paces on sentence boundaries, and pronounce.py turns an em-dash into a
+   * comma, so a dashed list is read as one undifferentiated run. */
+  const SAY_ORDER = ['network-shaping', 'player-state', 'bitrate-chart'];
+  // Several names begin with "the", which reads wrong at the head of a
+  // sentence; capitalise rather than dropping the article, since it is correct
+  // mid-sentence elsewhere.
+  const sentence = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+  const openParts = SAY_ORDER
+    .filter((k) => FOLDS_OPEN.includes(k) && FOLD_SAY[k])
+    .map((k) => sentence(`${FOLD_SAY[k][0]}, ${FOLD_SAY[k][1]}.`));
+  if (openParts.length) {
+    cue(`Three panels are open for this. ${openParts.join(' ')}`, 9000);
+    await sleep(9000);
+  }
+
+  // These panels are not used today, but naming what each one DOES is the
+  // part that lands: "Fault Injection, Content Manipulation, Server Timeouts"
+  // alone means nothing to anyone who has not used the tool, and the whole
+  // value of mentioning them is showing the tool does more than throttling.
+  // Costs about ten seconds and buys the viewer a map of the rest.
+  const shutParts = ['fault-injection', 'content-manipulation', 'server-timeouts']
+    .filter((k) => !FOLDS_OPEN.includes(k) && FOLD_SAY[k])
+    .map((k) => sentence(`${FOLD_SAY[k][0]} for ${FOLD_SAY[k][1]}.`));
+  if (shutParts.length) {
+    cue(`The others are folded on purpose. ${shutParts.join(' ')} `
+      + `Each is a different way to break a stream, and none of them are in `
+      + `play today. The only thing changing here is how much bandwidth there `
+      + `is.`, 11000);
+    await sleep(11000);
+  }
+
   // Match on display_id — the pill carries "Session #N", and N came from the
   // same API record. Matching on the device or content tail would be ambiguous
   // the moment a second iPhone connects.
@@ -821,6 +1293,10 @@ function phoneController() {
   const rec0 = await api(`/api/v2/players/${pid}`);
   const pm0 = rec0.current_play?.player_metrics || rec0.player_metrics || {};
   const variants = rec0.current_play?.manifest?.variants || [];
+  const audioKbpsMeasured = await audioKbps(rec0.current_play?.manifest?.master_url || '');
+  if (audioKbpsMeasured) console.log(`  audio rendition ~${audioKbpsMeasured} kbps`);
+  else console.error('  ⚠ could not measure the audio rendition — its line will omit the figure');
+
   console.log(`  device ${pm0.device_model} · ${variants.length} variants · `
     + `rung ${rungName(pm0.video_resolution)} · buffer ${pm0.buffer_depth_s}s`
     + ` · content ${pm0.content_name}`);
@@ -838,8 +1314,21 @@ function phoneController() {
   // is computed from the requested clip's ladder, so a substitution produces a
   // take that describes one clip over footage of another, fluently and
   // wrongly. Cheaper to lose the take here than to find out in the edit.
-  if (CONTENT && pm0.content_name && pm0.content_name !== CONTENT) {
-    console.error(`\n✗ playing ${pm0.content_name}, expected ${CONTENT}.`);
+  // Prefer the master URL: content_name is frequently absent (it was on takes 2
+  // AND 3), and `CONTENT && pm0.content_name && …` then skips the check
+  // silently — a guard that only fires when it feels like it is worse than none,
+  // because it reads as verified. master_url always carries the content:
+  //   go-live/fpv5_p200_h264_6s/master_6s.m3u8
+  const masterUrl = rec0.current_play?.manifest?.master_url || '';
+  const playing = pm0.content_name
+    || (masterUrl.match(/go-live\/([^/]+)\//) || [])[1]
+    || null;
+  if (CONTENT && !playing) {
+    console.error('\n⚠ cannot tell what is playing — neither content_name nor master_url.');
+    console.error('  Recording anyway, but the narration is NOT verified against the clip.');
+  }
+  if (CONTENT && playing && playing !== CONTENT) {
+    console.error(`\n✗ playing ${playing}, expected ${CONTENT}.`);
     console.error('  The tile tap fell back to the continue-watching hero. Either put the');
     console.error('  clip in the hero, or check the id with:');
     console.error('    go run ./cmd/demo-device -list-tiles   (in tests/characterization)');
@@ -857,6 +1346,8 @@ function phoneController() {
   // avg→peak band per variant with `hidden: false`, so twelve bands stripe the
   // plot area by default. Useful at a desk, noise at video size.
   for (const g of HIDE_LEGENDS) await hideLegend(g);
+  if (FOCUS_MIN > 0) await setFocusWindow(FOCUS_MIN);
+  await measureFocus();
   // ANNOTATE_TEST=1 exercises the annotation path against the live chart and
   // screenshots the result, without recording or applying anything. The circle
   // depends on Chart.js internals (legendHitBoxes, scales.getPixelForValue), so
@@ -884,7 +1375,7 @@ function phoneController() {
 
   /* 5a. Tour the two panels this demo is about ------------------------- */
   mark('tour');
-  lay('side-by-side');
+  lay('side-by-side', { on: 'state_chart' });
 
   cue(`A real iPhone, playing a live low-latency HLS stream. `
     + `${pm0.device_model}, ${pm0.player_tech} ${pm0.player_tech_version}.`, 6000);
@@ -895,27 +1386,75 @@ function phoneController() {
     + `${rungName(asc[0].resolution)} to ${rungName(asc[asc.length - 1].resolution)}.`, 6000);
   await sleep(6000);
 
-  // Player State — the event timeline. Everything quoted here is read back off
-  // the record, so the tour cannot describe a startup that did not happen.
+  /* ---- Player State + Bandwidth together -------------------------------
+   * The event and the thing that caused it, in one frame. Watching a variant
+   * switch appear on the timeline while the line steps on the chart is the
+   * pairing; either alone is half the story. */
+  lay('side-by-side', { on: 'state_chart' });
   await spot('.vis-timeline', 0, 'center');
-  cue(`Player State is the event timeline. First frame at `
+  cue(`Player State is the event timeline — every switch, stall and state `
+    + `change the player reported. First frame at `
     + `${(pm0.first_frame_time_s ?? 0).toFixed(1)} seconds, `
-    + `${plural(pm0.profile_shift_count || 0, 'variant switch')} so far.`, 7000);
-  await sleep(7000);
-  await unspot();
-
-  // Bitrate chart — name the three series the rest of the demo depends on.
-  await spot('canvas', 0, 'center');
-  cue(`And the bitrate chart. Three lines matter: the cap we impose, the rung `
-    + `the player FETCHES, and the rung actually on SCREEN.`, 8000);
+    + `${plural(pm0.profile_shift_count || 0, 'variant switch')} so far.`, 8000);
   await sleep(8000);
-
-  cue(`Right now all three agree — ${rungName(pm0.video_resolution)}, `
-    + `buffer ${(pm0.buffer_depth_s ?? 0).toFixed(0)} seconds. Nothing is `
-    + `constraining it yet.`, 7000);
-  await sleep(7000);
   await unspot();
-  lay('web-full');
+
+  cue(`Below it, the same moments as numbers. Watch them together: an event on `
+    + `the timeline, a step on the chart.`, 7000);
+  await sleep(7000);
+
+  /* ---- the series, one at a time --------------------------------------- */
+  lay('side-by-side', { on: 'state_chart' });
+  cue('Five lines on the bandwidth chart are worth knowing by name.', 5500);
+  await sleep(5500);
+
+  await tourSeries('Limit (rate_mbps)',
+    'The Limit is the cap WE impose — enforced in the kernel on the proxy, not '
+    + 'a suggestion to the player. Everything else on this chart is the player '
+    + 'reacting to it.');
+
+  await tourSeries('Fetching Variant',
+    'Fetching Variant is the rung the player is pulling right now. It moves '
+    + 'first, because choosing a rung is the decision; everything else is '
+    + 'consequence.');
+
+  await tourSeries('Displayed Variant',
+    'Displayed Variant is the rung actually on the screen. It lags the fetched '
+    + 'one by roughly a buffer — the segments already downloaded have to play '
+    + 'out before the new rung is seen.');
+
+  const avgNet = await page.evaluate(() => window.__seriesLatest('Player avg_network_bitrate'));
+  await tourSeries('Player avg_network_bitrate',
+    'This one comes from the iPhone: what AVPlayer believes it is receiving'
+    + (avgNet == null ? '' : `, currently ${fmtMbps(avgNet)} megabits`)
+    + '. It is the player\'s own estimate, and it is not always right.');
+
+  const shaper = await page.evaluate(() => window.__seriesLatest('mbps_shaper_avg'));
+  await tourSeries('mbps_shaper_avg',
+    'And this is the rate limiter\'s own count of what it actually pushed '
+    + 'through'
+    + (shaper == null ? '' : `, ${fmtMbps(shaper)} megabits`)
+    + '. Server-side ground truth — the number to trust when the client and '
+    + 'the network disagree.');
+
+  await endTourHover();
+  cue(`Right now nothing is constraining any of it — `
+    + `${rungName(pm0.video_resolution)}, buffer `
+    + `${(pm0.buffer_depth_s ?? 0).toFixed(0)} seconds.`, 6500);
+  await sleep(6500);
+
+  /* ---- Bandwidth + buffer/live offset ----------------------------------
+   * What a cap COSTS. The buffer is where a squeeze shows up before the
+   * picture does, so it belongs in frame with the cap that caused it. */
+  lay('side-by-side', { on: 'chart_buffer' });
+  await spot('canvas', 1, 'center');
+  cue('Underneath: buffer depth and live offset. When the cap bites, the '
+    + 'buffer drains before the picture changes — this is where a squeeze '
+    + 'shows up first.', 8000);
+  await sleep(8000);
+  await unspot();
+
+  lay('web-pip', { on: 'pattern' });
 
   /* 6. Configure the pattern -----------------------------------------
    * ORDER MATTERS. Template FIRST: the Margin / Step duration / Fill density
@@ -1026,7 +1565,7 @@ function phoneController() {
   }
   await page.evaluate(() => window.__scrollTo('canvas'));
   await sleep(1200);
-  lay('side-by-side');
+  lay('side-by-side', { on: 'state_chart' });
 
   /* 8. Watch it happen -------------------------------------------------
    * Everything from here is generated from live readings. The recorder makes
@@ -1070,6 +1609,9 @@ function phoneController() {
           await page.evaluate(() => window.__scrollTo('.vis-timeline'));
           await sleep(400);
           await page.evaluate((s) => window.__circleNewestEvent({ seed: s }), a.seed);
+        } else if (a.kind === 'say') {
+          cue(a.text, 8000);
+          lastCue = Date.now();
         } else if (a.kind === 'clear') {
           await page.evaluate(() => window.__scribClear());
           await page.evaluate(() => window.__scrollTo('canvas'));
@@ -1189,19 +1731,35 @@ function phoneController() {
     if (!troughDone && step != null && cap != null && cap <= minCapSeen + 0.001
         && step > 2 && cap < 1.0) {
       troughDone = true;
-      lay('phone-full');
+      lay('phone-full', { on: 'chart' });
       cue(`Bottom of the valley — ${fmtMbps(cap)} megabits. Buffer `
         + `${(m.buffer_depth_s ?? 0).toFixed(0)} seconds, `
         + `${plural((m.stalling_count || 0) - stall0, 'stall')}, `
         + `${plural((m.buffering_count || 0) - rebuf0, 'rebuffer')} so far.`, 8000);
       lastCue = Date.now();
+      // Queued rather than awaited: the poll loop must keep running or it
+      // misses transitions. These land as their own cues a beat apart.
+      pending.push({ at: now() + 8.5, kind: 'say', text:
+        'And the picture is not really acceptable here — nobody would ship '
+        + 'this. That is the point of the floor, not a flaw in it.' });
+      pending.push({ at: now() + 17.0, kind: 'say', text:
+        'Some of that is a choice we made. Audio is a separate rendition '
+        + 'shared by every rung'
+        + (audioKbpsMeasured ? `, AAC-LC at about ${audioKbpsMeasured} kilobits` : ', AAC-LC')
+        + ' — the same on the bottom rung as the top, so down here the sound '
+        + 'takes a large share of the budget and the video gets what is left.' });
+      pending.push({ at: now() + 26.0, kind: 'say', text:
+        'HE-AAC would carry the same audio in about a third of that and hand '
+        + 'the difference to the picture. Licensing is why we are not using '
+        + 'it. Either way, what we are here to watch is how the player BEHAVES '
+        + 'as the ceiling moves — not how good 234p can look.' });
     }
 
     /* Recovery begins — cap rising again past the floor. */
     if (troughDone && !recovering && cap != null && cap > minCapSeen * 1.5) {
       recovering = true;
       mark('recovery');
-      lay('side-by-side');
+      lay('side-by-side', { on: 'state_chart' });
       cue('The cap starts climbing back. Now the question is how fast the player '
         + 'trusts the extra headroom.', 6000);
       lastCue = Date.now();
@@ -1235,7 +1793,7 @@ function phoneController() {
   }
 
   mark('wrap');
-  lay('web-full');
+  lay('web-pip', { on: 'chart' });
   const fin = await api(`/api/v2/players/${pid}`);
   const fm = fin.current_play?.player_metrics || fin.player_metrics || {};
   const downs = shifts.filter((s) => s.dir === 'down').length;
