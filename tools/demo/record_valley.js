@@ -113,6 +113,9 @@ const PAINT_CHECK = process.env.PAINT_CHECK !== '0';
 // How many displayed-variant arrivals to call out IN EACH DIRECTION. The lag
 // they describe is one idea; take 7 said it 27 times.
 const DISPLAYED_MAX = Number(process.env.DISPLAYED_MAX || 3);
+// How many rung changes to call out IN EACH DIRECTION. Take 8 narrated 30 of
+// its 39; the chart shows the rest better than a voice can.
+const LIMIT_MAX = Number(process.env.LIMIT_MAX || 5);
 
 /* How many times each NOTABLE ABR behaviour gets narrated.
  *
@@ -1724,6 +1727,30 @@ function phoneController() {
   const rates = await page.$$eval('.step-row input.col-rate',
     (els) => els.map((e) => Number(e.value)).filter((v) => Number.isFinite(v)));
   const topCap = rates.length ? Math.max(...rates) : null;
+
+  /* Where the pattern REVERSES — the step indices at which the limit stops
+   * falling and starts rising, and vice versa.
+   *
+   * Needed to tell hunting from correct tracking. When the limit itself turns
+   * around, the player turning around with it is the right behaviour, not
+   * instability, and calling that "hunting" would be teaching the viewer
+   * something false. For a valley that is the floor in the middle plus both
+   * ends; derived from the rates rather than assumed, so a different template
+   * gets its own turning points. */
+  const turnSteps = (() => {
+    if (rates.length < 3) return [];
+    const turns = [0, rates.length - 1];
+    for (let i = 1; i < rates.length - 1; i += 1) {
+      const fallingBefore = rates[i] <= rates[i - 1];
+      const fallingAfter = rates[i + 1] <= rates[i];
+      if (fallingBefore !== fallingAfter) turns.push(i);
+    }
+    return turns;
+  })();
+  if (turnSteps.length) {
+    console.log(`  pattern turns at step ${turnSteps.join(', ')} `
+      + `(of ${rates.length}) — changes there are tracking, not hunting`);
+  }
   const floor = rates.length ? Math.min(...rates) : null;
 
   await spot(`.template-row`, 0, 'nearest');
@@ -1791,6 +1818,9 @@ function phoneController() {
    * the moment the value changed rather than scripting the prose in advance. */
   const started = Date.now();
   let lastStep = null, lastFetch = null, lastDisp = null;
+  // Rung-change call-outs, counted per direction for the same reason as the
+  // "on screen now" ones below.
+  let limitDown = 0, limitUp = 0;
   // "On screen now" call-outs, counted separately per direction so a busy
   // descent cannot spend the whole budget and leave the recovery silent.
   let displayedDown = 0, displayedUp = 0;
@@ -1812,6 +1842,9 @@ function phoneController() {
   let lastHuntAt = -1e9;
 
   /** Peak Mbps for each rung, from the ladder the stream actually published. */
+  // Rungs in ladder order, lowest first — the last is the top of the ladder.
+  const ladderRungs = variants.map((v) => rungName(v.resolution)).filter(Boolean)
+    .sort((a, b) => idxOfRung(a) - idxOfRung(b));
   const rungPeak = {};
   for (const v of variants) {
     const n = rungName(v.resolution);
@@ -1879,7 +1912,13 @@ function phoneController() {
     if (hist.length >= 3) {
       const w = hist.slice(-3);
       const alternating = w[0].dir !== w[1].dir && w[1].dir !== w[2].dir;
-      if (alternating && steps(w[2].at - w[0].at) <= 2.5
+      /* Not hunting if the PATTERN is turning around underneath it. At the top
+       * and the bottom of the valley the limit reverses, and a player that
+       * reverses with it is tracking correctly — the oscillation is ours, not
+       * its. Only flag changes of direction while the limit holds its own. */
+      const nearTurn = turnSteps.length && w.some((x) => x.step != null
+        && turnSteps.some((t) => Math.abs(x.step - t) <= 2));
+      if (alternating && !nearTurn && steps(w[2].at - w[0].at) <= 2.5
           && w[0].at - lastHuntAt > STEP_SECONDS * 4) {
         lastHuntAt = w[0].at;
         notable.push({ kind: 'hunting', at: cur.at,
@@ -1895,6 +1934,8 @@ function phoneController() {
     }
   }
   let troughDone = false, recovering = false;
+  // The floor ASIDE is one-time, even though the floor BEAT repeats.
+  let troughExplained = false;
   // The legend revisit fires once, at the first valley floor.
   let secondTourDone = false;
   let minCapSeen = Infinity, lastCue = 0, cycle = 0;
@@ -2005,8 +2046,22 @@ function phoneController() {
           lastStep = step;
           break;
         }
-        cue(`Cycle ${cycle} done — the network limit is back at the top and the player has `
-          + `recovered. Going round again.`, 7000);
+        /* Did it actually get back to the top? Take 8's second cycle ended on
+         * 1800p and the narration claimed recovery anyway, which is the one
+         * thing a demo about ABR behaviour must not do. The climb sits right on
+         * the boundary at these step lengths, so both outcomes are real and
+         * worth saying out loud. */
+        const topRung = ladderRungs[ladderRungs.length - 1];
+        const reclaimed = topRung && rungName(m.fetching_resolution) === topRung;
+        cue(reclaimed
+          ? `Cycle ${cycle} done — the limit is back at the top and the player `
+            + `took the whole ladder back, all the way to ${topRung}.`
+            + (cycle < CYCLES ? ' Going round again.' : '')
+          : `Cycle ${cycle} done. The limit is back at the top, but the player `
+            + `only climbed as far as ${rungName(m.fetching_resolution)} before `
+            + `the cycle turned — it ran out of headroom-time, not headroom. `
+            + `Coming up the ladder is slower than going down it.`
+            + (cycle < CYCLES ? ' Going round again.' : ''), 8000);
         lastCue = Date.now();
         troughDone = false;                 // re-arm the per-cycle narration
         recovering = false;
@@ -2019,14 +2074,26 @@ function phoneController() {
     if (m.fetching_resolution && m.fetching_resolution !== lastFetch) {
       const from = rungName(lastFetch), to = rungName(m.fetching_resolution);
       const down = to && from && parseInt(to) < parseInt(from);
-      shifts.push({ at: now(), from, to, dir: down ? 'down' : 'up', cap, res: m.fetching_resolution });
+      shifts.push({ at: now(), from, to, dir: down ? 'down' : 'up', cap, step, res: m.fetching_resolution });
       notice(shifts, cap);
-      // Droppable, and deliberately terse. These fire on every rung change, and
-      // during a fast descent they arrive under a second apart — the long form
-      // ("Cap is now X megabits. The player drops what it FETCHES: A to B.")
-      // needed ~7s to say and was the bulk of take 7's 137s of overrun.
-      cue(`Network limit ${fmtMbps(cap)}. ${down ? 'Down' : 'Up'} to ${to}.`,
-        5000, null, { droppable: true });
+      /* Terse, droppable, AND capped per direction.
+       *
+       * The overrun guard only drops what there is no TIME to say; it has no
+       * opinion about whether the twenty-first rung change is worth saying at
+       * all. Take 8 still called out 30 of its 39 changes. A few on the way
+       * down and a few on the way back up is enough to establish that the
+       * player is tracking the limit — after that the chart shows it better
+       * than a voice can, and the notable-behaviour detectors cover anything
+       * genuinely surprising.
+       *
+       * Per direction, so a busy descent cannot spend the whole budget and
+       * leave the recovery silent. */
+      const limitSeen = down ? limitDown : limitUp;
+      if (limitSeen < LIMIT_MAX) {
+        if (down) limitDown += 1; else limitUp += 1;
+        cue(`Network limit ${fmtMbps(cap)}. ${down ? 'Down' : 'Up'} to ${to}.`,
+          5000, null, { droppable: true });
+      }
       lastFetch = m.fetching_resolution;
       lastCue = Date.now();
 
@@ -2114,6 +2181,12 @@ function phoneController() {
       lastCue = Date.now();
       // Queued rather than awaited: the poll loop must keep running or it
       // misses transitions. These land as their own cues a beat apart.
+      /* The floor aside — why the picture looks like that, where the bitrate
+       * went, what we are actually here to watch — is a ONE-TIME explanation.
+       * troughDone re-arms every cycle so the trough beat itself repeats, which
+       * is right; this does not. Take 8 said all three of these twice. */
+      if (!troughExplained) {
+        troughExplained = true;
       pending.push({ at: now() + 8.5, kind: 'say', text:
         'And the picture is not really acceptable here — nobody would ship '
         + 'this. That is the point of the floor, not a flaw in it.' });
@@ -2128,6 +2201,7 @@ function phoneController() {
         + 'the difference to the picture. Licensing is why we are not using '
         + 'it. Either way, what we are here to watch is how the player BEHAVES '
         + 'as the ceiling moves — not how good 234p can look.' });
+      }
       /* Only on the FIRST valley. By the second the audience has seen the
        * shape, and pointing at it again would be padding. */
       if (!secondTourDone) {
