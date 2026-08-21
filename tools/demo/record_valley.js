@@ -769,15 +769,26 @@ function phoneController() {
       // The real-device path goes to :4799 (CHAR_IOS_DIRECT_APPIUM_URL), not
       // the sim farm's :4723 — naming the wrong port sends the next person to
       // check a server that was never involved.
-      console.error('  XCTDaemonErrorDomain Code=41 ("Not authorized for performing UI');
-      console.error('  testing actions") has TWO causes on the device, and they look');
-      console.error('  identical from here:');
-      console.error('    1. the iPhone is LOCKED');
-      console.error('    2. Settings > Developer > Enable UI Automation is OFF');
-      console.error('       (and Developer Mode on) — a reinstall can clear it');
-      console.error('  Then the host side:');
-      console.error('    3. appium on :4799   (curl -s localhost:4799/status)');
-      console.error('    4. go-ios tunnel up  (ios tunnel ls)');
+      console.error('  XCTDaemonErrorDomain Code=41 ("Not authorized for performing');
+      console.error('  UI testing actions") reads as a phone problem and usually is not.');
+      console.error('  Check THIS MACHINE first — the host causes are invisible to');
+      console.error('  tunnel/list/status checks, which all report healthy anyway:');
+      console.error('');
+      console.error('    1. an ORPHANED WebDriverAgent holding the device\'s one XCTest');
+      console.error('       session. The tell is that it is OLDER than the running');
+      console.error('       appium, so it cannot be appium\'s child:');
+      console.error('         ps -o pid,lstart,command -p $(pgrep -f "xcodebuild.*WebDriverAgent" | head -1)');
+      console.error('         pgrep -f "appium --port"');
+      console.error('       Fix: pkill -f "xcodebuild.*WebDriverAgent"');
+      console.error('    2. appium on :4799   (curl -s localhost:4799/status)');
+      console.error('       — the real-device path is :4799, NOT the sim farm\'s :4723');
+      console.error('    3. go-ios tunnel up  (ios tunnel ls)');
+      console.error('');
+      console.error('  Only then the device: is it LOCKED, and is Settings > Developer >');
+      console.error('  Enable UI Automation on? If the appium log shows a [Xcode] line');
+      console.error('  from WebDriverAgentRunner-Runner[pid], WDA already LAUNCHED on the');
+      console.error('  phone — pairing, signing and Developer Mode are fine, so suspect 1.');
+      console.error('  See .claude/findings/orphaned-wda-blocks-session-code41-2026-08-21.md');
       phone.stop();
       process.exit(1);
     }
