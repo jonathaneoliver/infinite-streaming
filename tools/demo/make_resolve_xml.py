@@ -49,34 +49,40 @@ def transcode_for_nle(src, dest_dir, prores=False):
     volume, same absolute path form. That message covers unsupported codecs as
     well as missing files, which is what makes it so misleading.
 
-    H.264 in a .mov by default. ProRes was the first attempt and turned 78MB
-    into 4.9GB — a 63x multiplier for a screen recording. H.264 lands in the
-    low hundreds of MB, Resolve reads it, and Apple Silicon decodes it in
-    hardware.
+    The default path delegates to tools/demo/transcode_for_nle.sh rather than
+    running its own ffmpeg. This used to be a second, independent transcoder
+    here — libx264 where the shell used VideoToolbox, writing browser.mov where
+    the shell wrote browser-nle.mov. Two implementations of one decision meant
+    the codec-size rule (hardware H.264 dies over 4096px, so a tall capture has
+    to be HEVC) could be learned in one and missing from the other. It was.
 
-    --prores if you want intra-frame scrubbing: stepping frame by frame through
-    a chart change never decodes a GOP. That is a real editing benefit and the
-    reason to spend the disk, but it should be a choice rather than a default.
+    --prores stays inline: intra-frame scrubbing means stepping frame by frame
+    through a chart change never decodes a GOP. That is a real editing benefit
+    and the reason to spend the disk — 78MB became 4.9GB at a quarter of these
+    dimensions — but it should be a choice rather than a default.
 
     The output name also drops the `page@<hash>` form — one fewer oddity to
     suspect when a path fails to resolve.
     """
     import subprocess
-    dest = os.path.join(dest_dir, "browser-prores.mov" if prores else "browser.mov")
-    if os.path.exists(dest):
+    if not prores:
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "transcode_for_nle.sh")
+        r = subprocess.run([script, dest_dir], capture_output=False)
+        dest = os.path.join(dest_dir, "browser-nle.mov")
+        if r.returncode != 0 or not os.path.exists(dest):
+            raise SystemExit("transcode failed")
+        return dest
+
+    dest = os.path.join(dest_dir, "browser-prores.mov")
+    if os.path.exists(dest) and os.path.getsize(dest) > 0:
         print("  reusing %s" % dest)
         return dest
-    if prores:
-        codec = ["-c:v", "prores_ks", "-profile:v", "1", "-pix_fmt", "yuv422p10le"]
-        print("  transcoding browser track to ProRes 422 LT…")
-    else:
-        # -g 25 = a keyframe a second at this source rate, so scrubbing stays
-        # responsive; the default ~250 makes seeking in an NLE feel stuck.
-        codec = ["-c:v", "libx264", "-crf", "16", "-preset", "medium",
-                 "-pix_fmt", "yuv420p", "-g", "25", "-movflags", "+faststart"]
-        print("  transcoding browser track to H.264/mov…")
-    r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-stats", "-i", src]
-                       + codec + ["-an", dest], capture_output=False)
+    print("  transcoding browser track to ProRes 422 LT…")
+    r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-stats", "-i", src,
+                        "-c:v", "prores_ks", "-profile:v", "1",
+                        "-pix_fmt", "yuv422p10le", "-an", dest],
+                       capture_output=False)
     if r.returncode != 0 or not os.path.exists(dest):
         raise SystemExit("transcode failed")
     print("  %s  %.1f MB" % (dest, os.path.getsize(dest) / 1e6))
