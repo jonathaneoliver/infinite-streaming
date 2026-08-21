@@ -110,6 +110,9 @@ const CAPTIONS = process.env.CAPTIONS === '1';
 // Preflight the tall capture with a short throwaway recording. On by default:
 // it costs ~15s and take 7 lost 22 minutes to exactly this failure.
 const PAINT_CHECK = process.env.PAINT_CHECK !== '0';
+// How many displayed-variant arrivals to call out IN EACH DIRECTION. The lag
+// they describe is one idea; take 7 said it 27 times.
+const DISPLAYED_MAX = Number(process.env.DISPLAYED_MAX || 3);
 const USER = process.env.DEMO_USER || '';
 const PASS = process.env.DEMO_PASS || '';
 
@@ -524,6 +527,16 @@ function rungName(res) {
   if (!res) return null;
   const m = /x(\d+)$/.exec(String(res));
   return m ? `${m[1]}p` : String(res);
+}
+
+/** Height in lines, for comparing two rungs. "1080p" -> 1080.
+ *
+ *  Ordering by the number rather than a fixed ladder list, so this keeps
+ *  working on content whose ladder is not the one this demo happens to use.
+ *  Returns -1 for anything unparseable, which sorts below every real rung. */
+function idxOfRung(name) {
+  const m = /^(\d+)p$/.exec(String(name || ''));
+  return m ? Number(m[1]) : -1;
 }
 
 function fmtMbps(v) {
@@ -1767,9 +1780,9 @@ function phoneController() {
    * the moment the value changed rather than scripting the prose in advance. */
   const started = Date.now();
   let lastStep = null, lastFetch = null, lastDisp = null;
-  // How many times the displayed-variant lag has been explained in full. The
-  // explanation is worth making, once or twice — not on all 27 arrivals.
-  let displayedNarrated = 0;
+  // "On screen now" call-outs, counted separately per direction so a busy
+  // descent cannot spend the whole budget and leave the recovery silent.
+  let displayedDown = 0, displayedUp = 0;
   let troughDone = false, recovering = false;
   // The legend revisit fires once, at the first valley floor.
   let secondTourDone = false;
@@ -1940,18 +1953,31 @@ function phoneController() {
       const from = rungName(lastDisp), to = rungName(m.video_resolution);
       const origin = [...shifts].reverse().find((s) => s.res === m.video_resolution);
       const lag = origin ? now() - origin.at : null;
-      /* Droppable, and the buffer-draining explanation only rides along on the
-       * FIRST few. It is the point of the whole lag, worth saying properly —
-       * but take 7 said it 27 times, and a sentence repeated that often stops
-       * being an explanation and becomes a tic. After that, just the numbers. */
-      const explain = displayedNarrated < 3;
-      cue(`On screen now: ${from} to ${to}`
-        + (lag == null ? '.'
-          : explain ? `, ${lag.toFixed(0)} seconds after it started fetching that `
-            + `rung — that gap is the buffer draining.`
-            : `, ${lag.toFixed(0)} seconds behind.`),
-        5000, null, { droppable: true });
-      displayedNarrated += 1;
+      /* Call out only a FEW of these, and only near the start of each
+       * direction.
+       *
+       * The lag between fetching a rung and seeing it is worth explaining —
+       * it is the buffer, made visible. But it is one idea, and take 7 said it
+       * 27 times. Repeated that often it stops being an explanation and
+       * becomes a tic, and it crowds out the narration that is actually
+       * tracking the valley.
+       *
+       * So: a few on the way down, a few on the way back up, counted per
+       * direction rather than overall — otherwise a busy descent spends the
+       * whole budget and the recovery, which is the more interesting half,
+       * gets nothing. The first of each direction carries the full
+       * explanation; the rest are just the numbers. */
+      const dropping = idxOfRung(to) < idxOfRung(from);
+      const seen = dropping ? displayedDown : displayedUp;
+      if (seen < DISPLAYED_MAX) {
+        if (dropping) displayedDown += 1; else displayedUp += 1;
+        cue(`On screen now: ${from} to ${to}`
+          + (lag == null ? '.'
+            : seen === 0 ? `, ${lag.toFixed(0)} seconds after it started fetching `
+              + `that rung — that gap is the buffer draining.`
+              : `, ${lag.toFixed(0)} seconds behind.`),
+          5000, null, { droppable: true });
+      }
       // Circle the arrival too, in the Displayed Variant's own colour — so the
       // two circles on screen are the two halves of the same decision.
       if (annotated && annotated <= ANNOTATE_SHIFTS) {
