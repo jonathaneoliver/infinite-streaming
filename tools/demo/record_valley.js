@@ -162,6 +162,13 @@ const LABEL_NARRATION = {
   },
   '*qoe_abr_conservative': {
     rank: 2, after: 25, every: 300,
+    // Still leaving headroom on the table? If it has since climbed to within
+    // a rung of what the limit allows, the gap being described has closed.
+    stillTrue: (m, sh) => {
+      const cap = sh?.pattern_rate_runtime_mbps;
+      const got = m?.video_bitrate_mbps;
+      return cap != null && got != null && got < cap * 0.6;
+    },
     say: 'Look at the gap that has opened between the limit and what the player '
       + 'is fetching. There is headroom there it is not taking. Coming back up '
       + 'is a risk — it has to spend buffer to find out whether the bandwidth '
@@ -169,12 +176,20 @@ const LABEL_NARRATION = {
   },
   '*qoe_min_variant_stuck': {
     rank: 2, after: 20, every: 300,
+    // Only worth saying while it is STILL on the bottom rung.
+    stillTrue: (m) => /(^|x)234$/.test(String(m?.video_resolution || '')),
     say: 'It has been parked on the bottom rung for a while now. There is '
       + 'nowhere lower to go, so this is the floor of what the ladder can do '
       + 'about a limit this tight.',
   },
   '*qoe_throughput_divergence': {
     rank: 1, after: 15, every: 300,
+    stillTrue: (m, sh) => {
+      const client = m?.avg_network_bitrate_mbps;
+      const server = sh?.mbps_shaper_avg ?? sh?.mbps_transfer_rate;
+      if (client == null || server == null || !server) return false;
+      return Math.abs(client - server) / server > 0.4;
+    },
     say: 'The client and the server disagree about the throughput here. What '
       + 'AVPlayer believes it is receiving has come apart from what the rate '
       + 'limiter actually pushed — and the player makes its decisions on its '
@@ -182,6 +197,8 @@ const LABEL_NARRATION = {
   },
   '*qoe_live_offset_concerning': {
     rank: 2, after: 15, every: 300,
+    // A live offset that recovered on its own is not worth interrupting for.
+    stillTrue: (m) => (m?.live_offset_s ?? 0) > 12,
     say: 'The live offset is stretching. The player is falling behind the live '
       + 'edge because it cannot fetch fast enough to keep up with the clock.',
   },
@@ -207,6 +224,16 @@ const LABEL_NARRATION = {
 const LABELS = process.env.LABELS !== '0';
 // Blanket override for every `every` above, when a take wants more or less.
 const LABEL_COOLDOWN_S = Number(process.env.LABEL_COOLDOWN_S || 0);
+
+/* How many things a narrator may say in any rolling minute.
+ *
+ * The per-type cooldowns are independent by design, which means they cannot
+ * see each other: six different labels each firing once is six narrations in a
+ * minute and every cooldown is satisfied. A human demonstrator has a felt
+ * ceiling regardless of how many interesting things are happening, and past it
+ * the audience stops hearing any of it. Milestones are exempt — the spine of
+ * the demo is never crowded out by commentary. */
+const NARRATION_PER_MIN = Number(process.env.NARRATION_PER_MIN || 6);
 
 /* How many times each NOTABLE ABR behaviour gets narrated.
  *
@@ -1251,6 +1278,18 @@ function phoneController() {
   const SPEAK_CPS = Number(process.env.SPEAK_CPS || 12.6);
   let speakingUntil = 0;
   let cuesDropped = 0;
+  // Rolling budget (#4) — take-seconds at which each cue was spoken.
+  const spokenAt = [];
+  let budgetDropped = 0;
+  /* Hush window (#1) — take-seconds until which commentary stays quiet.
+   *
+   * When the narration has just promised something ("now watch how fast it
+   * trusts the headroom"), the right thing to do is stop talking and let it
+   * happen. A demonstrator goes quiet over their own payoff; we were narrating
+   * straight through it. Only `critical` gets through — a stall during the
+   * payoff IS the payoff. */
+  let hushUntil = 0;
+  let hushDropped = 0;
 
   function speechSeconds(text) {
     return text.length / SPEAK_CPS;
@@ -1258,6 +1297,24 @@ function phoneController() {
 
   function cue(text, holdMs = 4000, on = null, opts = {}) {
     const at = now();
+    // #1 — quiet over the payoff. Milestones and critical events still speak.
+    if (opts.budgeted && !opts.critical && at < hushUntil) {
+      hushDropped += 1;
+      console.log(`  [${at.toFixed(1)}s] (hushed for another `
+        + `${(hushUntil - at).toFixed(0)}s) ${text.slice(0, 50)}`);
+      return false;
+    }
+    // #4 — rolling per-minute ceiling across ALL commentary, which the
+    // independent per-type cooldowns cannot enforce between them.
+    if (opts.budgeted) {
+      while (spokenAt.length && at - spokenAt[0] > 60) spokenAt.shift();
+      if (spokenAt.length >= NARRATION_PER_MIN) {
+        budgetDropped += 1;
+        console.log(`  [${at.toFixed(1)}s] (over budget, `
+          + `${spokenAt.length}/min) ${text.slice(0, 50)}`);
+        return false;
+      }
+    }
     if (opts.droppable && at < speakingUntil) {
       cuesDropped += 1;
       console.log(`  [${at.toFixed(1)}s] (skipped, still speaking for `
@@ -1267,6 +1324,8 @@ function phoneController() {
     // Milestones may start before the previous line has finished; measure from
     // the later of the two so the budget never runs backwards.
     speakingUntil = Math.max(at, speakingUntil) + speechSeconds(text);
+    spokenAt.push(at);
+    if (opts.hush) hushUntil = Math.max(hushUntil, at + opts.hush);
     const pan = on && focus[on] != null ? focus[on] : undefined;
     cues.push({ at: Math.round(at * 1000) / 1000, text, holdMs,
                 ...(pan == null ? {} : { pan }),
@@ -1649,19 +1708,6 @@ function phoneController() {
   const rec0 = await api(`/api/v2/players/${pid}`);
   const pm0 = rec0.current_play?.player_metrics || rec0.player_metrics || {};
   const variants = rec0.current_play?.manifest?.variants || [];
-  /* Subscribe to the server's own classification, scoped to THIS play.
-   *
-   * sinceMs is the take's own start: connecting replays the play's backfill,
-   * and narrating minutes-old rows would fire every label at once, in the past.
-   *
-   * Failure is not fatal — the analytics sidecar is optional and the live path
-   * does not depend on it, so a take without it simply falls back to the
-   * recorder's own (narrower) detectors. */
-  if (LABELS) {
-    labelsLive = await subscribeLabels(
-      pid, rec0.current_play?.id, t0, queueLabel);
-  }
-
   const audioKbpsMeasured = await audioKbps(rec0.current_play?.manifest?.master_url || '');
   if (audioKbpsMeasured) console.log(`  audio rendition ~${audioKbpsMeasured} kbps`);
   else console.error('  ⚠ could not measure the audio rendition — its line will omit the figure');
@@ -2133,6 +2179,8 @@ function phoneController() {
    * produces several within a second or two. Narrating all of them talks over
    * the picture and over itself. Rank by the server's own severity first, then
    * by the table's `rank`, and speak only the winner; the losers are recorded. */
+  // Freshest sample, for the #3 re-check at speaking time.
+  let lastMetrics = {}, lastShape = {};
   const labelSpokenAt = {};     // label -> take-seconds when last narrated
   const labelQueue = [];        // { name, sev, at, prio, say }
   const SEV_RANK = { error: 40, critical: 30, warning: 20, info: 10, testing: 0 };
@@ -2174,9 +2222,41 @@ function phoneController() {
           + `${(now() - last).toFixed(0)}s since the last one, needs ${q.every}s`);
         continue;
       }
+      /* #3 — is it still true?
+       *
+       * The whole point of holding a label for context is that time passes,
+       * and in that time the situation can reverse. A human would not announce
+       * "it isn't taking the headroom" about a gap that closed ten seconds ago.
+       * Ongoing CONDITIONS get re-checked here; point-in-time EVENTS (a stall,
+       * an overshoot, a startup breach) have no predicate because they
+       * happened, and happening is not undone by what came after. */
+      const spec = LABEL_NARRATION[q.name];
+      if (spec && spec.stillTrue && !spec.stillTrue(lastMetrics, lastShape)) {
+        console.log(`  [label] ${q.name} dropped — no longer true by the time `
+          + 'there was context for it');
+        continue;
+      }
       labelSpokenAt[q.name] = now();
-      cue(q.say, 9000);
+      cue(q.say, 9000, null, { budgeted: true, critical: q.sev === 'critical' });
     }
+  }
+
+  /* Subscribe to the server's own classification, scoped to THIS play.
+   *
+   * Deliberately HERE and not up beside the other preflight reads: queueLabel
+   * closes over labelQueue and labelSpokenAt, and labelsLive is a `let` — all
+   * declared just above. Starting the stream before those bindings exist meant
+   * a ReferenceError the moment the first label arrived.
+   *
+   * t0 is the cutoff: connecting replays this play's backfill, and narrating
+   * minutes-old rows would fire every label at once, in the past.
+   *
+   * Failure is not fatal — the analytics sidecar is optional and the live path
+   * does not depend on it, so a take without it falls back to the recorder's
+   * own narrower detectors. */
+  if (LABELS) {
+    labelsLive = await subscribeLabels(
+      pid, rec0.current_play?.id, t0, queueLabel);
   }
   let minCapSeen = Infinity, lastCue = 0, cycle = 0;
   const shifts = [];
@@ -2264,6 +2344,8 @@ function phoneController() {
     const m = rec.current_play?.player_metrics || rec.player_metrics || {};
     const sm = rec.current_play?.server_metrics || rec.server_metrics || {};
     const sh = rec.shape || {};
+    lastMetrics = m;
+    lastShape = sh;
     const step = sh.pattern_step_runtime;
     const cap = sh.pattern_rate_runtime_mbps;
 
@@ -2457,7 +2539,7 @@ function phoneController() {
       mark('recovery');
       lay('side-by-side', { on: 'state_chart' });
       cue('The network limit starts climbing back. Now the question is how fast the player '
-        + 'trusts the extra headroom.', 6000);
+        + 'trusts the extra headroom.', 6000, null, { hush: 25 });
       lastCue = Date.now();
     }
 
@@ -2567,6 +2649,10 @@ function phoneController() {
   }
   // Say what was left out. A silent drop reads as "nothing happened there"
   // when reviewing a take, which is the one thing it must not look like.
+  if (hushDropped || budgetDropped) {
+    console.log(`  quiet: ${hushDropped} held back over a payoff, `
+      + `${budgetDropped} over the ${NARRATION_PER_MIN}/min budget`);
+  }
   if (cuesDropped) {
     console.log(`  ${cuesDropped} play-by-play cue(s) skipped — no room to say `
       + `them before the next one. Raise SPEAK_CPS if the voice is faster than `
