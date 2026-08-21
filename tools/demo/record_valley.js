@@ -152,7 +152,7 @@ const FOLDS_OPEN = (process.env.FOLDS_OPEN
 // and says why it is open or shut, which is the part a viewer cannot infer
 // from a collapsed header.
 const FOLD_SAY = {
-  'network-shaping': ['Network Shaping', 'where the cap gets set'],
+  'network-shaping': ['Network Shaping', 'where the network limit gets set'],
   'player-state': ['Player State', 'the event timeline'],
   'bitrate-chart': ['the Bitrate Charts', 'what the player did about it'],
   'fault-injection': ['Fault Injection', 'HTTP errors, hangs, corrupted responses'],
@@ -921,14 +921,51 @@ function phoneController() {
   /** `on` names a focus target, as for lay(). It becomes the cue's `pan`, and
    *  the compositor moves the framing to it as the line is spoken — so the
    *  view follows the narration instead of holding one crop for four minutes. */
-  function cue(text, holdMs = 4000, on = null) {
+  /* A cue is only worth emitting if there is TIME TO SAY IT.
+   *
+   * Take 7 shipped with 44 of its 104 cues overrunning their slot by 137
+   * seconds in total, because cues are stamped at event times and ABR events
+   * cluster: during a fast descent two variant changes can land 0.6s apart,
+   * and each wants ~7s of speech. The narration then talks over itself for the
+   * rest of the take, and the captions cut each other off.
+   *
+   * The recorder cannot know the generated audio length — that is Voicebox's
+   * business, later. But speech rate is stable enough to budget against:
+   * take 7's 104 clips measured 12.6 characters per second overall.
+   *
+   * So: track when the last cue would stop speaking, and drop any cue MARKED
+   * DROPPABLE that would collide with it. Droppable is opt-in, not the
+   * default — the tour, the trough and the cycle boundaries are the spine of
+   * the demo, and a rule that could silently delete them would be worse than
+   * the overlap it fixes. Only the per-change play-by-play opts in, and not
+   * narrating every single rung change is the right outcome anyway: nobody can
+   * follow five of them in ten seconds. */
+  const SPEAK_CPS = Number(process.env.SPEAK_CPS || 12.6);
+  let speakingUntil = 0;
+  let cuesDropped = 0;
+
+  function speechSeconds(text) {
+    return text.length / SPEAK_CPS;
+  }
+
+  function cue(text, holdMs = 4000, on = null, opts = {}) {
     const at = now();
+    if (opts.droppable && at < speakingUntil) {
+      cuesDropped += 1;
+      console.log(`  [${at.toFixed(1)}s] (skipped, still speaking for `
+        + `${(speakingUntil - at).toFixed(1)}s) ${text.slice(0, 60)}`);
+      return false;
+    }
+    // Milestones may start before the previous line has finished; measure from
+    // the later of the two so the budget never runs backwards.
+    speakingUntil = Math.max(at, speakingUntil) + speechSeconds(text);
     const pan = on && focus[on] != null ? focus[on] : undefined;
     cues.push({ at: Math.round(at * 1000) / 1000, text, holdMs,
                 ...(pan == null ? {} : { pan }),
                 words: text.split(/\s+/).length });
     console.log(`  [${at.toFixed(1)}s] ${text}`);
     if (CAPTIONS) page.evaluate((t) => window.__say(t), text).catch(() => {});
+    return true;
   }
 
   /** Named vertical targets, in device pixels, filled in once the page has
@@ -1435,16 +1472,16 @@ function phoneController() {
   await sleep(5500);
 
   await tourSeries('Limit (rate_mbps)',
-    'The Limit is the cap WE impose — enforced in the kernel on the proxy, not '
-    + 'a suggestion to the player. Everything else on this chart is the player '
-    + 'reacting to it. '
+    'The Limit is the network limit WE impose — enforced in the kernel on the '
+    + 'proxy, not a suggestion to the player. Everything else on this chart is '
+    + 'the player reacting to it. '
     + 'And it never goes away. With no pattern running the server still holds '
     + 'every session'
     // Not fmtMbps(): that always keeps a decimal, and the baseline is a round
     // config value. "one hundred point zero megabits" is a mouthful for 100.
     + (baselineMbps
       ? ` to ${Number.isInteger(baselineMbps) ? baselineMbps : fmtMbps(baselineMbps)} megabits`
-      : ' to a baseline cap')
+      : ' to a baseline network limit')
     + '. That is deliberate. An unthrottled link on the same machine would '
     + 'flatter the player in ways no real viewer would ever see, so the floor '
     + 'is set to something a remote server might plausibly give you.', 15000);
@@ -1484,7 +1521,7 @@ function phoneController() {
    * picture does, so it belongs in frame with the cap that caused it. */
   lay('side-by-side', { on: 'chart_buffer' });
   await spot('canvas', 1, 'center');
-  cue('Underneath: buffer depth and live offset. When the cap bites, the '
+  cue('Underneath: buffer depth and live offset. When the network limit bites, the '
     + 'buffer drains before the picture changes — this is where a squeeze '
     + 'shows up first.', 8000);
   await sleep(8000);
@@ -1545,7 +1582,7 @@ function phoneController() {
   const floor = rates.length ? Math.min(...rates) : null;
 
   await spot(`.template-row`, 0, 'nearest');
-  cue(`Valley: hold the cap above the top variant, walk it all the way down, `
+  cue(`Valley: hold the network limit above the top variant, walk it all the way down, `
     + `then walk it back up.`, 6000);
   await sleep(6000);
   await unspot();
@@ -1560,7 +1597,7 @@ function phoneController() {
 
   /* 7. Settle, then apply --------------------------------------------- */
   mark('settle');
-  cue(`Before touching anything: the cap is off, and the player is holding the `
+  cue(`Before touching anything: the network limit is off, and the player is holding the `
     + `top rung.`, Math.max(3000, SETTLE_S * 1000));
   await sleep(SETTLE_S * 1000);
 
@@ -1609,6 +1646,9 @@ function phoneController() {
    * the moment the value changed rather than scripting the prose in advance. */
   const started = Date.now();
   let lastStep = null, lastFetch = null, lastDisp = null;
+  // How many times the displayed-variant lag has been explained in full. The
+  // explanation is worth making, once or twice — not on all 27 arrivals.
+  let displayedNarrated = 0;
   let troughDone = false, recovering = false;
   let minCapSeen = Infinity, lastCue = 0, cycle = 0;
   const shifts = [];
@@ -1693,7 +1733,7 @@ function phoneController() {
           lastStep = step;
           break;
         }
-        cue(`Cycle ${cycle} done — the cap is back at the top and the player has `
+        cue(`Cycle ${cycle} done — the network limit is back at the top and the player has `
           + `recovered. Going round again.`, 7000);
         lastCue = Date.now();
         troughDone = false;                 // re-arm the per-cycle narration
@@ -1708,8 +1748,12 @@ function phoneController() {
       const from = rungName(lastFetch), to = rungName(m.fetching_resolution);
       const down = to && from && parseInt(to) < parseInt(from);
       shifts.push({ at: now(), from, to, dir: down ? 'down' : 'up', cap, res: m.fetching_resolution });
-      cue(`Cap is now ${fmtMbps(cap)} megabits. The player ${down ? 'drops' : 'raises'} `
-        + `what it FETCHES: ${from} to ${to}.`, 5000);
+      // Droppable, and deliberately terse. These fire on every rung change, and
+      // during a fast descent they arrive under a second apart — the long form
+      // ("Cap is now X megabits. The player drops what it FETCHES: A to B.")
+      // needed ~7s to say and was the bulk of take 7's 137s of overrun.
+      cue(`Network limit ${fmtMbps(cap)}. ${down ? 'Down' : 'Up'} to ${to}.`,
+        5000, null, { droppable: true });
       lastFetch = m.fetching_resolution;
       lastCue = Date.now();
 
@@ -1748,9 +1792,18 @@ function phoneController() {
       const from = rungName(lastDisp), to = rungName(m.video_resolution);
       const origin = [...shifts].reverse().find((s) => s.res === m.video_resolution);
       const lag = origin ? now() - origin.at : null;
-      cue(`Now it reaches the screen: ${from} to ${to}`
-        + (lag != null ? `, ${lag.toFixed(0)} seconds after it started fetching that rung — `
-          + `that gap is the buffer draining.` : '.'), 5000);
+      /* Droppable, and the buffer-draining explanation only rides along on the
+       * FIRST few. It is the point of the whole lag, worth saying properly —
+       * but take 7 said it 27 times, and a sentence repeated that often stops
+       * being an explanation and becomes a tic. After that, just the numbers. */
+      const explain = displayedNarrated < 3;
+      cue(`On screen now: ${from} to ${to}`
+        + (lag == null ? '.'
+          : explain ? `, ${lag.toFixed(0)} seconds after it started fetching that `
+            + `rung — that gap is the buffer draining.`
+            : `, ${lag.toFixed(0)} seconds behind.`),
+        5000, null, { droppable: true });
+      displayedNarrated += 1;
       // Circle the arrival too, in the Displayed Variant's own colour — so the
       // two circles on screen are the two halves of the same decision.
       if (annotated && annotated <= ANNOTATE_SHIFTS) {
@@ -1796,14 +1849,14 @@ function phoneController() {
       recovering = true;
       mark('recovery');
       lay('side-by-side', { on: 'state_chart' });
-      cue('The cap starts climbing back. Now the question is how fast the player '
+      cue('The network limit starts climbing back. Now the question is how fast the player '
         + 'trusts the extra headroom.', 6000);
       lastCue = Date.now();
     }
 
     /* Periodic keep-alive so long plateaus are not silent, but not chatty. */
     if (Date.now() - lastCue > 45000 && step != null) {
-      cue(`Step ${step} — cap ${fmtMbps(cap)}, fetching ${rungName(m.fetching_resolution)}, `
+      cue(`Step ${step} — network limit ${fmtMbps(cap)}, fetching ${rungName(m.fetching_resolution)}, `
         + `showing ${rungName(m.video_resolution)}, buffer `
         + `${(m.buffer_depth_s ?? 0).toFixed(0)}s.`, 5000);
       lastCue = Date.now();
@@ -1886,6 +1939,13 @@ function phoneController() {
   const cuesPath = path.join(OUT, 'cues.json');
   fs.writeFileSync(cuesPath, JSON.stringify(data, null, 2));
   console.log(`\nwrote ${cuesPath} — ${cues.length} cues, ${layout.length} layout marks`);
+  // Say what was left out. A silent drop reads as "nothing happened there"
+  // when reviewing a take, which is the one thing it must not look like.
+  if (cuesDropped) {
+    console.log(`  ${cuesDropped} play-by-play cue(s) skipped — no room to say `
+      + `them before the next one. Raise SPEAK_CPS if the voice is faster than `
+      + `${SPEAK_CPS} chars/sec.`);
+  }
   console.log(`browser: ${videoPath}`);
   if (phonePath) console.log(`phone:   ${phonePath}`);
   // Tear the Appium session down explicitly. Leaving it open wedges the next
