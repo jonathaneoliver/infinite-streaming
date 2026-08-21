@@ -113,6 +113,17 @@ const PAINT_CHECK = process.env.PAINT_CHECK !== '0';
 // How many displayed-variant arrivals to call out IN EACH DIRECTION. The lag
 // they describe is one idea; take 7 said it 27 times.
 const DISPLAYED_MAX = Number(process.env.DISPLAYED_MAX || 3);
+
+/* How many times each NOTABLE ABR behaviour gets narrated.
+ *
+ * Take 8 contained 5 over-downshifts, 6 multi-rung drops and several flapping
+ * windows. Narrating all of them would be the play-by-play problem again: the
+ * first instance teaches the viewer something, the fifth is noise. */
+const NOTABLE_MAX = {
+  overshoot: Number(process.env.NOTABLE_OVERSHOOT || 2),
+  plunge: Number(process.env.NOTABLE_PLUNGE || 1),
+  hunting: Number(process.env.NOTABLE_HUNTING || 1),
+};
 const USER = process.env.DEMO_USER || '';
 const PASS = process.env.DEMO_PASS || '';
 
@@ -1783,6 +1794,106 @@ function phoneController() {
   // "On screen now" call-outs, counted separately per direction so a busy
   // descent cannot spend the whole budget and leave the recovery silent.
   let displayedDown = 0, displayedUp = 0;
+
+  /* ---- notable ABR behaviour ------------------------------------------
+   *
+   * The valley makes the player do things worth pointing at, and they are all
+   * derivable from the shift history the recorder already keeps. Detected live
+   * so they can be narrated, which means each is recognised only once its
+   * CONFIRMING shift arrives — an over-correction is not visible until the
+   * correction happens. So the narration is phrased in the past tense.
+   *
+   * Thresholds are expressed in STEPS and in LADDER FRACTIONS rather than in
+   * seconds and rung counts. An absolute "within 20 seconds" silently changes
+   * meaning when STEP_SECONDS changes, and "3 rungs" means something different
+   * on a 5-rung ladder than on this 12-rung one. */
+  const notableSeen = { overshoot: 0, plunge: 0, hunting: 0 };
+  const notable = [];      // recorded even when not narrated, for later analysis
+  let lastHuntAt = -1e9;
+
+  /** Peak Mbps for each rung, from the ladder the stream actually published. */
+  const rungPeak = {};
+  for (const v of variants) {
+    const n = rungName(v.resolution);
+    if (n) rungPeak[n] = (v.bandwidth || v.average_bandwidth || 0) / 1e6;
+  }
+
+  function notice(hist, capNow) {
+    if (hist.length < 2) return;
+    const cur = hist[hist.length - 1];
+    const prev = hist[hist.length - 2];
+    const steps = (t) => t / Math.max(1, STEP_SECONDS);
+
+    /* OVER-DOWNSHIFT — dropped further than it needed to, then took some back
+     * while the limit had not moved. The ladder is what makes this a claim
+     * rather than a guess: if the limit at the drop already covered the rung
+     * it climbed back to, the lower rung was never necessary. */
+    if (prev.dir === 'down' && cur.dir === 'up'
+        && steps(cur.at - prev.at) <= 1.5) {
+      const limitFlat = !prev.cap || cur.cap <= prev.cap * 1.1;
+      const back = rungPeak[cur.to];
+      const hadRoom = back != null && prev.cap != null && back <= prev.cap * 1.05;
+      if (limitFlat && (hadRoom || back == null)) {
+        notable.push({ kind: 'overshoot', at: cur.at, from: prev.from,
+                       bottom: prev.to, back: cur.to, seconds: cur.at - prev.at });
+        if (notableSeen.overshoot < NOTABLE_MAX.overshoot) {
+          notableSeen.overshoot += 1;
+          cue(`That was an over-correction. It fell to ${prev.to}, then took `
+            + `${cur.to} back ${(cur.at - prev.at).toFixed(0)} seconds later `
+            + `with the limit unchanged — so ${prev.to} was further than it `
+            + `needed to go. ABR judges by recent throughput, and a limit `
+            + `falling mid-segment reads worse than it turns out to be.`, 9000);
+        }
+      }
+    }
+
+    /* MULTI-RUNG PLUNGE — skipped a quarter of the ladder in one move. */
+    const span = idxOfRung(cur.from) - idxOfRung(cur.to);
+    const ladder = Object.keys(rungPeak).length || 12;
+    if (cur.dir === 'down' && idxOfRung(cur.from) > 0
+        && hist.filter((h) => h.dir === 'down').length
+        && span > 0) {
+      const skipped = variants.length
+        ? variants.filter((v) => {
+          const n = idxOfRung(rungName(v.resolution));
+          return n > idxOfRung(cur.to) && n < idxOfRung(cur.from);
+        }).length + 1
+        : 1;
+      if (skipped >= Math.max(2, Math.ceil(ladder * 0.25))) {
+        notable.push({ kind: 'plunge', at: cur.at, from: cur.from,
+                       to: cur.to, rungs: skipped });
+        if (notableSeen.plunge < NOTABLE_MAX.plunge) {
+          notableSeen.plunge += 1;
+          cue(`It just skipped ${skipped} rungs in one move, ${cur.from} `
+            + `straight to ${cur.to}. That is what a player does when the `
+            + `limit drops faster than the buffer can absorb — it stops `
+            + `stepping down and jumps, because arriving late costs a stall `
+            + `and arriving small only costs detail.`, 9000);
+        }
+      }
+    }
+
+    /* HUNTING — three alternating changes inside a couple of steps, meaning
+     * the limit is sitting on the boundary between two rungs and neither is
+     * stable. Merged: overlapping windows are one event, not three. */
+    if (hist.length >= 3) {
+      const w = hist.slice(-3);
+      const alternating = w[0].dir !== w[1].dir && w[1].dir !== w[2].dir;
+      if (alternating && steps(w[2].at - w[0].at) <= 2.5
+          && w[0].at - lastHuntAt > STEP_SECONDS * 4) {
+        lastHuntAt = w[0].at;
+        notable.push({ kind: 'hunting', at: cur.at,
+                       path: w.map((x) => `${x.from}>${x.to}`).join(' ') });
+        if (notableSeen.hunting < NOTABLE_MAX.hunting) {
+          notableSeen.hunting += 1;
+          cue(`Watch it hunt — three changes in `
+            + `${(w[2].at - w[0].at).toFixed(0)} seconds. The limit is sitting `
+            + `right on the boundary between two rungs, so neither one is `
+            + `stable and the player keeps changing its mind.`, 9000);
+        }
+      }
+    }
+  }
   let troughDone = false, recovering = false;
   // The legend revisit fires once, at the first valley floor.
   let secondTourDone = false;
@@ -1909,6 +2020,7 @@ function phoneController() {
       const from = rungName(lastFetch), to = rungName(m.fetching_resolution);
       const down = to && from && parseInt(to) < parseInt(from);
       shifts.push({ at: now(), from, to, dir: down ? 'down' : 'up', cap, res: m.fetching_resolution });
+      notice(shifts, cap);
       // Droppable, and deliberately terse. These fire on every rung change, and
       // during a fast descent they arrive under a second apart — the long form
       // ("Cap is now X megabits. The player drops what it FETCHES: A to B.")
@@ -2108,6 +2220,20 @@ function phoneController() {
     device: pm0.device_model,
     content: pm0.content_name,
     variants: variants.length,
+    /* The ladder itself, not just how many rungs it has.
+     *
+     * `variants` above is a COUNT, which is enough for narration ("12 variants")
+     * and useless for analysis afterwards: anything ladder-relative — was there
+     * room for the rung it abandoned, how much of the ladder did that drop skip
+     * — needs the peaks, and reconstructing them means re-fetching a manifest
+     * that may since have changed. Cheap to record, expensive to recover. */
+    ladder: variants.map((v) => ({
+      rung: rungName(v.resolution),
+      resolution: v.resolution,
+      peak_mbps: Math.round((v.bandwidth || 0) / 1e4) / 100,
+      avg_mbps: Math.round((v.average_bandwidth || 0) / 1e4) / 100,
+    })).filter((v) => v.rung).sort((a, b) => idxOfRung(a.rung) - idxOfRung(b.rung)),
+    notable,
     pattern: { template: 'valley', fill: FILL, stepSeconds: STEP_SECONDS, margin: MARGIN, steps: stepCount },
     rates,
     shifts,
@@ -2119,6 +2245,11 @@ function phoneController() {
   const cuesPath = path.join(OUT, 'cues.json');
   fs.writeFileSync(cuesPath, JSON.stringify(data, null, 2));
   console.log(`\nwrote ${cuesPath} — ${cues.length} cues, ${layout.length} layout marks`);
+  if (notable.length) {
+    const by = notable.reduce((a, n) => ({ ...a, [n.kind]: (a[n.kind] || 0) + 1 }), {});
+    console.log(`  notable: ${Object.entries(by).map(([k, v]) => `${k} x${v}`).join(', ')}`
+      + ` (narrated up to ${Object.values(NOTABLE_MAX).join('/')})`);
+  }
   // Say what was left out. A silent drop reads as "nothing happened there"
   // when reviewing a take, which is the one thing it must not look like.
   if (cuesDropped) {
