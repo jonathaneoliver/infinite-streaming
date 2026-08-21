@@ -24,6 +24,7 @@ those change the demo breaks, and there is otherwise nothing in-tree to notice.
 | `narrate_sentences.py` | text → speech, sentence-split, hash-cached |
 | `pronounce.py` | written → spoken. Project vocabulary lives in `narrative/smashing.pronounce`, **not** in this file |
 | `audition.py` | speaks the vocabulary aloud so you can judge it by ear |
+| `check_pronounce_sync.sh` | **app-specific.** Reports drift between `pronounce.py` and the Encoder copy it is vendored from; `--sync` adopts theirs. Run before a take — the narration step calls it |
 | `make_ass.py` | cues → ASS subtitles positioned in the caption strip |
 | `join.py` | concatenates parts with a fade, preserving every audio track |
 | `edit_text.py` | narration in and out of a plain text file, and in and out of git |
