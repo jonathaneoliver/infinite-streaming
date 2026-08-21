@@ -107,6 +107,9 @@ const DRY = process.env.DRY === '1';
 const QT_BOUNDS = process.env.QT_BOUNDS === undefined ? '20, 60, 500, 280' : process.env.QT_BOUNDS;
 // CAPTIONS=1 draws the narration in the page. Rehearsals only — see __capInit.
 const CAPTIONS = process.env.CAPTIONS === '1';
+// Preflight the tall capture with a short throwaway recording. On by default:
+// it costs ~15s and take 7 lost 22 minutes to exactly this failure.
+const PAINT_CHECK = process.env.PAINT_CHECK !== '0';
 const USER = process.env.DEMO_USER || '';
 const PASS = process.env.DEMO_PASS || '';
 
@@ -528,6 +531,92 @@ function fmtMbps(v) {
   return v >= 10 ? v.toFixed(1) : v.toFixed(2);
 }
 
+/** Record a few seconds with the real capture settings and check that the tall
+ *  viewport actually PAINTS into the video.
+ *
+ *  The naive version of this — sample one pixel three-quarters of the way down
+ *  — cries wolf. With no session selected the dashboard is short, so that depth
+ *  lands past the content and reads grey whether or not anything is wrong.
+ *
+ *  So compare two numbers instead: where the picture STOPS in the recorded
+ *  frame, and where the document's content actually ENDS. A short page is fine
+ *  (those agree). A page that outruns its own capture is the bug — that is take
+ *  7, where paint stopped dead at 1268 CSS px while content ran well past it.
+ *
+ *  Returns {ok, detail}. ok on any internal error: a preflight that cannot run
+ *  must not block a take. */
+async function paintCheck(chromium) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'paintcheck-'));
+  try {
+    const b = await chromium.launch({ headless: false, args: [`--window-size=${W},${H}`] });
+    const ctx = await b.newContext({
+      viewport: { width: W, height: VIEW_H },
+      deviceScaleFactor: DPR,
+      ignoreHTTPSErrors: true,
+      httpCredentials: USER ? { username: USER, password: PASS } : undefined,
+      recordVideo: { dir, size: { width: W * DPR, height: VIEW_H * DPR } },
+    });
+    const p = await ctx.newPage();
+    await p.goto(`${BASE}/dashboard/testing.html`, { waitUntil: 'networkidle', timeout: 60000 });
+    await p.waitForTimeout(5000);
+
+    /* Where does the document's own content end, in CSS px? scrollHeight is no
+     * use — it is floor-limited by the viewport, so a short page still reports
+     * 3416 against a 3400 viewport. Ask the elements instead. */
+    const contentBottom = await p.evaluate(() => {
+      let max = 0;
+      for (const el of document.body.querySelectorAll('*')) {
+        const r = el.getBoundingClientRect();
+        if (r.width && r.height) max = Math.max(max, r.bottom + window.scrollY);
+      }
+      return Math.round(max);
+    });
+
+    await ctx.close();
+    await b.close();
+
+    const clip = fs.readdirSync(dir).filter((f) => f.endsWith('.webm'))[0];
+    if (!clip) return { ok: true, detail: 'no clip written' };
+
+    // One column down the middle of the frame.
+    const col = require('child_process').execFileSync('ffmpeg',
+      ['-v', 'error', '-i', path.join(dir, clip), '-frames:v', '1',
+       '-vf', `crop=w=2:h=${VIEW_H * DPR}:x=${W}:y=0`,
+       '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 1 << 24 });
+
+    const isGrey = (r, g, bl) => Math.abs(r - g) < 8 && Math.abs(g - bl) < 8
+      && r > 100 && r < 190;
+    const rows = Math.floor(col.length / 6);
+    let paintStops = null;
+    for (let i = 0; i < rows; i += 1) {
+      const o = i * 6;
+      if (!isGrey(col[o], col[o + 1], col[o + 2])) continue;
+      let run = true;
+      for (let j = i; j < Math.min(i + 60, rows); j += 1) {
+        const q = j * 6;
+        if (!isGrey(col[q], col[q + 1], col[q + 2])) { run = false; break; }
+      }
+      if (run) { paintStops = Math.round(i / DPR); break; }
+    }
+
+    if (paintStops == null) {
+      return { ok: true, detail: `paints to the bottom (content ends ${contentBottom}px)` };
+    }
+    // 60px of slack: the boundary is read off a single column, and the last
+    // element's box can sit a little above the visual end of the page.
+    const ok = paintStops + 60 >= Math.min(contentBottom, VIEW_H);
+    return {
+      ok,
+      detail: `paint stops at ${paintStops}px CSS, content ends at ${contentBottom}px`
+        + (ok ? ' — consistent' : ' — CONTENT IS BEING CUT OFF'),
+    };
+  } catch (e) {
+    return { ok: true, detail: `could not run (${e.message.split('\n')[0]})` };
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* best effort */ }
+  }
+}
+
 /** Measured audio bitrate of the stream's audio rendition, in kbps.
  *
  *  Segment bytes over segment seconds. Includes container overhead, so it
@@ -832,12 +921,6 @@ function phoneController() {
     + `× ${CYCLES} cycle${CYCLES === 1 ? '' : 's'}`);
   console.log('──────────────────────────────────────────────────────────\n');
 
-  if (DRY) {
-    console.log('DRY=1 — preflight only. Nothing released, nothing recorded.');
-    return;
-  }
-
-  /* 2. Browser -------------------------------------------------------- */
   let chromium;
   try {
     ({ chromium } = require('playwright'));
@@ -845,6 +928,44 @@ function phoneController() {
     console.error('playwright is not installed. From tools/demo:  npm install');
     process.exit(1);
   }
+
+  /* Will the tall viewport actually PAINT into the recorded video?
+   *
+   * Take 7 recorded 22 minutes in which everything below 1268 CSS px was flat
+   * grey — unpainted compositor surface, cutting mid-chart, while the page
+   * itself reported scrollHeight 3416. The page was tall; the capture was not.
+   *
+   * It cannot be checked from inside the run: page.screenshot() goes through
+   * CDP's captureScreenshot, which rasterises beyond the window surface and so
+   * reports healthy even when the video is grey (this cost a debugging pass).
+   * And the video is unreadable until the context closes. So the only honest
+   * check is a short throwaway recording made with the same settings.
+   *
+   * Fifteen seconds to avoid discovering it twenty-two minutes later. */
+  if (TALL && PAINT_CHECK) {
+    const { ok, detail } = await paintCheck(chromium);
+    console.log(`  paint check: ${detail}`);
+    if (!ok) {
+      console.error('✗ the tall viewport is NOT painting into the recorded video.');
+      console.error('  Everything below the window surface would come out flat grey.');
+      console.error('  Known causes, in order:');
+      console.error('    1. the browser window was moved between displays with');
+      console.error('       different scale factors, or resized, during a previous run');
+      console.error('    2. headless — measured WORSE than headed for this, not better');
+      console.error('    3. the window is occluded or on another Space');
+      console.error('  Leave the browser window alone once the take starts.');
+      console.error('  Set PAINT_CHECK=0 to record anyway.');
+      process.exit(1);
+    }
+  }
+
+
+  if (DRY) {
+    console.log('DRY=1 — preflight only. Nothing released, nothing recorded.');
+    return;
+  }
+
+  /* 2. Browser -------------------------------------------------------- */
   const browser = await chromium.launch({ headless: false, args: [`--window-size=${W},${H}`] });
   const ctx = await browser.newContext({
     viewport: { width: W, height: VIEW_H },
