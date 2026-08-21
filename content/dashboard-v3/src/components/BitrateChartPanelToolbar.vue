@@ -15,7 +15,7 @@
  * of sync visually with the other two.
  */
 import { computed } from 'vue';
-import { useChartCoordination } from '@/composables/useChartCoordination';
+import { useChartCoordination, FOCUS_CHOICES_MIN } from '@/composables/useChartCoordination';
 
 const props = defineProps<{
   playerId: string;
@@ -38,6 +38,14 @@ const currentMode = computed<YMaxMode>(() => {
 function setMode(m: YMaxMode) {
   coord.setBandwidthYMax(m === 'auto' ? undefined : Number(m));
 }
+
+/* Rolling window. Alt+wheel still works and is quicker in the hand; this
+ * exists because a gesture cannot be SET — not by a link, not by a script, not
+ * reproducibly — and because nobody discovers Alt+wheel from a tooltip. */
+const focusMin = computed(() => Math.round(coord.state.liveSpan / 60_000));
+function setFocus(min: number) {
+  coord.setLiveSpan(min * 60_000);
+}
 </script>
 
 <template>
@@ -53,6 +61,20 @@ function setMode(m: YMaxMode) {
           @change="setMode(m)"
         />
         <span>{{ m === 'auto' ? 'Auto' : `${m} Mbps` }}</span>
+      </label>
+    </div>
+
+    <div class="ymax">
+      <span class="ymax-label">Window</span>
+      <label v-for="m in FOCUS_CHOICES_MIN" :key="m" class="pill" :class="{ active: focusMin === m }">
+        <input
+          type="radio"
+          name="panel-focus-span"
+          :value="m"
+          :checked="focusMin === m"
+          @change="setFocus(m)"
+        />
+        <span>{{ m }}m</span>
       </label>
     </div>
 
