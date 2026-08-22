@@ -87,15 +87,26 @@ SAMPLE_TEXT = "The quick brown fox jumped over the lazy dog."
 
 
 def sample_path(v):
-    os.makedirs(os.path.join(HERE, "samples"), exist_ok=True)
-    return os.path.join(HERE, "samples", "voice-%s.wav" % v["key"])
+    """The hover sample for one voice, beside that voice's sentence clips.
+
+    Everything belonging to a voice now lives in one directory keyed by its
+    profile id — clips and sample together. Previously the samples were written
+    into tools/demo/samples/ INSIDE THE REPO and committed, which put generated
+    audio under version control and split a voice's files across two places
+    with two different naming schemes.
+
+    ensure_profile() resolves presets to a real profile id, so this is the same
+    directory the clips land in rather than one keyed by the voice's short name.
+    """
+    d = ns.sent_dir(ensure_profile(v))
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "sample.wav")
 
 
 def build_sample(v):
-    out = sample_path(v)
+    out = sample_path(v)          # resolves the profile as a side effect
     if os.path.exists(out) and ns.dur(out) > 0.2:
         return out
-    ensure_profile(v)
     ns.generate(SAMPLE_TEXT, out, profile=v["profile"], engine=v["engine"])
     return out
 
