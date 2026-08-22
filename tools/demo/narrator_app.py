@@ -240,13 +240,20 @@ def dur_cached(path):
 
 
 def cue_audio_path(text, voice=None):
-    """Per-cue audio, keyed on the CUE's text AND the voice.
+    """Per-cue audio, keyed on the SPOKEN text AND the voice.
 
     Without the voice in the key a second narrator would collide with the first
     — same text, same hash, wrong person. The default voice keeps the original
-    naming so the clips already generated are not orphaned."""
+    naming so the clips already generated are not orphaned.
+
+    Keyed on for_speech(text) rather than the raw caption, so a change to the
+    PRONUNCIATION invalidates it too. Keyed on the raw text, this cache survived
+    a fix that changed how every video resolution is spoken — "2160p" had been
+    coming out as "21 60 p" — and would have quietly served the old audio back
+    on the next export. The sentence-clip cache one level down is already keyed
+    this way, which is why it self-corrected and this did not."""
     voice = voice or PRIMARY
-    h = hashlib.sha1(text.encode()).hexdigest()[:12]
+    h = hashlib.sha1(ns.for_speech(text).encode()).hexdigest()[:12]
     os.makedirs(ns.CUEW, exist_ok=True)
     if voice["key"] == PRIMARY["key"]:
         return os.path.join(ns.CUEW, "app-%s.wav" % h)
