@@ -1311,7 +1311,8 @@ function phoneController() {
    * the overlap it fixes. Only the per-change play-by-play opts in, and not
    * narrating every single rung change is the right outcome anyway: nobody can
    * follow five of them in ten seconds. */
-  const SPEAK_CPS = Number(process.env.SPEAK_CPS || 12.6);
+  const SPEAK_GAP_MS = Number(process.env.SPEAK_GAP_MS || 400);
+  const SPEAK_CPS = Number(process.env.SPEAK_CPS || 13.5);
   let speakingUntil = 0;
   let cuesDropped = 0;
   // Rolling budget (#4) — take-seconds at which each cue was spoken.
@@ -1369,6 +1370,24 @@ function phoneController() {
     console.log(`  [${at.toFixed(1)}s] ${text}`);
     if (CAPTIONS) page.evaluate((t) => window.__say(t), text).catch(() => {});
     return true;
+  }
+
+  /** Narrate, then wait until it has actually been SAID.
+   *
+   *  Every call site used to be `cue(text, N)` followed by `await sleep(N)`,
+   *  where N was picked for how long the PICTURE needed and had nothing to do
+   *  with how long the LINE takes to speak. The Limit tour line runs 28 seconds
+   *  of speech and was held for 15, so the next line began 13 seconds early and
+   *  everything after it inherited the overlap.
+   *
+   *  holdMs is a floor now, not the answer: wait the longer of what the picture
+   *  needs and what the voice needs. */
+  async function say(text, holdMs = 4000, on = null, opts = {}) {
+    const spoke = cue(text, holdMs, on, opts);
+    const need = spoke === false ? 0
+      : Math.ceil(speechSeconds(text) * 1000) + SPEAK_GAP_MS;
+    await sleep(Math.max(holdMs, need));
+    return spoke;
   }
 
   /** Named vertical targets, in device pixels, filled in once the page has
@@ -1579,8 +1598,11 @@ function phoneController() {
     }, label);
     if (!engaged) console.error(`  ⚠ legend hover did not highlight "${label}"`);
 
-    cue(sentence, holdMs);
-    await sleep(holdMs);
+    // say(), not cue()+sleep(holdMs): the tour lines are the longest in the
+    // take — the Limit one runs 28 seconds of speech against a 15-second hold,
+    // so the next series started while it was still talking and every line
+    // after it inherited the overlap.
+    await say(sentence, holdMs);
     return true;
   }
 
@@ -1634,8 +1656,7 @@ function phoneController() {
   /* 4a. The empty panel, then the session arriving --------------------- */
   mark('empty');
   await spot('.page-card', 0, 'start');
-  cue('Nothing is connected. The dashboard has no session to show.', 6000);
-  await sleep(6000);
+  await say('Nothing is connected. The dashboard has no session to show.', 6000);
   await unspot();
 
   // Both sources in frame BEFORE playback starts. The session appearing in an
@@ -1675,9 +1696,8 @@ function phoneController() {
 
   const pid = chosen.id;
   console.log(`  session #${chosen.display_id} ${pid} appeared at ${now().toFixed(1)}s`);
-  cue('There it is. The phone registered a session the moment it asked for the '
+  await say('There it is. The phone registered a session the moment it asked for the '
     + 'first playlist.', 6000);
-  await sleep(5000);
 
   /* Name the panels before using them. Three are open; the rest are shut on
    * purpose, and saying so stops the folded ones reading as broken.
@@ -1694,8 +1714,7 @@ function phoneController() {
     .filter((k) => FOLDS_OPEN.includes(k) && FOLD_SAY[k])
     .map((k) => sentence(`${FOLD_SAY[k][0]}, ${FOLD_SAY[k][1]}.`));
   if (openParts.length) {
-    cue(`Three panels are open for this. ${openParts.join(' ')}`, 9000);
-    await sleep(9000);
+    await say(`Three panels are open for this. ${openParts.join(' ')}`, 9000);
   }
 
   // These panels are not used today, but naming what each one DOES is the
@@ -1707,11 +1726,10 @@ function phoneController() {
     .filter((k) => !FOLDS_OPEN.includes(k) && FOLD_SAY[k])
     .map((k) => sentence(`${FOLD_SAY[k][0]} for ${FOLD_SAY[k][1]}.`));
   if (shutParts.length) {
-    cue(`The others are folded on purpose. ${shutParts.join(' ')} `
+    await say(`The others are folded on purpose. ${shutParts.join(' ')} `
       + `Each is a different way to break a stream, and none of them are in `
       + `play today. The only thing changing here is how much bandwidth there `
       + `is.`, 11000);
-    await sleep(11000);
   }
 
   // Match on display_id — the pill carries "Session #N", and N came from the
@@ -1843,14 +1861,12 @@ function phoneController() {
   mark('tour');
   lay('side-by-side', { on: 'state_chart' });
 
-  cue(`A real iPhone, playing a live low-latency HLS stream. `
+  await say(`A real iPhone, playing a live low-latency HLS stream. `
     + `${pm0.device_model}, ${pm0.player_tech} ${pm0.player_tech_version}.`, 6000);
-  await sleep(6000);
 
   const asc = [...variants].sort((a, b) => a.bandwidth - b.bandwidth);
-  cue(`The stream publishes ${variants.length} variants, from `
+  await say(`The stream publishes ${variants.length} variants, from `
     + `${rungName(asc[0].resolution)} to ${rungName(asc[asc.length - 1].resolution)}.`, 6000);
-  await sleep(6000);
 
   /* ---- Player State + Bandwidth together -------------------------------
    * The event and the thing that caused it, in one frame. Watching a variant
@@ -1858,36 +1874,39 @@ function phoneController() {
    * pairing; either alone is half the story. */
   lay('side-by-side', { on: 'state_chart' });
   await spot('.vis-timeline', 0, 'center');
-  cue(`Player State is the event timeline — every switch, stall and state `
+  await say(`Player State is the event timeline — every switch, stall and state `
     + `change the player reported. First frame at `
     + `${(pm0.first_frame_time_s ?? 0).toFixed(1)} seconds, `
     + `${plural(pm0.profile_shift_count || 0, 'variant switch')} so far.`, 8000);
-  await sleep(8000);
   await unspot();
 
-  cue(`Below it, the same moments as numbers. Watch them together: an event on `
+  await say(`Below it, the same moments as numbers. Watch them together: an event on `
     + `the timeline, a step on the chart.`, 7000);
-  await sleep(7000);
 
   /* ---- the series, one at a time --------------------------------------- */
   lay('side-by-side', { on: 'state_chart' });
-  cue('Five lines on the bandwidth chart are worth knowing by name.', 5500);
-  await sleep(5500);
+  await say('Five lines on the bandwidth chart are worth knowing by name.', 5500);
 
   await tourSeries('Limit (rate_mbps)',
     'The Limit is the network limit WE impose — enforced in the kernel on the '
     + 'proxy, not a suggestion to the player. Everything else on this chart is '
-    + 'the player reacting to it. '
-    + 'And it never goes away. With no pattern running the server still holds '
-    + 'every session'
+    + 'the player reacting to it.', 9000);
+
+  /* The baseline is a second thought, so it gets a second line.
+   *
+   * These were one sentence, which ran to 380 characters: 28 seconds of speech
+   * against a 15-second hold, and a three-line caption nobody reads to the end.
+   * Two shorter lines say the same thing, and the pause between them is where
+   * the first idea lands. */
+  await say('And it never goes away. With no pattern running the server still '
+    + 'holds every session'
     // Not fmtMbps(): that always keeps a decimal, and the baseline is a round
     // config value. "one hundred point zero megabits" is a mouthful for 100.
     + (baselineMbps
       ? ` to ${Number.isInteger(baselineMbps) ? baselineMbps : fmtMbps(baselineMbps)} megabits`
       : ' to a baseline network limit')
-    + '. That is deliberate. An unthrottled link on the same machine would '
-    + 'flatter the player in ways no real viewer would ever see, so the floor '
-    + 'is set to something a remote server might plausibly give you.', 15000);
+    + '. An unthrottled link on the same machine would flatter the player in '
+    + 'ways no real viewer would ever see.', 8000);
 
   await tourSeries('Fetching Variant',
     'Fetching Variant is the rung the player is pulling right now. It moves '
@@ -1914,20 +1933,18 @@ function phoneController() {
     + 'the network disagree.');
 
   await endTourHover();
-  cue(`Right now nothing is constraining any of it — `
+  await say(`Right now nothing is constraining any of it — `
     + `${rungName(pm0.video_resolution)}, buffer `
     + `${(pm0.buffer_depth_s ?? 0).toFixed(0)} seconds.`, 6500);
-  await sleep(6500);
 
   /* ---- Bandwidth + buffer/live offset ----------------------------------
    * What a cap COSTS. The buffer is where a squeeze shows up before the
    * picture does, so it belongs in frame with the cap that caused it. */
   lay('side-by-side', { on: 'chart_buffer' });
   await spot('canvas', 1, 'center');
-  cue('Underneath: buffer depth and live offset. When the network limit bites, the '
+  await say('Underneath: buffer depth and live offset. When the network limit bites, the '
     + 'buffer drains before the picture changes — this is where a squeeze '
     + 'shows up first.', 8000);
-  await sleep(8000);
   await unspot();
 
   lay('web-pip', { on: 'pattern' });
@@ -2009,18 +2026,16 @@ function phoneController() {
   const floor = rates.length ? Math.min(...rates) : null;
 
   await spot(`.template-row`, 0, 'nearest');
-  cue(`Valley: hold the network limit above the top variant, walk it all the way down, `
+  await say(`Valley: hold the network limit above the top variant, walk it all the way down, `
     + `then walk it back up.`, 6000);
-  await sleep(6000);
   await unspot();
 
   // Deliberately NOT spotlighting `.steps`. The generated table is 47 rows of
   // rates — accurate, and unreadable at video size. The same facts (count,
   // ceiling, floor) are read out here and shown compactly by `.applied-summary`
   // once the pattern is running.
-  cue(`${stepCount} steps at ${STEP_SECONDS} seconds each — from `
+  await say(`${stepCount} steps at ${STEP_SECONDS} seconds each — from `
     + `${fmtMbps(topCap)} megabits down to ${fmtMbps(floor)} and back.`, 6500);
-  await sleep(6500);
 
   /* 7. Settle, then apply --------------------------------------------- */
   mark('settle');
@@ -2038,8 +2053,21 @@ function phoneController() {
 
   mark('descent');
   await spot('button.apply', 0, 'nearest');
-  cue('Applying the pattern.', 2500);
-  await sleep(1800);
+  await say('Applying the pattern.', 2500);
+
+  /* Tell the viewer what to watch for BEFORE it happens.
+   *
+   * There is a stretch here where the limit is stepping down and the player has
+   * not reacted yet — the buffer is still full of segments fetched at the old
+   * rate. Naming the order things will move in turns that gap from dead air
+   * into anticipation, and it means the eye is on the right lines when the
+   * first change finally lands. */
+  await sleep(10000);
+  await say('See how the limit is starting to step down. Watch the '
+    + 'avg_network_bitrate follow it first — that is the player noticing. Then, '
+    + 'a little later, the fetching variant will drop to a rung that fits, and '
+    + 'later still the displayed variant will follow it onto the screen.',
+    9000, 'chart');
   await clickSel('button.apply');
   await unspot();
 
@@ -2222,6 +2250,8 @@ function phoneController() {
   const SEV_RANK = { error: 40, critical: 30, warning: 20, info: 10, testing: 0 };
   // Two narrations closer together than this are a collision, not a sequence.
   const LABEL_COLLIDE_S = Number(process.env.LABEL_COLLIDE_S || 8);
+  // How long a label may wait for a gap in the narration before giving up.
+  const LABEL_MAX_DEFER_S = Number(process.env.LABEL_MAX_DEFER_S || 45);
 
   function queueLabel(sev, name, tsMs) {
     const spec = LABEL_NARRATION[name];
@@ -2252,6 +2282,20 @@ function phoneController() {
       const q = labelQueue[i];
       if (now() < q.at) continue;
       labelQueue.splice(i, 1);
+      /* Still talking? Come back to it. The line was held for its context
+       * delay so that it would land on a visible shape; saying it over the top
+       * of the previous line loses both. Deferred, not dropped — but not
+       * forever: past LABEL_MAX_DEFER_S the shape it describes has scrolled
+       * out of the window and it is no longer worth saying. */
+      if (now() < speakingUntil) {
+        if (now() - q.at > LABEL_MAX_DEFER_S) {
+          console.log(`  [label] ${q.name} abandoned — waited `
+            + `${(now() - q.at).toFixed(0)}s for a gap and never got one`);
+          continue;
+        }
+        labelQueue.push(q);
+        continue;
+      }
       const last = labelSpokenAt[q.name];
       if (last != null && now() - last < q.every) {
         console.log(`  [label] ${q.name} suppressed — `
@@ -2356,6 +2400,12 @@ function phoneController() {
             + 'two lines IS the buffer — widest where the limit fell fastest.', 7000);
           await endTourHover();
         } else if (a.kind === 'say') {
+          // Queued on fixed offsets, which cannot know how long the previous
+          // line runs. Re-queue a beat later rather than speak over it.
+          if (now() < speakingUntil) {
+            pending.unshift({ ...a, at: speakingUntil + 0.3 });
+            break;
+          }
           cue(a.text, 8000);
           lastCue = Date.now();
         } else if (a.kind === 'clear') {
@@ -2550,16 +2600,15 @@ function phoneController() {
         'And the picture is not really acceptable here — nobody would ship '
         + 'this. That is the point of the floor, not a flaw in it.' });
       pending.push({ at: now() + 17.0, kind: 'say', text:
-        'Some of that is a choice we made. Audio is a separate rendition '
-        + 'shared by every rung'
-        + (audioKbpsMeasured ? `, AAC-LC at about ${audioKbpsMeasured} kilobits` : ', AAC-LC')
-        + ' — the same on the bottom rung as the top, so down here the sound '
-        + 'takes a large share of the budget and the video gets what is left.' });
+        'Some of that is our own doing. Audio is a separate rendition, the '
+        + 'same on the bottom rung as the top'
+        + (audioKbpsMeasured ? `, about ${audioKbpsMeasured} kilobits either way` : '')
+        + '. Down here that is most of the budget, and the picture gets what '
+        + 'is left.' });
       pending.push({ at: now() + 26.0, kind: 'say', text:
-        'HE-AAC would carry the same audio in about a third of that and hand '
-        + 'the difference to the picture. Licensing is why we are not using '
-        + 'it. Either way, what we are here to watch is how the player BEHAVES '
-        + 'as the ceiling moves — not how good 234p can look.' });
+        'HE-AAC would carry it in a third of that and hand the difference to '
+        + 'the picture; licensing is why we are not using it. Either way, what '
+        + 'we came to watch is the BEHAVIOUR, not how good 234p can look.' });
       }
       /* Only on the FIRST valley. By the second the audience has seen the
        * shape, and pointing at it again would be padding. */
@@ -2614,11 +2663,10 @@ function phoneController() {
   const ups = shifts.filter((s) => s.dir === 'up').length;
   // A take cut short by RUN_TIMEOUT_MS never completes a cycle, and "Over 0
   // cycles" is a sentence no one should have to hear.
-  cue(`${cycle ? `Over ${plural(cycle, 'cycle')}: ` : 'Partway through the first cycle: '}`
+  await say(`${cycle ? `Over ${plural(cycle, 'cycle')}: ` : 'Partway through the first cycle: '}`
     + `${plural(shifts.length, 'variant change')} — ${downs} down, ${ups} back up. `
     + `${plural((fm.stalling_count || 0) - stall0, 'stall')} and `
     + `${plural((fm.buffering_count || 0) - rebuf0, 'rebuffer')} across the whole valley.`, 9000);
-  await sleep(9000);
 
   if (segments.length) segments[segments.length - 1].to = now();
 
