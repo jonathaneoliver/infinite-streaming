@@ -255,9 +255,15 @@ def build_cue_audio(text, voice=None):
     paths = []
     for s in sents:
         h = hashlib.sha1(s.encode()).hexdigest()[:10]
-        os.makedirs(ns.SENT, exist_ok=True)
-        dest = os.path.join(ns.SENT, "s-%s.wav" % h if voice["key"] == PRIMARY["key"]
-                            else "s-%s-%s.wav" % (voice["key"], h))
+        # A directory per VOICE, keyed by the profile actually being generated
+        # with — not by a filename prefix inside one directory chosen from
+        # VB_PROFILE. Those were two different notions of "which voice": run the
+        # editor with VB_PROFILE set to another voice and the primary's clips
+        # were written as bare s-<hash>.wav into that voice's directory, where a
+        # later run would read them back as the wrong speaker.
+        vdir = ns.sent_dir(ensure_profile(voice))
+        os.makedirs(vdir, exist_ok=True)
+        dest = os.path.join(vdir, "s-%s.wav" % h)
         ns.generate(s, dest, profile=voice["profile"], engine=voice["engine"])
         paths.append(dest)
     gaps = [ns.HEAD_GAP_MS if ns.is_heading(sents[j]) else ns.GAP_MS for j in range(len(sents) - 1)]

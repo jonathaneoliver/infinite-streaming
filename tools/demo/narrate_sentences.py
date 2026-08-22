@@ -44,7 +44,24 @@ OUTV = os.environ.get("OUTV", os.path.join(DEMO_DIR, "encoder-demo-narrated-pace
 _SENT_ROOT = os.environ.get("SENT_DIR") or os.path.join(
     os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
     "demo-narration")
-SENT = os.path.join(_SENT_ROOT, PROFILE)
+
+
+def sent_dir(profile=None):
+    """Where clips for ONE voice live.
+
+    A directory per profile, because the filename is a hash of the SENTENCE and
+    nothing else — the same words in two voices hash identically. Separating
+    them by path is what stops one voice being served the other's audio.
+
+    Takes the profile explicitly rather than reading the module-level PROFILE,
+    which is set from VB_PROFILE at import. A caller that generates in several
+    voices (the editor does) has one env var and many voices, and the two
+    disagreeing is precisely how Jonathan's clips ended up filed under Alice.
+    """
+    return os.path.join(_SENT_ROOT, profile or PROFILE)
+
+
+SENT = sent_dir()
 # Per-cue audio stays with the take: it is assembled from the clips with this
 # take's own timing, so it is not reusable across takes even when the text is.
 CUEW = os.path.join(DEMO_DIR, "cue-audio")
