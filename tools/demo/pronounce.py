@@ -202,8 +202,30 @@ def build(extras=None):
     return BASE_SPEECH + list(extras or []) + DEPLURALISE
 
 
+def _default_extras():
+    """The project's own vocabulary, loaded WITHOUT being asked.
+
+    This used to require DEMO_PRONOUNCE, and every caller that forgot it got the
+    base table silently — which is not a missing feature but a WRONG one. The
+    narration editor was launched without it and read every rung as digits:
+    "2160p" left as "2160 p" comes out of the engine as "21 60 p", and the same
+    for 1440p, 954p and the rest. The take sounded broken and nothing reported
+    a problem, because from the code's point of view nothing was wrong.
+
+    Falls back to whatever `narrative/*.pronounce` sits beside this file, which
+    is where a project's vocabulary lives by convention. DEMO_PRONOUNCE still
+    overrides, for auditioning an alternative table.
+    """
+    import glob
+    here = os.path.dirname(os.path.abspath(__file__))
+    rules = []
+    for f in sorted(glob.glob(os.path.join(here, "narrative", "*.pronounce"))):
+        rules += load_extras(f)
+    return rules
+
+
 _extras_path = os.environ.get("DEMO_PRONOUNCE")
-SPEECH = build(load_extras(_extras_path) if _extras_path else None)
+SPEECH = build(load_extras(_extras_path) if _extras_path else _default_extras())
 
 
 def for_speech(t, rules=None):
