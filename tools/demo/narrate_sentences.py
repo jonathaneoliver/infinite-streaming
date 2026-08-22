@@ -24,21 +24,27 @@ VIDEO = os.environ.get("VIDEO", os.path.join(DEMO_DIR, "encoder-demo.mp4"))
 # Distinct output so the two pacing approaches can be compared on the
 # same footage rather than one silently replacing the other.
 OUTV = os.environ.get("OUTV", os.path.join(DEMO_DIR, "encoder-demo-narrated-paced.mp4"))
-# The clip caches follow DEMO_DIR rather than living beside the script: this file
-# is in the repo now, and `sentences/` reached 214 wavs on one project.
+# The SENTENCE cache. Clips are keyed by a hash of the sentence, so identical
+# narration never needs generating twice — at ~12s a clip and ~150 clips a take,
+# that is twenty minutes per re-record.
 #
-# SENT_DIR moves the SENTENCE cache somewhere shared. Clips are keyed by a hash
-# of the sentence, so identical narration never needs generating twice — but
-# under DEMO_DIR that only ever helped WITHIN one take, and takes mostly repeat
-# each other. Re-recording regenerated ~150 clips at ~12s each to say the same
-# words in the same voice, roughly twenty minutes per take for nothing.
+# Scoped by profile id, because the hash covers the text and not the voice: two
+# profiles saying the same sentence are different audio and must not collide.
+# SENT_DIR overrides the location.
 #
-# Scoped by profile id, because the hash covers the text and not the voice:
-# two profiles saying the same sentence are different audio and must not
-# collide. Unset keeps the old per-take behaviour.
-_SENT_ROOT = os.environ.get("SENT_DIR")
-SENT = (os.path.join(_SENT_ROOT, PROFILE) if _SENT_ROOT
-        else os.path.join(DEMO_DIR, "sentences"))
+# Shared BY DEFAULT rather than on request. The first version made SENT_DIR
+# opt-in, and every caller that forgot it silently regenerated ~150 clips it
+# already had — the finish script did exactly that, and so did the narration
+# editor until it was launched with the flag. A cache nothing reaches by
+# default is not a cache.
+#
+# Lives under the user cache dir, not DEMO_DIR: clips are keyed by a hash of the
+# sentence, so they are equally valid for any take OR project using the same
+# voice, and there is nothing take-specific to clean up with a take.
+_SENT_ROOT = os.environ.get("SENT_DIR") or os.path.join(
+    os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+    "demo-narration")
+SENT = os.path.join(_SENT_ROOT, PROFILE)
 # Per-cue audio stays with the take: it is assembled from the clips with this
 # take's own timing, so it is not reusable across takes even when the text is.
 CUEW = os.path.join(DEMO_DIR, "cue-audio")
@@ -211,6 +217,30 @@ def main():
         if slot is not None and d > slot:
             flag = "  OVERRUNS by %.1fs" % (d - slot)
         print("  [%02d] %d sentence(s)  %.2fs%s" % (i, len(sents), d, flag))
+
+    # A cue that runs longer than the gap to the next one WILL be talked over.
+    # This was already reported per line, and that is exactly why it went
+    # unnoticed: 16 warnings scattered through 53 lines of routine output read
+    # as noise. The same facts, collected, are hard to miss — and the total is
+    # the number that says whether the take is usable.
+    overruns = []
+    for n, (i, c, _p, d) in enumerate(built):
+        nxt = next((b[1]["at"] for b in built[n + 1:]), None)
+        if nxt is None:
+            continue
+        slot = nxt - c["at"]
+        if d > slot:
+            overruns.append((i, d - slot, c["text"]))
+    if overruns:
+        worst = sorted(overruns, key=lambda o: -o[1])
+        print("\n=== %d of %d cues OVERRUN their slot, by %.0fs in total ==="
+              % (len(overruns), len(built), sum(o[1] for o in overruns)))
+        print("    They will be spoken over the line that follows them.")
+        for i, by, text in worst[:6]:
+            print("    cue %-3d +%5.1fs  %s" % (i, by, text[:60]))
+        if len(worst) > 6:
+            print("    ... and %d more" % (len(worst) - 6))
+        print("    Shorten the text, or space the cues further apart.")
 
     print("\n=== mux ===")
     args = ["ffmpeg", "-y", "-i", VIDEO]
