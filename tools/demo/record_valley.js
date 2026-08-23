@@ -1968,45 +1968,22 @@ function phoneController() {
     console.log('  Fetching Variant  ->', JSON.stringify(a));
     console.log('  Displayed Variant ->', JSON.stringify(b));
 
-    /* Is it on the right VALUE, not just the right time?
+    /* Y placement is NOT checked here, deliberately.
      *
-     * X was easy to confirm by eye — the marker line stays threaded through the
-     * circle as the chart scrolls. Y could be quietly wrong: getPixelForValue
-     * returns a perfectly plausible pixel for the WRONG point if the
-     * nearest-by-time search picked badly, and nothing in the picture would say
-     * so. So read the chart canvas at the circle's centre and compare it with
-     * the series' own colour. If the circle is on its line, the pixel under the
-     * middle of it is that line. */
-    for (const label of ['Fetching Variant', 'Displayed Variant']) {
-      const v = await page.evaluate((lbl) => {
-        const f = window.__chartByLabel(lbl);
-        if (!f) return null;
-        const { c, ch } = f;
-        const ds = ch.data.datasets.find((d) => d.label === lbl);
-        const pts = (ds.data || []).filter((q) => q && q.y != null);
-        if (!pts.length) return null;
-        const last = pts[pts.length - 1];
-        const bx = last.x instanceof Date ? last.x.getTime() : Number(last.x);
-        const px = Math.round(ch.scales.x.getPixelForValue(bx));
-        const py = Math.round(ch.scales.y.getPixelForValue(last.y));
-        // Sample a few pixels around the point: a 2px line will not always sit
-        // exactly on the rounded coordinate.
-        const g = c.getContext('2d');
-        const dpr = window.devicePixelRatio || 1;
-        let hit = null;
-        for (let dy = -3; dy <= 3 && !hit; dy += 1) {
-          const d = g.getImageData(Math.round(px * dpr),
-                                   Math.round((py + dy) * dpr), 1, 1).data;
-          if (d[3] > 40 && !(d[0] > 245 && d[1] > 245 && d[2] > 245)) {
-            hit = [d[0], d[1], d[2]];
-          }
-        }
-        return { want: ds.borderColor, got: hit, value: last.y, py };
-      }, label);
-      console.log(`  ${label} colour under centre: `
-        + `${v ? JSON.stringify(v.got) : 'n/a'} vs series ${v ? v.want : '?'} `
-        + `(value ${v ? v.value : '?'})`);
-    }
+     * A colour probe was tried — read the chart canvas under the circle and
+     * compare it with the series colour — and it never worked: it sampled the
+     * newest point at the live edge while the circle is drawn ~18s behind it,
+     * so the two were never looking at the same place. A check that always
+     * fails is worse than none, because it teaches you to skim past output.
+     *
+     * Y is sound on two other grounds. By construction: the pixel comes from
+     * ch.scales.y.getPixelForValue on the series' own scale, so it is wrong
+     * only if the VALUE is wrong, and the value reported (32.685407) is exactly
+     * the 2160p rung's peak bandwidth. And by eye: the drawn circle sits
+     * centred on that line in annotate-test.png.
+     *
+     * Worth building properly one day — anchored to the circle's own point
+     * rather than the latest one. */
 
     /* Does it TRACK? Placement was never the hard part — the old circles were
      * placed correctly and then sat still while the chart scrolled out from
