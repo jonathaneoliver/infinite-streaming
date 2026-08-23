@@ -110,6 +110,15 @@ const CAPTIONS = process.env.CAPTIONS === '1';
 // Preflight the tall capture with a short throwaway recording. On by default:
 // it costs ~15s and take 7 lost 22 minutes to exactly this failure.
 const PAINT_CHECK = process.env.PAINT_CHECK !== '0';
+// Jump from "session appeared" straight to the pattern. The demo opening runs
+// five and a half minutes before anything shifts, which is the point of a take
+// and the enemy of a throwaway test.
+//
+// Module scope, not the function body: it is READ ~470 lines before the config
+// block that declares the other annotation knobs, and a const is in the
+// temporal dead zone until its declaration runs. Same mistake as labelsLive
+// earlier — a hoisted reference to a not-yet-initialised const throws.
+const SKIP_TOUR = process.env.SKIP_TOUR === '1';
 // How many displayed-variant arrivals to call out IN EACH DIRECTION. The lag
 // they describe is one idea; take 7 said it 27 times.
 const DISPLAYED_MAX = Number(process.env.DISPLAYED_MAX || 3);
@@ -1439,6 +1448,9 @@ function phoneController() {
     return text.length / SPEAK_CPS;
   }
 
+  /* `on` is normally the name of a focus target. A NUMBER is taken as a pan
+   * position directly, in device pixels — for the cases where the caller knows
+   * exactly where to look, which is every annotation: it just drew there. */
   function cue(text, holdMs = 4000, on = null, opts = {}) {
     const at = now();
     // #1 — quiet over the payoff. Milestones and critical events still speak.
@@ -1470,7 +1482,8 @@ function phoneController() {
     speakingUntil = Math.max(at, speakingUntil) + speechSeconds(text);
     spokenAt.push(at);
     if (opts.hush) hushUntil = Math.max(hushUntil, at + opts.hush);
-    const pan = on && focus[on] != null ? focus[on] : undefined;
+    const pan = typeof on === 'number' ? Math.round(on)
+      : (on && focus[on] != null ? focus[on] : undefined);
     cues.push({ at: Math.round(at * 1000) / 1000, text, holdMs,
                 ...(pan == null ? {} : { pan }),
                 words: text.split(/\s+/).length });
@@ -2036,6 +2049,17 @@ function phoneController() {
 
   /* 5a. Tour the two panels this demo is about ------------------------- */
   mark('tour');
+  /* Everything from here to mark('configure') is narration and framing:
+   * panel names, the legend tour, what a variant is. None of it is needed
+   * by the pattern that follows, so a throwaway test can drop it — but the
+   * LAYOUT must still be set, because the crop stays wherever the last
+   * layout call left it. */
+  if (SKIP_TOUR) {
+    console.log('  SKIP_TOUR=1 — skipping the demo opening');
+    lay('side-by-side', { on: 'state_chart' });
+    await sleep(1500);
+  }
+  if (!SKIP_TOUR) {
   lay('side-by-side', { on: 'state_chart' });
 
   await say(`A real iPhone, playing a live low-latency HLS stream. `
@@ -2143,6 +2167,8 @@ function phoneController() {
    * the fill click then rebuilds it at 24 caps → 47 steps. Both tables are on
    * screen briefly, which is exactly why nothing narrates or spotlights until
    * the whole configuration has settled and the step count has been asserted. */
+  }
+
   mark('configure');
 
   // Radio indices follow the *_CHOICES arrays in NetworkShapingPattern.vue.
@@ -2534,6 +2560,14 @@ function phoneController() {
   // to the page (or redrawn on scroll) it points at nothing more often than not.
   // ANNOTATE_SHIFTS=2 turns it back on.
   const ANNOTATE_SHIFTS = Number(process.env.ANNOTATE_SHIFTS || 0);
+  /* How long a drawn annotation stays up.
+   *
+   * The real answer is "as long as the line describing it", so the hold is
+   * computed from the speech. These only bound it: under MIN it flashes and
+   * reads as a glitch, over MAX it stops saying "look here" and becomes part of
+   * the chart — and starts colliding with whatever is circled next. */
+  const ANNOTATE_MIN_S = Number(process.env.ANNOTATE_MIN_S || 5);
+  const ANNOTATE_MAX_S = Number(process.env.ANNOTATE_MAX_S || 20);
 
   async function drainAnnotations() {
     drainLabels();
@@ -2543,9 +2577,18 @@ function phoneController() {
         if (a.kind === 'chart') {
           await page.evaluate(() => window.__scrollTo('canvas'));
           await sleep(400);
+          /* Hold it for as long as the line takes to say, within bounds.
+           * Computed here rather than when the item was queued, because the
+           * wait for room means "now" is up to twenty seconds later and the
+           * narration has to land with the drawing, not before it. */
+          const holdS = a.say
+            ? Math.max(ANNOTATE_MIN_S,
+                       Math.min(ANNOTATE_MAX_S, speechSeconds(a.say) + 1.8))
+            : ANNOTATE_MIN_S;
           const hit = await page.evaluate(
-            ([label, t, s, col]) => window.__circleSeries(label, t, { seed: s, color: col }),
-            [a.series, a.tMs, a.seed, a.color]);
+            ([label, t, s, col, hold]) =>
+              window.__circleSeries(label, t, { seed: s, color: col, holdMs: hold }),
+            [a.series, a.tMs, a.seed, a.color, Math.round(holdS * 1000)]);
           if (hit) {
             console.log(`  [circle] ${a.series}: `
               + (hit.waiting ? `waiting, ${hit.shortBy}px short of clearing the edge`
@@ -2571,6 +2614,13 @@ function phoneController() {
             console.error(`  ⚠ "${a.series}" scrolled off before it could be circled`);
           } else if (!hit) {
             console.error(`  ⚠ no "${a.series}" point to circle`);
+          } else if (a.say) {
+            /* The line lands WITH the drawing, and brings the crop with it.
+             * hit.y is viewport CSS px; the compositor pans in device px, and
+             * the target is the circle's centre so it is framed rather than
+             * merely present somewhere on the page. */
+            cue(a.say, Math.round(holdS * 1000), hit.y * DPR);
+            lastCue = Date.now();
           }
         } else if (a.kind === 'timeline') {
           await page.evaluate(() => window.__scrollTo('.vis-timeline'));
@@ -2722,8 +2772,13 @@ function phoneController() {
         annotated++;
         const seed = annotated * 137;
         const t = now();
+        /* The description travels WITH the circle. Spoken when the drawing
+         * appears rather than when the change happened, because the two are one
+         * observation and the circle cannot be drawn for another ~18s. */
         pending.push({ at: t + 0.5, kind: 'chart', series: 'Fetching Variant',
-                       color: '#ef4444', tMs: Date.now(), seed });
+                       color: '#ef4444', tMs: Date.now(), seed,
+                       say: `There — the player just dropped from ${from} to `
+                         + `${to}, and that circle is the moment it decided.` });
         pending.push({ at: t + 4.5, kind: 'timeline', seed: seed + 11 });
         /* A backstop, not the mechanism — drawings expire on their own now.
          * At +8.5s this used to fire while the circle was still waiting for its
