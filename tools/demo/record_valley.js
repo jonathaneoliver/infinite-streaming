@@ -2304,6 +2304,10 @@ function phoneController() {
    * the moment the value changed rather than scripting the prose in advance. */
   const started = Date.now();
   let lastStep = null, lastFetch = null, lastDisp = null;
+  // Liveness: a frozen buffer under an impossible limit means the
+  // device stopped sending and we are reading its last words.
+  let lastBuffer = null, lastAliveRung = null, stillSteps = 0,
+      deadWarned = false;
   // Rung-change call-outs, counted per direction for the same reason as the
   // "on screen now" ones below.
   let limitDown = 0, limitUp = 0;
@@ -2894,6 +2898,38 @@ function phoneController() {
         + `showing ${rungName(m.video_resolution)}, buffer `
         + `${(m.buffer_depth_s ?? 0).toFixed(0)}s.`, 5000);
       lastCue = Date.now();
+
+      /* Is anyone home?
+       *
+       * Two signs together, because either alone has an innocent explanation.
+       * A buffer identical to three decimals across several steps is a stopped
+       * player, not a steady one — a live buffer breathes. And a rung held
+       * under a cap far below what it needs cannot happen while shaping is
+       * reaching the player. Together they mean the metrics are the last ones
+       * the device ever sent. */
+      const need = rungPeak[rungName(m.fetching_resolution)];
+      const starved = need != null && cap != null && cap < need * 0.5;
+      const buf = m.buffer_depth_s;
+      if (starved && buf != null && lastBuffer != null
+          && Math.abs(buf - lastBuffer) < 0.001
+          && m.fetching_resolution === lastAliveRung) {
+        stillSteps += 1;
+      } else {
+        stillSteps = 0;
+      }
+      lastBuffer = buf;
+      lastAliveRung = m.fetching_resolution;
+      if (stillSteps === 6 && !deadWarned) {
+        deadWarned = true;
+        console.error(`\n  ⚠ THE PLAYER IS NOT RESPONDING.`);
+        console.error(`    ${stillSteps} steps with the buffer frozen at `
+          + `${buf}s and the rung held at ${rungName(m.fetching_resolution)}, `
+          + `under a ${fmtMbps(cap)} Mbps limit that rung needs `
+          + `${fmtMbps(need)} for.`);
+        console.error(`    These metrics are almost certainly the last ones the `
+          + `device sent. Check playback on the phone — everything narrated `
+          + `from here describes a stream that is not playing.\n`);
+      }
     }
   }
 
@@ -2993,6 +3029,10 @@ function phoneController() {
   }
   // Say what was left out. A silent drop reads as "nothing happened there"
   // when reviewing a take, which is the one thing it must not look like.
+  if (deadWarned) {
+    console.error('  ⚠ this take narrated over a player that had stopped '
+      + 'responding — treat every number in it as stale');
+  }
   if (hushDropped || budgetDropped) {
     console.log(`  quiet: ${hushDropped} held back over a payoff, `
       + `${budgetDropped} over the ${NARRATION_PER_MIN}/min budget`);
