@@ -773,6 +773,40 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(cue_status(i, STATE["cues"]["cues"][i]))
 
     def do_POST(self):
+        m = re.match(r"^/api/cues/(\d+)/reroll$", self.path)
+        if m:
+            """Throw away this cue's audio and speak it again.
+
+            Both caches are content-addressed, so a plain re-speak returns the
+            same bad take forever: the assembled cue is keyed on the spoken text
+            and each sentence clip on itself. Nothing changes until the files
+            are gone. Removes the sentence clips too, because the truncation
+            happens inside a SENTENCE — keeping them would just reassemble the
+            same clipped words into a new container.
+            """
+            i = int(m.group(1))
+            with LOCK:
+                c = STATE["cues"]["cues"][i]
+                text = c.get("text") or ""
+                removed = 0
+                for v in selected_voices():
+                    p = cue_audio_path(text, v)
+                    if os.path.exists(p):
+                        os.remove(p)
+                        removed += 1
+                    for sent in ns.split_sentences(ns.for_speech(text)):
+                        h = hashlib.sha1(sent.encode()).hexdigest()[:10]
+                        sp = os.path.join(ns.sent_dir(ensure_profile(v)),
+                                          "s-%s.wav" % h)
+                        if os.path.exists(sp):
+                            os.remove(sp)
+                            removed += 1
+                c.pop("spoken", None)
+            print("[reroll] cue %d — purged %d file(s)" % (i, removed), flush=True)
+            for v in selected_voices():
+                build_cue_audio(text, v)
+            return self._json(cue_status(i, STATE["cues"]["cues"][i]))
+
         m = re.match(r"^/api/cues/(\d+)/voice$", self.path)
         if m:
             i = int(m.group(1))

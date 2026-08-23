@@ -293,6 +293,7 @@ function render() {
         <button data-speak="${i}">Speak</button>
         <button data-play="${i}" ${c.audio?'':'disabled'}>Play</button>
         <button data-seek="${i}">Seek</button>
+        <button data-reroll="${i}" title="Voicebox sometimes clips the last word. This throws the clip away and speaks it again — a plain re-speak would return the same cached take.">Re-roll</button>
         <span style="flex:1"></span>
         <button data-del="${i}" title="Remove this caption and its voice-over entirely">Delete</button>
       </div></div>`;
@@ -308,6 +309,14 @@ document.getElementById('list').addEventListener('click', async (e) => {
     if (!confirm('Remove the caption AND voice-over for cue ' + i + '?')) return;
     const r = await (await fetch('/api/cues/'+i, {method:'DELETE'})).json();
     cues[i] = r; render();
+    return;
+  }
+  if (t.dataset.reroll != null) {
+    const i = +t.dataset.reroll; t.textContent = '…'; t.disabled = true;
+    const r = await (await fetch('/api/cues/'+i+'/reroll', {method:'POST'})).json();
+    cues[i] = r; render();
+    // Play it straight back: the whole point is judging the new take by ear.
+    new Audio('/api/cues/'+i+'/audio?'+Date.now()).play();
     return;
   }
   if (t.dataset.speak != null) {
