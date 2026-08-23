@@ -520,17 +520,27 @@ window.__scribble = (o) => {
   const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
   const rx = o.rx || 60, ry = o.ry || 34;
   let d = '';
-  // Two loops, the second offset — the way you actually circle something twice.
-  for (let loop = 0; loop < 2; loop++) {
-    const spin = loop * 0.45;                 // start the 2nd pass elsewhere
-    const grow = 1 + loop * 0.08;
-    for (let i = 0; i <= 26; i++) {
-      const a = spin + (i / 26) * Math.PI * 2 * 1.06;   // >1 turn = overshoot
-      const j = 0.90 + rnd() * 0.20;
-      const x = o.x + Math.cos(a) * rx * grow * j;
-      const y = o.y + Math.sin(a) * ry * grow * j;
-      d += (i === 0 && loop === 0 ? 'M' : 'L') + x.toFixed(1) + ' ' + y.toFixed(1) + ' ';
-    }
+  /* ONE loop with a small overshoot — the gesture is "circled this", not
+   * "scribbled over it". Two passes read as the latter.
+   *
+   * The overshoot matters more than the wobble: a stroke that closes exactly on
+   * its start looks drawn by a machine, and one that carries past and crosses
+   * itself looks like a hand that did not stop in time. STEPS is high enough
+   * that the jitter reads as an unsteady line rather than a coarse polygon.
+   *
+   * The jitter tapers in over the first few points, because a pen is
+   * steadiest where it starts and drifts as it goes. */
+  const STEPS = 64;
+  const TURN = o.turn || 1.12;                // >1 = carry past the start
+  for (let i = 0; i <= STEPS; i++) {
+    const t = i / STEPS;
+    const a = -Math.PI * 0.55 + t * Math.PI * 2 * TURN;   // start upper-left
+    const ease = Math.min(1, t * 4);
+    const j = 1 + (rnd() - 0.5) * 0.13 * ease;
+    const drift = 1 + t * 0.05;               // the loop opens slightly
+    const x = o.x + Math.cos(a) * rx * j * drift;
+    const y = o.y + Math.sin(a) * ry * j * drift;
+    d += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ' ' + y.toFixed(1) + ' ';
   }
   /* The path goes inside a <g> so it can be MOVED without being redrawn.
    * Redrawing each frame would re-roll nothing (the jitter is seeded) but would
@@ -548,12 +558,17 @@ window.__scribble = (o) => {
   const len = p.getTotalLength();
   p.style.strokeDasharray = len;
   p.style.strokeDashoffset = len;
-  p.style.transition = 'stroke-dashoffset ' + (o.ms || 700) + 'ms ease-out';
+  p.style.transition = 'stroke-dashoffset ' + (o.ms || 780)
+    + 'ms cubic-bezier(.35,.05,.6,1)';
   requestAnimationFrame(() => { p.style.strokeDashoffset = '0'; });
 
-  if (o.anchor) {
-    window.__scribTrack(g, o.anchor, { x: o.x, y: o.y }, o.holdMs || 9000);
-  }
+  /* Every drawing expires; only an anchored one also MOVES.
+   *
+   * Expiry used to be a side effect of tracking, so an un-anchored scribble
+   * lived until something cleared the whole overlay — which is why an explicit
+   * clear existed, and why that clear could land in the middle of a wait and
+   * delete a circle that had not been drawn yet. */
+  window.__scribTrack(g, o.anchor || null, { x: o.x, y: o.y }, o.holdMs || 9000);
   return true;
 };
 
@@ -579,6 +594,7 @@ window.__scribTrack = (g, anchor, drawnAt, holdMs) => {
         if (a.g.parentNode) a.g.parentNode.removeChild(a.g);
         return false;
       }
+      if (!a.anchor) return true;          // expires, but never moves
       const at = window.__scribAnchorXY(a.anchor);
       if (!at) { a.g.style.display = 'none'; return true; }
       a.g.style.display = '';
@@ -649,8 +665,31 @@ window.__circleSeries = (label, tMs, opts) => {
   // off the right of the plot into empty page, pointing at nothing.
   const a = ch.chartArea || { left: 0, right: c.clientWidth, top: 0, bottom: c.clientHeight };
   const rx = (opts && opts.rx) || 60, ry = (opts && opts.ry) || 34;
-  const px = Math.min(Math.max(ch.scales.x.getPixelForValue(bx), a.left + rx), a.right - rx);
-  const py = Math.min(Math.max(ch.scales.y.getPixelForValue(best.y), a.top + ry), a.bottom - ry);
+  /* Reserve the DRAWN extent, not the nominal radius.
+   *
+   * The stroke is not an rx-by-ry ellipse: it opens by 5% as it goes round
+   * (drift) and carries up to ~6.5% of jitter, so it reaches about 1.12x. The
+   * clamp used to reserve rx exactly, which is fine in the middle of the plot
+   * and wrong at the live edge — precisely where a change that JUST happened
+   * sits. The circle then hung off the right of the chart into the page margin.
+   *
+   * Tracking pulls it back inside within a second or two as the data scrolls
+   * inward, but the first seconds are the ones being narrated. */
+  const REACH = 1.15;
+  const ex = rx * REACH, ey = ry * REACH;
+  const rawX = ch.scales.x.getPixelForValue(bx);
+
+  /* Not yet. A change that just happened sits against the live edge, where a
+   * whole circle cannot fit. Sliding it inward to make it fit would point it at
+   * a value the data does not have, so wait instead: the point scrolls inward
+   * at a few pixels a second and will clear the edge shortly. The caller
+   * re-tries. */
+  if (opts && opts.requireInside !== false) {
+    if (rawX > a.right - ex) return { waiting: true, shortBy: Math.round(rawX - (a.right - ex)) };
+    if (rawX < a.left + ex) return { waiting: false, gone: true };
+  }
+  const px = Math.min(Math.max(rawX, a.left + ex), a.right - ex);
+  const py = Math.min(Math.max(ch.scales.y.getPixelForValue(best.y), a.top + ey), a.bottom - ey);
   const x = rect.x + px, y = rect.y + py;
   /* Hand the DATA coordinate down, not just the pixel one. The pixel is where
    * the point is now; the anchor is what it means, and only the anchor survives
@@ -1907,10 +1946,67 @@ function phoneController() {
   if (process.env.ANNOTATE_TEST === '1') {
     await page.evaluate(() => window.__scrollTo('canvas'));
     await sleep(800);
-    const a = await page.evaluate((t) => window.__circleSeries('Fetching Variant', t, { seed: 7 }), Date.now());
-    const b = await page.evaluate((t) => window.__circleSeries('Displayed Variant', t, { seed: 21, color: '#a855f7' }), Date.now());
+    const HOLD = Number(process.env.ANNOTATE_WATCH_S || 12) * 1000 + 8000;
+    /* Retry while the point is still under the live edge. A change that has
+     * just happened needs ~16s to scroll far enough in for a whole circle to
+     * fit; calling once and reporting waiting:true says nothing about whether
+     * the wait ever resolves, which is the part worth testing. */
+    const circleWhenReady = async (label, seed, colour) => {
+      const stamp = Date.now();
+      for (let i = 0; i < 40; i += 1) {
+        const r = await page.evaluate(([l, t, sd, c, h]) =>
+          window.__circleSeries(l, t, { seed: sd, color: c, holdMs: h }),
+        [label, stamp, seed, colour, HOLD]);
+        if (!r || !r.waiting) return { ...r, waitedS: i };
+        if (i === 0) console.log(`  [circle] ${label}: waiting, ${r.shortBy}px short`);
+        await sleep(1000);
+      }
+      return { gaveUp: true };
+    };
+    const a = await circleWhenReady('Fetching Variant', 7, undefined);
+    const b = await circleWhenReady('Displayed Variant', 21, '#a855f7');
     console.log('  Fetching Variant  ->', JSON.stringify(a));
     console.log('  Displayed Variant ->', JSON.stringify(b));
+
+    /* Is it on the right VALUE, not just the right time?
+     *
+     * X was easy to confirm by eye — the marker line stays threaded through the
+     * circle as the chart scrolls. Y could be quietly wrong: getPixelForValue
+     * returns a perfectly plausible pixel for the WRONG point if the
+     * nearest-by-time search picked badly, and nothing in the picture would say
+     * so. So read the chart canvas at the circle's centre and compare it with
+     * the series' own colour. If the circle is on its line, the pixel under the
+     * middle of it is that line. */
+    for (const label of ['Fetching Variant', 'Displayed Variant']) {
+      const v = await page.evaluate((lbl) => {
+        const f = window.__chartByLabel(lbl);
+        if (!f) return null;
+        const { c, ch } = f;
+        const ds = ch.data.datasets.find((d) => d.label === lbl);
+        const pts = (ds.data || []).filter((q) => q && q.y != null);
+        if (!pts.length) return null;
+        const last = pts[pts.length - 1];
+        const bx = last.x instanceof Date ? last.x.getTime() : Number(last.x);
+        const px = Math.round(ch.scales.x.getPixelForValue(bx));
+        const py = Math.round(ch.scales.y.getPixelForValue(last.y));
+        // Sample a few pixels around the point: a 2px line will not always sit
+        // exactly on the rounded coordinate.
+        const g = c.getContext('2d');
+        const dpr = window.devicePixelRatio || 1;
+        let hit = null;
+        for (let dy = -3; dy <= 3 && !hit; dy += 1) {
+          const d = g.getImageData(Math.round(px * dpr),
+                                   Math.round((py + dy) * dpr), 1, 1).data;
+          if (d[3] > 40 && !(d[0] > 245 && d[1] > 245 && d[2] > 245)) {
+            hit = [d[0], d[1], d[2]];
+          }
+        }
+        return { want: ds.borderColor, got: hit, value: last.y, py };
+      }, label);
+      console.log(`  ${label} colour under centre: `
+        + `${v ? JSON.stringify(v.got) : 'n/a'} vs series ${v ? v.want : '?'} `
+        + `(value ${v ? v.value : '?'})`);
+    }
 
     /* Does it TRACK? Placement was never the hard part — the old circles were
      * placed correctly and then sat still while the chart scrolled out from
@@ -1929,6 +2025,11 @@ function phoneController() {
     const WATCH_S = Number(process.env.ANNOTATE_WATCH_S || 12);
     await sleep(WATCH_S * 1000);
     const t1shift = await readShift();
+    console.log(`  groups at t0: ${t0shift.length}, after ${WATCH_S}s: ${t1shift.length}`);
+    if (!t1shift.length) {
+      console.log('    the annotations were GONE by the second sample — they '
+        + 'expired before the watch finished, which says nothing about tracking');
+    }
     console.log(`  after ${WATCH_S}s:`);
     t1shift.forEach((v, i) => {
       const was = t0shift[i];
@@ -1942,6 +2043,10 @@ function phoneController() {
     const shot = path.join(OUT, 'annotate-test.png');
     await page.screenshot({ path: shot });
     console.log('  wrote', shot);
+    // Stop the device controller before returning. Without this the child
+    // process keeps the event loop alive and the test never exits — it looked
+    // like a hang in ctx.close(), which it was not.
+    if (phone) { try { phone.stop(); } catch (e) { /* already gone */ } }
     await ctx.close(); await browser.close();
     return;
   }
@@ -2464,7 +2569,32 @@ function phoneController() {
           const hit = await page.evaluate(
             ([label, t, s, col]) => window.__circleSeries(label, t, { seed: s, color: col }),
             [a.series, a.tMs, a.seed, a.color]);
-          if (!hit) console.error(`  ⚠ no "${a.series}" point to circle`);
+          if (hit) {
+            console.log(`  [circle] ${a.series}: `
+              + (hit.waiting ? `waiting, ${hit.shortBy}px short of clearing the edge`
+                : hit.gone ? 'scrolled off'
+                : `drawn at ${Math.round(hit.x)},${Math.round(hit.y)} value ${hit.value}`));
+          } else {
+            console.log(`  [circle] ${a.series}: no point found`);
+          }
+          if (hit && hit.waiting) {
+            /* Still under the live edge. Come back in a second — it is
+             * scrolling inward at a few pixels a second and there is no point
+             * drawing a circle whose right half falls off the plot. */
+            const tries = (a.tries || 0) + 1;
+            if (tries <= 40) {
+              pending.unshift({ ...a, at: now() + 1, tries });
+            } else {
+              console.error(`  ⚠ "${a.series}" never came far enough onto the `
+                + `chart to circle (short by ${hit.shortBy}px)`);
+            }
+            break;
+          }
+          if (hit && hit.gone) {
+            console.error(`  ⚠ "${a.series}" scrolled off before it could be circled`);
+          } else if (!hit) {
+            console.error(`  ⚠ no "${a.series}" point to circle`);
+          }
         } else if (a.kind === 'timeline') {
           await page.evaluate(() => window.__scrollTo('.vis-timeline'));
           await sleep(400);
@@ -2618,7 +2748,10 @@ function phoneController() {
         pending.push({ at: t + 0.5, kind: 'chart', series: 'Fetching Variant',
                        color: '#ef4444', tMs: Date.now(), seed });
         pending.push({ at: t + 4.5, kind: 'timeline', seed: seed + 11 });
-        pending.push({ at: t + 8.5, kind: 'clear' });
+        /* A backstop, not the mechanism — drawings expire on their own now.
+         * At +8.5s this used to fire while the circle was still waiting for its
+         * point to come onto the chart, deleting it before it existed. */
+        pending.push({ at: t + 40, kind: 'clear' });
       }
     }
 
