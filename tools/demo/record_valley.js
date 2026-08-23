@@ -1888,7 +1888,7 @@ function phoneController() {
   await say('Five lines on the bandwidth chart are worth knowing by name.', 5500);
 
   await tourSeries('Limit (rate_mbps)',
-    'The Limit is the network limit WE impose — enforced in the kernel on the '
+    'The Limit is the network limit we set — enforced in the kernel on the '
     + 'proxy, not a suggestion to the player. Everything else on this chart is '
     + 'the player reacting to it.', 9000);
 
