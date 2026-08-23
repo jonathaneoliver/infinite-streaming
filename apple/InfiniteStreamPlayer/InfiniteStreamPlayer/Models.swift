@@ -152,7 +152,7 @@ struct ContentItem: Decodable, Identifiable, Equatable, Hashable {
     var effectiveCodec: String {
         if !codec.isEmpty { return codec.lowercased() }
         let lower = name.lowercased()
-        let pattern = #"_p200_(h264|hevc|h265|av1)\b"#
+        let pattern = #"_p200_(h264|hevc|h265|av1)(?:_|$)"#
         if let r = lower.range(of: pattern, options: .regularExpression) {
             let match = lower[r]
             for c in ["h264", "hevc", "h265", "av1"] where match.contains(c) {
@@ -177,7 +177,7 @@ struct ContentItem: Decodable, Identifiable, Equatable, Hashable {
     }
 
     private static func stripCodecSuffix(_ name: String) -> String {
-        let pattern = #"_p200_(h264|hevc|h265|av1)(_\d{8}_\d{6})?$"#
+        let pattern = #"_p200_(h264|hevc|h265|av1)(_(?:xs|vod|\d+(?:\.\d+)?s))?(_\d{8}_\d{6})?$"#
         if let r = name.range(of: pattern, options: [.regularExpression, .caseInsensitive]) {
             return String(name[..<r.lowerBound])
         }

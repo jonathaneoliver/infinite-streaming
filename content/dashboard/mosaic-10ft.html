@@ -709,7 +709,7 @@
 
     function populateContentFilter() {
         const sel = document.getElementById('contentFilter');
-        const names = [...new Set(ALL_CONTENT.map(c => c.name.replace(/_h264|_hevc|_av1|_ts|_hw|_dash/g, '')))];
+        const names = [...new Set(ALL_CONTENT.map(c => c.name.replace(/_h264|_hevc|_av1|_ts|_hw|_dash|_xs|_vod/g, '')))];
         names.sort();
         for (const name of names) {
             const opt = document.createElement('option');
@@ -1225,7 +1225,7 @@
         localStorage.setItem('ismSelectedContent', fullName);
         localStorage.setItem('ismSelectedContentFull', fullName);
         const baseName = fullName
-            .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+            .replace(/_(?:h264|hevc|av1|dash|ts|hw)(?:_(?:xs|vod|\d+(?:\.\d+)?s))?$/i, '')
             .replace(/_\d{8}_\d{6}$/i, '');
         localStorage.setItem('ismSelectedContentBase', baseName);
         const url = streamUrlFor(item);

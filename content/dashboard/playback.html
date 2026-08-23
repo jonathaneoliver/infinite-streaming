@@ -604,7 +604,7 @@
                 if (fullMatch) return fullMatch.name;
             }
             const base = stored
-                .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+                .replace(/_(?:h264|hevc|av1|dash|ts|hw)(?:_(?:xs|vod|\d+(?:\.\d+)?s))?$/i, '')
                 .replace(/_\d{8}_\d{6}$/i, '');
             const candidates = availableContent.filter(item => item.name.includes(base));
             if (codecSelection === 'all') return candidates[0]?.name || stored;
@@ -635,7 +635,7 @@
                     localStorage.setItem('ismSelectedContentFull', candidate);
                     localStorage.setItem('ismSelectedContent', candidate);
                     const baseName = candidate
-                        .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+                        .replace(/_(?:h264|hevc|av1|dash|ts|hw)(?:_(?:xs|vod|\d+(?:\.\d+)?s))?$/i, '')
                         .replace(/_\\d{8}_\\d{6}$/i, '');
                     localStorage.setItem('ismSelectedContentBase', baseName);
                     if (window.ISMNav && typeof window.ISMNav.updateSelectedContentBadge === 'function') {
@@ -706,7 +706,7 @@
             localStorage.setItem('ismSelectedContentFull', content);
             localStorage.setItem('ismSelectedContent', content);
             const baseName = content
-                .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+                .replace(/_(?:h264|hevc|av1|dash|ts|hw)(?:_(?:xs|vod|\d+(?:\.\d+)?s))?$/i, '')
                 .replace(/_\\d{8}_\\d{6}$/i, '');
             localStorage.setItem('ismSelectedContentBase', baseName);
             if (window.ISMNav && typeof window.ISMNav.updateSelectedContentBadge === 'function') {
