@@ -532,6 +532,10 @@ window.__scribble = (o) => {
       d += (i === 0 && loop === 0 ? 'M' : 'L') + x.toFixed(1) + ' ' + y.toFixed(1) + ' ';
     }
   }
+  /* The path goes inside a <g> so it can be MOVED without being redrawn.
+   * Redrawing each frame would re-roll nothing (the jitter is seeded) but would
+   * restart the stroke reveal, and the shape must stay the shape it was. */
+  const g = document.createElementNS(NS, 'g');
   const p = document.createElementNS(NS, 'path');
   p.setAttribute('d', d);
   p.setAttribute('fill', 'none');
@@ -539,13 +543,73 @@ window.__scribble = (o) => {
   p.setAttribute('stroke-width', o.width || 3.5);
   p.setAttribute('stroke-linecap', 'round');
   p.setAttribute('stroke-linejoin', 'round');
-  svg.appendChild(p);
+  g.appendChild(p);
+  svg.appendChild(g);
   const len = p.getTotalLength();
   p.style.strokeDasharray = len;
   p.style.strokeDashoffset = len;
   p.style.transition = 'stroke-dashoffset ' + (o.ms || 700) + 'ms ease-out';
   requestAnimationFrame(() => { p.style.strokeDashoffset = '0'; });
+
+  if (o.anchor) {
+    window.__scribTrack(g, o.anchor, { x: o.x, y: o.y }, o.holdMs || 9000);
+  }
   return true;
+};
+
+/* Keep a drawing glued to its data point while the chart scrolls underneath.
+ *
+ * One rAF loop for every live annotation. Each frame it re-asks Chart.js where
+ * the anchored timestamp now sits and translates the group by the difference
+ * from where it was drawn. Chart.js is the authority on that mapping, so this
+ * follows a pan, a zoom and a rescale identically — there is no rate to measure
+ * and nothing to drift out of sync.
+ *
+ * Hides rather than removes when the point scrolls off the left of the plot:
+ * the window can be widened again, and a circle that reappears with its data is
+ * better than one that vanished permanently. */
+window.__scribLive = window.__scribLive || [];
+window.__scribTrack = (g, anchor, drawnAt, holdMs) => {
+  window.__scribLive.push({ g, anchor, drawnAt, until: Date.now() + holdMs });
+  if (window.__scribRAF) return;
+  const step = () => {
+    const now = Date.now();
+    window.__scribLive = window.__scribLive.filter((a) => {
+      if (now > a.until) {
+        if (a.g.parentNode) a.g.parentNode.removeChild(a.g);
+        return false;
+      }
+      const at = window.__scribAnchorXY(a.anchor);
+      if (!at) { a.g.style.display = 'none'; return true; }
+      a.g.style.display = '';
+      a.g.setAttribute('transform',
+        'translate(' + (at.x - a.drawnAt.x).toFixed(1) + ','
+        + (at.y - a.drawnAt.y).toFixed(1) + ')');
+      return true;
+    });
+    if (window.__scribLive.length) {
+      window.__scribRAF = requestAnimationFrame(step);
+    } else {
+      window.__scribRAF = null;
+    }
+  };
+  window.__scribRAF = requestAnimationFrame(step);
+};
+
+/* Where does an anchored data point sit RIGHT NOW, in viewport pixels?
+ * Returns null once it has scrolled out of the plot area. */
+window.__scribAnchorXY = (anchor) => {
+  const found = window.__chartByLabel(anchor.label);
+  if (!found) return null;
+  const { c, ch } = found;
+  if (!ch.scales || !ch.scales.x) return null;
+  const a = ch.chartArea;
+  if (!a) return null;
+  const px = ch.scales.x.getPixelForValue(anchor.bx);
+  if (px < a.left - 4 || px > a.right + 4) return null;   // scrolled away
+  const py = ch.scales.y.getPixelForValue(anchor.by);
+  const rect = c.getBoundingClientRect();
+  return { x: rect.x + px, y: rect.y + py };
 };
 window.__scribClear = () => {
   const s = document.getElementById('__pwscrib');
@@ -588,7 +652,11 @@ window.__circleSeries = (label, tMs, opts) => {
   const px = Math.min(Math.max(ch.scales.x.getPixelForValue(bx), a.left + rx), a.right - rx);
   const py = Math.min(Math.max(ch.scales.y.getPixelForValue(best.y), a.top + ry), a.bottom - ry);
   const x = rect.x + px, y = rect.y + py;
-  window.__scribble(Object.assign({ x, y }, opts || {}));
+  /* Hand the DATA coordinate down, not just the pixel one. The pixel is where
+   * the point is now; the anchor is what it means, and only the anchor survives
+   * the next scroll. */
+  window.__scribble(Object.assign(
+    { x, y, anchor: { label, bx, by: best.y } }, opts || {}));
   return { x, y, value: best.y };
 };
 
@@ -1843,7 +1911,34 @@ function phoneController() {
     const b = await page.evaluate((t) => window.__circleSeries('Displayed Variant', t, { seed: 21, color: '#a855f7' }), Date.now());
     console.log('  Fetching Variant  ->', JSON.stringify(a));
     console.log('  Displayed Variant ->', JSON.stringify(b));
-    await sleep(1500);
+
+    /* Does it TRACK? Placement was never the hard part — the old circles were
+     * placed correctly and then sat still while the chart scrolled out from
+     * under them. Sample the group's transform twice, some seconds apart: a
+     * tracking annotation accumulates a negative x translation at exactly the
+     * rate the plot is scrolling. Zero movement means it is stuck again. */
+    const readShift = () => page.evaluate(() => {
+      const g = document.querySelectorAll('#__pwscrib g');
+      return Array.from(g).map((el) => {
+        const m = /translate\(([-\d.]+),([-\d.]+)\)/.exec(el.getAttribute('transform') || '');
+        return m ? { dx: Number(m[1]), dy: Number(m[2]) } : null;
+      });
+    });
+    await sleep(1200);
+    const t0shift = await readShift();
+    const WATCH_S = Number(process.env.ANNOTATE_WATCH_S || 12);
+    await sleep(WATCH_S * 1000);
+    const t1shift = await readShift();
+    console.log(`  after ${WATCH_S}s:`);
+    t1shift.forEach((v, i) => {
+      const was = t0shift[i];
+      if (!v || !was) { console.log(`    [${i}] no transform — NOT tracking`); return; }
+      const moved = v.dx - was.dx;
+      console.log(`    [${i}] dx ${was.dx.toFixed(0)} -> ${v.dx.toFixed(0)} `
+        + `(${moved.toFixed(0)}px, ${(moved / WATCH_S).toFixed(1)}px/s) `
+        + (Math.abs(moved) > 2 ? 'TRACKING' : 'STUCK'));
+    });
+    await sleep(500);
     const shot = path.join(OUT, 'annotate-test.png');
     await page.screenshot({ path: shot });
     console.log('  wrote', shot);
