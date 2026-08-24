@@ -966,6 +966,32 @@ func (a *AppiumLauncher) findByAccessibilityID(ctx context.Context, sessID, id s
 	return elementID, nil
 }
 
+// PageSource returns the driver's view of the current screen (XCUITest serves
+// XML). Exposed so callers can discover which accessibility identifiers are
+// actually on screen rather than guessing one and interpreting a miss.
+//
+// The motivating case: ResumePlaybackClip falls back to the continue-watching
+// hero when its home-tile-<clip> never renders, so asking for the wrong id
+// plays the WRONG CONTENT and reports success. Dumping the ids turns that
+// silent substitution into something you can look at.
+func (a *AppiumLauncher) PageSource(ctx context.Context, d Device) (string, error) {
+	sessID := a.sessionID(d)
+	if sessID == "" {
+		return "", errors.New("PageSource: no active appium session for device")
+	}
+	raw, err := a.doRequest(ctx, "GET", "/session/"+sessID+"/source", nil)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return "", fmt.Errorf("decode page source: %w", err)
+	}
+	return resp.Value, nil
+}
+
 // clickElement issues the W3C click on a previously-found element.
 func (a *AppiumLauncher) clickElement(ctx context.Context, sessID, elementID string) error {
 	_, err := a.doRequest(ctx, "POST",

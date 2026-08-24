@@ -101,6 +101,35 @@ function writeYMaxStored(pid: string, v: number | undefined) {
   } catch { /* ignore */ }
 }
 
+/** Rolling-window choices offered in developer mode, in minutes.
+ *
+ *  Chosen against this system's actual cadence rather than round numbers: a
+ *  pattern step is 6s and a full valley cycle is 47 steps (~4.7 min), so
+ *    1m  ~10 steps  — individual shifts legible
+ *    2m  ~20 steps  — under half a cycle
+ *    5m             — ONE whole cycle, the arc the demo is about
+ *   10m             — two cycles (the historical default)
+ *   30m             — session overview
+ *  Below a minute the window is shorter than the buffer, and a variant change
+ *  cannot be seen reaching the screen at all. */
+export const FOCUS_CHOICES_MIN = [1, 2, 5, 10, 30] as const;
+
+const FOCUS_STORAGE_PREFIX = 'dashboard_v3_focus_ms:';
+function readFocusStored(pid: string): number | undefined {
+  try {
+    const raw = localStorage.getItem(FOCUS_STORAGE_PREFIX + pid);
+    if (!raw) return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  } catch { return undefined; }
+}
+function writeFocusStored(pid: string, v: number | undefined) {
+  try {
+    if (v == null) localStorage.removeItem(FOCUS_STORAGE_PREFIX + pid);
+    else localStorage.setItem(FOCUS_STORAGE_PREFIX + pid, String(v));
+  } catch { /* ignore */ }
+}
+
 function freshState(pid: string): ChartCoordinationState {
   return reactive<ChartCoordinationState>({
     expanded: readExpandedStored(),
@@ -111,7 +140,10 @@ function freshState(pid: string): ChartCoordinationState {
     cursorMs: null,
     cursorLabel: null,
     range: null,
-    liveSpan: DEFAULT_FOCUS_MS,
+    // Same reasoning as bandwidthYMax above: a chosen window should survive a
+    // reload and a new play. Seeding here is also what lets a recorder set it
+    // from localStorage before the page loads, instead of driving the gesture.
+    liveSpan: readFocusStored(pid) ?? DEFAULT_FOCUS_MS,
   });
 }
 
@@ -198,7 +230,13 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
    *  by explicit user gestures. Pass any positive number; <= 0
    *  reverts to DEFAULT_FOCUS_MS. */
   function setLiveSpan(ms: number) {
-    cur().liveSpan = ms > 0 ? ms : DEFAULT_FOCUS_MS;
+    const v = ms > 0 ? ms : DEFAULT_FOCUS_MS;
+    cur().liveSpan = v;
+    // Persist only an EXPLICIT choice. Alt+wheel lands on arbitrary spans and
+    // writing those would make every incidental zoom sticky across reloads.
+    if (FOCUS_CHOICES_MIN.some((m) => m * 60_000 === v)) {
+      writeFocusStored(playerIdRef.value, v);
+    }
   }
 
   /** Single Live-toggle handler used by chart toolbars, the lane
