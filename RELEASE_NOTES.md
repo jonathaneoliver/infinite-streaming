@@ -19,7 +19,8 @@ leaves an overnight sweep hunting for aberrations while you sleep.
 
 - **Critical fixes first.** Several v2.0.0 bugs produced silently *wrong*
   test results rather than visible failures — sessions running uncapped,
-  a blank Network Log, a wedge detector that could not fire. Read
+  freeze detection that could not fire during a freeze, and Android
+  receiving no shaping or fault injection at all. Read
   [Critical fixes](#critical-fixes) before the feature list.
 - **Device fleets.** An Appium Device Farm integration plus a
   device-aware concurrent test pool runs mixed fleets of iOS sims,
@@ -99,6 +100,12 @@ symptom was a silently *wrong result* rather than a visible failure —
 the worst failure mode for a measurement rig, because a corrupted run
 looks exactly like a good one.
 
+Every entry below was verified to **predate v2.0.0** by blaming the code
+each fix replaced back to its introducing commit and confirming that
+commit is an ancestor of the v2.0.0 tag. Regressions introduced *and*
+fixed inside this release cycle are deliberately excluded — they never
+reached you.
+
 ### Cross-session shaping clobber (#818)
 
 Concurrent sessions clobbered each other's `tc` caps. Every per-session
@@ -127,19 +134,25 @@ private clone, compare-and-swap, retry on conflict — with side effects
 hoisted out so they run exactly once on the committed result. Reads are
 clone-free via `sessionsView`.
 
-### Blank Network Log and PlayLog on existing deployments (#913)
+### Analytics schema never upgraded on an existing volume (#913)
 
 The schema was applied only through `docker-entrypoint-initdb.d`, which
-runs on first-ever boot with an empty data dir — on an existing volume
-it silently did nothing. Combined with ad-hoc `make analytics-migrate`
-changes that were never backported, even a **clean install** built
-`session_events` with 193 of its 200 columns.
+runs on first-ever boot with an empty data dir — **on an existing volume
+it silently did nothing.** Every schema change since then had to be
+applied by hand via `make analytics-migrate`, and any that wasn't
+backported to `01-schema.sql` never reached a rebuilt stack at all.
 
-The dashboard's timeseries query selects `control_revision`; the missing
-column raised `UNKNOWN_IDENTIFIER`, the backfill loop bailed on the
-first error, and **both the Network Log and the PlayLog rendered empty —
-while every container booted green and video played normally.** The
-container now re-applies the idempotent schema on every boot.
+That is why this upgrade needs no manual migration: the container now
+re-applies the idempotent schema on every boot, so a v2.0.0 volume picks
+up all ~20 new columns by itself.
+
+The drift this mechanism allowed is not theoretical — during development
+it removed `control_revision` from fresh installs, and because the
+dashboard's timeseries query selects that column, the missing identifier
+aborted the backfill loop and **both the Network Log and the PlayLog
+rendered empty while every container booted green and video played
+normally.** That particular incident was caught and fixed inside this
+cycle, but the mechanism that produced it was present in v2.0.0.
 
 ### Network rows unattributed at the start of every play (#914)
 
@@ -151,25 +164,21 @@ per-player Network Log. The proxy now stamps `player_id` from the
 request's query param, and the forwarder prefers that value and learns
 the session map from it.
 
-### Network label chips never rendered (#560)
-
-The v2 `/network_requests` read API wasn't projecting the `labels`
-column at all, so no network-row chip ever rendered. This silently
-affected the **pre-existing** `http_5xx`, `slow_segment`, `fault_*`,
-`*transport_*` and `*request_retry` labels — not just newly added ones.
-
-### The wedge detector could not detect a wedge (#706)
+### Freeze detection could not fire during a freeze (#706)
 
 `checkFrozenState()` was invoked only from
-`AVPlayer.addPeriodicTimeObserver`, whose callback fires off the
+`AVPlayer.addPeriodicTimeObserver`, whose callback runs off the
 **playback** clock — it goes silent the instant the playhead stops,
-which is exactly when a freeze begins.
+which is exactly when a freeze begins. Both the observer wiring and the
+frozen detector shipped in v2.0.0, so on that release `frozen_count`
+could never be raised by a real freeze.
 
 Characterized live on a real iPhone: a textbook hard wedge (`-12880`
 "removing variants", playhead frozen for ~5 minutes, no recovery when
-the cap lifted back to 60 Mbps) reported `frozen_count: 0` and no
-`wedge_detected`. Detection is now driven by a wall-clock timer, so it
-keeps running precisely when playback does not.
+the cap lifted back to 60 Mbps) reported `frozen_count: 0`. Detection is
+now driven by a wall-clock timer, so it keeps running precisely when
+playback does not — which also makes the new #703 wedge detector
+(see §10) able to fire at all.
 
 ### Android bypassed the proxy entirely (#863)
 
