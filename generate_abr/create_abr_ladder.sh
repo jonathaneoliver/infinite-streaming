@@ -42,10 +42,30 @@ Required Arguments:
 
 Optional Arguments:
   --output <name>         Base name for output files (default: derived from input filename)
-  --output-dir <path>     Base output directory (default: current working directory)
+  --output-dir <path>     Base output directory. Default: \$ENCODE_STAGING_DIR if
+                          set in the environment, else the current working directory.
                           Relative paths are resolved from where you run the script
   --resume-package-from <path> Resume from existing temp dir with encoded files
                          (expects files like h264_360p.mp4/hevc_360p.mp4 and optional audio.mp4)
+  --ladder <legacy|apple|apple-uniq|apple-uniq-live-xs>
+                         Encoding ladder (default: apple-uniq-live-xs).
+                         apple-uniq-live-xs = the FLEXIBLE delivery profile and
+                                  the Encoder project's default of the same name.
+                                  apple-uniq rungs with H.264 extended to 4K (12
+                                  rungs per codec), peak capped at 100% of target
+                                  with a 0.25x buffer so the delivered peak stays
+                                  <=1.25x avg even when go-live re-chops the one
+                                  encode to 1s. Tags output '_xs'.
+                         legacy = the repo's tuned 1.5x ladder (unchanged).
+                         apple  = faithful Apple HLS Authoring Spec bitrates:
+                                  H.264 capped at 1080p (9 rungs), HEVC to 2160p
+                                  (12 rungs), AV1 mirrors HEVC. Multi-rung per
+                                  resolution. See issue #868.
+                         apple-uniq = same Apple bitrates, but same-resolution
+                                  rungs are given unique (stepped-down) 16:9
+                                  resolutions so each rung is distinguishable by
+                                  decoded frame size. Res is always <= apple's;
+                                  removes apple's same-res quality steps. #871.
   --codec <hevc|h264|av1|both|all> Codec selection (default: both)
   --no-hevc              Skip HEVC encoding (same as --codec h264)
   --no-h264              Skip H.264 encoding (same as --codec hevc)
@@ -53,6 +73,19 @@ Optional Arguments:
   --time <seconds>       Limit video duration (e.g., --time 30 for 30 seconds)
   --force-software       Force software encoding (default behavior)
   --force-hardware       Force hardware encoding via VideoToolbox (macOS)
+  --output-tag <tag>     Profile tag appended after the codec in the output
+                         directory name (<stem>_p200_<codec>_<tag>). Defaults to
+                         'xs' on the apple-uniq-live-xs ladder, none otherwise.
+                         Pass an empty string to force no tag.
+  --single-pass          Disable two-pass (two-pass is ON by default). Faster,
+                         but a tight VBV buffer makes single-pass x265 undershoot
+                         the target average by ~17%.
+  --two-pass             Two-pass software encode (libx264/libx265). Pass 1
+                         profiles complexity; pass 2 distributes bits to hit the
+                         -b:v target accurately while the tight VBV still holds
+                         peaks flat. Fixes the single-pass x265 average undershoot
+                         under a small bufsize (~17% low on HEVC — see #868).
+                         Roughly doubles encode time. Ignored for hardware/AV1.
   --max-res <resolution> Limit maximum resolution tier encoded
                          Valid: 360p, 540p, 720p, 1080p, 1440p, 2160p
                          Example: --max-res 1080p (skips 1440p, 2160p)
@@ -71,6 +104,11 @@ Optional Arguments:
   --segment-duration <s> Segment duration in seconds (default: 6)
   --partial-duration <s> Partial/GOP duration in seconds (default: 0.2)
   --gop-duration <s>     GOP/keyframe duration in seconds (default: 1.0)
+  --byteranges           KEEP the .byteranges sidecar files. They are ALWAYS
+                         generated (the HLS manifests inject the inline
+                         #EXT-X-PART partials by reading them); default prunes the
+                         files after injection. Pass this to retain them as the
+                         documented fallback for consumers that read sidecars.
   --bitrate-override-hevc <map> Override HEVC ladder kbps by resolution (e.g. 360p=1367,540p=2617)
   --bitrate-override-h264 <map> Override H264 ladder kbps by resolution (e.g. 360p=1421,540p=2762)
   --vmaf-lookup-csv <p>  CSV from crf_bandwidth_sweep.py for estimated VMAF burn-in
@@ -126,6 +164,9 @@ Examples:
   
   # Force hardware encoding (VideoToolbox, macOS)
   $0 --input video.mp4 --force-hardware
+
+  # Two-pass HEVC for accurate average bitrate (honest AVERAGE-BANDWIDTH)
+  $0 --input video.mp4 --codec hevc --two-pass
   
   # Enable padding with black frames
   $0 --input video.mp4 --padding
@@ -177,6 +218,13 @@ CODEC_SELECTION_EXPLICIT=false
 TIME_LIMIT=""  # Optional duration limit in seconds
 FORCE_SOFTWARE=false  # Force software encoding (disables hardware)
 FORCE_HARDWARE=false  # Force hardware encoding (VideoToolbox)
+# Two-pass software encode (libx264/libx265) for an accurate average bitrate.
+# ON by default, matching the Encoder project (_DEFAULT_PASSES = 2 for every
+# codec). This is not a quality nicety: the 0.25x VBV bufsize is tight enough
+# that single-pass x265 undershoots the -b:v target by ~17%, so the ladder's
+# published bitrates are only truthful with two passes. Disable with
+# --single-pass when iterating and the exact average does not matter.
+TWO_PASS=true
 HLS_FORMAT="fmp4"  # fmp4, ts, both
 PAD_TO_SEGMENT_BOUNDARY=false  # Padding is disabled by default
 MAX_RESOLUTION_HEIGHT=""  # Optional max resolution limit (e.g., "1080p")
@@ -191,6 +239,29 @@ DEFAULT_VMAF_LOOKUP_CSV="${SCRIPT_DIR}/crf_bandwidth_sweep_newer.csv"
 RESUME_PACKAGE_FROM=""    # Optional path to existing abr_ladder temp dir
 RESUME_MODE=false
 FRAGMENT_PARSER_SCRIPT="" # Auto-detected path to parse_fmp4_fragments.py
+# .byteranges sidecars. Phase 6 ALWAYS generates them: Phase 7's HLS manifests
+# inject the inline #EXT-X-PART partials by READING these sidecars
+# (create_hls_manifests.py:load_byteranges), so the partials only exist if the
+# sidecars were generated first. (#762/#765 gated Phase 6 off by default on the
+# mistaken premise that the sidecars "go unread" — silently dropping EVERY
+# partial from new content. Fixed.) This flag now only controls whether the
+# sidecar FILES are KEPT afterward: default false prunes them once Phase 7 has
+# consumed them (go-live serves the inline #EXT-X-PART, its authoritative
+# source); --byteranges retains them as the fallback for direct-sidecar readers.
+EMIT_BYTERANGES=false
+# Encoding ladder selection (#868/#871): `legacy` = the repo's tuned 1.5x
+# ladder (ALL_RESOLUTION_TIERS, default, unchanged); `apple` = a faithful
+# reproduction of Apple's HLS Authoring Spec bitrates (per-codec, multi-rung);
+# `apple-uniq` = Apple's bitrates with same-res rungs stepped to unique 16:9
+# resolutions (<= apple's) so each rung is distinguishable by decoded frame
+# size — see the APPLE_LADDER_*_UNIQ arrays for the rationale + trade-off.
+#
+# Default is `apple-uniq-live-xs`, the FLEXIBLE delivery profile: it matches the
+# Encoder project's own default of the same name, so content produced here and
+# content produced there are the same shape and can be compared. Its VBV is what
+# makes one encode safe for go-live to re-chop into LL/2s/6s — see
+# ladder_maxrate_percent() below.
+LADDER="apple-uniq-live-xs"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -243,6 +314,19 @@ while [[ $# -gt 0 ]]; do
             FORCE_HARDWARE=true
             shift
             ;;
+        --two-pass)
+            TWO_PASS=true
+            shift
+            ;;
+        --single-pass)
+            TWO_PASS=false
+            shift
+            ;;
+        --output-tag)
+            # Explicit wins over the ladder default; --output-tag "" forces none.
+            OUTPUT_TAG="$2"
+            shift 2
+            ;;
         --no-padding)
             PAD_TO_SEGMENT_BOUNDARY=false
             shift
@@ -277,6 +361,14 @@ while [[ $# -gt 0 ]]; do
             GOP_DURATION="$2"
             shift 2
             ;;
+        --byteranges)
+            EMIT_BYTERANGES=true
+            shift
+            ;;
+        --ladder)
+            LADDER="$2"
+            shift 2
+            ;;
         --bitrate-override-hevc)
             BITRATE_OVERRIDE_HEVC="$2"
             shift 2
@@ -308,6 +400,22 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Validate ladder selection (#868)
+case "$LADDER" in
+    legacy|apple|apple-uniq|apple-uniq-live-xs) ;;
+    *)
+        echo "Error: --ladder must be 'legacy', 'apple', 'apple-uniq' or 'apple-uniq-live-xs' (got '$LADDER')"
+        usage
+        exit 1
+        ;;
+esac
+
+# Two-pass only applies to software libx264/libx265. Hardware VideoToolbox and
+# AV1 (libsvtav1) fall back to single pass; warn so the flag isn't assumed active.
+if [[ "$TWO_PASS" == "true" ]] && [[ "$FORCE_HARDWARE" == "true" ]]; then
+    echo "Warning: --two-pass is ignored under --force-hardware (VideoToolbox is single-pass); use software encoding for two-pass."
+fi
 
 # Validate required arguments
 if [[ "$RESUME_MODE" == "false" ]] && [[ -z "$INPUT_FILE" ]]; then
@@ -395,18 +503,20 @@ if [[ -n "$VMAF_LOOKUP_CSV" ]]; then
     fi
 fi
 
-# Validate max-res if provided
+# Validate max-res if provided.
+#
+# PARSED, not looked up against a fixed list. The old list held only the six
+# legacy heights, so it rejected every non-standard rung the apple-uniq ladders
+# introduced (234p / 396p / 468p / 504p / 594p / 954p / 1800p) — including
+# heights in the DEFAULT ladder, which made `--max-res 954p` an error even
+# though 954p is a real rung. A height that matches no rung simply filters
+# nothing out, which is the same harmless outcome as capping above the source.
 if [[ -n "$MAX_RESOLUTION_HEIGHT" ]]; then
-    case "$MAX_RESOLUTION_HEIGHT" in
-        360p|540p|720p|1080p|1440p|2160p)
-            # Valid resolution
-            ;;
-        *)
-            echo "Error: --max-res must be one of: 360p, 540p, 720p, 1080p, 1440p, 2160p"
-            echo "Example: --max-res 1080p"
-            exit 1
-            ;;
-    esac
+    if [[ ! "$MAX_RESOLUTION_HEIGHT" =~ ^[0-9]+p$ ]]; then
+        echo "Error: --max-res must be a height like 360p, 720p, 1080p, 2160p (got '$MAX_RESOLUTION_HEIGHT')"
+        echo "Example: --max-res 1080p"
+        exit 1
+    fi
 fi
 
 ################################################################################
@@ -435,7 +545,65 @@ SKIP_AUDIO=false
 SEGMENT_DURATION="${SEGMENT_DURATION:-6}"    # Target segment duration in seconds
 PARTIAL_DURATION="${PARTIAL_DURATION:-0.2}"  # Partial fragment duration in seconds
 GOP_DURATION="${GOP_DURATION:-1.0}"          # GOP/keyframe duration in seconds
-MAXRATE_PERCENT="${MAXRATE_PERCENT:-124}"    # Peak cap percentage of target bitrate (<125% guidance)
+# Peak cap as a percentage of the target bitrate, defaulted PER LADDER.
+#
+# The peak a window of length T can actually reach is:
+#
+#     peak/avg  =  MAXRATE_PERCENT/100  +  BUFSIZE_MULT / T
+#
+# go-live re-chops ONE encode into LL/2s/6s, so the number that matters is not
+# the peak at the packaged segment length but the peak at the SHORTEST length it
+# will ever be served at. At the historical 124% the delivered peak ran
+# 1.28x (6s) / 1.37x (2s) / 1.49x (1s) — drifting across variants and breaching
+# Apple's 1.25x live/linear bound at 1s, which means an encode that measured fine
+# at 6s misrepresented itself once re-segmented.
+#
+# apple-uniq-live-xs drops the ceiling to 100% and spends the difference on
+# buffer instead: 1.04x (6s) / 1.13x (2s) / 1.25x (1s). The 1s case now lands
+# EXACTLY on the bound and every longer variant sits below it, which is what
+# makes a single encode safe to re-segment — the "flexible" in the profile name.
+# Measured peaks never reached 86-92% of the old maxrate at any rung, so the
+# ceiling was never the binding constraint; trading it for buffer costs nothing.
+ladder_maxrate_percent() {
+    case "$LADDER" in
+        apple-uniq-live-xs) echo 100 ;;
+        *)                  echo 124 ;;
+    esac
+}
+MAXRATE_PERCENT="${MAXRATE_PERCENT:-$(ladder_maxrate_percent)}"
+
+# Profile tag appended AFTER the codec in the output directory name:
+#     <stem>_p200_<codec>[_<tag>]        e.g. myclip_p200_h264_xs
+#
+# This names the DELIVERY PROFILE, not the codec or the ladder. The Encoder
+# project derives it from whether the profile pins a segment length: unpinned
+# (re-choppable) yields `xs`, a pinned one yields `6s`/`2s`/`1s`. This script
+# always carries a SEGMENT_DURATION, so that exact signal does not exist here —
+# what carries the meaning is the ladder, and only apple-uniq-live-xs is the
+# flexible profile. A future natively-segmented ladder should set its own tag
+# (`--output-tag 1s`) rather than inherit this one.
+#
+# The legacy ladders stay untagged so existing content keeps its current names;
+# only new apple-uniq-live-xs encodes gain a suffix.
+ladder_output_tag() {
+    case "$LADDER" in
+        apple-uniq-live-xs) echo "xs" ;;
+        *)                  echo "" ;;
+    esac
+}
+[[ -z "${OUTPUT_TAG+x}" ]] && OUTPUT_TAG="$(ladder_output_tag)"
+# Pre-rendered "_<tag>" (empty when untagged) so call sites stay readable.
+TAG_SFX=""
+[[ -n "$OUTPUT_TAG" ]] && TAG_SFX="_${OUTPUT_TAG}"
+BUFSIZE_MULT="${BUFSIZE_MULT:-0.25}"         # VBV bufsize = this × target kbps. The peak a window of length T can reach is maxrate + bufsize/T, so a large buffer lets SHORT segments burst well above maxrate (1× → a 1s window could hit ~2.2× target, a 6s window ~1.4×). 0.25× keeps the peak within ~1.5× at 1s and ~1.28× at 6s, so avg/peak stay far more consistent across 1s/2s/6s segment sizes (#868). History: 2× → 1× (#829, June) → 0.25×. Trade-off: a tighter buffer gives the encoder less room to spend bits on hard/high-motion scenes (watch VMAF on the very low rungs, where 0.25× can drop below a single I-frame). May be fractional; computed via awk below since bash $(()) is integer-only.
+# AAC-LC stereo 48kHz on every rung, matching the Encoder project's audio.py.
+# 96k, not the historical 192k: audio rides on EVERY rung, so at the new bottom
+# rung (145 kbps video) a 192k track is larger than the picture it accompanies —
+# the low rungs stopped representing the bitrate they advertise. Halving it also
+# widens the effective video budget at the bottom of the ladder, which is where
+# the combined-bandwidth rung spacing is tightest.
+AAC_BITRATE="${AAC_BITRATE:-96k}"
+AAC_SAMPLE_RATE="${AAC_SAMPLE_RATE:-48000}"
 MULTI_DURATION_LCM=12           # LCM of 2s/4s/6s for multi-duration support
 PADDING_THRESHOLD=0.1           # Minimum remainder to trigger padding (seconds)
 PADDING_WARNING_RATIO=50        # Warn if padding exceeds this % of total duration
@@ -472,17 +640,265 @@ NC='\033[0m' # No Color
 
 # All possible resolution tiers (filtered based on source resolution)
 # Format: name:width:height:bitrate_h265_kbps:bitrate_h264_kbps:bitrate_av1_kbps:preset:fontsize_tc:fontsize_label:x:y_tc:y_label
+# 1.5x ladder (#811): adjacent rungs are ~1.55x apart on the COMBINED (video+audio)
+# bandwidth the PLAYER actually selects on — inside Apple's 1.5-2x adjacent-tier
+# guideline, with margin so real encodes clear 1.5x. Replaces the old ~1.4x
+# geometric-fill ladder (#762), which sat below 1.5x and let AVPlayer avg-key one
+# rung up then starve on that rung's peak under a tight cap (the over-selection
+# wedge). The geometric series is built on COMBINED avg (video target = combined -
+# ~200k audio) PER CODEC: the ~constant audio compresses low-end ratios, so
+# targeting video-only bitrate at 1.5x is NOT enough — it yields only ~1.4x
+# combined at the bottom (caught by generate_abr/ladder_audit.py). Floor anchored
+# at the prior 360p (h264 600 / h265 300); the 4K top floats up (~26 Mbps h264) to
+# hold >=1.5x across 9 rungs. 648p + 1800p dropped. Verify with ladder_audit.py
+# (expect no tight_spacing; all adjacent COMBINED ratios in [1.5, 2.0]).
+#
+# proxy `allowed_variants: alternating_variants` still works: it keeps every 2nd
+# rung of the bandwidth-sorted ladder (top + bottom retained) — now 9 -> 5 rungs
+# (360p/540p/900p/1296p/2160p, ~2.4x apart) instead of the old 11 -> 6. The skip
+# is generic (no fixed fill/star pattern), so it tracks whatever ladder is here;
+# the prior byte-for-byte "original 6" coupling is intentionally retired.
+# Format: name:width:height:h265_kbps:h264_kbps:av1_kbps:preset:fs_tc:fs_label:x:y_tc:y_label
 declare -a ALL_RESOLUTION_TIERS=(
     "360p:640:360:300:600:300:medium:20:16:10:10:30"
-    "540p:960:540:900:1200:900:medium:24:20:10:10:34"
-    "720p:1280:720:1500:2400:1500:medium:28:24:10:10:38"
-    "1080p:1920:1080:4500:5000:4500:medium:36:32:10:10:45"
-    "1440p:2560:1440:7500:11000:7500:medium:42:36:10:10:52"
-    "2160p:3840:2160:15000:21700:15000:medium:54:48:10:10:64"
+    "432p:768:432:575:1040:575:medium:22:18:10:10:32"
+    "540p:960:540:1001:1722:1001:medium:24:20:10:10:34"
+    "720p:1280:720:1662:2779:1662:medium:28:24:10:10:38"
+    "900p:1600:900:2686:4418:2686:medium:32:28:10:10:41"
+    "1080p:1920:1080:4273:6957:4273:medium:36:32:10:10:45"
+    "1296p:2304:1296:6734:10894:6734:medium:39:34:10:10:48"
+    "1440p:2560:1440:10547:16995:10547:medium:42:36:10:10:52"
+    "2160p:3840:2160:16458:26453:16458:medium:54:48:10:10:64"
 )
 
-# Will be populated after source detection
-declare -a PROFILES=()
+# ---------------------------------------------------------------------------
+# Apple HLS Authoring Specification ladders (#868)
+# ---------------------------------------------------------------------------
+# Faithful reproduction of Apple's recommended 16:9 SDR AVERAGE bitrates from
+# https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices
+# (Tables 2-1 / 2-2, spec rev 2025-06-26). Selected with `--ladder apple`.
+# Unlike the legacy ladder these are PER-CODEC and MULTI-RUNG:
+#   - H.264/AVC tops out at 1080p (9 rungs) — Apple publishes no H.264 above
+#     1080p; HEVC is the codec for 1440p/2160p.
+#   - HEVC extends to 2160p (12 rungs).
+#   - Several resolutions carry more than one rung (e.g. two 1080p, three 540p).
+#   - AV1 reuses the HEVC targets — Apple publishes no AV1 bitrate table and
+#     AV1 ~= HEVC efficiency (documented assumption, not from Apple).
+# Peak stays MAXRATE_PERCENT (<=125%), inside Apple's VOD peak<200%-of-average
+# rule. Burn-in font params follow the legacy tiers; 234p/432p interpolated.
+# Format: width:height:bitrate_kbps:preset:fontsize_tc:fontsize_label:x:y_tc:y_label
+declare -a APPLE_LADDER_H264=(
+    "416:234:145:medium:16:12:8:8:24"
+    "640:360:365:medium:20:16:10:10:30"
+    "768:432:730:medium:22:18:10:10:32"
+    "768:432:1100:medium:22:18:10:10:32"
+    "960:540:2000:medium:24:20:10:10:34"
+    "1280:720:3000:medium:28:24:10:10:38"
+    "1280:720:4500:medium:28:24:10:10:38"
+    "1920:1080:6000:medium:36:32:10:10:45"
+    "1920:1080:7800:medium:36:32:10:10:45"
+)
+declare -a APPLE_LADDER_HEVC=(
+    "640:360:145:medium:20:16:10:10:30"
+    "768:432:300:medium:22:18:10:10:32"
+    "960:540:600:medium:24:20:10:10:34"
+    "960:540:900:medium:24:20:10:10:34"
+    "960:540:1600:medium:24:20:10:10:34"
+    "1280:720:2400:medium:28:24:10:10:38"
+    "1280:720:3400:medium:28:24:10:10:38"
+    "1920:1080:4500:medium:36:32:10:10:45"
+    "1920:1080:5800:medium:36:32:10:10:45"
+    "2560:1440:8100:medium:42:36:10:10:52"
+    "3840:2160:11600:medium:54:48:10:10:64"
+    "3840:2160:16800:medium:54:48:10:10:64"
+)
+# AV1 mirrors the HEVC targets (see note above).
+declare -a APPLE_LADDER_AV1=("${APPLE_LADDER_HEVC[@]}")
+
+# Apple-uniq ladder (#868/#871): Apple's EXACT bitrates, but every rung is
+# given a UNIQUE resolution per codec so a same-bitrate-different-quality rung
+# is distinguishable downstream by decoded frame size alone (AVPlayer's
+# `presentationSize` / player_metrics `video_resolution` are resolution-only,
+# so the plain `apple` ladder's 3x540p etc. collapse to one indistinguishable
+# lane on the dashboard's displayed-variant chart, timeline and iOS tile).
+# Disambiguation rule:
+#   - Bitrates are byte-identical to APPLE_LADDER_* above. ABR selection is
+#     bandwidth-driven, so throughput-vs-rung behaviour is unchanged.
+#   - Within each duplicate-resolution group the HIGHEST-bitrate rung keeps
+#     Apple's exact resolution; the redundant lower rungs step DOWN in clean
+#     16:9 increments (>=36px height, clearing the ~16px coded-vs-display /
+#     mod-16 decode-noise floor). Every proposed resolution is therefore <=
+#     Apple's original for that rung, so the selectable set at any viewport is
+#     a superset-or-equal of Apple's — never more restrictive.
+#   - Result: both ladders are strictly monotonic in bitrate AND resolution.
+# Trade-off: this REMOVES Apple's same-resolution quality steps (e.g. HEVC
+# 540p@600/900/1600 becomes 468p/504p/540p), so every upshift now also crosses
+# a resolution boundary. Use `--ladder apple` when same-res laddering is the
+# behaviour under study; `--ladder apple-uniq` when per-rung telemetry matters.
+# Fill-in rung sizing (Encoder project #91/#134, ported here). The fill-ins were
+# originally made by stepping DOWN slightly from the standard height
+# (1080->1044, 2160->2124), which kept nearly the same pixel count while taking
+# the LOWER bitrate of the pair — starved rungs: 2124p carried 97% of 4K's
+# pixels on 70% of its bitrate. Each fill-in is now sized so its bits-per-pixel
+# matches the standard rung it was stepped down from. BITRATES ARE UNCHANGED;
+# only the frame size moves, so the rung stops being a near-duplicate of its
+# pair and becomes a real intermediate step:
+#     684p  1216x684  ->  594p  1056x594
+#    1044p  1856x1044 ->  954p  1696x954
+#    2124p  3776x2124 -> 1800p  3200x1800
+# Heights are multiples of 18, which is what makes them EXACTLY 16:9 and forces
+# width to a multiple of 32. One height per tier, IDENTICAL across h264/hevc/av1
+# so a rung is identifiable by frame size and codecs compare apples-to-apples.
+# The LOW fill-ins (h264 396p, hevc 468p/504p) are deliberately NOT re-sized:
+# bits-per-pixel is not constant down a ladder (it climbs through the low rungs
+# before plateauing), so matching a low fill-in to a plateau value would drag it
+# into the ramp.
+declare -a APPLE_LADDER_H264_UNIQ=(
+    "416:234:145:medium:16:12:8:8:24"
+    "640:360:365:medium:20:16:10:10:30"
+    "704:396:730:medium:22:18:10:10:32"
+    "768:432:1100:medium:22:18:10:10:32"
+    "960:540:2000:medium:24:20:10:10:34"
+    "1056:594:3000:medium:24:20:10:10:34"
+    "1280:720:4500:medium:28:24:10:10:38"
+    "1696:954:6000:medium:32:28:10:10:41"
+    "1920:1080:7800:medium:36:32:10:10:45"
+)
+declare -a APPLE_LADDER_HEVC_UNIQ=(
+    "640:360:145:medium:20:16:10:10:30"
+    "768:432:300:medium:22:18:10:10:32"
+    "832:468:600:medium:24:20:10:10:34"
+    "896:504:900:medium:24:20:10:10:34"
+    "960:540:1600:medium:24:20:10:10:34"
+    "1056:594:2400:medium:24:20:10:10:34"
+    "1280:720:3400:medium:28:24:10:10:38"
+    "1696:954:4500:medium:32:28:10:10:41"
+    "1920:1080:5800:medium:36:32:10:10:45"
+    "2560:1440:8100:medium:42:36:10:10:52"
+    "3200:1800:11600:medium:48:42:10:10:58"
+    "3840:2160:16800:medium:54:48:10:10:64"
+)
+declare -a APPLE_LADDER_AV1_UNIQ=("${APPLE_LADDER_HEVC_UNIQ[@]}")
+
+# apple-uniq H.264 extended to 4K, used by the `apple-uniq-live-xs` ladder.
+# Apple's spec caps H.264 at 1080p and puts HEVC above, but high-bitrate 4K
+# H.264 is still wanted for maximum player compatibility (AVPlayer will not
+# play our DASH, and H.264 is the universal decode path). The three extra rungs
+# mirror the HEVC-uniq top RESOLUTIONS (1440/1800/2160) with H.264-appropriate
+# (higher) bitrates, so h264/hevc/av1 stay rung-count-parallel at 12.
+declare -a APPLE_LADDER_H264_UNIQ_FULL=(
+    "${APPLE_LADDER_H264_UNIQ[@]}"
+    "2560:1440:13500:medium:42:36:10:10:52"
+    "3200:1800:19000:medium:48:42:10:10:58"
+    "3840:2160:27000:medium:54:48:10:10:64"
+)
+declare -a APPLE_LADDER_HEVC_UNIQ_FULL=("${APPLE_LADDER_HEVC_UNIQ[@]}")
+declare -a APPLE_LADDER_AV1_UNIQ_FULL=("${APPLE_LADDER_HEVC_UNIQ[@]}")
+
+# Per-codec encoding variant lists — the SINGLE source of truth for both the
+# encode and packaging phases, populated after source detection. Each row
+# carries a UNIQUE `label` that doubles as the temp-file stem, output
+# subdirectory, playlist path and report key. For the legacy ladder (one rung
+# per resolution per codec) the label is just the resolution name (e.g.
+# `1080p`), so legacy output is byte-for-byte unchanged. For the apple ladder,
+# duplicate-resolution rungs get an ordinal suffix (`1080p_1`, `1080p_2`) so
+# they never collide.
+# Format: width:height:bitrate_kbps:label:preset:fontsize_tc:fontsize_label:x:y_tc:y_label
+declare -a VARIANTS_HEVC=()
+declare -a VARIANTS_H264=()
+declare -a VARIANTS_AV1=()
+
+# True if $codec is enabled by the current --codec selection.
+codec_enabled() {
+    case "$1" in
+        hevc) [[ "$CODEC_SELECTION" == "hevc" || "$CODEC_SELECTION" == "both" || "$CODEC_SELECTION" == "all" ]] ;;
+        h264) [[ "$CODEC_SELECTION" == "h264" || "$CODEC_SELECTION" == "both" || "$CODEC_SELECTION" == "all" ]] ;;
+        av1)  [[ "$CODEC_SELECTION" == "av1"  || "$CODEC_SELECTION" == "all" ]] ;;
+        *) return 1 ;;
+    esac
+}
+
+# Echo the VARIANTS_* array name backing a codec (for use with `local -n`).
+codec_variant_array() {
+    case "$1" in
+        hevc) echo "VARIANTS_HEVC" ;;
+        h264) echo "VARIANTS_H264" ;;
+        av1)  echo "VARIANTS_AV1" ;;
+    esac
+}
+
+# Total number of variants selected across all enabled codecs (#868).
+total_selected_variants() {
+    echo $(( ${#VARIANTS_HEVC[@]} + ${#VARIANTS_H264[@]} + ${#VARIANTS_AV1[@]} ))
+}
+
+# Emit the FULL labeled rung list for a codec under the active $LADDER, BEFORE
+# any source-resolution / max-res / file-existence filtering. Bitrate overrides
+# are baked in here; labels are assigned over the full ladder so that the normal
+# and resume paths derive IDENTICAL labels for whichever rungs they keep.
+# Output rows: width:height:bitrate:label:preset:fontsize_tc:fontsize_label:x:y_tc:y_label
+enumerate_codec_rungs() {
+    local codec="$1"
+    local override_map=""
+    case "$codec" in
+        hevc) override_map="$BITRATE_OVERRIDE_HEVC" ;;
+        h264) override_map="$BITRATE_OVERRIDE_H264" ;;
+    esac
+
+    # Gather source rungs as width:height:bitrate:preset:ftc:flbl:x:ytc:ylbl
+    local -a src=()
+    if [[ "$LADDER" == apple* ]]; then
+        # apple            -> APPLE_LADDER_*            (#868/#871)
+        # apple-uniq       -> APPLE_LADDER_*_UNIQ
+        # apple-uniq-live-xs -> APPLE_LADDER_*_UNIQ_FULL (h264 climbs to 4K)
+        local apple_suffix=""
+        [[ "$LADDER" == "apple-uniq" ]] && apple_suffix="_UNIQ"
+        [[ "$LADDER" == "apple-uniq-live-xs" ]] && apple_suffix="_UNIQ_FULL"
+        local apple_arr=""
+        case "$codec" in
+            hevc) apple_arr="APPLE_LADDER_HEVC${apple_suffix}" ;;
+            h264) apple_arr="APPLE_LADDER_H264${apple_suffix}" ;;
+            av1)  apple_arr="APPLE_LADDER_AV1${apple_suffix}" ;;
+        esac
+        local -n _al="$apple_arr"
+        src=("${_al[@]}")
+    else
+        local tier _name _w _h _b265 _b264 _bav1 _preset _ftc _flbl _x _ytc _ylbl _b
+        for tier in "${ALL_RESOLUTION_TIERS[@]}"; do
+            IFS=':' read -r _name _w _h _b265 _b264 _bav1 _preset _ftc _flbl _x _ytc _ylbl <<< "$tier"
+            case "$codec" in hevc) _b="$_b265" ;; h264) _b="$_b264" ;; av1) _b="$_bav1" ;; esac
+            src+=("$_w:$_h:$_b:$_preset:$_ftc:$_flbl:$_x:$_ytc:$_ylbl")
+        done
+    fi
+
+    # Bake overrides + count resolution occurrences for label disambiguation.
+    local -a baked=()
+    local -A rescount=()
+    local row width height b preset ftc flbl x ytc ylbl res_name
+    for row in "${src[@]}"; do
+        IFS=':' read -r width height b preset ftc flbl x ytc ylbl <<< "$row"
+        res_name="$(get_resolution_name "$width")"
+        b="$(resolve_bitrate_override "$override_map" "$res_name" "$b")"
+        baked+=("$width:$height:$b:$preset:$ftc:$flbl:$x:$ytc:$ylbl")
+        rescount["$res_name"]=$(( ${rescount["$res_name"]:-0} + 1 ))
+    done
+
+    # Assign labels: bare res_name when unique within the codec, res_name_N when
+    # duplicated. Legacy ladders have unique resolutions => label == res_name.
+    local -A residx=()
+    local label
+    for row in "${baked[@]}"; do
+        IFS=':' read -r width height b preset ftc flbl x ytc ylbl <<< "$row"
+        res_name="$(get_resolution_name "$width")"
+        if (( ${rescount["$res_name"]} > 1 )); then
+            residx["$res_name"]=$(( ${residx["$res_name"]:-0} + 1 ))
+            label="${res_name}_${residx["$res_name"]}"
+        else
+            label="$res_name"
+        fi
+        echo "$width:$height:$b:$label:$preset:$ftc:$flbl:$x:$ytc:$ylbl"
+    done
+}
 
  # Temp directory will be created after output directories are derived
 
@@ -635,6 +1051,28 @@ get_resolution_name() {
         640)  echo "360p" ;;
         2560) echo "1440p" ;;
         3840) echo "2160p" ;;
+        416)  echo "234p" ;;  # Apple ladder lowest H.264 rung (#868)
+        # Distinct-height fill rungs (#762): each 16:9 width is unique, so the
+        # width→height-name map stays unambiguous. Without these the `*)`
+        # fallback would misname e.g. 768 as "768p" instead of "432p".
+        768)  echo "432p" ;;
+        1152) echo "648p" ;;
+        1600) echo "900p" ;;
+        2304) echo "1296p" ;;
+        3200) echo "1800p" ;;
+        # apple-uniq stepped-down rungs (#868/#871): unique 16:9 widths.
+        704)  echo "396p" ;;
+        832)  echo "468p" ;;
+        896)  echo "504p" ;;
+        1056) echo "594p" ;;
+        1696) echo "954p" ;;
+        # Retired apple-uniq fill widths. The rungs were re-sized (see the
+        # APPLE_LADDER_*_UNIQ comment) because they were starved, but the map
+        # entries stay so `--resume-package-from` can still name variants from a
+        # temp dir encoded before the re-size.
+        1216) echo "684p" ;;
+        1856) echo "1044p" ;;
+        3776) echo "2124p" ;;
         *)    echo "${width}p" ;;
     esac
 }
@@ -642,11 +1080,25 @@ get_resolution_name() {
 get_resolution_height() {
     local res_name=$1
     case "$res_name" in
+        "234p") echo "234" ;;
         "360p") echo "360" ;;
+        "396p") echo "396" ;;
+        "432p") echo "432" ;;
+        "468p") echo "468" ;;
+        "504p") echo "504" ;;
         "540p") echo "540" ;;
+        "594p") echo "594" ;;
+        "648p") echo "648" ;;
+        "684p") echo "684" ;;
         "720p") echo "720" ;;
+        "900p") echo "900" ;;
+        "954p") echo "954" ;;
+        "1044p") echo "1044" ;;
         "1080p") echo "1080" ;;
+        "1296p") echo "1296" ;;
         "1440p") echo "1440" ;;
+        "1800p") echo "1800" ;;
+        "2124p") echo "2124" ;;
         "2160p") echo "2160" ;;
         *) echo "0" ;;
     esac
@@ -958,27 +1410,31 @@ prepare_resume_packaging_context() {
         exit 1
     fi
 
-    PROFILES=()
-    for tier in "${ALL_RESOLUTION_TIERS[@]}"; do
-        IFS=':' read -r name width height bitrate_h265 bitrate_h264 bitrate_av1 preset fontsize_tc fontsize_label x y_tc y_label <<< "$tier"
-        local include_tier=true
-        if [[ "$need_hevc" == "true" ]] && [[ ! -s "$TEMP_DIR/hevc_${name}.mp4" ]]; then
-            include_tier=false
-        fi
-        if [[ "$need_h264" == "true" ]] && [[ ! -s "$TEMP_DIR/h264_${name}.mp4" ]]; then
-            include_tier=false
-        fi
-        if [[ "$need_av1" == "true" ]] && [[ ! -s "$TEMP_DIR/av1_${name}.mp4" ]]; then
-            include_tier=false
-        fi
-        if [[ "$include_tier" == "true" ]]; then
-            PROFILES+=("$width:$height:$bitrate_h265:$bitrate_h264:$bitrate_av1:$preset:$fontsize_tc:$fontsize_label:$x:$y_tc:$y_label")
-            log_success "Resume tier detected: $name"
-        fi
+    # Rebuild the per-codec variant lists by matching the active ladder's
+    # labeled rungs against the encoded MP4s on disk (#868). Labels are derived
+    # from the ladder, so they match whatever the encode phase wrote — but that
+    # means --ladder must match the ladder used to encode (see usage note).
+    VARIANTS_HEVC=()
+    VARIANTS_H264=()
+    VARIANTS_AV1=()
+    local codec rung r_label detected=0
+    for codec in hevc h264 av1; do
+        codec_enabled "$codec" || continue
+        local -n _out="$(codec_variant_array "$codec")"
+        while IFS= read -r rung; do
+            [[ -z "$rung" ]] && continue
+            IFS=':' read -r _ _ _ r_label _ <<< "$rung"
+            if [[ -s "$TEMP_DIR/${codec}_${r_label}.mp4" ]]; then
+                _out+=("$rung")
+                log_success "Resume variant detected: ${codec}_${r_label}"
+                ((detected++)) || true
+            fi
+        done < <(enumerate_codec_rungs "$codec")
     done
 
-    if [[ ${#PROFILES[@]} -eq 0 ]]; then
-        log_error "No common tiers found for selected codec mode '$CODEC_SELECTION' in $TEMP_DIR"
+    if [[ $detected -eq 0 ]]; then
+        log_error "No encoded variants matching ladder '$LADDER' for codec mode '$CODEC_SELECTION' in $TEMP_DIR"
+        log_error "(if the encode used a different --ladder, pass the same one to resume)"
         exit 1
     fi
 
@@ -997,11 +1453,10 @@ prepare_resume_packaging_context() {
     elif [[ "$need_av1" == "true" ]]; then
         probe_codec="av1"
     fi
-    local first_profile="${PROFILES[0]}"
-    IFS=':' read -r first_w _ _ _ _ _ _ _ _ _ _ <<< "$first_profile"
-    local first_res
-    first_res="$(get_resolution_name "$first_w")"
-    local probe_file="$TEMP_DIR/${probe_codec}_${first_res}.mp4"
+    local -n _probe_arr="$(codec_variant_array "$probe_codec")"
+    local first_label
+    IFS=':' read -r _ _ _ first_label _ <<< "${_probe_arr[0]}"
+    local probe_file="$TEMP_DIR/${probe_codec}_${first_label}.mp4"
     if [[ -f "$probe_file" ]]; then
         SOURCE_WIDTH=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of default=noprint_wrappers=1:nokey=1 "$probe_file" 2>/dev/null)
         SOURCE_HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of default=noprint_wrappers=1:nokey=1 "$probe_file" 2>/dev/null)
@@ -1019,7 +1474,7 @@ prepare_resume_packaging_context() {
 
     log "Resume source directory: $TEMP_DIR"
     log "Resume codec selection: $CODEC_SELECTION"
-    log "Resume tiers selected: ${#PROFILES[@]}"
+    log "Resume variants selected: $(total_selected_variants)"
     echo ""
 }
 
@@ -1042,8 +1497,15 @@ derive_output_directories() {
     
     # Determine output directory
     if [[ -z "$OUTPUT_BASE_DIR" ]]; then
-        # Default to current working directory (where script was run from)
-        OUTPUT_BASE_DIR="$PWD/$base_name"
+        if [[ -n "$ENCODE_STAGING_DIR" ]]; then
+            # Default to the configured staging dir (#868) so encodes don't
+            # scatter across whatever CWD they were launched from. Export
+            # ENCODE_STAGING_DIR (e.g. in ~/.zshrc) to set it.
+            OUTPUT_BASE_DIR="${ENCODE_STAGING_DIR%/}/$base_name"
+        else
+            # No staging dir configured: current working directory.
+            OUTPUT_BASE_DIR="$PWD/$base_name"
+        fi
     else
         # User specified directory - make it absolute if relative
         if [[ "$OUTPUT_BASE_DIR" != /* ]]; then
@@ -1056,19 +1518,19 @@ derive_output_directories() {
     
     # Handle existing directories with timestamp
     if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "hevc" ]]; then
-        OUTPUT_DIR_HEVC="${OUTPUT_BASE_DIR}_hevc"
+        OUTPUT_DIR_HEVC="${OUTPUT_BASE_DIR}_hevc${TAG_SFX}"
         if [[ -d "$OUTPUT_DIR_HEVC" ]]; then
             TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-            OUTPUT_DIR_HEVC="${OUTPUT_BASE_DIR}_hevc_${TIMESTAMP}"
+            OUTPUT_DIR_HEVC="${OUTPUT_BASE_DIR}_hevc${TAG_SFX}_${TIMESTAMP}"
             log_warn "Output directory exists, using: $(basename $OUTPUT_DIR_HEVC)"
         fi
         mkdir -p "$OUTPUT_DIR_HEVC"
         
         # Create TS package directory if TS format is requested
         if [[ "$HLS_FORMAT" == "ts" ]] || [[ "$HLS_FORMAT" == "both" ]]; then
-            OUTPUT_DIR_HEVC_TS="${OUTPUT_BASE_DIR}_hevc_ts"
+            OUTPUT_DIR_HEVC_TS="${OUTPUT_BASE_DIR}_hevc_ts${TAG_SFX}"
             if [[ -d "$OUTPUT_DIR_HEVC_TS" ]]; then
-                OUTPUT_DIR_HEVC_TS="${OUTPUT_BASE_DIR}_hevc_ts_${TIMESTAMP}"
+                OUTPUT_DIR_HEVC_TS="${OUTPUT_BASE_DIR}_hevc_ts${TAG_SFX}_${TIMESTAMP}"
                 log_warn "Output directory exists, using: $(basename $OUTPUT_DIR_HEVC_TS)"
             fi
             mkdir -p "$OUTPUT_DIR_HEVC_TS"
@@ -1076,19 +1538,19 @@ derive_output_directories() {
     fi
     
     if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "h264" ]]; then
-        OUTPUT_DIR_H264="${OUTPUT_BASE_DIR}_h264"
+        OUTPUT_DIR_H264="${OUTPUT_BASE_DIR}_h264${TAG_SFX}"
         if [[ -d "$OUTPUT_DIR_H264" ]]; then
             TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-            OUTPUT_DIR_H264="${OUTPUT_BASE_DIR}_h264_${TIMESTAMP}"
+            OUTPUT_DIR_H264="${OUTPUT_BASE_DIR}_h264${TAG_SFX}_${TIMESTAMP}"
             log_warn "Output directory exists, using: $(basename $OUTPUT_DIR_H264)"
         fi
         mkdir -p "$OUTPUT_DIR_H264"
         
         # Create TS package directory if TS format is requested
         if [[ "$HLS_FORMAT" == "ts" ]] || [[ "$HLS_FORMAT" == "both" ]]; then
-            OUTPUT_DIR_H264_TS="${OUTPUT_BASE_DIR}_h264_ts"
+            OUTPUT_DIR_H264_TS="${OUTPUT_BASE_DIR}_h264_ts${TAG_SFX}"
             if [[ -d "$OUTPUT_DIR_H264_TS" ]]; then
-                OUTPUT_DIR_H264_TS="${OUTPUT_BASE_DIR}_h264_ts_${TIMESTAMP}"
+                OUTPUT_DIR_H264_TS="${OUTPUT_BASE_DIR}_h264_ts${TAG_SFX}_${TIMESTAMP}"
                 log_warn "Output directory exists, using: $(basename $OUTPUT_DIR_H264_TS)"
             fi
             mkdir -p "$OUTPUT_DIR_H264_TS"
@@ -1096,10 +1558,10 @@ derive_output_directories() {
     fi
 
     if [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "av1" ]]; then
-        OUTPUT_DIR_AV1="${OUTPUT_BASE_DIR}_av1"
+        OUTPUT_DIR_AV1="${OUTPUT_BASE_DIR}_av1${TAG_SFX}"
         if [[ -d "$OUTPUT_DIR_AV1" ]]; then
             TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-            OUTPUT_DIR_AV1="${OUTPUT_BASE_DIR}_av1_${TIMESTAMP}"
+            OUTPUT_DIR_AV1="${OUTPUT_BASE_DIR}_av1${TAG_SFX}_${TIMESTAMP}"
             log_warn "Output directory exists, using: $(basename $OUTPUT_DIR_AV1)"
         fi
         mkdir -p "$OUTPUT_DIR_AV1"
@@ -1422,12 +1884,13 @@ check_prerequisites() {
     fi
     log_success "Font available"
 
-    # Check fMP4 fragment parser helper (used in Phase 6).
+    # Check fMP4 fragment parser helper (Phase 6 — ALWAYS runs; the inline
+    # #EXT-X-PART partials depend on its .byteranges output).
     if detect_fragment_parser_script; then
         log_success "Fragment parser: $FRAGMENT_PARSER_SCRIPT"
     else
         log_warn "Fragment parser script not found (parse_fmp4_fragments.py)"
-        log_warn "Phase 6 (.byteranges generation) will be skipped"
+        log_warn "Phase 6 will be skipped — LL-HLS #EXT-X-PART partials will be MISSING"
     fi
     
     echo ""
@@ -1661,7 +2124,7 @@ apply_padding() {
             -filter_complex "[0:v]${video_filter}[v];[0:a]${audio_filter}[a]" \
             -map "[v]" -map "[a]" \
             -c:v libx264 -preset slow -crf 18 -g 48 -keyint_min 48 -sc_threshold 0 \
-            -c:a aac -b:a 192k -ac 2 \
+            -c:a aac -b:a "$AAC_BITRATE" -ac 2 \
             -movflags +faststart \
             "$padded_file"
     else
@@ -1753,51 +2216,114 @@ select_resolution_tiers() {
     log "Selecting appropriate encoding tiers..."
     echo ""
     
+    log "Encoding ladder: ${LADDER}"
+
     local selected_count=0
     local skipped_by_maxres=0
     local max_res_height=99999  # Default: no limit
-    
+
     # Convert max-res to numeric height if specified
     if [[ -n "$MAX_RESOLUTION_HEIGHT" ]]; then
         max_res_height=$(get_resolution_height "$MAX_RESOLUTION_HEIGHT")
     fi
-    
-    for tier in "${ALL_RESOLUTION_TIERS[@]}"; do
-        IFS=':' read -r name width height bitrate_h265 bitrate_h264 bitrate_av1 preset fontsize_tc fontsize_label x y_tc y_label <<< "$tier"
-        
-        # Check source resolution limit (existing logic)
-        if [[ $width -gt $SOURCE_WIDTH ]] || [[ $height -gt $SOURCE_HEIGHT ]]; then
-            log "  ✗ $name (${width}×${height}) - exceeds source resolution"
-            continue
-        fi
-        
-        # Check max-res limit (NEW)
-        if [[ $height -gt $max_res_height ]]; then
-            log "  ✗ $name (${width}×${height}) - exceeds max-resolution limit"
-            ((skipped_by_maxres++)) || true
-            continue
-        fi
-        
-        # Tier is within both limits - include it
-        PROFILES+=("$width:$height:$bitrate_h265:$bitrate_h264:$bitrate_av1:$preset:$fontsize_tc:$fontsize_label:$x:$y_tc:$y_label")
-        log_success "✓ $name (${width}×${height})"
-        ((selected_count++)) || true
+
+    # Reset per-codec variant lists, then build each enabled codec's rungs from
+    # the active ladder, filtering by source resolution and the --max-res limit.
+    VARIANTS_HEVC=()
+    VARIANTS_H264=()
+    VARIANTS_AV1=()
+
+    local codec rung width height bitrate label preset ftc flbl x ytc ylbl
+    for codec in hevc h264 av1; do
+        codec_enabled "$codec" || continue
+        local -n _out="$(codec_variant_array "$codec")"
+        while IFS= read -r rung; do
+            [[ -z "$rung" ]] && continue
+            IFS=':' read -r width height bitrate label preset ftc flbl x ytc ylbl <<< "$rung"
+
+            # Source resolution limit
+            if [[ $width -gt $SOURCE_WIDTH ]] || [[ $height -gt $SOURCE_HEIGHT ]]; then
+                log "  ✗ ${codec} ${label} (${width}×${height}) - exceeds source resolution"
+                continue
+            fi
+            # --max-res limit
+            if [[ $height -gt $max_res_height ]]; then
+                log "  ✗ ${codec} ${label} (${width}×${height}) - exceeds max-resolution limit"
+                ((skipped_by_maxres++)) || true
+                continue
+            fi
+
+            _out+=("$width:$height:$bitrate:$label:$preset:$ftc:$flbl:$x:$ytc:$ylbl")
+            log_success "✓ ${codec} ${label} (${width}×${height} @ ${bitrate}kbps)"
+            ((selected_count++)) || true
+        done < <(enumerate_codec_rungs "$codec")
     done
-    
+
     echo ""
-    log_success "Selected $selected_count resolution tiers for encoding"
-    
+    log_success "Selected $selected_count variants for encoding (ladder: ${LADDER})"
+
     # Add info message to report if max-res limited encoding
     if [[ -n "$MAX_RESOLUTION_HEIGHT" ]] && [[ $skipped_by_maxres -gt 0 ]]; then
-        ENCODING_INFOS+=("Maximum resolution limited to ${MAX_RESOLUTION_HEIGHT} (${skipped_by_maxres} higher tiers skipped)")
+        ENCODING_INFOS+=("Maximum resolution limited to ${MAX_RESOLUTION_HEIGHT} (${skipped_by_maxres} higher variants skipped)")
     fi
-    
+
     echo ""
 }
 
 ################################################################################
 # Phase 3: Encode Variants
 ################################################################################
+
+# Two-pass software encode for libx264/libx265 (#868). Single-pass x265 under a
+# tight 0.25x VBV bufsize undershoots the -b:v target by ~17% because it has no
+# buffer to bank bits for complex scenes, which sags the achieved average well
+# below the advertised AVERAGE-BANDWIDTH and packs the ladder rungs together.
+# Two-pass fixes this: pass 1 profiles scene complexity into a stats file (muxed
+# output discarded via -f null), pass 2 distributes bits to hit the average
+# accurately while the SAME maxrate/bufsize VBV keeps peaks flat. Relies on bash
+# dynamic scope to read encode_variant's locals (filter, bitrate_kbps,
+# bufsize_kbps, preset, output_file, label). Args: <vcodec> <params_key>
+# <base_params> <vtag>.
+encode_two_pass_sw() {
+    local vcodec="$1"       # libx265 | libx264
+    local params_key="$2"   # x265-params | x264-params
+    local base_params="$3"  # keyint=...:scenecut=0:open-gop=0[:pools=...]
+    local vtag="$4"         # hvc1 | avc1
+    local maxrate_k="$((bitrate_kbps * MAXRATE_PERCENT / 100))k"
+    local passlog="$TEMP_DIR/${codec}_${label}_2pass.log"
+
+    log "  Two-pass: pass 1/2 (complexity analysis, output discarded)"
+    ffmpeg -i "$MEZZANINE" \
+           -vf "$filter" \
+           -c:v "$vcodec" \
+           -b:v "${bitrate_kbps}k" \
+           -maxrate "$maxrate_k" \
+           -bufsize "${bufsize_kbps}k" \
+           -preset "$preset" \
+           -threads 0 \
+           "-${params_key}" "${base_params}:pass=1:stats=${passlog}" \
+           -pix_fmt yuv420p \
+           -an \
+           -f null - \
+           -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+
+    log "  Two-pass: pass 2/2 (final encode to target average)"
+    ffmpeg -i "$MEZZANINE" \
+           -vf "$filter" \
+           -c:v "$vcodec" \
+           -b:v "${bitrate_kbps}k" \
+           -maxrate "$maxrate_k" \
+           -bufsize "${bufsize_kbps}k" \
+           -preset "$preset" \
+           -threads 0 \
+           "-${params_key}" "${base_params}:pass=2:stats=${passlog}" \
+           -tag:v "$vtag" \
+           -pix_fmt yuv420p \
+           -an \
+           -movflags empty_moov+default_base_moof -frag_duration 1000000 \
+           "$output_file" \
+           -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+}
 
 encode_variant() {
     local codec=$1
@@ -1810,9 +2336,12 @@ encode_variant() {
     local x_offset=$8
     local y_tc=$9
     local y_label=${10}
-    
+    # Unique per-rung label (#868). Defaults to res_name for the legacy ladder
+    # (one rung per resolution) so output paths are byte-for-byte unchanged; the
+    # apple ladder passes e.g. "1080p_2" to disambiguate same-resolution rungs.
     local res_name=$(get_resolution_name $width)
-    local output_file="$TEMP_DIR/${codec}_${res_name}.mp4"
+    local label=${11:-$res_name}
+    local output_file="$TEMP_DIR/${codec}_${label}.mp4"
     
     # Build labels
     local codec_upper=$(echo $codec | tr '[:lower:]' '[:upper:]')
@@ -2001,7 +2530,13 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
     fi
     
     START_TIME=$(date +%s)
-    
+
+    # VBV buffer size in kbits. BUFSIZE_MULT may be fractional (e.g. 0.25), which
+    # bash $(()) cannot multiply — compute with awk (rounded). Used by every
+    # encoder branch below in place of the old integer $((bitrate_kbps*MULT)).
+    local bufsize_kbps
+    bufsize_kbps=$(awk -v b="$bitrate_kbps" -v m="$BUFSIZE_MULT" 'BEGIN{printf "%d", (b*m)+0.5}')
+
     # Execute encoding with encoder-specific commands
     if [ "$codec" = "hevc" ]; then
         if [ "$encoder_type" = "hardware" ]; then
@@ -2012,7 +2547,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -allow_sw 1 \
                    -b:v "${bitrate_kbps}k" \
                    -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-                   -bufsize "$((bitrate_kbps * 2))k" \
+                   -bufsize "${bufsize_kbps}k" \
                    -g "$KEYINT" \
                    -force_key_frames "expr:gte(n,n_forced*$KEYINT)" \
                    -tag:v hvc1 \
@@ -2021,14 +2556,19 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -movflags empty_moov+default_base_moof -frag_duration 1000000 \
                    "$output_file" \
                    -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+        elif [ "$TWO_PASS" = true ]; then
+            # libx265 software, two-pass (accurate average — see encode_two_pass_sw)
+            encode_two_pass_sw libx265 x265-params \
+                "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0:pools=+:frame-threads=0" \
+                hvc1
         else
-            # libx265 software with bitrate control
+            # libx265 software with bitrate control (single pass)
             ffmpeg -i "$MEZZANINE" \
                    -vf "$filter" \
                    -c:v libx265 \
                    -b:v "${bitrate_kbps}k" \
                    -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-                   -bufsize "$((bitrate_kbps * 2))k" \
+                   -bufsize "${bufsize_kbps}k" \
                    -preset "$preset" \
                    -threads 0 \
                    -x265-params "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0:pools=+:frame-threads=0" \
@@ -2048,7 +2588,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -allow_sw 1 \
                    -b:v "${bitrate_kbps}k" \
                    -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-                   -bufsize "$((bitrate_kbps * 2))k" \
+                   -bufsize "${bufsize_kbps}k" \
                    -g "$KEYINT" \
                    -force_key_frames "expr:gte(n,n_forced*$KEYINT)" \
                    -tag:v avc1 \
@@ -2057,14 +2597,19 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -movflags empty_moov+default_base_moof -frag_duration 1000000 \
                    "$output_file" \
                    -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+        elif [ "$TWO_PASS" = true ]; then
+            # libx264 software, two-pass (accurate average — see encode_two_pass_sw)
+            encode_two_pass_sw libx264 x264-params \
+                "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0" \
+                avc1
         else
-            # libx264 software with bitrate control
+            # libx264 software with bitrate control (single pass)
             ffmpeg -i "$MEZZANINE" \
                    -vf "$filter" \
                    -c:v libx264 \
                    -b:v "${bitrate_kbps}k" \
                    -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-                   -bufsize "$((bitrate_kbps * 2))k" \
+                   -bufsize "${bufsize_kbps}k" \
                    -preset "$preset" \
                    -threads 0 \
                    -x264-params "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0" \
@@ -2083,7 +2628,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                -preset 8 \
                -b:v "${bitrate_kbps}k" \
                -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-               -bufsize "$((bitrate_kbps * 2))k" \
+               -bufsize "${bufsize_kbps}k" \
                -g "$KEYINT" \
                -force_key_frames "expr:gte(n,n_forced*$KEYINT)" \
                -svtav1-params "keyint=${KEYINT}:scd=0" \
@@ -2112,7 +2657,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
     local encode_speed=$(awk -v mez="$MEZ_DURATION" -v dur="$DURATION" 'BEGIN {printf "%.2f", mez/dur}')
     
     # Track variant stats for report
-    local variant_key="${codec_upper}_${res_name}"
+    local variant_key="${codec_upper}_${label}"
     VARIANT_ENCODE_TIMES["$variant_key"]="$DURATION"
     VARIANT_FILE_SIZES["$variant_key"]="$FILE_SIZE"
     VARIANT_SPEEDS["$variant_key"]="${encode_speed}x"
@@ -2123,41 +2668,22 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
 
 encode_all_variants() {
     print_header "Phase 3: Encoding Video Variants"
-    
-    # Calculate variant count
-    local codec_multiplier=1
-    if [[ "$CODEC_SELECTION" == "both" ]]; then
-        codec_multiplier=2
-    elif [[ "$CODEC_SELECTION" == "all" ]]; then
-        codec_multiplier=3
-    fi
-    local variant_count=$((${#PROFILES[@]} * codec_multiplier))
-    log "Encoding ${#PROFILES[@]} quality levels × $codec_multiplier codec(s) = $variant_count variants"
-    echo ""
-    
-    # Parse profiles and encode
-    for profile in "${PROFILES[@]}"; do
-        IFS=':' read -r width height bitrate_h265 bitrate_h264 bitrate_av1 preset fontsize_tc fontsize_label x y_tc y_label <<< "$profile"
-        local res_name=$(get_resolution_name "$width")
-        local bitrate_h265_effective
-        local bitrate_h264_effective
-        bitrate_h265_effective=$(resolve_bitrate_override "$BITRATE_OVERRIDE_HEVC" "$res_name" "$bitrate_h265")
-        bitrate_h264_effective=$(resolve_bitrate_override "$BITRATE_OVERRIDE_H264" "$res_name" "$bitrate_h264")
-        
-        # Encode HEVC variant if requested
-        if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "hevc" ]]; then
-            encode_variant "hevc" "$width" "$height" "$bitrate_h265_effective" "$preset" "$fontsize_tc" "$fontsize_label" "$x" "$y_tc" "$y_label"
-        fi
-        
-        # Encode H.264 variant if requested
-        if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "h264" ]]; then
-            encode_variant "h264" "$width" "$height" "$bitrate_h264_effective" "$preset" "$fontsize_tc" "$fontsize_label" "$x" "$y_tc" "$y_label"
-        fi
 
-        # Encode AV1 variant if requested
-        if [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "av1" ]]; then
-            encode_variant "av1" "$width" "$height" "$bitrate_av1" "$preset" "$fontsize_tc" "$fontsize_label" "$x" "$y_tc" "$y_label"
-        fi
+    # Per-codec variant lists are the source of truth; bitrate overrides were
+    # already baked in during select_resolution_tiers, so encode each rung's
+    # carried bitrate directly.
+    local total_variants=$(( ${#VARIANTS_HEVC[@]} + ${#VARIANTS_H264[@]} + ${#VARIANTS_AV1[@]} ))
+    log "Encoding $total_variants variants across selected codec(s) (ladder: ${LADDER})"
+    echo ""
+
+    local codec variant width height bitrate label preset ftc flbl x ytc ylbl
+    for codec in hevc h264 av1; do
+        codec_enabled "$codec" || continue
+        local -n _v="$(codec_variant_array "$codec")"
+        for variant in "${_v[@]}"; do
+            IFS=':' read -r width height bitrate label preset ftc flbl x ytc ylbl <<< "$variant"
+            encode_variant "$codec" "$width" "$height" "$bitrate" "$preset" "$ftc" "$flbl" "$x" "$ytc" "$ylbl" "$label"
+        done
     done
 }
 
@@ -2204,26 +2730,26 @@ create_audio_mezzanine() {
         ENCODING_INFOS+=("Audio downmixed from ${AUDIO_CHANNELS}-channel to stereo")
     fi
 
-    # Always transcode to AAC-LC 192k stereo 48kHz. Single canonical
+    # Always transcode to AAC-LC $AAC_BITRATE stereo 48kHz. Single canonical
     # audio output for the whole catalogue, no codec/profile gating
     # decisions, every master.m3u8 carries `CODECS="...,mp4a.40.2"`,
     # every player on every platform decodes it. Trade is one extra
     # audio re-encode per clip — cheap (audio is a few MB), worth the
     # certainty across Apple AVPlayer / Android ExoPlayer / hls.js /
     # Roku.
-    log "Transcoding audio (source codec: $AUDIO_CODEC, profile: ${AUDIO_PROFILE:-?}) → AAC-LC 192k stereo 48kHz"
-    ENCODING_INFOS+=("Audio transcoded to AAC-LC 192k stereo 48kHz (source: ${AUDIO_CODEC})")
+    log "Transcoding audio (source codec: $AUDIO_CODEC, profile: ${AUDIO_PROFILE:-?}) → AAC-LC ${AAC_BITRATE} stereo ${AAC_SAMPLE_RATE}Hz"
+    ENCODING_INFOS+=("Audio transcoded to AAC-LC ${AAC_BITRATE} stereo ${AAC_SAMPLE_RATE}Hz (source: ${AUDIO_CODEC})")
 
     if [ "$needs_padding" -eq 1 ]; then
         ffmpeg -i "$MEZZANINE" \
-               -vn -c:a aac -b:a 192k -ar 48000 -ac 2 \
+               -vn -c:a aac -b:a "$AAC_BITRATE" -ar "$AAC_SAMPLE_RATE" -ac 2 \
                -af "apad=pad_dur=${AUDIO_PADDING_DURATION}" \
                -movflags empty_moov+default_base_moof -frag_duration 1000000 \
                "$TEMP_DIR/audio.mp4" \
                -loglevel error -stats 2>&1 | tee -a "$LOG_FILE"
     else
         ffmpeg -i "$MEZZANINE" \
-               -vn -c:a aac -b:a 192k -ar 48000 -ac 2 \
+               -vn -c:a aac -b:a "$AAC_BITRATE" -ar "$AAC_SAMPLE_RATE" -ac 2 \
                -movflags empty_moov+default_base_moof -frag_duration 1000000 \
                "$TEMP_DIR/audio.mp4" \
                -loglevel error -stats 2>&1 | tee -a "$LOG_FILE"
@@ -2274,15 +2800,15 @@ package_with_ffmpeg() {
     local output_dir=$2
     
     local codec_upper=$(echo "$codec" | tr '[:lower:]' '[:upper:]')
+    local -n _variants="$(codec_variant_array "$codec")"   # per-codec rungs (#868)
     print_header "Phase 5: Segmenting $codec_upper with ffmpeg (frag_keyframe)"
     
     log "Creating ${SEGMENT_DURATION}s segments with fragments at each keyframe (${PARTIAL_DURATION}s GOPs)..."
     log "This preserves GOP boundaries for proper LL-HLS with partials per segment..."
     
     # Create resolution subdirectories
-    for profile in "${PROFILES[@]}"; do
-        IFS=':' read -r width height _ _ _ _ _ _ _ _ <<< "$profile"
-        local res_name=$(get_resolution_name $width)
+    for variant in "${_variants[@]}"; do
+        IFS=':' read -r width height _ res_name _ _ _ _ _ _ <<< "$variant"
         mkdir -p "$output_dir/$res_name"
     done
     
@@ -2292,9 +2818,8 @@ package_with_ffmpeg() {
     fi
     
     # Segment each video resolution
-    for profile in "${PROFILES[@]}"; do
-        IFS=':' read -r width height _ _ _ _ _ _ _ _ <<< "$profile"
-        local res_name=$(get_resolution_name $width)
+    for variant in "${_variants[@]}"; do
+        IFS=':' read -r width height _ res_name _ _ _ _ _ _ <<< "$variant"
         local input_file="$TEMP_DIR/${codec}_${res_name}.mp4"
         
         log "Segmenting $res_name..."
@@ -2355,9 +2880,8 @@ package_with_ffmpeg() {
     log "Creating HLS manifests..."
     
     # Create variant playlists for each video resolution
-    for profile in "${PROFILES[@]}"; do
-        IFS=':' read -r width height _ _ _ _ _ _ _ _ <<< "$profile"
-        local res_name=$(get_resolution_name $width)
+    for variant in "${_variants[@]}"; do
+        IFS=':' read -r width height _ res_name _ _ _ _ _ _ <<< "$variant"
         local playlist="$output_dir/$res_name/playlist.m3u8"
         
         # Count segments
@@ -2488,9 +3012,8 @@ EOF
     fi
     
     # Process each resolution in reverse order (highest first)
-    for profile in "${PROFILES[@]}"; do
-        IFS=':' read -r width height _ _ _ _ _ _ _ _ <<< "$profile"
-        local res_name=$(get_resolution_name $width)
+    for variant in "${_variants[@]}"; do
+        IFS=':' read -r width height _ res_name _ _ _ _ _ _ <<< "$variant"
         local variant_playlist="$output_dir/$res_name/playlist.m3u8"
         
         if [[ ! -f "$variant_playlist" ]]; then
@@ -2590,6 +3113,7 @@ package_dash() {
     local output_dir=$2
     
     local codec_upper=$(echo "$codec" | tr '[:lower:]' '[:upper:]')
+    local -n _variants="$(codec_variant_array "$codec")"   # per-codec rungs (#868)
     print_header "Phase 5: Packaging $codec_upper to DASH"
     
     if ! command -v packager &> /dev/null; then
@@ -2602,9 +3126,8 @@ package_dash() {
     log "Organizing output with resolution subdirectories..."
     
     # Create resolution subdirectories
-    for profile in "${PROFILES[@]}"; do
-        IFS=':' read -r width height _ _ _ _ _ _ _ _ <<< "$profile"
-        local res_name=$(get_resolution_name $width)
+    for variant in "${_variants[@]}"; do
+        IFS=':' read -r width height _ res_name _ _ _ _ _ _ <<< "$variant"
         mkdir -p "$output_dir/$res_name"
     done
     
@@ -2617,9 +3140,8 @@ package_dash() {
     local cmd="packager"
     
     # Add video streams
-    for profile in "${PROFILES[@]}"; do
-        IFS=':' read -r width height _ _ _ _ _ _ _ _ <<< "$profile"
-        local res_name=$(get_resolution_name $width)
+    for variant in "${_variants[@]}"; do
+        IFS=':' read -r width height _ res_name _ _ _ _ _ _ <<< "$variant"
         local input_file="$TEMP_DIR/${codec}_${res_name}.mp4"
         
         cmd="$cmd 'in=${input_file},stream=video,init_segment=${res_name}/init.mp4,segment_template=${res_name}/segment_\$Number%05d\$.m4s'"
@@ -2637,10 +3159,17 @@ package_dash() {
     cmd="$cmd --mpd_output manifest.mpd"
     cmd="$cmd --generate_static_live_mpd"  # This helps with SegmentList generation
     
-    # Execute in output directory
+    # Execute in output directory. Shaka Packager writes manifest.mpd via an
+    # atomic tmpfile+rename; when that tmpfile lands on a DIFFERENT filesystem
+    # than $output_dir (system $TMPDIR on the boot disk vs output on an external
+    # volume like $ENCODE_STAGING_DIR) the rename fails with EXDEV and no MPD is
+    # produced (#868/#908). Point the packager temp at a dir on the OUTPUT
+    # volume so the rename stays intra-device.
+    local pkg_tmp="$output_dir/.packager_tmp"
+    mkdir -p "$pkg_tmp"
     cd "$output_dir"
-    eval $cmd 2>&1 | tee -a "$LOG_FILE"
-    local packager_exit_code=$?
+    ( export TMPDIR="$pkg_tmp"; eval $cmd ) 2>&1 | tee -a "$LOG_FILE"
+    local packager_exit_code=${PIPESTATUS[0]}
     cd "$SCRIPT_DIR"
     
     # Check if manifest.mpd was created successfully
@@ -2648,10 +3177,11 @@ package_dash() {
     if [[ ! -f "$output_dir/manifest.mpd" ]]; then
         log_warn "manifest.mpd not found - checking for Shaka Packager temp files..."
         
-        # Look for the largest packager temp file created after this encode started
-        # (largest = most complete, as partial manifests are smaller)
+        # Look for the largest packager temp file (largest = most complete).
+        # Search the output-volume temp first, then the system temp; recover by
+        # COPYING (cp is cross-device-safe where the atomic rename was not).
         local temp_matches
-        temp_matches=$(find "${TEMP_BASE}/encoding" -name "packager-tempfile-*" -type f -newer "$output_dir" 2>/dev/null)
+        temp_matches=$(find "$pkg_tmp" "${TEMP_BASE}" -maxdepth 1 -name "packager-tempfile-*" -type f 2>/dev/null)
         local temp_manifest=""
         if [[ -n "$temp_matches" ]]; then
             temp_manifest=$(printf '%s\n' "$temp_matches" | xargs ls -S 2>/dev/null | head -1)
@@ -2662,10 +3192,12 @@ package_dash() {
             cp "$temp_manifest" "$output_dir/manifest.mpd"
             log_success "Recovered manifest.mpd from temp file"
         else
+            rm -rf "$pkg_tmp" 2>/dev/null
             log_error "Failed to create manifest.mpd and no temp file found"
             return 1
         fi
     fi
+    rm -rf "$pkg_tmp" 2>/dev/null
     
     # Convert SegmentTemplate to SegmentList
     convert_to_segmentlist "$output_dir"
@@ -2887,11 +3419,11 @@ generate_hls_ts_segments() {
     
     # Generate TS segments from the original encoded MP4 files in temp directory
     # These files have complete video/audio data, unlike the fragmented init.mp4 files
-    
-    for profile in "${PROFILES[@]}"; do
-        IFS=':' read -r width height bitrate_h265 bitrate_h264 preset fontsize_tc fontsize_label x y_tc y_label <<< "$profile"
-        
-        local res_name=$(get_resolution_name $width)
+
+    local -n _variants="$(codec_variant_array "$codec")"   # per-codec rungs (#868)
+    for variant in "${_variants[@]}"; do
+        IFS=':' read -r width height _ res_name _ _ _ _ _ _ <<< "$variant"
+
         local source_mp4="$temp_dir/${codec}_${res_name}.mp4"
         
         if [ ! -f "$source_mp4" ]; then
@@ -2942,7 +3474,7 @@ generate_hls_ts_segments() {
         # Re-encode audio to AAC to ensure perfect segment boundary alignment
         # Using -c copy can cause fractional frame misalignment issues
         ffmpeg -i "$temp_dir/audio.mp4" \
-            -c:a aac -b:a 192k -ar 48000 -ac 2 \
+            -c:a aac -b:a "$AAC_BITRATE" -ar "$AAC_SAMPLE_RATE" -ac 2 \
             -f hls \
             -hls_time $SEGMENT_DURATION \
             -hls_segment_type mpegts \
@@ -3504,16 +4036,60 @@ EOF
 
 get_resolution_dimensions() {
     local res_name=$1
+    res_name="${res_name%_[0-9]*}"   # strip apple multi-rung ordinal (#868): 1080p_2 -> 1080p
     case "$res_name" in
         "2160p") echo "3840×2160" ;;
+        "2124p") echo "3776×2124" ;;
         "1440p") echo "2560×1440" ;;
         "1080p") echo "1920×1080" ;;
+        "1044p") echo "1856×1044" ;;
         "720p") echo "1280×720" ;;
+        "684p") echo "1216×684" ;;
         "540p") echo "960×540" ;;
+        "504p") echo "896×504" ;;
+        "468p") echo "832×468" ;;
         "432p") echo "768×432" ;;
+        "396p") echo "704×396" ;;
         "360p") echo "640×360" ;;
+        "234p") echo "416×234" ;;
         *) echo "Unknown" ;;
     esac
+}
+
+################################################################################
+# Ladder audit (#811)
+################################################################################
+
+# Audit an encode's ABR ladder (generate_abr/ladder_audit.py): structure +
+# Apple-spec checks, advertised-vs-measured segment bitrates, and per-rung VMAF.
+# VMAF is subsampled by default; set LADDER_AUDIT_VMAF=0 to skip it (fast,
+# structure-only) or LADDER_AUDIT_VMAF=full for every frame. Writes
+# ladder_audit.json into the dir and appends a section to ENCODING_REPORT.md.
+# Non-fatal: a failing check warns but never aborts the encode.
+run_ladder_audit() {
+    local dir="$1" codec="$2"
+    local audit="${SCRIPT_DIR}/ladder_audit.py"
+    [[ -f "$audit" ]] || { log_warn "ladder_audit.py not found; skipping ladder audit"; return 0; }
+    [[ -f "$dir/master.m3u8" ]] || { log_warn "no master.m3u8 in $dir; skipping ladder audit"; return 0; }
+
+    local vmaf_args=() vmode="${LADDER_AUDIT_VMAF:-1}"
+    if [[ "$vmode" == "0" ]]; then
+        vmaf_args=(--no-vmaf)
+    elif [[ -f "$MEZZANINE" ]]; then
+        vmaf_args=(--vmaf-ref "$MEZZANINE")
+        [[ "$vmode" == "full" ]] && vmaf_args+=(--vmaf-full)
+    else
+        log_warn "mezzanine unavailable; ladder audit will skip VMAF (use --keep-mezzanine or LADDER_AUDIT_VMAF=0)"
+        vmaf_args=(--no-vmaf)
+    fi
+
+    log "Ladder audit ($codec): $dir"
+    if python3 "$audit" --dir "$dir" --report-md "$dir/ENCODING_REPORT.md" "${vmaf_args[@]}" \
+        >>"$TEMP_DIR/encoding.log" 2>&1; then
+        log_success "Ladder audit ($codec): clean — see $dir/ladder_audit.json"
+    else
+        log_warn "Ladder audit ($codec): check failures — see $dir/ENCODING_REPORT.md / ladder_audit.json"
+    fi
 }
 
 ################################################################################
@@ -3532,7 +4108,7 @@ print_summary() {
     echo -e "  Resolution: ${SOURCE_WIDTH}×${SOURCE_HEIGHT}"
     echo -e "  Frame Rate: ${SOURCE_FPS_DECIMAL} fps (${SOURCE_FPS})"
     echo -e "  GOP Keyint: ${KEYINT} frames (${GOP_DURATION}s closed GOPs)"
-    echo -e "  Tiers: ${#PROFILES[@]} resolutions encoded"
+    echo -e "  Variants: $(total_selected_variants) encoded (ladder: ${LADDER})"
     echo -e "  Audio: $([ "$SKIP_AUDIO" == "true" ] && echo "None (video-only)" || echo "AAC stereo")"
     echo ""
     
@@ -3600,7 +4176,7 @@ print_resume_summary() {
     echo -e "${CYAN}Resume Source:${NC}"
     echo -e "  Directory: $RESUME_PACKAGE_FROM"
     echo -e "  Codec selection: $CODEC_SELECTION"
-    echo -e "  Tiers packaged: ${#PROFILES[@]}"
+    echo -e "  Variants packaged: $(total_selected_variants)"
     echo -e "  Audio: $([ "$SKIP_AUDIO" == "true" ] && echo "None (video-only)" || echo "Included")"
     echo ""
 
@@ -3797,11 +4373,25 @@ main() {
         export_mezzanine_files "av1" "$OUTPUT_DIR_AV1"
     fi
     
-    # Generate fragment metadata (.byteranges files) for LL-HLS support
+    # Phase 6 — ALWAYS run. Phase 7 (generate_hls_manifests) injects the inline
+    # #EXT-X-PART partials by READING the .byteranges this produces, so the
+    # partials exist ONLY if this ran. (#762/#765 gated it off by default and
+    # silently dropped every partial from new content — the bug this fixes.)
     parse_fmp4_fragments
-    
-    # Generate HLS manifests
+
+    # Generate HLS manifests (injects #EXT-X-PART from the .byteranges above)
     generate_hls_manifests
+
+    # Prune the now-consumed .byteranges sidecars unless --byteranges asked to keep
+    # them: Phase 7 already folded their data into the inline #EXT-X-PART (go-live's
+    # authoritative source), so the files are redundant on disk — dropping them is
+    # #762's disk goal, now WITHOUT breaking LL.
+    if [[ "$EMIT_BYTERANGES" != true ]]; then
+        for _brd in "$OUTPUT_DIR_HEVC" "$OUTPUT_DIR_H264" "$OUTPUT_DIR_AV1"; do
+            [[ -n "$_brd" && -d "$_brd" ]] && find "$_brd" -name "*.byteranges" -type f -delete 2>/dev/null
+        done
+        log "Pruned .byteranges sidecars (inline #EXT-X-PART retained; --byteranges keeps the files)"
+    fi
     
     # Generate HLS Transport Stream segments (if requested)
     if [ "$HLS_FORMAT" = "ts" ] || [ "$HLS_FORMAT" = "both" ]; then
@@ -3824,16 +4414,19 @@ main() {
         if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "hevc" ]]; then
             generate_thumbnail "$OUTPUT_DIR_HEVC"
             generate_encoding_report "$OUTPUT_DIR_HEVC" "hevc"
+            run_ladder_audit "$OUTPUT_DIR_HEVC" "hevc"
         fi
 
         if [[ "$CODEC_SELECTION" == "both" ]] || [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "h264" ]]; then
             generate_thumbnail "$OUTPUT_DIR_H264"
             generate_encoding_report "$OUTPUT_DIR_H264" "h264"
+            run_ladder_audit "$OUTPUT_DIR_H264" "h264"
         fi
 
         if [[ "$CODEC_SELECTION" == "all" ]] || [[ "$CODEC_SELECTION" == "av1" ]]; then
             generate_thumbnail "$OUTPUT_DIR_AV1"
             generate_encoding_report "$OUTPUT_DIR_AV1" "av1"
+            run_ladder_audit "$OUTPUT_DIR_AV1" "av1"
         fi
         print_summary
     else

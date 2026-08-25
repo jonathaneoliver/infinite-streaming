@@ -13,12 +13,13 @@
  * routes display panels to the side-channel store in v2-repo instead
  * of the live `/api/v2/players` fetch.
  */
-import { ref, computed } from 'vue';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
+import { ref, computed, watch } from 'vue';
+import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/vue-query';
 import ShellLayout from '@/components/ShellLayout.vue';
 import SessionDisplay from '@/components/SessionDisplay.vue';
 import ChatPanel from '@/components/chat/ChatPanel.vue';
-import { parseTimeAny, canonicalUUID } from '@/composables/urlTimeFormat';
+import { parseTimeAny, canonicalUUID, parseCompareParam } from '@/composables/urlTimeFormat';
+import { contentFromMasterUrl } from '@/composables/useSessionLabels';
 import { getPlay, patchPlayClassification, type PlaySummary } from '@/repo/v2-repo';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 import type { ChatScope } from '@/types/chat';
@@ -29,8 +30,42 @@ const qs = new URLSearchParams(window.location.search);
 // the v3 timeseries endpoint and the SSE pool both key by player_id.
 // UUIDs are lowercased — CH stores them lowercase and iOS sometimes
 // emits uppercase (case_sensitivity_ids memory).
-const playerId = ref<string>(canonicalUUID(qs.get('player_id') ?? ''));
-const playId = ref<string | null>(qs.get('play_id') ? canonicalUUID(qs.get('play_id')!) : null);
+// #736: `compare=<player>~<play>~<tag>,…` — the grouped set to overlay in
+// archive compare mode (the active play is included). Like testing.html's
+// session-tab pill rail, the active member is switchable: player_id / play_id
+// FOLLOW the selected tab, SessionDisplay re-keys reactively, and it
+// re-derives self vs siblings from the (unchanged) compare set. Empty
+// `compare` ⇒ ordinary single-play view.
+const comparePlays = parseCompareParam(qs.get('compare'));
+const urlPlayerId = canonicalUUID(qs.get('player_id') ?? '');
+const urlPlayId = qs.get('play_id') ? canonicalUUID(qs.get('play_id')!) : null;
+// Active tab index — defaults to the play the user clicked (the URL player_id).
+const activeIdx = ref(Math.max(0, comparePlays.findIndex((m) => m.playerId === urlPlayerId)));
+const playerId = computed<string>(() =>
+  comparePlays.length ? comparePlays[activeIdx.value].playerId : urlPlayerId,
+);
+const playId = computed<string | null>(() =>
+  comparePlays.length ? (comparePlays[activeIdx.value].playId ?? null) : urlPlayId,
+);
+
+// Two independent viewer controls (paired with the enqueueRow play-scope
+// guard in useSessionTimeSeries):
+//   scopeToPlay — the play_id row filter. Default on = only this play.
+//   expandSteps — repeatable window widening; each step = ±5 min, end
+//                 clamped to now by SessionDisplay so it never pads into
+//                 the future. windowPadMs is the derived symmetric pad.
+const CONTEXT_STEP_MS = 5 * 60 * 1000;
+const scopeToPlay = ref(true);
+const expandSteps = ref(0);
+const windowPadMs = computed(() => expandSteps.value * CONTEXT_STEP_MS);
+
+// Unchecking "this play only" against a tight URL window would show nothing
+// new (neighbouring plays fall outside it), so auto-expand one step the
+// first time the filter is dropped. Re-checking leaves the window as-is
+// (use Reset to snap back).
+watch(scopeToPlay, (on) => {
+  if (!on && expandSteps.value === 0) expandSteps.value = 1;
+});
 
 /** Initial time window. New canonical param names are `from` / `to`
  *  (shorter, no `:` in compact ISO → no `%3A` clutter). Legacy
@@ -76,15 +111,10 @@ const chatScope = computed<ChatScope>(() => {
   };
 });
 
-/** "Show before/after" toggle. When ON, SessionDisplay drops the
- *  play_id filter on its SSE subscription and widens the time
- *  window to play_bounds ± 5 min, so rows from neighbouring plays
- *  for the same player become visible in the same panel layout.
- *  Default OFF — the page is locked to this play, matching the
- *  "click a session row, see that session" mental model from
- *  sessions.html. */
-const showContext = ref<boolean>(false);
-function toggleShowContext() { showContext.value = !showContext.value; }
+// Session-viewer is always scoped to this play — play_id is passed straight to
+// the SSE, the same play-scoped view testing.html uses. The old "showing context
+// / this play only" padlock toggle was removed for parity with testing.html (and
+// because it was confusing); the play_id filter is simply always on here.
 
 // Starred state — backed by TanStack so the optimistic flip, the
 // mutation rollback, and any future cache invalidations follow the
@@ -103,6 +133,44 @@ const playQuery = useQuery<PlaySummary | null>({
 const starred = computed<boolean>(
   () => String(playQuery.data.value?.classification ?? '') === 'favourite',
 );
+
+// #736 member-tab labels — mirror testing.html's `Session #N (Port …) · device
+// · content`. Port is derived from the session number (external band 21<sid>81,
+// the third-from-last digit carrying the session); device · content + the group
+// badge come off the active play summary (fleet members share them).
+function portForTag(tag?: string): string {
+  return tag && /^\d$/.test(tag) ? `21${tag}81` : '';
+}
+function memberLabel(m: { tag?: string }): string {
+  const port = portForTag(m.tag);
+  return `Session #${m.tag ?? '?'}${port ? ` (Port ${port})` : ''}`;
+}
+// Per-member device tail. One getPlay() per compare member, keyed identically
+// to the active playQuery (['play', playId]) so the active member dedupes
+// against the existing cache — one-shot, no polling, no SSE. Each tab shows
+// ITS OWN device: previously a single computed read the ACTIVE play, so every
+// tab showed the same device (a phone+TV compare read "· phone" on both).
+const memberPlayQueries = useQueries({
+  queries: computed(() => comparePlays.map((m) => ({
+    queryKey: ['play', m.playId] as const,
+    queryFn: () => getPlay(m.playId),
+    enabled: !!m.playId,
+    refetchInterval: false as const,
+  }))),
+});
+// Bare CPU arch is not a meaningful device model (iOS reports "arm64"); skip it.
+const ARCH_ONLY = /^(arm64|aarch64|x86_64|x86|arm)$/i;
+function memberTail(i: number): string {
+  const p = memberPlayQueries.value[i]?.data as Record<string, unknown> | undefined | null;
+  if (!p) return '';
+  const deviceClass = p.device_class ? String(p.device_class) : '';
+  const modelRaw = p.device_model ? String(p.device_model) : '';
+  const model = modelRaw && !ARCH_ONLY.test(modelRaw) ? modelRaw : '';
+  const content = (p.content_id ? String(p.content_id) : '')
+    || contentFromMasterUrl((p.master_manifest_url as string | null | undefined) ?? null);
+  return [deviceClass, model, content].filter(Boolean).join(' · ');
+}
+const groupBadge = computed<string>(() => String(playQuery.data.value?.group_id ?? ''));
 
 const starMutation = useMutation({
   mutationFn: (next: boolean) =>
@@ -157,45 +225,82 @@ const backHref = '/dashboard/sessions.html';
 
     <div class="page">
       <main class="content">
+        <header class="page-header">
+          <div>
+            <div class="page-title">Session Viewer</div>
+            <div class="page-subtitle">Replay an archived session through the live charts.</div>
+          </div>
+        </header>
+
         <div v-if="!playerId" class="empty">
           <p>No <code>player_id</code> in the URL.</p>
           <p>Open <code>/dashboard/session-viewer.html?player_id=&lt;uuid&gt;&amp;play_id=&lt;uuid&gt;</code></p>
         </div>
 
         <template v-else>
+          <!-- #736 member tab rail — like testing.html's session pills, on
+               its own row above the banner. Click a tab to make that grouped
+               play active (its panels show, its line goes solid); the overlay
+               set stays the same. -->
+          <div v-if="comparePlays.length" class="session-tabs" role="tablist" aria-label="Grouped sessions">
+            <button
+              v-for="(m, i) in comparePlays"
+              :key="m.playerId"
+              type="button"
+              role="tab"
+              class="session-tab grouped"
+              :class="{ active: i === activeIdx }"
+              :aria-selected="i === activeIdx"
+              :title="m.playerId"
+              @click="activeIdx = i"
+            >
+              <span class="st-label">{{ memberLabel(m) }}<span v-if="memberTail(i)" class="st-tail"> · {{ memberTail(i) }}</span></span>
+              <span v-if="groupBadge" class="group-badge">{{ groupBadge }}</span>
+            </button>
+          </div>
           <!-- REPLAY banner — page-specific (SessionDisplay's brush
-               block joins flush below it via shared border styling). -->
+               block joins flush below it via shared border styling).
+               Single-session controls only: player/play + actions. -->
           <header class="meta-banner">
             <div class="meta-line">
               <span class="replay-badge">REPLAY</span>
               <span class="meta-label">player</span>
               <code class="id-pill" :title="playerId">{{ playerId || '(no player)' }}</code>
               <span class="meta-label">play</span>
-              <!-- play_id gets a "disabled" style when showContext is on:
-                   the SSE has dropped the play_id filter so the id shown
-                   here is no longer what's actually being filtered. The
-                   strike + muted colour signals "this label doesn't
-                   reflect what you're currently looking at". -->
               <code
                 class="id-pill"
-                :class="{ 'id-pill-disabled': showContext }"
-                :title="showContext
-                  ? `${playId ?? '(all plays)'} — filter disabled while showing context`
-                  : (playId ?? '(all plays)')"
+                :class="{ 'id-pill-disabled': !scopeToPlay }"
+                :title="!scopeToPlay ? `${playId} — filter off, showing all plays in the window` : (playId ?? '(all plays)')"
               >{{ playId ?? '(all plays)' }}</code>
             </div>
             <div class="banner-actions">
+              <label
+                class="banner-toggle"
+                :class="{ disabled: !playId }"
+                :title="scopeToPlay
+                  ? 'Showing only this play. Uncheck to include neighbouring plays of this player (auto-widens the window)'
+                  : `Showing all of this player's plays in the window. Check to lock to this play`"
+              >
+                <input type="checkbox" v-model="scopeToPlay" :disabled="!playId" />
+                This play only
+              </label>
               <button
                 type="button"
                 class="banner-btn"
-                :class="{ active: showContext }"
-                @click="toggleShowContext"
+                @click="expandSteps++"
                 :disabled="!playId"
-                :title="showContext
-                  ? 'Snap back to this play only'
-                  : 'Show rows from before and after this play (same player, ±5 min)'"
+                :title="`Widen the window ±5 min for more context (end won't pass now). Currently ±${expandSteps * 5} min — click again for more`"
               >
-                {{ showContext ? '🔓 Showing context' : '🔒 This play only' }}
+                ⊕ Expand 5m<span v-if="expandSteps"> · ±{{ expandSteps * 5 }}m</span>
+              </button>
+              <button
+                v-if="expandSteps"
+                type="button"
+                class="banner-btn"
+                @click="expandSteps = 0"
+                title="Reset the window back to this play's span"
+              >
+                ⊙ Reset
               </button>
               <button
                 type="button"
@@ -215,9 +320,11 @@ const backHref = '/dashboard/sessions.html';
           <SessionDisplay
             :player-id="playerId"
             :play-id="playId"
-            :show-context="showContext"
             :start-ms="startMs"
             :end-ms="endMs"
+            :scope-to-play="scopeToPlay"
+            :window-pad-ms="windowPadMs"
+            :compare-plays="comparePlays"
           />
         </template>
       </main>
@@ -280,6 +387,10 @@ const backHref = '/dashboard/sessions.html';
   overflow-x: hidden;
 }
 .header-title { font-size: 16px; font-weight: 600; }
+/* In-page page title, mirroring Testing.vue's .page-header/.page-title. */
+.page-header { margin-bottom: 16px; }
+.page-title { font-size: 24px; font-weight: 600; color: #202124; }
+.page-subtitle { font-size: 13px; color: #5f6368; margin-top: 2px; }
 
 .meta-banner {
   display: flex;
@@ -337,6 +448,25 @@ const backHref = '/dashboard/sessions.html';
 }
 
 .banner-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+/* #736 member tab rail — matches testing.html's session pills exactly. */
+.session-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
+.session-tab {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 380px;
+  border: 1px solid #c7d2fe; background: #eef2ff; color: #1e1b4b;
+  padding: 8px 14px; border-radius: 999px; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: transform 0.08s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.session-tab:hover { background: #e0e7ff; box-shadow: 0 4px 12px rgba(59,130,246,0.18); transform: translateY(-1px); }
+.session-tab.active { background: #1e40af; color: #fff; border-color: #1e40af; box-shadow: 0 6px 14px rgba(30,64,175,0.32); }
+.session-tab.grouped { border-left: 4px solid #10b981; padding-left: 10px; }
+.session-tab.grouped.active { border-left-color: #34d399; }
+.session-tab .st-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-tab .st-tail { font-weight: 500; opacity: 0.85; }
+.session-tab .group-badge {
+  flex: none; background: #10b981; color: #fff; font-size: 10px; font-weight: 700;
+  padding: 1px 8px; border-radius: 8px; font-family: ui-monospace, monospace;
+}
+.session-tab.active .group-badge { background: #34d399; }
 .banner-btn {
   display: inline-flex;
   align-items: center;
@@ -358,6 +488,24 @@ const backHref = '/dashboard/sessions.html';
   color: #fff;
 }
 .banner-btn.disabled { opacity: 0.4; pointer-events: none; }
+
+/* "This play only" filter checkbox — styled to sit alongside .banner-btn. */
+.banner-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #fff;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #1f2937;
+  cursor: pointer;
+  user-select: none;
+}
+.banner-toggle input { cursor: pointer; margin: 0; }
+.banner-toggle.disabled { opacity: 0.4; pointer-events: none; }
 
 .empty {
   text-align: center;

@@ -7,8 +7,8 @@
  *     - VARIANT     (per (resolution, bitrate) sub-lane)
  *     - DISPLAY RES
  *     - PLAYERSTATE
- *     - PLAYBACK    (FIRST_FRAME / RESTART / TIMEJUMP / SHIFT_UP /
- *                    SHIFT_DOWN / PLAYBACK_START)
+ *     - PLAYBACK    (FIRST_FRAME / NEW_PLAY / RESTART / LIVE_RESYNC / RATE→N /
+ *                    TIMEJUMP / SHIFT_UP / SHIFT_DOWN / PLAYBACK_START)
  *     - IMPAIRMENT  (STALL / FROZEN / SEGMENT_STALL / ERROR)
  *   CONTROL section
  *     - CONTROL     (CONTROL_CHANGE, USER_MARKED — operator + control
@@ -31,6 +31,8 @@ import { computed, onBeforeUnmount, ref, toRef, watch } from 'vue';
 import { ensureVisTimeline } from '@/composables/useChartJs';
 import { useChartCoordination, DEFAULT_FOCUS_MS } from '@/composables/useChartCoordination';
 import type { Stream } from '@/composables/useSessionTimeSeries';
+import { useLifecycleLineVisibility, type LifecycleMarker, type EventMarker } from '@/composables/useLifecycleMarkers';
+import { nearestVariantByBitrate } from '@/composables/useManifestVariants';
 
 interface LaneCfg { label: string; color: string }
 const EVENT_LANES: Record<string, LaneCfg> = {
@@ -179,15 +181,9 @@ const PLAYER_STATE_COLOR: Record<string, string> = {
 function playerStateColor(s: string | null | undefined): string {
   return PLAYER_STATE_COLOR[String(s ?? '').trim().toLowerCase()] || '#d1d5db';
 }
-function variantColor(mbps: number): string {
-  if (!Number.isFinite(mbps) || mbps <= 0) return '#9ca3af';
-  if (mbps < 1)  return '#dc2626';
-  if (mbps < 2)  return '#ea580c';
-  if (mbps < 4)  return '#f59e0b';
-  if (mbps < 8)  return '#84cc16';
-  if (mbps < 16) return '#16a34a';
-  return '#10b981';
-}
+// Fixed resolution palette — used as a fallback before the variant
+// ladder has been discovered, or for a displayed resolution that isn't
+// one of the manifest rungs.
 function displayResColor(res: string | null | undefined): string {
   const r = String(res ?? '').toLowerCase();
   if (r.includes('2160')) return '#7c3aed';
@@ -199,8 +195,45 @@ function displayResColor(res: string | null | undefined): string {
   return '#6b7280';
 }
 
+// Distinct resolutions in the discovered ladder, ascending by Mbps
+// (lowest quality first). `variantOrder` is sorted descending by Mbps.
+function ladderResolutionsAsc(): string[] {
+  const seen = new Set<string>();
+  const asc: string[] = [];
+  for (let i = variantOrder.length - 1; i >= 0; i--) {
+    const r = variantOrder[i].resolution;
+    if (r && !seen.has(r)) { seen.add(r); asc.push(r); }
+  }
+  return asc;
+}
+
+// Single source of truth for resolution colour, shared by the
+// "VIDEO RES" rail and the per-variant fetch rows so a given resolution
+// gets the SAME colour on both. Colour by the resolution's rung in the
+// discovered ladder — warm (red) at the bottom → cool (green) at the
+// top — which also keeps adjacent rungs distinct (the old absolute-Mbps
+// buckets collapsed e.g. 1.06 / 1.42 / 1.89 Mbps into one colour).
+// Falls back to the fixed palette when the ladder isn't known yet or
+// the resolution isn't one of the manifest rungs.
+function colorForResolution(res: string | null | undefined): string {
+  const r = String(res ?? '').trim();
+  if (!r) return '#9ca3af';
+  const ladder = ladderResolutionsAsc();
+  const idx = ladder.indexOf(r);
+  if (idx >= 0) {
+    const t = ladder.length === 1 ? 1 : idx / (ladder.length - 1);
+    const hue = Math.round(t * 140); // 0 = red (low) → 140 = green (high)
+    return `hsl(${hue}, 70%, 45%)`;
+  }
+  return displayResColor(r);
+}
+
 const props = defineProps<{
   playerId: string;
+  /** Coordination scope key (per-player, stable across plays). Drives
+   *  useChartCoordination only; data still keys off playerId. Falls back to
+   *  playerId when absent. */
+  coordId?: string;
   /** Samples stream from SessionDisplay's useSessionTimeSeries model.
    *  Each row is a CH session_snapshots projection (lanes_v1 bundle).
    *  EventsTimeline derives swim-lane segments from successive rows. */
@@ -210,8 +243,23 @@ const props = defineProps<{
    *  consumers (live testing.html) can skip wiring it without
    *  breaking the component. */
   avmetricsStream?: Stream<Record<string, unknown>>;
+  /** control_events stream (proxy/harness/auto action log). Each row carries
+   *  `source` / `event` / `info` — what control mutation happened — which
+   *  drives the CONTROL lane markers. Optional; without it the CONTROL lane
+   *  has no points (control_revision alone only says "something changed"). */
+  controlStream?: Stream<Record<string, unknown>>;
+  /** Player-lifecycle vertical lines (restart / play_start / play_end),
+   *  computed once in SessionDisplay. Rendered as full-height vis-timeline
+   *  custom-times so they cross every lane (incl. Player State) and align
+   *  with the same lines on the value charts. Per-type visibility comes from
+   *  the shared toggle (useLifecycleLineVisibility). */
+  lifecycleMarkers?: LifecycleMarker[];
+  /** Severity-coloured focus-window event bars (mirrored from the metric
+   *  charts) — drawn as vis custom-time lines across every lane. */
+  eventMarkers?: EventMarker[];
 }>();
-const coord = useChartCoordination(toRef(props, 'playerId'));
+const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
+const { lineVisibility } = useLifecycleLineVisibility();
 
 /** Adapter — map a CH session_snapshots row (wire shape from the v3
  *  /api/v2/timeseries endpoint) to the small subset of fields ingest()
@@ -227,12 +275,17 @@ interface IngestRow {
   stalls: number | null;
   droppedFrames: number | null;
   error: string;
+  errorCode: number | null;
+  errorDomain: string;
   firstFrameTimeS: number | null;
   videoStartTimeS: number | null;
   loopCountServer: number | null;
   controlRevision: string | null;
   playId: string | null;
   manifestVariants: { bandwidth?: number; resolution?: string }[] | null;
+  playerRestarts: number | null;
+  lastEvent: string;
+  playbackRate: number | null;
 }
 
 function tsOfRow(row: Record<string, unknown>): number {
@@ -276,15 +329,28 @@ function chRowToIngest(row: Record<string, unknown>): IngestRow | null {
     waitingReason: String(row.waiting_reason ?? '').trim(),
     videoResolution: String(row.video_resolution ?? '').trim(),
     videoBitrateMbps: num(row.video_bitrate_mbps),
-    stalls: num(row.stall_count),
-    droppedFrames: num(row.dropped_frames),
+    // #550 Phase 1 soft cutover: prefer the new canonical column
+    // names; fall back to legacy ones during the deprecation window
+    // so the timeline still renders for historical rows that pre-date
+    // the rename.
+    stalls: num(row.stalling_count) ?? num(row.stall_count),
+    droppedFrames: num(row.frames_dropped),
     error: String(row.player_error ?? ''),
-    firstFrameTimeS: num(row.video_first_frame_time_s),
-    videoStartTimeS: num(row.video_start_time_s),
+    errorCode: num(row.error_code),
+    errorDomain: String(row.error_domain ?? '').trim(),
+    firstFrameTimeS: num(row.video_first_frame_time_ms) != null
+      ? (num(row.video_first_frame_time_ms) as number) / 1000
+      : num(row.video_first_frame_time_s),
+    videoStartTimeS: num(row.video_start_time_ms) != null
+      ? (num(row.video_start_time_ms) as number) / 1000
+      : num(row.video_start_time_s),
     loopCountServer: num(row.loop_count_server),
     controlRevision,
     playId: typeof row.play_id === 'string' ? row.play_id : null,
     manifestVariants: variants,
+    playerRestarts: num(row.player_restarts),
+    lastEvent: String(row.last_event ?? '').trim(),
+    playbackRate: num(row.playback_rate),
   };
 }
 
@@ -363,6 +429,15 @@ interface StatefulEvent {
 }
 
 const statefulEvents: StatefulEvent[] = [];
+/** Backstop cap on retained stateful events (issue #582). This array was
+ *  appended on every heartbeat and never trimmed within a session, so it
+ *  grew unbounded — and renderStatefulLanes walks + sorts it on each
+ *  render. We normally trim it to the events cache's retained window (so
+ *  the Player State lanes cover the SAME span as the charts on pan-back);
+ *  this count is only a fallback when the cache bounds aren't known yet.
+ *  Set high (well above the cache cap × a few events/heartbeat) so it
+ *  never trims tighter than the cache window. */
+const STATEFUL_EVENTS_CAP = 40000;
 // IDs assigned to coalesced range items so we can replace cleanly on
 // every render. Range items are tagged by the lane key + rendered
 // `range:<key>:<n>` so we can detect & remove them before re-adding.
@@ -377,9 +452,21 @@ let prevLoopServer: number | null = null;
 let prevControlRev: string | null = null;
 let prevError: string | null = null;
 let prevPlayId: string | null = null;
+// #703a — play_ids already marked NEW PLAY, so the synthetic-play_id flicker
+// (manifest-URL churn between ticks) doesn't re-mark a play we've already seen.
+const seenPlayIds = new Set<string>();
 let prevFirstFrame: number | null = null;
 let prevVideoStart: number | null = null;
 let prevVariantMbps: number | null = null;
+// #703a — PLAYBACK-lane RESTART (player_restarts counter-diff) + LIVE RESYNC
+// (last_event transition). prevRestarts seeds on the first row so we mark only
+// increments, not the play's starting count.
+let prevRestarts: number | null = null;
+let prevLastEvent: string | null = null;
+// #703a — last playback_rate seen (rounded), so a PLAYBACK-lane "RATE → N"
+// marker drops on ANY rate change. rate 0 = AVPlayer paused/stuck; 1 = play;
+// other = trick/slow. Generic — copes with any rate, not just 0/1.
+let prevRate: number | null = null;
 // Watermark of the latest CH row already fed through `ingest()`. The
 // markers-stream watcher uses this to consume only NEW rows on each
 // version bump (the stream cache holds the full backfill + live tail).
@@ -415,33 +502,39 @@ function bandwidthMbpsForResolution(
   return undefined;
 }
 
-/** Find the canonical resolution for a given bitrate by consulting the
- *  manifest's variant ladder. Mirrors the legacy session-shell.js
- *  `manifestResolutionForBitrateFromVariants`: the bitrate match is
- *  tolerant (±max(0.5 Mbps, 5% of the variant's Mbps)) so EWMA drift
- *  doesn't lose the match. Returns '' if no variant is close enough,
- *  so the caller can fall back to the player-reported resolution. */
-function manifestResolutionForBitrate(
+/** Snap a player-reported DECODED resolution (presentationSize on iOS /
+ *  videoWidth×videoHeight on web) to the nearest manifest rung BY FRAME
+ *  HEIGHT, returning that rung's canonical resolution string + peak Mbps.
+ *  The decoded size legitimately differs from the manifest RESOLUTION
+ *  attribute (coded-vs-display like 1080↔1088 mod-16, PAR / clean aperture,
+ *  packager quirks), so an exact-string match would leave the lane showing
+ *  non-manifest "WxH". Returns null when there's no manifest / parseable
+ *  height, so the caller falls back to the raw player value. */
+function manifestVariantForDisplayedRes(
   variants: IngestRow['manifestVariants'],
-  targetMbps: number,
-): string {
-  if (!Number.isFinite(targetMbps)) return '';
-  if (!variants || variants.length === 0) return '';
-  let best: string | null = null;
+  videoResolution: string,
+): { resolution: string; mbps: number | undefined } | null {
+  if (!videoResolution || !variants || variants.length === 0) return null;
+  const heightOf = (s: string): number => {
+    const m = /(\d+)\s*[x×]\s*(\d+)/i.exec(s);
+    return m ? Number(m[2]) : NaN;
+  };
+  const h = heightOf(videoResolution);
+  if (!Number.isFinite(h)) return null;
+  let best: { resolution: string; mbps: number | undefined } | null = null;
   let bestDelta = Infinity;
   for (const v of variants) {
-    const vBw = Number(v?.bandwidth ?? 0);
-    if (!Number.isFinite(vBw) || vBw <= 0) continue;
-    const vMbps = vBw / 1_000_000;
-    const delta = Math.abs(vMbps - targetMbps);
-    const tol = Math.max(0.5, vMbps * 0.05);
-    if (delta < tol && delta < bestDelta) {
+    const r = String(v?.resolution ?? '').trim();
+    const vh = heightOf(r);
+    if (!r || !Number.isFinite(vh)) continue;
+    const delta = Math.abs(vh - h);
+    if (delta < bestDelta) {
       bestDelta = delta;
-      const r = String(v?.resolution ?? '').trim();
-      if (r) best = r;
+      const bw = Number(v?.bandwidth ?? 0);
+      best = { resolution: r, mbps: Number.isFinite(bw) && bw > 0 ? bw / 1_000_000 : undefined };
     }
   }
-  return best ?? '';
+  return best;
 }
 
 function laneClose(key: string, t: number) {
@@ -449,6 +542,9 @@ function laneClose(key: string, t: number) {
   if (!cur) return;
   cur.end = t;
   const dur = ((t - cur.ts0) / 1000).toFixed(1);
+  // `cur.content` was already HTML-escaped at laneOpen, so it is safe to
+  // interpolate into the tooltip verbatim (re-escaping would double-encode).
+  // Issue #625.
   cur.title = `${EVENT_LANES[key]?.label ?? key}: ${cur.content}\n${fmtTime(cur.ts0)} → ${fmtTime(t)} (${dur}s)`;
   itemsDS?.update(cur);
   openRanges[key] = null;
@@ -456,15 +552,18 @@ function laneClose(key: string, t: number) {
 
 function laneOpen(key: string, t: number, label: string, color: string) {
   const id = nextId++;
+  // `label` is session-derived; vis renders both `content` (bar text)
+  // and `title` (tooltip) as HTML, so escape once and reuse. Issue #625.
+  const safeLabel = escapeHTML(label);
   const item: TimelineRangeItem = {
     id,
     group: key,
-    content: label,
+    content: safeLabel,
     start: t,
     end: t + 1,
     ts0: t,
     type: 'range',
-    title: `${EVENT_LANES[key]?.label ?? key}: ${label}\n${fmtTime(t)}`,
+    title: `${EVENT_LANES[key]?.label ?? key}: ${safeLabel}\n${fmtTime(t)}`,
     style: `background-color: ${color}; border-color: ${color}; color: #fff;`,
   };
   openRanges[key] = item;
@@ -488,13 +587,19 @@ function ensureVariantLane(mbps: number, resolution: string) {
 
 function pushPoint(group: string, t: number, label: string, color: string, detail?: string) {
   const id = nextId++;
+  // The tooltip is HTML-rendered by vis. `label` is a static literal at
+  // every call site, but `detail` can carry session-derived data (e.g.
+  // `r.error`), so escape both — the embedded literal `\n` is untouched by
+  // escapeHTML and still renders as a line break. Issue #625.
+  const safeLabel = escapeHTML(label);
+  const safeDetail = detail ? escapeHTML(detail) : '';
   const item: TimelinePointItem = {
     id,
     group,
     content: '',
     start: t,
     type: 'point',
-    title: detail ? `${label}${detail}\n${fmtTime(t)}` : `${label}\n${fmtTime(t)}`,
+    title: detail ? `${safeLabel}${safeDetail}\n${fmtTime(t)}` : `${safeLabel}\n${fmtTime(t)}`,
     style: `background-color: ${color}; border-color: ${color};`,
   };
   items.push(item);
@@ -509,7 +614,9 @@ function rebuildGroups() {
   // reported `video_resolution` flickers during a switch.
   const variantGroups = variantOrder.map((v) => ({
     id: v.key,
-    content: variantLabel(v.mbps, v.resolution),
+    // vis renders group `content` as HTML; `v.resolution` is manifest-
+    // derived, so escape the rendered label. Issue #625.
+    content: escapeHTML(variantLabel(v.mbps, v.resolution)),
   }));
   const groups: any[] = [
     { id: 'PLAYER_SECTION', content: 'PLAYER', nestedGroups: [
@@ -583,6 +690,14 @@ async function ensureTimeline(): Promise<void> {
         // render as multi-line, vertically-spread fields. `overflowMethod`
         // flips the tooltip when it would clip the timeline edge.
         tooltip: { followMouse: true, overflowMethod: 'flip' },
+        // Disabling vis's built-in sanitizer is required so the styled,
+        // multi-line AVMetrics tooltip (`<div style=…>`/`<span>`) renders
+        // — vis's default XSS filter would strip the inline `style`/tags.
+        // This is safe because EVERY session-derived value that reaches an
+        // item `content`/`title` is HTML-escaped at source via escapeHTML
+        // (laneOpen, laneClose, pushPoint, coalesce, variant group labels,
+        // ingestAVMetric, formatAVMetricRawHTML). Only developer-authored
+        // formatting literals remain unescaped here. Issues #486, #625.
         xss: { disabled: true },
       });
       // Pause/live transitions come from the Live toggle button, the
@@ -641,6 +756,10 @@ async function ensureTimeline(): Promise<void> {
       });
       installLiveWheelAnchor();
       installCursorHoverTooltip();
+      installLifecycleHoverTooltip();
+      // Draw any lifecycle lines that were ready before the timeline existed
+      // (the reactive watcher only re-fires on subsequent marker changes).
+      void syncLifecycleLines();
     } finally {
       // Hold the resolved promise around so subsequent calls short-circuit
       // via the `if (timeline) return` check at the top.
@@ -669,6 +788,16 @@ function ingest(r: IngestRow) {
     prevLoopServer = null;
     prevError = null;
     prevFirstFrame = prevVideoStart = null;
+    prevRestarts = null;
+    prevLastEvent = null;
+    prevRate = null;
+    // #703a — PLAYBACK-lane NEW PLAY marker the first time a play_id appears
+    // (Set-deduped vs the synthetic-id flicker). Marks genuine new-play
+    // boundaries — e.g. each stop/restart-playback case in a sweep session.
+    if (r.playId && !seenPlayIds.has(r.playId)) {
+      seenPlayIds.add(r.playId);
+      pushPoint('PLAYBACK', t, 'NEW PLAY', '#0891b2', `\nplay_id ${r.playId.slice(0, 8)}…`);
+    }
   }
 
   // STATEFUL LANES — push every heartbeat as an event into a flat
@@ -692,37 +821,44 @@ function ingest(r: IngestRow) {
   // Operator preference: a single resolution should read with the
   // same colour everywhere on the chart. Issue #486.
   if (r.videoResolution) {
-    const matchMbps = bandwidthMbpsForResolution(r.manifestVariants, r.videoResolution);
+    // Snap the decoded WxH to the manifest's canonical rung (nearest height)
+    // so the lane reads manifest-matching values, not e.g. "1920x1088".
+    // Falls back to the raw player value when there's no manifest.
+    const snapped = manifestVariantForDisplayedRes(r.manifestVariants, r.videoResolution);
     statefulEvents.push({
       ts: t,
       type: 'DISPLAY_RES',
-      resolution: r.videoResolution,
-      mbps: matchMbps,
+      resolution: snapped?.resolution ?? r.videoResolution,
+      mbps: snapped?.mbps ?? bandwidthMbpsForResolution(r.manifestVariants, r.videoResolution),
     });
   }
 
-  // VARIANT — keyed on the MANIFEST's canonical resolution for the
-  // rung so transient `video_resolution` flicker during a switch
-  // doesn't create phantom lanes.
+  // VARIANT — keyed on the MANIFEST's canonical rung (resolution AND peak
+  // Mbps), NOT the player's reported video_bitrate. video_bitrate is
+  // AVPlayer's indicatedBitrate — a jittery EWMA that wobbles around the
+  // true rung (e.g. 29.6/29.9 for a 29.86 Mbps 4K variant). Snapping to the
+  // nearest published peak collapses phantom near-duplicate lanes and kills
+  // jitter-driven SHIFT markers. Issue #619.
   const mbpsRaw = r.videoBitrateMbps;
   if (mbpsRaw != null && mbpsRaw > 0) {
-    const mbpsRounded = Math.round(mbpsRaw * 10) / 10;
-    const variantRes = manifestResolutionForBitrate(r.manifestVariants, mbpsRounded);
-    if (variantRes) {
+    const rung = nearestVariantByBitrate(r.manifestVariants, mbpsRaw);
+    if (rung && rung.resolution) {
+      const canonMbps = rung.peakMbps;
+      const variantRes = rung.resolution;
       if (prevVariantMbps != null) {
-        if (mbpsRaw > prevVariantMbps + 0.01) {
-          pushPoint('PLAYBACK', t, 'SHIFT UP', '#3b82f6', `\n${prevVariantMbps.toFixed(2)} → ${mbpsRaw.toFixed(2)} Mbps`);
-        } else if (mbpsRaw < prevVariantMbps - 0.01) {
-          pushPoint('PLAYBACK', t, 'SHIFT DOWN', '#ef4444', `\n${prevVariantMbps.toFixed(2)} → ${mbpsRaw.toFixed(2)} Mbps`);
+        if (canonMbps > prevVariantMbps + 0.01) {
+          pushPoint('PLAYBACK', t, 'SHIFT UP', '#3b82f6', `\n${prevVariantMbps.toFixed(2)} → ${canonMbps.toFixed(2)} Mbps`);
+        } else if (canonMbps < prevVariantMbps - 0.01) {
+          pushPoint('PLAYBACK', t, 'SHIFT DOWN', '#ef4444', `\n${prevVariantMbps.toFixed(2)} → ${canonMbps.toFixed(2)} Mbps`);
         }
       }
-      prevVariantMbps = mbpsRaw;
-      const key = variantLaneId(mbpsRounded, variantRes);
-      ensureVariantLane(mbpsRounded, variantRes);
+      prevVariantMbps = canonMbps;
+      const key = variantLaneId(canonMbps, variantRes);
+      ensureVariantLane(canonMbps, variantRes);
       statefulEvents.push({
         ts: t,
         type: 'VARIANT',
-        mbps: mbpsRounded,
+        mbps: canonMbps,
         variantRes,
         variantKey: key,
       });
@@ -738,15 +874,18 @@ function ingest(r: IngestRow) {
     pushPoint('IMPAIRMENT', t, 'FROZEN', '#4c1d95', `\n+${r.droppedFrames - prevDropped} dropped`);
   }
   if (r.error && r.error !== prevError) {
-    pushPoint('IMPAIRMENT', t, 'ERROR', '#e11d48', `\n${r.error}`);
+    // Include the NSError domain/code when present (e.g. "NSURLErrorDomain
+    // #-1008") — the message string alone rarely identifies the failure.
+    const code = (r.errorCode != null && r.errorCode !== 0)
+      ? `${r.errorDomain || 'error'} #${r.errorCode}` : '';
+    const detail = code ? `\n${r.error}\n${code}` : `\n${r.error}`;
+    pushPoint('IMPAIRMENT', t, 'ERROR', '#e11d48', detail);
     prevError = r.error;
   }
   if (r.stalls != null) prevStalls = r.stalls;
   if (r.droppedFrames != null) prevDropped = r.droppedFrames;
 
   // PLAYBACK — FIRST_FRAME + START TIME on first observation per play.
-  // (Legacy RESTART event was driven by `player_restarts`, which isn't
-  // persisted in CH; drop until the schema gains it.)
   if (r.firstFrameTimeS != null && r.firstFrameTimeS > 0 && prevFirstFrame !== r.firstFrameTimeS) {
     pushPoint('PLAYBACK', t, 'FIRST FRAME', '#14b8a6', `\n${r.firstFrameTimeS.toFixed(3)}s`);
     prevFirstFrame = r.firstFrameTimeS;
@@ -755,6 +894,37 @@ function ingest(r: IngestRow) {
     pushPoint('PLAYBACK', t, 'START TIME', '#15803d', `\n${r.videoStartTimeS.toFixed(3)}s`);
     prevVideoStart = r.videoStartTimeS;
   }
+  // PLAYBACK — RESTART on each player_restarts increment (#703a; the column is
+  // persisted via the lanes_v1 bundle). Seed silently on the first row so we
+  // mark only mid-play recoveries, not the play's starting count.
+  if (r.playerRestarts != null) {
+    if (prevRestarts != null && r.playerRestarts > prevRestarts) {
+      pushPoint('PLAYBACK', t, 'RESTART', '#f59e0b', `\n+${r.playerRestarts - prevRestarts} (total ${r.playerRestarts})`);
+    }
+    prevRestarts = r.playerRestarts;
+  }
+  // PLAYBACK — LIVE RESYNC: the #703a cheap seek-to-live nudge. It keeps the
+  // item (no player_restarts bump), so it's surfaced off the last_event
+  // transition rather than the counter.
+  if (r.lastEvent === 'live_resync' && prevLastEvent !== 'live_resync') {
+    pushPoint('PLAYBACK', t, 'LIVE RESYNC', '#0ea5e9', '\nseek toward live edge');
+  }
+  if (r.lastEvent) prevLastEvent = r.lastEvent;
+
+  // PLAYBACK — playback_rate transitions (#703a). Drop a "RATE → N" marker on
+  // ANY rate change (rounded to ignore float noise), labelled with the actual
+  // rate so it copes with anything: 0 = paused/stuck (the stuck signal that the
+  // state lane masks), 1 = play, 2 = ff, 0.5 = slow, etc. Colour: 0 red, 1
+  // green, anything else amber (trick/slow).
+  if (r.playbackRate != null) {
+    const rate = Math.round(r.playbackRate * 100) / 100;
+    if (prevRate != null && rate !== prevRate) {
+      const color = rate === 0 ? '#dc2626' : (rate === 1 ? '#16a34a' : '#f59e0b');
+      // Label IS the A→B transition (e.g. "RATE 0 → 1"); no redundant detail.
+      pushPoint('PLAYBACK', t, `RATE ${prevRate} → ${rate}`, color, '');
+    }
+    prevRate = rate;
+  }
 
   // SERVER — LOOP increments.
   if (r.loopCountServer != null && prevLoopServer != null && r.loopCountServer > prevLoopServer) {
@@ -762,10 +932,13 @@ function ingest(r: IngestRow) {
   }
   if (r.loopCountServer != null) prevLoopServer = r.loopCountServer;
 
-  // CONTROL — record any control_revision change.
-  if (r.controlRevision && r.controlRevision !== '0' && r.controlRevision !== prevControlRev) {
+  // CONTROL — fallback only. control_revision is an opaque revision stamp, so
+  // this just says "something changed". When a control_events stream is wired
+  // (SessionDisplay), the richer drainControlRows() drives the lane with the
+  // actual action (event/info/source) instead — see below.
+  if (!props.controlStream && r.controlRevision && r.controlRevision !== '0' && r.controlRevision !== prevControlRev) {
     if (prevControlRev != null && prevControlRev !== '0') {
-      pushPoint('CONTROL', t, 'CONTROL CHANGE', '#7c3aed', `\n${prevControlRev} → ${r.controlRevision}`);
+      pushPoint('CONTROL', t, 'CONTROL CHANGE', '#7c3aed', '\nrevision changed');
     }
     prevControlRev = r.controlRevision;
   }
@@ -847,15 +1020,19 @@ function renderStatefulLanes(nowMs: number) {
       // bar stretches across the visible window.
       const end = j < seq.length ? seq[j].ts : nowMs;
       const durSec = ((end - start) / 1000).toFixed(1);
+      // `label` is session-derived (player state/reason, resolution,
+      // play_id); vis renders both `content` and `title` as HTML, so
+      // escape once and reuse. `type` is a static lane literal. Issue #625.
+      const safeLabel = escapeHTML(label);
       desired.push({
         id: statefulItemId(type, runIndex++) as any,
         group: lane,
-        content: label,
+        content: safeLabel,
         start,
         end: Math.max(end, start + 1),
         ts0: start,
         type: 'range',
-        title: `${type}: ${label}\n${fmtTime(start)} → ${fmtTime(end)} (${durSec}s)`,
+        title: `${type}: ${safeLabel}\n${fmtTime(start)} → ${fmtTime(end)} (${durSec}s)`,
         style: `background-color: ${color}; border-color: ${color}; color: #fff;`,
       });
       i = j;
@@ -872,19 +1049,17 @@ function renderStatefulLanes(nowMs: number) {
     'DISPLAY_RES',
     () => 'DISPLAY_RES',
     (e) => e.resolution ?? '?',
-    // Colour by the matching variant's Mbps when available so
-    // 1920x1080 here reads with the same swatch as 1920x1080 on
-    // the VARIANT lane. Pre-manifest heartbeats (no match) fall
-    // back to the legacy resolution-bucket palette. Issue #486.
-    (e) => (e.mbps && e.mbps > 0
-      ? variantColor(e.mbps)
-      : displayResColor(e.resolution ?? null)),
+    // Colour by resolution via the shared ladder-rung mapping so a
+    // given resolution reads with the same swatch on both this rail
+    // and the VARIANT lane (issue #486), while keeping adjacent rungs
+    // distinct. Falls back to the fixed palette pre-manifest.
+    (e) => colorForResolution(e.resolution ?? null),
   );
   coalesce(
     'VARIANT',
     (e) => e.variantKey ?? 'VARIANT',
     () => '', // ranges are blank bars; label sits on the group header
-    (e) => variantColor(e.mbps ?? 0),
+    (e) => colorForResolution(e.variantRes ?? null),
   );
 
   // PLAY_ID — one range per contiguous run of the same play_id.
@@ -968,6 +1143,20 @@ async function drainNewRows() {
     }
   }
   lastIngestedMs = highWater;
+  // Bound the stateful-event history (issue #582) WITHOUT trimming
+  // tighter than what the charts show. Trim to the events cache's
+  // retained window (rangeBounds.min) so the Player State lanes fill in
+  // over exactly the same span the charts do when the operator pans the
+  // focus window back. Appended in ascending ts order, so the oldest are
+  // at the front. The fixed cap is only a fallback before bounds exist.
+  const minKeep = props.eventsStream.rangeBounds.value?.min;
+  if (minKeep != null) {
+    let drop = 0;
+    while (drop < statefulEvents.length && statefulEvents[drop].ts < minKeep) drop++;
+    if (drop > 0) statefulEvents.splice(0, drop);
+  } else if (statefulEvents.length > STATEFUL_EVENTS_CAP) {
+    statefulEvents.splice(0, statefulEvents.length - STATEFUL_EVENTS_CAP);
+  }
 }
 
 watch(
@@ -1093,7 +1282,9 @@ function ingestAVMetric(row: Record<string, unknown>) {
   const item: TimelineRangeItem = {
     id,
     group: 'AVMETRICS',
-    content: short,
+    // `short` derives from the session's `event_type`; vis renders the bar
+    // `content` as HTML (the tooltip path already escapes). Issue #625.
+    content: escapeHTML(short),
     start: t,
     end: t + computeAVMetricsDurationMs(),
     ts0: t,
@@ -1150,6 +1341,42 @@ watch(
   { immediate: true },
 );
 
+/* ─── control_events drain (#474) — drives the CONTROL lane with the actual
+ * action (event/info/source) instead of the opaque control_revision. Low
+ * volume, so one pushPoint per row (no AVMetrics-style sizing/reflow). */
+let lastControlIngestedMs = -Infinity;
+async function drainControlRows() {
+  const stream = props.controlStream;
+  if (!stream) return;
+  const raw = stream.inRange(
+    lastControlIngestedMs === -Infinity ? 0 : lastControlIngestedMs + 1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (!raw.length) return;
+  await ensureTimeline();
+  let highWater = lastControlIngestedMs;
+  for (const row of raw) {
+    const t = tsOfRow(row);
+    if (!Number.isFinite(t) || t <= lastControlIngestedMs) continue;
+    const event = String(row.event ?? '').trim();
+    const source = String(row.source ?? '').trim();
+    const info = String(row.info ?? '').trim();
+    if (event) {
+      // Label = what + who (e.g. "shape · harness"); tooltip detail = the
+      // info payload (rate, fault kind, pattern step, labels, …).
+      const label = source ? `${event} · ${source}` : event;
+      pushPoint('CONTROL', t, label, EVENT_LANES.CONTROL.color, info ? `\n${info}` : '');
+    }
+    if (t > highWater) highWater = t;
+  }
+  lastControlIngestedMs = highWater;
+}
+watch(
+  () => props.controlStream?.version.value ?? 0,
+  () => { void drainControlRows(); },
+  { immediate: true },
+);
+
 // Toggle the AVMETRICS lane's visibility when activity appears or
 // disappears (issue #486). Single boolean memo so we only call
 // rebuildGroups on the actual transition — every other version
@@ -1196,25 +1423,34 @@ watch(
 // the old session's lanes instead of accumulating both. Watching
 // playerId (a string prop) keeps this simple; SessionDisplay's
 // useSessionTimeSeries already re-subscribes the SSE stream.
+function resetIngest() {
+  statefulEvents.length = 0;
+  pendingLive.length = 0;
+  pendingLiveAV.length = 0;
+  lastIngestedMs = -Infinity;
+  lastAVIngestedMs = -Infinity;
+  lastControlIngestedMs = -Infinity;
+  prevStalls = prevDropped = null;
+  prevLoopServer = null;
+  prevControlRev = null;
+  prevError = null;
+  prevPlayId = null;
+  seenPlayIds.clear();
+  prevFirstFrame = prevVideoStart = null;
+  prevVariantMbps = null;
+  if (itemsDS) {
+    try { itemsDS.clear(); } catch { /* ignore */ }
+  }
+}
+
+watch(() => props.playerId, () => { resetIngest(); });
+
+// Cache reset (#587) — the events stream re-subscribed to a new window
+// (refetch-on-pan / return-to-live). The forward-only watermark would
+// miss the freshly-loaded (possibly older) window, so reset and re-drain.
 watch(
-  () => props.playerId,
-  () => {
-    statefulEvents.length = 0;
-    pendingLive.length = 0;
-    pendingLiveAV.length = 0;
-    lastIngestedMs = -Infinity;
-    lastAVIngestedMs = -Infinity;
-    prevStalls = prevDropped = null;
-    prevLoopServer = null;
-    prevControlRev = null;
-    prevError = null;
-    prevPlayId = null;
-    prevFirstFrame = prevVideoStart = null;
-    prevVariantMbps = null;
-    if (itemsDS) {
-      try { itemsDS.clear(); } catch { /* ignore */ }
-    }
-  },
+  () => props.eventsStream.epoch.value,
+  () => { resetIngest(); void drainNewRows(); },
 );
 
 watch(
@@ -1348,7 +1584,10 @@ function installCursorHoverTooltip() {
       if (cursorTooltipVisible.value) cursorTooltipVisible.value = false;
       return;
     }
-    const lineEl = c.querySelector('.vis-custom-time') as HTMLElement | null;
+    // Target the nav-cursor line specifically — there are now several
+    // `.vis-custom-time` elements (the lifecycle lines share the class), and
+    // a bare querySelector would grab whichever renders first.
+    const lineEl = c.querySelector('.vis-custom-time.nav-cursor') as HTMLElement | null;
     if (!lineEl) {
       if (cursorTooltipVisible.value) cursorTooltipVisible.value = false;
       return;
@@ -1395,11 +1634,145 @@ watch(
   { immediate: true },
 );
 
+/*
+ * Player-lifecycle vertical lines (restart / play_start / play_end).
+ *
+ * Each visible marker is a vis-timeline custom-time keyed `lc-<kind>-<ms>`,
+ * so the rendered <div> carries that id as a CSS class — the per-kind colour
+ * comes from CSS that matches the class substring. The id encodes the
+ * position, so a marker never needs repositioning: we only add ids that
+ * appeared and remove ids that vanished (markers recomputed, or a kind
+ * toggled off). `lcLines` doubles as the id→detail lookup the hover uses.
+ */
+const lcLines = new Map<string, string>();
+
+function lcIdFor(m: LifecycleMarker): string {
+  return `lc-${m.kind}-${Math.round(m.ms)}`;
+}
+
+async function syncLifecycleLines(): Promise<void> {
+  await ensureTimeline();
+  if (!timeline) return;
+  const desired = new Map<string, { ms: number; detail: string }>();
+  for (const m of props.lifecycleMarkers ?? []) {
+    if (!lineVisibility[m.kind]) continue;
+    if (!Number.isFinite(m.ms)) continue;
+    desired.set(lcIdFor(m), { ms: m.ms, detail: m.detail });
+  }
+  // Remove lines no longer wanted.
+  for (const id of [...lcLines.keys()]) {
+    if (!desired.has(id)) {
+      try { timeline.removeCustomTime(id); } catch { /* ignore */ }
+      lcLines.delete(id);
+    }
+  }
+  // Add newly-wanted lines.
+  for (const [id, { ms, detail }] of desired) {
+    if (!lcLines.has(id)) {
+      try {
+        timeline.addCustomTime(new Date(ms), id);
+        lcLines.set(id, detail);
+      } catch { /* duplicate id / pre-mount — ignore */ }
+    }
+  }
+}
+
+watch(
+  [
+    () => props.lifecycleMarkers,
+    () => lineVisibility.restart,
+    () => lineVisibility.play_start,
+    () => lineVisibility.play_end,
+    () => lineVisibility.user_marked,
+    () => lineVisibility.server_loop,
+  ],
+  () => { void syncLifecycleLines(); },
+  { immediate: true },
+);
+
+// Event-bar custom-time lines — mirror syncLifecycleLines. id `ev-<sev>-<ms>`
+// lands as a CSS class so the per-severity rules recolour each line; evLines
+// doubles as the id→detail lookup for the shared hover tooltip.
+const evLines = new Map<string, string>();
+function evIdFor(m: EventMarker): string {
+  return `ev-${m.sev}-${Math.round(m.ms)}`;
+}
+async function syncEventLines(): Promise<void> {
+  await ensureTimeline();
+  if (!timeline) return;
+  const desired = new Map<string, { ms: number; detail: string }>();
+  for (const m of props.eventMarkers ?? []) {
+    if (!Number.isFinite(m.ms)) continue;
+    desired.set(evIdFor(m), { ms: m.ms, detail: m.detail });
+  }
+  for (const id of [...evLines.keys()]) {
+    if (!desired.has(id)) {
+      try { timeline.removeCustomTime(id); } catch { /* ignore */ }
+      evLines.delete(id);
+    }
+  }
+  for (const [id, { ms, detail }] of desired) {
+    if (!evLines.has(id)) {
+      try { timeline.addCustomTime(new Date(ms), id); evLines.set(id, detail); } catch { /* ignore */ }
+    }
+  }
+}
+watch(() => props.eventMarkers, () => { void syncEventLines(); }, { immediate: true });
+
+/* Lifecycle-line hover tooltip — same custom-DOM approach as the cursor
+ * tooltip, but hit-tests EVERY lifecycle custom-time element and shows the
+ * nearest one's detail (restart reason / play_id / terminal status). */
+const lcTooltipVisible = ref(false);
+const lcTooltipX = ref(0);
+const lcTooltipY = ref(0);
+const lcTooltipText = ref('');
+
+function installLifecycleHoverTooltip() {
+  const c = container.value;
+  if (!c) return;
+  c.addEventListener('mousemove', (e) => {
+    if (lcLines.size === 0) {
+      if (lcTooltipVisible.value) lcTooltipVisible.value = false;
+      return;
+    }
+    const cRect = c.getBoundingClientRect();
+    const mx = e.clientX - cRect.left;
+    const my = e.clientY - cRect.top;
+    let bestDist = 6; // px tolerance
+    let bestText = '';
+    const els = c.querySelectorAll('.vis-custom-time[class*="lc-"], .vis-custom-time[class*="ev-"]');
+    els.forEach((el) => {
+      const lineX = el.getBoundingClientRect().left - cRect.left;
+      const d = Math.abs(mx - lineX);
+      if (d >= bestDist) return;
+      // Recover the id (and its detail) from the element's class list.
+      let detail = '';
+      el.classList.forEach((cls) => {
+        if (cls.startsWith('lc-') && lcLines.has(cls)) detail = lcLines.get(cls) as string;
+        else if (cls.startsWith('ev-') && evLines.has(cls)) detail = evLines.get(cls) as string;
+      });
+      if (detail) { bestDist = d; bestText = detail; }
+    });
+    if (!bestText) {
+      if (lcTooltipVisible.value) lcTooltipVisible.value = false;
+      return;
+    }
+    lcTooltipText.value = bestText;
+    lcTooltipX.value = Math.min(mx + 8, c.clientWidth - 220);
+    lcTooltipY.value = Math.max(4, my - 52);
+    lcTooltipVisible.value = true;
+  });
+  c.addEventListener('mouseleave', () => {
+    lcTooltipVisible.value = false;
+  });
+}
+
 onBeforeUnmount(() => {
   try { timeline?.destroy(); } catch { /* ignore */ }
   timeline = null;
   itemsDS = null;
   groupsDS = null;
+  lcLines.clear();
 });
 </script>
 
@@ -1438,6 +1811,13 @@ onBeforeUnmount(() => {
         class="cursor-tooltip"
         :style="{ left: cursorTooltipX + 'px', top: cursorTooltipY + 'px' }"
       >{{ coord.state.cursorLabel }}</div>
+      <!-- Lifecycle-line hover tooltip — restart reason / play_id /
+           terminal status for the nearest lifecycle line. Multi-line. -->
+      <div
+        v-if="lcTooltipVisible"
+        class="cursor-tooltip lc-tooltip"
+        :style="{ left: lcTooltipX + 'px', top: lcTooltipY + 'px' }"
+      >{{ lcTooltipText }}</div>
     </div>
 
     <!-- Colour key — placed BELOW the chart so the eye reads the
@@ -1595,6 +1975,16 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Lifecycle tooltip is multi-line (reason / play_id / status / time) and
+ * slate (matches the line charts' marker tooltip) rather than the cursor's
+ * blue, so the two never read as the same thing. */
+.lc-tooltip {
+  background: rgba(15, 23, 42, 0.94);
+  white-space: pre-line;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.4;
+}
 /* "Selected event" custom-time line — full visual parity with the
  * line-chart cursor: 1.5 px dashed blue line + a small filled
  * triangle at the top. vis-timeline renders <div class="vis-custom-time">
@@ -1620,6 +2010,48 @@ onBeforeUnmount(() => {
   border-right: 5px solid transparent;
   border-top: 6px solid #1d4ed8;
 }
+
+/* Per-kind lifecycle custom-time lines — restart (amber dashed),
+ * play_start (green solid), play_end (slate dashed). The id (`lc-<kind>-<ms>`)
+ * lands on the element as a CSS class, so a class-substring match recolours
+ * the shared `.vis-custom-time` line + its top arrow. z-index 4 keeps these
+ * just under the user-selected cursor (5). */
+.events-timeline :deep(.vis-custom-time[class*='lc-restart-']) {
+  border-left: 1.5px dashed #f59e0b !important;
+  z-index: 4;
+}
+.events-timeline :deep(.vis-custom-time[class*='lc-restart-']::before) { border-top-color: #f59e0b; }
+.events-timeline :deep(.vis-custom-time[class*='lc-play_start-']) {
+  border-left: 1.5px solid #15803d !important;
+  z-index: 4;
+}
+.events-timeline :deep(.vis-custom-time[class*='lc-play_start-']::before) { border-top-color: #15803d; }
+.events-timeline :deep(.vis-custom-time[class*='lc-play_end-']) {
+  border-left: 1.5px dashed #475569 !important;
+  z-index: 4;
+}
+.events-timeline :deep(.vis-custom-time[class*='lc-play_end-']::before) { border-top-color: #475569; }
+.events-timeline :deep(.vis-custom-time[class*='lc-user_marked-']) {
+  border-left: 1.5px solid #db2777 !important;
+  z-index: 4;
+}
+.events-timeline :deep(.vis-custom-time[class*='lc-user_marked-']::before) { border-top-color: #db2777; }
+.events-timeline :deep(.vis-custom-time[class*='lc-server_loop-']) {
+  border-left: 1.5px solid #84cc16 !important;
+  z-index: 4;
+}
+.events-timeline :deep(.vis-custom-time[class*='lc-server_loop-']::before) { border-top-color: #84cc16; }
+
+/* Event-bar custom-time lines (severity-coloured), mirrored from the metric
+ * charts. z-index 3 keeps them beneath the lifecycle lines (4) + cursor (5). */
+.events-timeline :deep(.vis-custom-time[class*='ev-critical-']) { border-left: 1.5px dashed #dc2626 !important; z-index: 3; }
+.events-timeline :deep(.vis-custom-time[class*='ev-critical-']::before) { border-top-color: #dc2626; }
+.events-timeline :deep(.vis-custom-time[class*='ev-error-']) { border-left: 1.5px dashed #f97316 !important; z-index: 3; }
+.events-timeline :deep(.vis-custom-time[class*='ev-error-']::before) { border-top-color: #f97316; }
+.events-timeline :deep(.vis-custom-time[class*='ev-warning-']) { border-left: 1.5px dashed #eab308 !important; z-index: 3; }
+.events-timeline :deep(.vis-custom-time[class*='ev-warning-']::before) { border-top-color: #eab308; }
+.events-timeline :deep(.vis-custom-time[class*='ev-info-']) { border-left: 1.5px dashed #0ea5e9 !important; z-index: 3; }
+.events-timeline :deep(.vis-custom-time[class*='ev-info-']::before) { border-top-color: #0ea5e9; }
 
 /* vis-timeline label panel + labelset pinned to the SAME 60px width
  * as the Chart.js charts' left y-axis (see MetricsLineChart.Y_WIDTH)

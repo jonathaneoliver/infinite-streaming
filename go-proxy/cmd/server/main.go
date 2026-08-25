@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"math"
@@ -95,8 +96,6 @@ type tcStatsCache struct {
 	backlog int64
 }
 
-
-
 // HeaderPair is a single name/value pair, used to carry HTTP request /
 // response headers and query parameters in NetworkLogEntry. Mirrors the
 // HAR 1.2 NameValue shape so a HAR consumer can drop these straight into
@@ -132,6 +131,16 @@ type NetworkLogEntry struct {
 	// events (user-reload, auto-recovery). Issue #280.
 	PlayID string `json:"play_id,omitempty"`
 
+	// PlayerID identifies the player that made this request, stamped from
+	// the request's `?player_id=` query param (raw/uppercase off iOS) so the
+	// attribution rides the request itself and does NOT depend on the session
+	// having been associated with a player_id yet. Without it, the forwarder's
+	// session→player_id map is cold for a burst of early requests on a fresh
+	// stack and those rows land with an empty player_id — invisible to the
+	// dashboard's player-filtered Network Log. The forwarder canonicalises it
+	// (lowercase) and also learns the session→player mapping from it. Issue #911.
+	PlayerID string `json:"player_id,omitempty"`
+
 	// AttemptID identifies which playback attempt within a play this
 	// request belongs to. The player initialises it to 1 on every
 	// new play and increments by 1 at every `restart` event
@@ -163,6 +172,25 @@ type NetworkLogEntry struct {
 	TTFBMs     float64 `json:"ttfb_ms"`     // Upstream time to first byte
 	TransferMs float64 `json:"transfer_ms"` // Downstream write+flush time to client (= client-perceived `receive`)
 	TotalMs    float64 `json:"total_ms"`
+
+	// DeliveryRateMbps is the kernel's own throughput estimate
+	// (tcpi_delivery_rate) sampled at end of transfer, in decimal Mbps.
+	// The derived bytes_out/transfer_ms Mbps only times the memcpy into
+	// the socket send buffer, so it over-reports 1000× when a sub-buffer
+	// segment is absorbed before tc drains the qdisc onto the wire. This
+	// field is the honest shaped-rate cross-check. Connection-level (not
+	// per-stream), so under HTTP/2 it reflects the whole socket. Linux
+	// only; unset on the macOS dev build.
+	DeliveryRateMbps float64 `json:"delivery_rate_mbps,omitempty"`
+
+	// DeliveryRateAppLimited is the kernel's tcpi_delivery_rate_app_limited
+	// flag for the sample above: true when the sender ran out of data to
+	// push, so DeliveryRateMbps reflects the app's pace rather than the
+	// link and reads noisily (starved low OR burst high). Consumers should
+	// trust the rate only when this is false (a network-limited sample).
+	// omitempty: present only when flagged, and only meaningful when
+	// DeliveryRateMbps is non-zero. Linux only.
+	DeliveryRateAppLimited bool `json:"delivery_rate_app_limited,omitempty"`
 
 	// ClientWaitMs is the time from when the proxy received the request
 	// to when it sent the first response byte back to the client. It IS
@@ -340,66 +368,76 @@ func (rb *NetworkLogRingBuffer) GetAll() []NetworkLogEntry {
 }
 
 type App struct {
-	sessionsMu               sync.Mutex
-	sessionsSnap             atomic.Pointer[[]SessionData]
-	throughputMu             sync.RWMutex
-	throughputData           map[int]map[string]interface{}
-	sessionEvents            *SessionEventStore
-	traffic                  *TcTrafficManager
-	upstreamHost             string
-	upstreamPort             string
-	maxSessions              int
+	// #740: the in-memory session list is now mutated lock-free via
+	// mutateSessions (immutable copy-on-write + CompareAndSwap). The former
+	// sessionsMu (guarded only the publish, never the read-modify-write) and
+	// createMu (#739 bootstrap-allocation lock, subsumed by reserve-then-fill)
+	// are gone — see mutateSessions and the handleProxy reserve CAS.
+	sessionsSnap   atomic.Pointer[[]SessionData]
+	throughputMu   sync.RWMutex
+	throughputData map[int]map[string]interface{}
+	sessionEvents  *SessionEventStore
+	traffic        *TcTrafficManager
+	upstreamHost   string
+	upstreamPort   string
+	maxSessions    int
 	// defaultRateMbps is the baseline rate cap (Mbps) applied to every
 	// new player session via setDefault on `nftables_bandwidth_mbps` in
 	// normalizeSessionsForResponse. Read once at boot from
 	// INFINITE_STREAM_DEFAULT_RATE_MBPS. 0 = no cap (today's behaviour);
 	// non-zero = the deployment's interpretation of "no operator
 	// override." See issue #480.
-	defaultRateMbps          int
-	client                   *http.Client
-	portMap                  PortMapping
-	shapeMu                  sync.Mutex
-	shapeLoops               map[int]context.CancelFunc
-	shapeStates              map[int]NftShapePattern
-	shapeApplyMu             sync.Mutex
-	shapeApply               map[int]ShapeApplyState
-	faultMu                  sync.Mutex
-	faultLoops               map[int]context.CancelFunc
-	networkLogsMu            sync.RWMutex
-	networkLogs              map[string]*NetworkLogRingBuffer // sessionId -> ring buffer
-	loopStateMu              sync.Mutex
-	loopStateBySession       map[string]ServerLoopState
-	sessionsHub              *SessionEventHub
+	defaultRateMbps int
+	// shaping is the boot-time capability probe result (#910): which
+	// network-shaping controls the kernel actually backs on this host, plus
+	// the resolved mode. Read-only after startup, so no lock. Surfaced on
+	// /api/v2/info and /api/nftables/capabilities; drives the dashboard's
+	// degraded-mode banner and per-control disablement.
+	shaping            shapingCaps
+	client             *http.Client
+	portMap            PortMapping
+	shapeMu            sync.Mutex
+	shapeLoops         map[int]context.CancelFunc
+	shapeStates        map[int]NftShapePattern
+	shapeApplyMu       sync.Mutex
+	shapeApply         map[int]ShapeApplyState
+	faultMu            sync.Mutex
+	faultLoops         map[int]context.CancelFunc
+	networkLogsMu      sync.RWMutex
+	networkLogs        map[string]*NetworkLogRingBuffer // sessionId -> ring buffer
+	loopStateMu        sync.Mutex
+	loopStateBySession map[string]ServerLoopState
+	sessionsHub        *SessionEventHub
 	// Monotonic revision stamped on each /api/sessions/stream frame
 	// (handleSessionStream initial frame + emitSessionEvent per-event
 	// frames). Was named sessionsBroadcastSeq when the debounced
 	// full-state broadcast lived here; kept stable as the wire
 	// revision is consumer-visible.
-	sessionsBroadcastSeq     uint64
-	networkHub               *NetworkEventHub
+	sessionsBroadcastSeq uint64
+	networkHub           *NetworkEventHub
 	// controlHub broadcasts proxy/harness control events to subscribers
 	// (forwarder + any dashboard SSE client). Issue #474 Milestone B.
-	controlHub               *ControlEventHub
+	controlHub *ControlEventHub
 	// avmetricsHub broadcasts iOS 18 AVMetrics raw events posted by the
 	// player to dashboard + forwarder subscribers. Issue #486 spike.
-	avmetricsHub             *AVMetricEventHub
-	uiStateVersionSeq        uint64
-	segmentFlightMu          sync.Mutex
-	segmentFlight            map[int]segmentFlightInfo // internal port -> segment transfer info
-	segmentFlightSeq         uint64                    // atomic generation counter for flight IDs
-	segmentRunMu             sync.Mutex
-	segmentRun               map[int]segmentRunRecord // internal port -> last completed run record
-	drainActiveMu            sync.Mutex
-	drainActive              map[int]bool // per-port: true while awaitSocketDrain is running
-	tcSamplesMu              sync.Mutex
-	tcSamples                map[int][]tcSample
-	wireRateMu               sync.Mutex
-	wireRate                 map[int]wireRateSample // latest byte-change-gated rate per port
-	tcCacheMu                sync.Mutex
-	tcCache                  map[int]*tcStatsCache // per-port TC stats cache
-	transferCompleteMu           sync.Mutex
-	transferCompleteMbps         map[int]float64   // latest completed segment Mbps per port
-	transferCompleteAt           map[int]time.Time // when the drain completed
+	avmetricsHub         *AVMetricEventHub
+	uiStateVersionSeq    uint64
+	segmentFlightMu      sync.Mutex
+	segmentFlight        map[int]segmentFlightInfo // internal port -> segment transfer info
+	segmentFlightSeq     uint64                    // atomic generation counter for flight IDs
+	segmentRunMu         sync.Mutex
+	segmentRun           map[int]segmentRunRecord // internal port -> last completed run record
+	drainActiveMu        sync.Mutex
+	drainActive          map[int]bool // per-port: true while awaitSocketDrain is running
+	tcSamplesMu          sync.Mutex
+	tcSamples            map[int][]tcSample
+	wireRateMu           sync.Mutex
+	wireRate             map[int]wireRateSample // latest byte-change-gated rate per port
+	tcCacheMu            sync.Mutex
+	tcCache              map[int]*tcStatsCache // per-port TC stats cache
+	transferCompleteMu   sync.Mutex
+	transferCompleteMbps map[int]float64   // latest completed segment Mbps per port
+	transferCompleteAt   map[int]time.Time // when the drain completed
 	// metricsPostMu serialises `handlePostSessionMetrics` per session_id.
 	// Without this, two near-simultaneous POSTs run in independent
 	// goroutines that race for `sessionsMu`; the loser writes after the
@@ -409,7 +447,7 @@ type App struct {
 	// arrival order — Go's sync.Mutex grants in approximately FIFO
 	// order under contention since 1.9, which is what TCP delivery
 	// guarantees per connection. Issue #403 follow-up.
-	metricsPostMu                sync.Map // session_id -> *sync.Mutex
+	metricsPostMu sync.Map // session_id -> *sync.Mutex
 }
 
 // sessionStateMu serialises read-modify-write on the session map
@@ -568,6 +606,13 @@ type ControlEventHub struct {
 	mu      sync.Mutex
 	nextID  int
 	clients map[int]*ControlClient
+	// lastServerStart holds the most recent server_start boot marker so it
+	// can be replayed to clients that subscribe AFTER boot. The restart
+	// that produces the marker is the same event that drops the forwarder's
+	// SSE subscription, and Broadcast to zero clients is a no-op — so
+	// without replay the marker would be lost before the forwarder
+	// reconnects. Set via BroadcastServerStart, replayed in AddClient. #671.
+	lastServerStart *ControlEvent
 }
 
 type ControlClient struct {
@@ -602,6 +647,15 @@ func (h *ControlEventHub) AddClient(buffer int) (int, <-chan ControlEvent) {
 	id := h.nextID
 	c := &ControlClient{ch: make(chan ControlEvent, buffer)}
 	h.clients[id] = c
+	// Replay the sticky boot marker so a forwarder reconnecting after a
+	// restart still archives the server_start. The channel was just created
+	// with room, so this never blocks. #671.
+	if h.lastServerStart != nil {
+		select {
+		case c.ch <- *h.lastServerStart:
+		default:
+		}
+	}
 	return id, c.ch
 }
 
@@ -639,6 +693,18 @@ func (h *ControlEventHub) Broadcast(ev ControlEvent) {
 			}
 		}
 	}
+}
+
+// BroadcastServerStart records the boot marker as sticky (replayed to every
+// future subscriber by AddClient) and broadcasts it to any client already
+// connected. Separate from Broadcast so only the boot marker is retained —
+// ordinary control events are not stickied. #671.
+func (h *ControlEventHub) BroadcastServerStart(ev ControlEvent) {
+	h.mu.Lock()
+	stored := ev
+	h.lastServerStart = &stored
+	h.mu.Unlock()
+	h.Broadcast(ev)
 }
 
 // AVMetricEventHub fans out iOS 18 AVMetrics raw events (issue #486) to
@@ -789,6 +855,25 @@ type TcTrafficManager struct {
 	nlMu          sync.Mutex
 	nlHandle      *netlink.Handle // persistent netlink handle, created lazily
 	nlLink        netlink.Link    // resolved once from interfaceName
+	// tcMu serialises ALL tc tree mutations — the shared-root ensure (root
+	// qdisc 1: + root class 1:1), the per-port leaf HTB class add/change, the
+	// per-port filter install, and the per-port clear sweep. Every one of these
+	// is a check-then-act against the SAME tc tree, so concurrent
+	// config-on-connects otherwise interleave and wipe each other's leaf
+	// classes: a leaf-class add racing a clear (or another port's root ensure)
+	// leaves that port running uncapped through the 10 Gbps default class.
+	// Guarding only the shared root (the pre-#746 scope) was not enough — the
+	// leaf add/change, filter install, and ClearPortShaping all ran OUTSIDE the
+	// lock and clobbered each other. This was masked pre-#740 by the bootstrap
+	// createMu (held across the kernel apply); the reserve-then-fill that
+	// replaced it removed that serialization. See #745 / #746.
+	//
+	// Deadlock-free by construction: Go sync.Mutex is NOT reentrant, so we use
+	// the public-wrapper / lock-free-core split. Public methods acquire tcMu
+	// once and delegate to a lock-free *Core helper; *Core helpers NEVER take
+	// the lock and only call other lock-free helpers — never a public (locking)
+	// method.
+	tcMu sync.Mutex
 	// Per-port ICMP filter state (issue #404). Tracks the last
 	// player_ip we installed an ICMP-routing filter for so the
 	// path-ping sampler's per-tick ApplyPlayerICMPFilter call
@@ -796,12 +881,33 @@ type TcTrafficManager struct {
 	// "is a filter currently installed?" check for cleanup.
 	icmpFilterMu       sync.Mutex
 	icmpFilterIPByPort map[int]string
+
+	// #910 honesty gates. Set once at boot from the shaping probe (or a
+	// forced degraded mode) via SetKernelShaping. When false, the matching
+	// public apply method no-ops instead of touching the kernel, so a
+	// forced-degraded box (where tc actually works) genuinely doesn't shape.
+	// Default true (NewTcTrafficManager) so existing callers/tests are
+	// unaffected until the boot probe narrows them.
+	kernelRate  bool
+	kernelNetem bool
+
+	// #910 per-session (per-port) degrade. When a single session is forced
+	// degraded on an otherwise-capable box (the A/B instrument), its bound
+	// port is registered here and the kernel apply no-ops for JUST that port,
+	// leaving every other session shaping normally. Set/cleared by the App
+	// from the session's shaping_forced_mode.
+	portGateMu   sync.Mutex
+	portRateOff  map[int]bool
+	portNetemOff map[int]bool
 }
 
 type ShapeApplyState struct {
-	rate  float64
-	delay int
-	loss  float64
+	rate     float64
+	delay    int
+	loss     float64
+	jitter   int     // #826 explicit jitter (delay stddev)
+	lossCorr float64 // #826 loss burst correlation %
+	delCorr  float64 // #826 delay-distribution correlation %
 }
 
 func (a *App) getShapeApplyState(port int) (ShapeApplyState, bool) {
@@ -814,6 +920,21 @@ func (a *App) getShapeApplyState(port int) (ShapeApplyState, bool) {
 func (a *App) setShapeApplyState(port int, state ShapeApplyState) {
 	a.shapeApplyMu.Lock()
 	a.shapeApply[port] = state
+	a.shapeApplyMu.Unlock()
+}
+
+// clearShapeApplyState forgets the last-applied shaping for a port. It MUST be
+// called whenever the port's kernel tc rule is wiped out-of-band (ClearPortShaping
+// at session-start / session-delete on a reused port). Otherwise the cached
+// state still matches a subsequent apply of the same rate and applyShapeIfChanged
+// SKIPS the re-install — leaving the port uncapped (config present, no kernel
+// rule). This bit config-on-connect (#712), which clears the port then re-applies
+// the materialized cap before the 302: on a reused port whose prior session had
+// the same rate (e.g. the pyramid's 1.048 Mbps floor every run), the re-apply was
+// skipped and the player cold-started unshaped on 4K.
+func (a *App) clearShapeApplyState(port int) {
+	a.shapeApplyMu.Lock()
+	delete(a.shapeApply, port)
 	a.shapeApplyMu.Unlock()
 }
 
@@ -968,6 +1089,14 @@ func (a *App) recordSessionStart(session SessionData, manifestURL string) {
 		}
 	}
 	a.emitControlEventForSession(sessionID, "proxy", "session_start", manifestURL)
+	// #910: mark every session that starts under degraded shaping so the
+	// control_events timeline (and the dashboard chip) shows it plainly. Uses
+	// the session's EFFECTIVE caps (host probe narrowed by any per-session
+	// shaping_forced_mode), so a single forced-degraded session is marked even
+	// on a fully-capable box. Source `auto` — a server-detected condition.
+	if eff := a.effectiveShapingForSession(session); eff.degraded() {
+		a.emitControlEventForSession(sessionID, "auto", "shaping_degraded", eff.degradedInfo())
+	}
 }
 
 func (a *App) recordSessionEnd(session SessionData, reason string) {
@@ -990,6 +1119,94 @@ func (a *App) recordSessionEnd(session SessionData, reason string) {
 		source = "harness"
 	}
 	a.emitControlEventForSession(sessionID, source, "session_end", reason)
+
+	// #556 — for a silent death (the player stopped POSTing without a
+	// clean client play-terminal event), synthesize a terminal
+	// session_events frame from the last-known snapshot so the play still
+	// gets an outcome row + QoE outcome labels (vsf/msf/ebvs/tier). Only
+	// for inactive_timeout: operator delete/clear is administrative
+	// teardown, not a play outcome, and a clean client play_end (or legacy
+	// session_end) already covers the happy path (and is deduped below).
+	if reason == "inactive_timeout" {
+		a.synthesizeTerminalSessionEvent(session, reason)
+	}
+}
+
+// synthesizeTerminalSessionEvent publishes one session_events frame
+// stamped as the play's terminal row, derived from the last-known
+// session snapshot. No-op when the client already delivered its own
+// play-terminal event (dedupe on last_event) so we never double-stamp.
+//
+// playback_status: respect a terminal status the client managed to set
+// before going silent; otherwise classify by whether playback ever
+// started — pre-first-frame => abandoned_start (qoe_ebvs), post-first-
+// frame => user_stopped. We deliberately do NOT fabricate a failure
+// (mid_stream_failure): the proxy can't prove one, and a silent
+// disappearance is almost always the user leaving.
+func (a *App) synthesizeTerminalSessionEvent(session SessionData, reason string) {
+	if a == nil {
+		return
+	}
+	if frame, ok := terminalFrameForSession(session, reason); ok {
+		a.emitSessionEvent(frame)
+	}
+}
+
+// terminalFrameForSession derives the synthesized terminal frame from a
+// last-known session snapshot. Pure (no App state) so it's unit-testable.
+// Returns ok=false when no frame should be emitted: a nil session, or
+// the client already delivered its own play-terminal event (dedupe on
+// last_event).
+//
+// #554: the play-terminal event is `play_end` (renamed from
+// `session_end`). The dedupe accepts BOTH names so a client that ended
+// cleanly with either is not double-stamped — clients migrate one at a
+// time and historical rows still carry `session_end`. The synthesized
+// frame itself stamps the new canonical `play_end`. (Distinct from the
+// proxy session-lifecycle `session_end` CONTROL event in
+// recordSessionEnd, which is unchanged.)
+func terminalFrameForSession(session SessionData, reason string) (SessionData, bool) {
+	if session == nil {
+		return nil, false
+	}
+	if isPlayTerminalLastEvent(getString(session, "player_metrics_last_event")) {
+		return nil, false // client ended cleanly — don't double-stamp
+	}
+	frame := cloneSession(session)
+	frame["player_metrics_last_event"] = "play_end"
+	frame["player_metrics_trigger_type"] = "play_end"
+	// #634 — the cloned snapshot still carries the dead session's FINAL
+	// HEARTBEAT event_time. Emitting the terminal frame at that exact
+	// instant ties with the real heartbeat row in session_events (the
+	// forwarder anchors `ts` to event_time), and the plays aggregate's
+	// argMax(playback_status, ts) then breaks the tie arbitrarily —
+	// playback_status flaps between in_progress and user_stopped from
+	// one read to the next. Stamp the synthetic row 1ms after the
+	// snapshot so it strictly wins ordering, without distorting the
+	// play's timeline by the reap delay (~60s). Unparseable/missing
+	// event_time is left alone — the merge chokepoint and the forwarder
+	// fallback already stamp wall clock in that case.
+	if t, ok := parseEventTime(getString(session, "player_metrics_event_time")); ok {
+		frame["player_metrics_event_time"] = t.Add(time.Millisecond).UTC().Format(time.RFC3339Nano)
+	}
+	if status := getString(session, "player_metrics_playback_status"); status == "" || status == "in_progress" {
+		if getInt(session, "player_metrics_video_first_frame_time_ms") > 0 {
+			frame["player_metrics_playback_status"] = "user_stopped"
+		} else {
+			frame["player_metrics_playback_status"] = "abandoned_start"
+		}
+		frame["player_metrics_playback_reason"] = reason
+	}
+	return frame, true
+}
+
+// isPlayTerminalLastEvent reports whether a player_metrics_last_event
+// value marks the play's terminal row. Accepts both the new canonical
+// `play_end` (#554) and the legacy `session_end` so the migration is
+// tolerant in both directions and historical rows keep deduping.
+// Mirrors the forwarder's qoe_labels.go isPlayTerminalEvent.
+func isPlayTerminalLastEvent(lastEvent string) bool {
+	return lastEvent == "play_end" || lastEvent == "session_end"
 }
 
 func (s *NftShapeStep) UnmarshalJSON(data []byte) error {
@@ -1011,12 +1228,274 @@ func (s *NftShapeStep) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// shapingCaps is the package-main mirror of server.ShapingCapabilities —
+// the boot-time result of probing which network-shaping controls the kernel
+// can actually apply on this host. Kept as a main-local type so the probe
+// (which needs TcTrafficManager / exec) stays out of the v2/server package;
+// v2Adapter.ShapingCapabilities maps it across the boundary. Issue #910.
+type shapingCaps struct {
+	rate           bool
+	delay          bool
+	loss           bool
+	transportFault bool
+	forced         bool
+	mode           string
+	reason         string
+}
+
+// degraded reports whether this host is running with anything less than full
+// kernel shaping — i.e. at least one control is unavailable (or forced off).
+// The dashboard + logged data must surface this so an operator is never
+// misled into thinking a configured cap is active. Issue #910.
+func (c shapingCaps) degraded() bool {
+	return !c.rate || !c.delay || !c.loss || !c.transportFault
+}
+
+// kernelRateOn / kernelNetemOn report whether the KERNEL should apply the
+// control for these caps. Only genuine "kernel" mode drives the kernel —
+// "http-only" does no network shaping, so it leaves the kernel untouched.
+// Issue #910.
+func (c shapingCaps) kernelRateOn() bool  { return c.mode == "kernel" && c.rate }
+func (c shapingCaps) kernelNetemOn() bool { return c.mode == "kernel" && (c.delay || c.loss) }
+
+// degradedInfo is the `info` payload carried on the shaping_degraded control
+// event: the resolved mode plus the semicolon-separated list of unavailable
+// controls (semicolons, not commas — commas/`=` are dropped by the forwarder's
+// label encoder; see reference_labelplay_value_encoding). Issue #910.
+func (c shapingCaps) degradedInfo() string {
+	var missing []string
+	if !c.rate {
+		missing = append(missing, "rate")
+	}
+	if !c.delay {
+		missing = append(missing, "delay")
+	}
+	if !c.loss {
+		missing = append(missing, "loss")
+	}
+	if !c.transportFault {
+		missing = append(missing, "transport_fault")
+	}
+	return fmt.Sprintf("mode=%s forced=%t unavailable=%s", c.mode, c.forced, strings.Join(missing, ";"))
+}
+
+// detectShapingCapabilities probes, once at boot, whether the kernel
+// facilities behind each network-shaping control actually apply on this host
+// — tc HTB (rate), tc netem (delay/loss), and nftables (transport faults).
+//
+// SHAPING_FORCE_DEGRADED overrides the live probe so degraded mode can be
+// exercised on a host that DOES have NET_ADMIN (the A/B instrument for #910):
+//
+//	http-only → all shaping controls reported unavailable (only HTTP faults)
+//
+// Any other value (empty/off/kernel) runs the real probe. Issue #910.
+// normalizeShapingMode canonicalises an operator-supplied forced-mode string
+// to "http-only" | "" (empty = off / inherit host). Issue #910.
+func normalizeShapingMode(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "http-only", "httponly", "http":
+		return "http-only"
+	default:
+		return ""
+	}
+}
+
+// forcedShapingCaps returns the capability set implied by a forced degraded
+// mode, or (_, false) when the string doesn't name one. Shared by the boot
+// env override and the per-session toggle (#910). The only degraded mode is
+// http-only, which leaves the KERNEL untouched (network shaping off, HTTP
+// faults still fire).
+func forcedShapingCaps(mode string) (shapingCaps, bool) {
+	switch normalizeShapingMode(mode) {
+	case "http-only":
+		return shapingCaps{
+			mode:   "http-only",
+			forced: true,
+			reason: "forced http-only (network shaping disabled; HTTP faults only)",
+		}, true
+	default:
+		return shapingCaps{}, false
+	}
+}
+
+func detectShapingCapabilities(t *TcTrafficManager) shapingCaps {
+	raw := strings.ToLower(strings.TrimSpace(getenv("SHAPING_FORCE_DEGRADED", "")))
+	if c, ok := forcedShapingCaps(raw); ok {
+		c.reason = "forced via SHAPING_FORCE_DEGRADED — " + c.reason
+		return c
+	}
+	switch raw {
+	case "", "off", "kernel":
+		// fall through to the live probe
+	default:
+		log.Printf("SHAPING_FORCE_DEGRADED=%q unrecognised (want http-only|off); running live probe", raw)
+	}
+
+	if runtime.GOOS != "linux" || t == nil {
+		return shapingCaps{
+			mode:   "http-only",
+			reason: "network shaping requires Linux with tc/netem/nftables; HTTP faults only",
+		}
+	}
+
+	rate, netem := t.probeTcCapabilities()
+	transport := probeNftCapability()
+	c := shapingCaps{rate: rate, delay: netem, loss: netem, transportFault: transport}
+	switch {
+	case rate && netem && transport:
+		c.mode = "kernel"
+	case !rate && !netem && !transport:
+		c.mode = "http-only"
+		c.reason = "no kernel shaping (tc/netem/nftables unavailable); HTTP faults only"
+	default:
+		// Partial kernel: some controls apply, some don't. Mode stays
+		// "kernel" (the working controls really are kernel-backed); the
+		// per-control booleans carry the truth the UI greys out from.
+		c.mode = "kernel"
+		c.reason = "partial kernel shaping: " + missingShapingControls(rate, netem, transport)
+	}
+	return c
+}
+
+// missingShapingControls builds a human list of the unavailable controls for
+// the partial-kernel reason string. Issue #910.
+func missingShapingControls(rate, netem, transport bool) string {
+	var missing []string
+	if !rate {
+		missing = append(missing, "rate (no sch_htb)")
+	}
+	if !netem {
+		missing = append(missing, "delay/loss (no sch_netem)")
+	}
+	if !transport {
+		missing = append(missing, "transport faults (no nftables)")
+	}
+	if len(missing) == 0 {
+		return "none"
+	}
+	return strings.Join(missing, ", ") + " unavailable"
+}
+
+// probeTcCapabilities checks whether tc HTB (rate) and tc netem (delay/loss)
+// actually apply on the shaping interface by installing and removing a
+// throwaway class + qdisc under the shared HTB root. It reuses the same root
+// the live path needs (idempotent), then adds/removes only a scratch leaf, so
+// it never disturbs real per-session shaping. Holds tcMu for the duration —
+// at boot there is no contention, but this keeps it consistent with every
+// other tc-tree mutation (#746). Issue #910.
+func (t *TcTrafficManager) probeTcCapabilities() (rate bool, netem bool) {
+	if runtime.GOOS != "linux" || t == nil {
+		return false, false
+	}
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
+
+	// Rate: the shared HTB root must install. If it can't, tc shaping is
+	// unavailable entirely (no sch_htb / no NET_ADMIN).
+	if err := t.ensureRootQdiscCore(); err != nil {
+		log.Printf("SHAPING probe: tc HTB root unavailable: %v", err)
+		return false, false
+	}
+	rate = true
+
+	// Netem: add a scratch HTB class under the root + a netem qdisc, then
+	// remove both. Scratch handles are chosen high to avoid colliding with
+	// any per-port class (which derive from the port number).
+	const scratchClass = "1:0ffe"
+	const scratchHandle = "0ffe:"
+	_ = exec.Command("tc", "class", "add", "dev", t.interfaceName,
+		"parent", "1:", "classid", scratchClass, "htb", "rate", "1000mbit").Run()
+	if err := exec.Command("tc", "qdisc", "add", "dev", t.interfaceName,
+		"parent", scratchClass, "handle", scratchHandle, "netem", "delay", "1ms").Run(); err == nil {
+		netem = true
+	} else {
+		log.Printf("SHAPING probe: tc netem unavailable: %v", err)
+	}
+	// Best-effort cleanup (deleting the class also drops its child qdisc).
+	_ = exec.Command("tc", "qdisc", "del", "dev", t.interfaceName,
+		"parent", scratchClass, "handle", scratchHandle).Run()
+	_ = exec.Command("tc", "class", "del", "dev", t.interfaceName,
+		"classid", scratchClass).Run()
+	return rate, netem
+}
+
+// probeNftCapability reports whether nftables can install the transport-fault
+// table/chain on this host. It calls the same ensureTransportFaultChain the
+// live DROP/REJECT path uses (idempotent), so a success leaves the host in the
+// state the real path expects. Issue #910.
+func probeNftCapability() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	if err := ensureTransportFaultChain(); err != nil {
+		log.Printf("SHAPING probe: nftables transport faults unavailable: %v", err)
+		return false
+	}
+	return true
+}
+
 func NewTcTrafficManager(interfaceName string, debug bool) *TcTrafficManager {
 	return &TcTrafficManager{
 		interfaceName:      interfaceName,
 		debug:              debug,
 		icmpFilterIPByPort: map[int]string{},
+		// #910: gates default OPEN — every existing caller (and test) expects
+		// the manager to attempt the kernel apply. SetKernelShaping narrows
+		// them at boot when the probe (or a forced degraded mode) says a
+		// control isn't kernel-backed.
+		kernelRate:   true,
+		kernelNetem:  true,
+		portRateOff:  map[int]bool{},
+		portNetemOff: map[int]bool{},
 	}
+}
+
+// SetPortShapingGate registers (or clears) a per-port kernel-apply gate for
+// the #910 per-session degrade. rateOff/netemOff true → the matching kernel
+// apply no-ops for this port only, leaving other sessions shaping normally.
+// Idempotent; clearing removes the entry.
+func (t *TcTrafficManager) SetPortShapingGate(port int, rateOff, netemOff bool) {
+	if t == nil {
+		return
+	}
+	t.portGateMu.Lock()
+	defer t.portGateMu.Unlock()
+	if rateOff {
+		t.portRateOff[port] = true
+	} else {
+		delete(t.portRateOff, port)
+	}
+	if netemOff {
+		t.portNetemOff[port] = true
+	} else {
+		delete(t.portNetemOff, port)
+	}
+}
+
+func (t *TcTrafficManager) portRateGated(port int) bool {
+	t.portGateMu.Lock()
+	defer t.portGateMu.Unlock()
+	return t.portRateOff[port]
+}
+
+func (t *TcTrafficManager) portNetemGated(port int) bool {
+	t.portGateMu.Lock()
+	defer t.portGateMu.Unlock()
+	return t.portNetemOff[port]
+}
+
+// SetKernelShaping is the #910 universal honesty backstop. It gates the two
+// kernel-apply entry points (UpdateRateLimit / UpdateNetem) so EVERY caller —
+// the v2 apply path, the legacy /api/nftables/* handlers, the pattern netem
+// setup, the #480 baseline — no-ops instead of shaping when the host (or a
+// forced degraded mode) can't back the control. Called once after the boot
+// probe; read-lock-free thereafter (booleans set before any session).
+func (t *TcTrafficManager) SetKernelShaping(rate, netem bool) {
+	if t == nil {
+		return
+	}
+	t.kernelRate = rate
+	t.kernelNetem = netem
 }
 
 func (t *TcTrafficManager) IsActive() bool {
@@ -1028,22 +1507,49 @@ func (t *TcTrafficManager) IsActive() bool {
 	return strings.Contains(string(output), "htb")
 }
 
-func (t *TcTrafficManager) EnsureRootQdisc() error {
+// tcAddAlreadyExists reports whether a `tc … add` failure is the benign
+// "the object already exists" outcome of a concurrent apply having created
+// the SAME shared object first. RTNETLINK reports a duplicate class/qdisc as
+// "File exists"; the root-qdisc replace path can also report "Exclusivity
+// flag on, cannot modify". Either way the shared root now exists — that's
+// success, not failure. Matching the kernel's English message is unavoidable
+// here: `tc` shells out and only surfaces RTNETLINK strings on stderr. See #745.
+func tcAddAlreadyExists(out []byte) bool {
+	s := strings.ToLower(string(out))
+	return strings.Contains(s, "file exists") || strings.Contains(s, "exclusivity flag on")
+}
+
+// ensureRootQdiscCore is the lock-free core of the root-qdisc ensure. The
+// caller MUST hold t.tcMu (#746). It NEVER takes the lock itself and is only
+// ever called from tcMu-holding paths (updateRateLimitCore, updateNetemCore,
+// EnsureClass).
+func (t *TcTrafficManager) ensureRootQdiscCore() error {
 	show := exec.Command("tc", "qdisc", "show", "dev", t.interfaceName)
 	if out, err := show.CombinedOutput(); err == nil {
 		if strings.Contains(string(out), "qdisc htb 1:") || strings.Contains(string(out), "root htb") {
 			return nil
 		}
 	}
-	_ = exec.Command("tc", "qdisc", "del", "dev", t.interfaceName, "root").Run()
+	// NOTE: no `tc qdisc del root` here — deleting the root nukes EVERY port's
+	// leaf class + filter at once (the #746 footgun). The "root already exists"
+	// check above plus the idempotent add (tcAddAlreadyExists below) are
+	// sufficient to converge on a single shared root.
 	cmd := exec.Command("tc", "qdisc", "add", "dev", t.interfaceName, "root", "handle", "1:", "htb", "default", "999")
 	if out, err := cmd.CombinedOutput(); err != nil {
+		// A concurrent installer (or an out-of-band one) won the race — the
+		// htb root now exists, which is what we wanted.
+		if tcAddAlreadyExists(out) {
+			return nil
+		}
 		return fmt.Errorf("tc qdisc add failed: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-func (t *TcTrafficManager) EnsureRootClass() error {
+// ensureRootClassCore is the lock-free core of the root-class 1:1 ensure. The
+// caller MUST hold t.tcMu (#746). It NEVER takes the lock itself and is only
+// ever called from tcMu-holding paths.
+func (t *TcTrafficManager) ensureRootClassCore() error {
 	cmd := exec.Command("tc", "class", "show", "dev", t.interfaceName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1058,6 +1564,12 @@ func (t *TcTrafficManager) EnsureRootClass() error {
 		"burst", "16k", "cburst", "16k", "quantum", "1514",
 	)
 	if out, err := addCmd.CombinedOutput(); err != nil {
+		// The root class already exists (a concurrent apply created it) →
+		// success. Previously this returned fatal, so the caller bailed before
+		// installing the per-port leaf class and that port ran uncapped (#745).
+		if tcAddAlreadyExists(out) {
+			return nil
+		}
 		return fmt.Errorf("tc root class add failed: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -1136,11 +1648,37 @@ func (t *TcTrafficManager) GetPortConfig(port int) (map[string]interface{}, erro
 	return config, nil
 }
 
+// UpdateRateLimit is the public, lock-acquiring entrypoint. It holds t.tcMu
+// for the whole leaf-class mutation (#746) so a concurrent config-on-connect
+// can't wipe this port's leaf class mid-apply, then delegates to the lock-free
+// core.
 func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
-	if err := t.EnsureRootQdisc(); err != nil {
+	// #910 honesty backstop — no kernel rate shaping when the host (or a
+	// forced degraded mode) can't back it. No-op success so callers proceed
+	// as if "no cap requested"; the degraded condition is surfaced by the
+	// session's shaping_degraded event + the dashboard's disabled controls.
+	if !t.kernelRate || t.portRateGated(port) {
+		reason := "kernel_rate_unavailable"
+		if t.kernelRate {
+			reason = "session_forced_degraded"
+		}
+		log.Printf("NETSHAPE rate gated port=%d rate_mbps=%.3f reason=%s (#910)", port, rateMbps, reason)
+		return nil
+	}
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
+	return t.updateRateLimitCore(port, rateMbps)
+}
+
+// updateRateLimitCore is the lock-free core of UpdateRateLimit. The caller MUST
+// hold t.tcMu. It only calls other lock-free helpers (ensureRootQdiscCore,
+// ensureRootClassCore, updateNetemCore, RemoveFilter, RemoveClass,
+// ensurePortFilter, ensurePrioLeafForPort) — never a public locking method.
+func (t *TcTrafficManager) updateRateLimitCore(port int, rateMbps float64) error {
+	if err := t.ensureRootQdiscCore(); err != nil {
 		return err
 	}
-	if err := t.EnsureRootClass(); err != nil {
+	if err := t.ensureRootClassCore(); err != nil {
 		return err
 	}
 	if rateMbps <= 0 {
@@ -1149,7 +1687,7 @@ func (t *TcTrafficManager) UpdateRateLimit(port int, rateMbps float64) error {
 			time.Now().UTC().Format(time.RFC3339Nano),
 			port,
 		)
-		_ = t.UpdateNetem(port, 0, 0)
+		_ = t.updateNetemCore(port, NetemParams{})
 		_ = t.RemoveFilter(port)
 		_ = t.RemoveClass(port)
 		t.logTcState("rate_clear", port)
@@ -1241,6 +1779,14 @@ func (t *TcTrafficManager) RemoveClass(port int) error {
 //     about to belong to a fresh playback episode; whatever was
 //     there before is by definition leftover from a prior session.
 func (t *TcTrafficManager) ClearPortShaping(port int) {
+	// Hold tcMu for the whole clear sweep (#746): the class-del here otherwise
+	// races a concurrent leaf-class add/change on another port's apply against
+	// the shared tc tree. The icmpFilterMu acquired below is a DIFFERENT mutex
+	// (guards only the per-port ICMP tracking map) and never overlaps tcMu's
+	// scope, so no deadlock. This method runs raw tc commands only — no *Core
+	// split needed.
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
 	portSuffix := fmt.Sprintf("%03d", port%1000)
 	classid := fmt.Sprintf("1:%s", portSuffix)
 	// First check if there's actually a class to clear — keeps the
@@ -1251,9 +1797,14 @@ func (t *TcTrafficManager) ClearPortShaping(port int) {
 		return
 	}
 	log.Printf("NETSHAPE port_shaping_clear port=%d classid=%s reason=session_start", port, classid)
-	_ = exec.Command("tc", "filter", "del", "dev", t.interfaceName, "protocol", "ip",
-		"parent", "1:0", "prio", "1", "u32",
-		"match", "ip", "sport", fmt.Sprintf("%d", port), "0xffff").Run()
+	// Delete THIS port's u32 filter by its exact handle (#816). This previously
+	// inlined `tc filter del … prio 1 u32 match ip sport <port>`, which at the
+	// shared prio 1 collaterally removed OTHER live sessions' filters — and since
+	// ClearPortShaping is the config-on-start sweep, it was the production
+	// trigger of the cross-session uncap. RemoveFilter resolves the exact handle
+	// (no-op when absent). Safe under the tcMu we already hold — RemoveFilter
+	// takes no lock.
+	_ = t.RemoveFilter(port)
 	// Also clear the per-port ICMP-to-player_ip filter installed for
 	// the path-ping prio routing (issue #404). Per-port pref makes
 	// this a single by-attribute delete; the tracking map is then
@@ -1310,7 +1861,9 @@ func (t *TcTrafficManager) scheduleRateLimitVerification(port int, expectedMbps 
 // (issue #352 layer 3) so any divergence is visible to operators.
 //
 // `tc class show` output for an htb class looks like:
-//   class htb 1:181 parent 1:1 prio 0 rate 15414Kbit ceil 15414Kbit ...
+//
+//	class htb 1:181 parent 1:1 prio 0 rate 15414Kbit ceil 15414Kbit ...
+//
 // We parse the "rate" token. Kbit and Mbit are the only units the
 // proxy ever installs, so the parser handles both.
 func (t *TcTrafficManager) ReadActualRateMbps(port int) float64 {
@@ -1348,13 +1901,62 @@ func (t *TcTrafficManager) ReadActualRateMbps(port int) float64 {
 	return -1
 }
 
+// RemoveFilter deletes ONLY this port's u32 classifier filter, resolved to its
+// exact kernel handle first. The previous implementation deleted by match-spec
+// at the shared `prio 1` (`tc filter del … prio 1 u32 match ip sport <port>`),
+// which the kernel/iproute2 can apply to the WRONG filter at that prio —
+// collaterally removing ANOTHER live session's filter. The victim's traffic
+// then fell through to the 10 Gbps HTB `default 999` class (uncapped) until its
+// next rate-set re-added its filter. This surfaced when a concurrent session's
+// config-on-start clear sweep (ClearPortShaping) ran while peers were streaming
+// (#816). Deleting by the resolved handle touches exactly one filter — or
+// nothing, when this port has no filter (a fresh session's sweep), which must
+// NOT fall back to a match-spec delete (that is the over-deletion being fixed).
 func (t *TcTrafficManager) RemoveFilter(port int) error {
+	show := exec.Command("tc", "filter", "show", "dev", t.interfaceName, "parent", "1:0")
+	out, _ := show.CombinedOutput()
+	handle := u32HandleForPort(string(out), port)
+	if handle == "" {
+		return nil // no filter classifies this port — nothing to remove
+	}
 	cmd := exec.Command(
-		"tc", "filter", "del", "dev", t.interfaceName, "protocol", "ip", "parent", "1:0", "prio", "1", "u32",
-		"match", "ip", "sport", fmt.Sprintf("%d", port), "0xffff",
+		"tc", "filter", "del", "dev", t.interfaceName, "parent", "1:0", "prio", "1",
+		"handle", handle, "u32",
 	)
-	_ = cmd.Run()
+	if outDel, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("NETSHAPE tc filter del failed port=%d handle=%s: %s", port, handle, strings.TrimSpace(string(outDel)))
+	}
 	return nil
+}
+
+// u32HandleForPort scans `tc filter show … parent 1:0` output and returns the
+// handle (e.g. "800::800") of the u32 filter whose selector matches the given
+// port — as a source port (the primary form ensurePortFilter installs) or a
+// destination port (the dport fallback). Returns "" when no filter classifies
+// the port. Pure/string-only so it is unit-testable off-box.
+//
+// iproute2 prints each u32 leaf filter as a header line carrying
+// `fh <handle> … flowid 1:<minor>` followed by one or more
+// `  match <hex>/<mask> at <off>` lines. ensurePortFilter encodes sport at
+// offset 20 as `<port>0000/ffff0000` and the dport fallback as
+// `0000<port>/0000ffff`, so each match is associated with the most recent leaf
+// handle line (the `fh 800:` hashtable line is skipped — only `::` leaf handles
+// classify traffic).
+func u32HandleForPort(filterShow string, port int) string {
+	sportHex := "match " + fmt.Sprintf("%04x0000/ffff0000", port) // sport at offset 20
+	dportHex := "match " + fmt.Sprintf("0000%04x/0000ffff", port) // dport at offset 20
+	handle := ""
+	for _, line := range strings.Split(filterShow, "\n") {
+		if i := strings.Index(line, "fh "); i >= 0 {
+			if tok := strings.Fields(line[i+3:]); len(tok) > 0 && strings.Contains(tok[0], "::") {
+				handle = tok[0]
+			}
+		}
+		if handle != "" && (strings.Contains(line, sportHex) || strings.Contains(line, dportHex)) {
+			return handle
+		}
+	}
+	return ""
 }
 
 func (t *TcTrafficManager) ensurePortFilter(port int, classid string) error {
@@ -1381,11 +1983,23 @@ func (t *TcTrafficManager) ensurePortFilter(port int, classid string) error {
 	return nil
 }
 
+// EnsureClass is a public, lock-acquiring entrypoint (App + updateNetemCore
+// callers). It holds t.tcMu for the whole ensure (#746) and delegates to
+// lock-free cores. NOTE: updateNetemCore calls ensureClassCore directly (it
+// already holds tcMu); only external/App callers go through this wrapper.
 func (t *TcTrafficManager) EnsureClass(port int, rateMbps float64) error {
-	if err := t.EnsureRootQdisc(); err != nil {
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
+	return t.ensureClassCore(port, rateMbps)
+}
+
+// ensureClassCore is the lock-free core of EnsureClass. The caller MUST hold
+// t.tcMu. Only calls other lock-free helpers.
+func (t *TcTrafficManager) ensureClassCore(port int, rateMbps float64) error {
+	if err := t.ensureRootQdiscCore(); err != nil {
 		return err
 	}
-	if err := t.EnsureRootClass(); err != nil {
+	if err := t.ensureRootClassCore(); err != nil {
 		return err
 	}
 	cmd := exec.Command("tc", "class", "show", "dev", t.interfaceName)
@@ -1398,7 +2012,7 @@ func (t *TcTrafficManager) EnsureClass(port int, rateMbps float64) error {
 	if strings.Contains(string(output), classid) {
 		return t.ensurePortFilter(port, classid)
 	}
-	return t.UpdateRateLimit(port, rateMbps)
+	return t.updateRateLimitCore(port, rateMbps)
 }
 
 // ensurePrioLeafForPort installs the prio+netem-per-band leaf inside
@@ -1421,6 +2035,46 @@ func (t *TcTrafficManager) EnsureClass(port int, rateMbps float64) error {
 // UpdateNetem subsequently replaces the per-band netems with user-
 // configured values. Idempotent — exits fast when the prio handle
 // already shows up under `tc qdisc show parent <classid>`.
+// addFairLeaf attaches sfq (Stochastic Fair Queuing) UNDER a prio band's netem
+// qdisc, so that concurrent flows sharing the same rate-capped class — e.g. a
+// player's separate video + audio HTTP/1.1 connections — are dequeued FAIRLY
+// per flow (round-robin over a 5-tuple hash) instead of one starving the other
+// in netem's internal FIFO. sfq is chosen over fq_codel deliberately: fq_codel's
+// CoDel AQM fights the shaper's *intentional* queue (the throttle pushes latency
+// past CoDel's 5ms target, so it ECN-marks/drops aggressively → TCP backs off →
+// throughput falls below the shaped rate). sfq gives the same per-flow fairness
+// with NO latency-based AQM, so it doesn't interfere with the rate shaping.
+// `perturb 10` re-hashes periodically so a hash collision can't persist.
+// netem applies any delay/loss first, then hands off to sfq. Must be re-applied
+// whenever the band's netem is (re)placed, since replacing a qdisc drops its
+// children. Best-effort: logs on failure.
+func (t *TcTrafficManager) addFairLeaf(port, band int) {
+	// SFQ is OFF by default: the prio band falls back to netem's internal FIFO,
+	// where the byte-heavy video flow dominates the queue and audio backs up
+	// behind it (no per-flow round-robin). The A/B test concluded the SFQ-driven
+	// audio fairness was feeding AVPlayer's bandwidth over-read / variant
+	// over-selection, so FIFO is the default. Opt back IN with PROXY_ENABLE_SFQ=1
+	// to restore the per-flow fair-queue leaf.
+	if os.Getenv("PROXY_ENABLE_SFQ") != "1" {
+		return
+	}
+	portSuffix := fmt.Sprintf("%03d", port%1000)
+	netemHandle := fmt.Sprintf("%s%d:", portSuffix, band)  // e.g. 1811:
+	fairHandle := fmt.Sprintf("%s%d:", portSuffix, band+4) // PPP5:/6:/7: — distinct from prio (PPP0:) + netem (PPP1-3:)
+	// delete-then-add, NOT replace: `tc qdisc replace` does an in-place CHANGE
+	// when a qdisc already exists at that parent, which tc rejects across a
+	// qdisc-TYPE switch (e.g. a leftover fq_codel from a prior build — host tc
+	// state survives container restarts). del is best-effort (errors harmlessly
+	// when nothing is there).
+	_ = exec.Command("tc", "qdisc", "del", "dev", t.interfaceName, "parent", netemHandle).Run()
+	if out, err := exec.Command(
+		"tc", "qdisc", "add", "dev", t.interfaceName,
+		"parent", netemHandle, "handle", fairHandle, "sfq", "perturb", "10",
+	).CombinedOutput(); err != nil {
+		log.Printf("NETSHAPE sfq leaf install failed port=%d band=%d: %s", port, band, strings.TrimSpace(string(out)))
+	}
+}
+
 func (t *TcTrafficManager) ensurePrioLeafForPort(port int) error {
 	portSuffix := fmt.Sprintf("%03d", port%1000)
 	classid := fmt.Sprintf("1:%s", portSuffix)
@@ -1449,6 +2103,7 @@ func (t *TcTrafficManager) ensurePrioLeafForPort(port int) error {
 		).CombinedOutput(); err != nil {
 			return fmt.Errorf("tc netem (band %d) replace failed: %s", band, strings.TrimSpace(string(out)))
 		}
+		t.addFairLeaf(port, band)
 	}
 	return nil
 }
@@ -1458,11 +2113,115 @@ func (t *TcTrafficManager) ensurePrioLeafForPort(port int) error {
 // installed (or confirmed present) before the netem replacements so
 // this works even when called on a class created by UpdateRateLimit
 // without netem ever previously being touched.
-func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) error {
-	if err := t.EnsureRootQdisc(); err != nil {
+// NetemParams bundles the link-impairment knobs applied to a port's netem
+// qdisc (#826). Zero values mean "unset": DelayMs/LossPct 0 ⇒ that axis off;
+// JitterMs 0 ⇒ server auto-jitter (a tight 5% of delay); LossCorrelationPct 0
+// ⇒ independent-uniform loss (legacy); JitterCorrelationPct 0 ⇒ no explicit
+// delay correlation. DelayMs is one-way (observed RTT ≈ DelayMs since only the
+// proxy's egress is shaped). See the proxy.yaml Shape doc + issue #826.
+type NetemParams struct {
+	DelayMs              int
+	LossPct              float64
+	JitterMs             int
+	LossCorrelationPct   float64
+	JitterCorrelationPct float64
+}
+
+// netemDelayLoss is the legacy two-axis constructor — the common
+// "delay + loss, default jitter/correlation" case. Kept so simple call
+// sites (clears, loss-only) stay readable.
+func netemDelayLoss(delayMs int, lossPct float64) NetemParams {
+	return NetemParams{DelayMs: delayMs, LossPct: lossPct}
+}
+
+// netemParamsFromSession reads the full #826 impairment knob set off a session
+// map's nftables_* keys, so the static-shape and pattern paths re-apply jitter +
+// correlations consistently with delay + loss. Missing keys read as zero (legacy
+// clean-link / uniform behaviour).
+func netemParamsFromSession(session map[string]interface{}) NetemParams {
+	return NetemParams{
+		DelayMs:              getInt(session, "nftables_delay_ms"),
+		LossPct:              getFloat(session, "nftables_packet_loss"),
+		JitterMs:             getInt(session, "nftables_jitter_ms"),
+		LossCorrelationPct:   getFloat(session, "nftables_loss_correlation_pct"),
+		JitterCorrelationPct: getFloat(session, "nftables_jitter_correlation_pct"),
+	}
+}
+
+// netemImpairmentArgs builds the netem delay/loss argument list (everything
+// after the literal `netem` token) for a NetemParams. Pure + side-effect-free
+// so the #826 correlated-loss / jitter-distribution wiring is unit-testable
+// without tc or Linux. Empty slice ⇒ a no-op netem (clean link).
+//
+// Delay: an explicit JitterMs wins (named link profiles set it directly);
+// otherwise fall back to the legacy auto-jitter of 5% of the mean (a tight
+// Gaussian — for delay=25 ms that's ~1 ms stddev, ~99.7% of per-packet delays
+// in [22, 28] ms). Integer-divide rounds delays ≤19 ms to zero auto-jitter,
+// which is fine: those low-RTT configs want jitter noise out of the signal.
+// Emits `delay TIME JITTER [CORRELATION] distribution normal`; correlation
+// (~25% ≈ real link) keeps successive delays correlated so netem doesn't
+// reorder packets into nonsense (#826 caveat 2).
+//
+// Loss: a correlation term turns netem's independent-uniform loss into
+// correlated/bursty loss (#826 caveat 1) — real loss clusters, and uniform
+// loss at the same percentage over-punishes TCP. 0 ⇒ legacy uniform loss.
+func netemImpairmentArgs(p NetemParams) []string {
+	var args []string
+	if p.DelayMs > 0 {
+		jitter := p.JitterMs
+		if jitter <= 0 {
+			jitter = p.DelayMs / 20
+		}
+		if jitter > 0 {
+			args = append(args, "delay", fmt.Sprintf("%dms", p.DelayMs), fmt.Sprintf("%dms", jitter))
+			if p.JitterCorrelationPct > 0 {
+				args = append(args, fmt.Sprintf("%.0f%%", p.JitterCorrelationPct))
+			}
+			args = append(args, "distribution", "normal")
+		} else {
+			args = append(args, "delay", fmt.Sprintf("%dms", p.DelayMs))
+		}
+	}
+	if p.LossPct > 0 {
+		if p.LossCorrelationPct > 0 {
+			args = append(args, "loss", fmt.Sprintf("%.2f%%", p.LossPct), fmt.Sprintf("%.0f%%", p.LossCorrelationPct))
+		} else {
+			args = append(args, "loss", fmt.Sprintf("%.2f%%", p.LossPct))
+		}
+	}
+	return args
+}
+
+// UpdateNetem is the public, lock-acquiring entrypoint. It holds t.tcMu for the
+// whole netem mutation (#746) and delegates to the lock-free core.
+func (t *TcTrafficManager) UpdateNetem(port int, p NetemParams) error {
+	// #910 honesty backstop — no kernel netem (delay/loss/jitter) when the
+	// host (or a forced degraded mode) can't back it. No-op success.
+	if !t.kernelNetem || t.portNetemGated(port) {
+		reason := "kernel_netem_unavailable"
+		if t.kernelNetem {
+			reason = "session_forced_degraded"
+		}
+		log.Printf("NETSHAPE netem gated port=%d delay_ms=%d loss_pct=%.3f reason=%s (#910)", port, p.DelayMs, p.LossPct, reason)
+		return nil
+	}
+	t.tcMu.Lock()
+	defer t.tcMu.Unlock()
+	return t.updateNetemCore(port, p)
+}
+
+// updateNetemCore is the lock-free core of UpdateNetem. The caller MUST hold
+// t.tcMu. Only calls other lock-free helpers (ensureRootQdiscCore,
+// ensureRootClassCore, ensureClassCore, ensurePrioLeafForPort) — never a public
+// locking method. (Also called directly from updateRateLimitCore's clear
+// branch, which already holds tcMu.)
+func (t *TcTrafficManager) updateNetemCore(port int, p NetemParams) error {
+	delayMs := p.DelayMs
+	lossPct := p.LossPct
+	if err := t.ensureRootQdiscCore(); err != nil {
 		return err
 	}
-	if err := t.EnsureRootClass(); err != nil {
+	if err := t.ensureRootClassCore(); err != nil {
 		return err
 	}
 	portSuffix := fmt.Sprintf("%03d", port%1000)
@@ -1477,7 +2236,7 @@ func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) e
 			return nil
 		}
 	} else {
-		if err := t.EnsureClass(port, 10000); err != nil {
+		if err := t.ensureClassCore(port, 10000); err != nil {
 			return err
 		}
 	}
@@ -1489,31 +2248,11 @@ func (t *TcTrafficManager) UpdateNetem(port int, delayMs int, lossPct float64) e
 		bandHandle := fmt.Sprintf("%s%d:", portSuffix, band)  // e.g. 1811:
 		args := []string{"qdisc", "replace", "dev", t.interfaceName,
 			"parent", bandParent, "handle", bandHandle, "netem"}
-		if delayMs > 0 {
-			// Tight Gaussian: stddev = 5% of mean. For delay=25 ms
-			// that's ~1 ms stddev, so ~99.7% of per-packet delays
-			// land in [22, 28] ms — variance for ABR/jitter-aware
-			// testing without dominating the configured value.
-			// Earlier `delay/2` was way too wide (a 25 ms config
-			// could draw [13, 37] ms with normal distribution and
-			// dip below netem's clamp-at-zero floor in the long
-			// tail), which violated the "I set 25 ms" mental model.
-			// Integer-divide rounds small delays (≤19 ms) to zero
-			// jitter — fine: those configs are testing low-RTT
-			// paths where jitter noise would be the dominant signal.
-			jitter := delayMs / 20
-			if jitter > 0 {
-				args = append(args, "delay", fmt.Sprintf("%dms", delayMs), fmt.Sprintf("%dms", jitter), "distribution", "normal")
-			} else {
-				args = append(args, "delay", fmt.Sprintf("%dms", delayMs))
-			}
-		}
-		if lossPct > 0 {
-			args = append(args, "loss", fmt.Sprintf("%.2f%%", lossPct))
-		}
+		args = append(args, netemImpairmentArgs(p)...)
 		if out, err := exec.Command("tc", args...).CombinedOutput(); err != nil {
 			return fmt.Errorf("tc netem band %d failed: %s", band, strings.TrimSpace(string(out)))
 		}
+		t.addFairLeaf(port, band)
 	}
 	if delayMs <= 0 && lossPct <= 0 {
 		t.logTcState("netem_clear", port)
@@ -1854,41 +2593,61 @@ func main() {
 
 	emptySessions := []SessionData{}
 	app := &App{
-		throughputData: map[int]map[string]interface{}{},
-		sessionEvents: eventStore,
-		traffic:       NewTcTrafficManager(interfaceName, tcDebug),
-		upstreamHost:  upstreamHost,
-		upstreamPort:  upstreamPort,
-		maxSessions:      maxSessions,
-		defaultRateMbps:  defaultRateMbps,
-		portMap:       loadPortMapping(),
+		throughputData:  map[int]map[string]interface{}{},
+		sessionEvents:   eventStore,
+		traffic:         NewTcTrafficManager(interfaceName, tcDebug),
+		upstreamHost:    upstreamHost,
+		upstreamPort:    upstreamPort,
+		maxSessions:     maxSessions,
+		defaultRateMbps: defaultRateMbps,
+		portMap:         loadPortMapping(),
 		client: &http.Client{
 			Transport: &http.Transport{
 				DialContext:           (&net.Dialer{Timeout: 6 * time.Second}).DialContext,
 				ResponseHeaderTimeout: 6 * time.Second,
 			},
 		},
-		shapeLoops:         map[int]context.CancelFunc{},
-		shapeStates:        map[int]NftShapePattern{},
-		shapeApply:         map[int]ShapeApplyState{},
-		faultLoops:         map[int]context.CancelFunc{},
-		sessionsHub:        NewSessionEventHub(),
-		networkHub:         NewNetworkEventHub(),
-		controlHub:         NewControlEventHub(),
-		avmetricsHub:       NewAVMetricEventHub(),
-		networkLogs:        map[string]*NetworkLogRingBuffer{},
-		loopStateBySession: map[string]ServerLoopState{},
-		segmentFlight:      map[int]segmentFlightInfo{},
-		segmentRun:         map[int]segmentRunRecord{},
-		drainActive:        map[int]bool{},
-		tcSamples:          map[int][]tcSample{},
-		wireRate:            map[int]wireRateSample{},
-		tcCache:             map[int]*tcStatsCache{},
-		transferCompleteMbps:    map[int]float64{},
-		transferCompleteAt:      map[int]time.Time{},
+		shapeLoops:           map[int]context.CancelFunc{},
+		shapeStates:          map[int]NftShapePattern{},
+		shapeApply:           map[int]ShapeApplyState{},
+		faultLoops:           map[int]context.CancelFunc{},
+		sessionsHub:          NewSessionEventHub(),
+		networkHub:           NewNetworkEventHub(),
+		controlHub:           NewControlEventHub(),
+		avmetricsHub:         NewAVMetricEventHub(),
+		networkLogs:          map[string]*NetworkLogRingBuffer{},
+		loopStateBySession:   map[string]ServerLoopState{},
+		segmentFlight:        map[int]segmentFlightInfo{},
+		segmentRun:           map[int]segmentRunRecord{},
+		drainActive:          map[int]bool{},
+		tcSamples:            map[int][]tcSample{},
+		wireRate:             map[int]wireRateSample{},
+		tcCache:              map[int]*tcStatsCache{},
+		transferCompleteMbps: map[int]float64{},
+		transferCompleteAt:   map[int]time.Time{},
 	}
 
 	app.sessionsSnap.Store(&emptySessions)
+
+	// Probe kernel shaping capability once at boot and log the resolved mode
+	// (#910). This is what the dashboard reads to disable/annotate controls
+	// instead of showing a phantom cap on a host without tc/netem/nftables.
+	app.shaping = detectShapingCapabilities(app.traffic)
+	// #910: narrow the kernel-apply gates to what this host/mode actually
+	// backs. Only genuine "kernel" mode drives the kernel — "http-only" does no
+	// network shaping, so it leaves the kernel untouched.
+	if app.traffic != nil {
+		kernelMode := app.shaping.mode == "kernel"
+		app.traffic.SetKernelShaping(kernelMode && app.shaping.rate, kernelMode && (app.shaping.delay || app.shaping.loss))
+	}
+	if app.shaping.reason != "" {
+		log.Printf("SHAPING MODE: %s — %s [rate=%t delay=%t loss=%t transport_fault=%t forced=%t]",
+			app.shaping.mode, app.shaping.reason,
+			app.shaping.rate, app.shaping.delay, app.shaping.loss, app.shaping.transportFault, app.shaping.forced)
+	} else {
+		log.Printf("SHAPING MODE: %s [rate=%t delay=%t loss=%t transport_fault=%t]",
+			app.shaping.mode, app.shaping.rate, app.shaping.delay, app.shaping.loss, app.shaping.transportFault)
+	}
 
 	go app.trackPortThroughput()
 	app.restoreTransportFaultSchedules()
@@ -1896,7 +2655,11 @@ func main() {
 	// survived the proxy restart. Without this, pre-existing sessions
 	// keep their session-map values but the kernel forgot — they end
 	// up uncapped. Issue #480.
-	app.restoreShapeApplication()
+	restoredShapes, skippedShapes := app.restoreShapeApplication()
+	// Record the restart as an archivable control_event so a cap-drop spike
+	// landing in the boot restore window is attributable to a redeploy rather
+	// than a shaper bug. Sticky-replayed to the forwarder on reconnect. #671.
+	app.emitServerStart(restoredShapes, skippedShapes)
 	// 100 ms TCP_INFO sampler — folds smoothed RTT / jitter / lifetime
 	// min / RTO into per-session windows that get drained on each
 	// snapshot broadcast (issue #401). Linux-only kernel read; the
@@ -1936,6 +2699,8 @@ func main() {
 	router.HandleFunc("/api/version", app.handleVersion).Methods(http.MethodGet)
 	router.HandleFunc("/api/nftables/port/{port}", app.handleNftPort).Methods(http.MethodGet)
 	router.HandleFunc("/api/nftables/bandwidth/{port}", app.handleNftBandwidth).Methods(http.MethodPost)
+	router.HandleFunc("/api/nftables/shaping-mode/{port}", app.handleNftShapingMode).Methods(http.MethodPost)
+	router.HandleFunc("/api/nftables/shaping-mode", app.handleNftShapingMode).Methods(http.MethodPost)
 	router.HandleFunc("/api/nftables/loss/{port}", app.handleNftLoss).Methods(http.MethodPost)
 	router.HandleFunc("/api/nftables/shape/{port}", app.handleNftShape).Methods(http.MethodPost)
 	router.HandleFunc("/api/nftables/pattern/{port}", app.handleNftPattern).Methods(http.MethodPost)
@@ -1971,7 +2736,7 @@ func main() {
 	errorCh := make(chan error, len(ports))
 	for _, port := range ports {
 		addr := fmt.Sprintf(":%d", port)
-		go func(bind string) {
+		go func(bind string, p int) {
 			srv := &http.Server{
 				Addr:    bind,
 				Handler: router,
@@ -1981,6 +2746,17 @@ func main() {
 				// read. Issue #401.
 				ConnContext: withTCPConnContext,
 			}
+			// Disable HTTP/2 on the per-session MEDIA ports so a player's video
+			// and audio fetch over SEPARATE HTTP/1.1 connections rather than
+			// multiplexing on one rate-capped h2 connection — where audio starves
+			// behind video in the kernel/tc FIFO (the origin fetch is instant, but
+			// the audio response queues ~the whole video drain). A non-nil empty
+			// TLSNextProto suppresses the stdlib's automatic h2 ALPN. Keep h2 on
+			// the API port (30081), where the dashboard/forwarder SSE streams rely
+			// on multiplexing many event-streams over one connection.
+			if p != 30081 {
+				srv.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
+			}
 			if tlsEnabled {
 				log.Printf("go-proxy listening on %s (TLS)", bind)
 				errorCh <- srv.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
@@ -1988,7 +2764,7 @@ func main() {
 				log.Printf("go-proxy listening on %s (plain HTTP)", bind)
 				errorCh <- srv.ListenAndServe()
 			}
-		}(addr)
+		}(addr, port)
 	}
 
 	err := <-errorCh
@@ -2181,6 +2957,26 @@ func (a *App) emitControlEventForSession(sessionID, source, event, info string) 
 	})
 }
 
+// emitServerStart records a global (session-less) boot marker into
+// control_events so a proxy restart is correlatable with the cap-drop spikes
+// it can produce (the restore window before restoreShapeApplication re-installs
+// each port's tc filter — see #671). source=auto: server-driven, not operator
+// or harness. Carries the shape-restoration counts so an operator can see how
+// many sessions were re-capped on boot. Goes through BroadcastServerStart so
+// the forwarder still archives it after its SSE reconnects post-restart.
+func (a *App) emitServerStart(restored, skipped int) {
+	if a == nil || a.controlHub == nil {
+		return
+	}
+	info := fmt.Sprintf("restored=%d;skipped=%d;baseline_mbps=%d", restored, skipped, a.defaultRateMbps)
+	a.controlHub.BroadcastServerStart(ControlEvent{
+		Ts:     time.Now().UTC(),
+		Source: "auto",
+		Event:  "server_start",
+		Info:   info,
+	})
+}
+
 func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	if a.sessionsHub == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -2350,6 +3146,12 @@ func (a *App) handlePostSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := strings.TrimSpace(r.URL.Query().Get("attempt_id")); v != "" {
 		metricsOnly["attempt_id"] = v
+	}
+	// Play-scoped client start (#587) — picked up here too so it lands
+	// on long-running iOS sessions between manifest fetches, same as
+	// play_id/attempt_id.
+	if v := strings.TrimSpace(r.URL.Query().Get("start_time")); v != "" {
+		metricsOnly["start_time"] = v
 	}
 	merged, ok := a.saveSessionByIDReturning(id, metricsOnly)
 	// Issue #470: emit one SSE frame per metrics POST. Every POST —
@@ -2538,7 +3340,7 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			break
 		}
 	}
-	shapeRateFields := []string{"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss"}
+	shapeRateFields := []string{"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss", "nftables_jitter_ms", "nftables_loss_correlation_pct", "nftables_jitter_correlation_pct"}
 	shapeRateUpdated := false
 	shapeFieldsPresent := make([]string, 0, len(shapeRateFields))
 	for _, key := range shapeRateFields {
@@ -2591,17 +3393,17 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			getString(target, "player_metrics_source"),
 			getString(target, "player_metrics_last_event"),
 			getInt(target, "player_metrics_loop_count_player"),
-			getInt(target, "player_metrics_loop_count_increment"),
+			getInt(target, "player_metrics_loop_count_delta"),
 			getInt(target, "loop_count_server"),
 		)
-	} else if _, ok := payload["player_metrics_loop_count_increment"]; ok {
+	} else if _, ok := payload["player_metrics_loop_count_delta"]; ok {
 		log.Printf(
 			"LOOP_COUNTER_PATCH session_id=%s source=%s event=%s player_loop_count=%d loop_increment=%d server_loop_count=%d",
 			id,
 			getString(target, "player_metrics_source"),
 			getString(target, "player_metrics_last_event"),
 			getInt(target, "player_metrics_loop_count_player"),
-			getInt(target, "player_metrics_loop_count_increment"),
+			getInt(target, "player_metrics_loop_count_delta"),
 			getInt(target, "loop_count_server"),
 		)
 	}
@@ -2627,6 +3429,7 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			target[resetKey] = normalizeRequestFailureType(resetType)
 		}
 	}
+	resetFailureWindowState(payload, target)
 	targetPort = getString(target, "x_forwarded_port")
 	if transportUpdated {
 		typeRaw := getString(target, "transport_failure_type")
@@ -2771,6 +3574,7 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 					session[resetKey] = normalizeRequestFailureType(resetType)
 				}
 			}
+			resetFailureWindowState(payload, session)
 			if transportUpdated && transportSnapshot != nil {
 				for key, value := range transportSnapshot {
 					session[key] = value
@@ -2882,10 +3686,9 @@ func (a *App) applySessionSettingsUpdate(id string, payload map[string]interface
 			if patternEnabled {
 				steps := parseShapeStepsFromSession(target)
 				if len(steps) > 0 {
-					delayMs := getInt(target, "nftables_delay_ms")
-					loss := getFloat(target, "nftables_packet_loss")
+					np := netemParamsFromSession(target)
 					log.Printf("SESSION_PATTERN_START source=session_patch session_id=%s port=%d steps=%d", id, portNum, len(steps))
-					if err := a.applyShapePattern(portNum, steps, delayMs, loss); err != nil {
+					if err := a.applyShapePattern(portNum, steps, np); err != nil {
 						log.Printf("SESSION_PATTERN_START_FAILED session_id=%s port=%d: %v", id, portNum, err)
 					}
 				}
@@ -2979,9 +3782,9 @@ func (a *App) emitHarnessSettingsChange(sessionID string, payload map[string]int
 	if patternTouched {
 		emit("pattern_config_change", "")
 	}
-	// Shaper rate / delay / loss.
+	// Shaper rate / delay / loss + #826 jitter/correlation knobs.
 	shaperTouched := false
-	for _, k := range []string{"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss"} {
+	for _, k := range []string{"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss", "nftables_jitter_ms", "nftables_loss_correlation_pct", "nftables_jitter_correlation_pct"} {
 		if _, ok := payload[k]; ok {
 			shaperTouched = true
 			break
@@ -3050,21 +3853,30 @@ func parseShapeStepsFromSession(session SessionData) []NftShapeStep {
 func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	if r.Method == http.MethodDelete {
-		sessions := a.getSessionList()
-		filtered := make([]SessionData, 0, len(sessions))
-		removedPorts := map[int]struct{}{}
-		for _, session := range sessions {
-			if getString(session, "session_id") != id {
-				filtered = append(filtered, session)
-				continue
+		// Collect the removed session(s) inside the (re-runnable) CAS
+		// closure; loop-state teardown / recordSessionEnd / kernel teardown
+		// run once on the committed result (mutateSessions side-effect rule).
+		var removed []SessionData
+		a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+			removed = removed[:0]
+			filtered := make([]SessionData, 0, len(sessions))
+			for _, session := range sessions {
+				if getString(session, "session_id") != id {
+					filtered = append(filtered, session)
+					continue
+				}
+				removed = append(removed, session)
 			}
+			return filtered, len(removed) > 0
+		})
+		removedPorts := map[int]struct{}{}
+		for _, session := range removed {
 			a.removeServerLoopState(id)
 			a.recordSessionEnd(session, "deleted")
 			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
 				removedPorts[port] = struct{}{}
 			}
 		}
-		a.saveSessionList(filtered)
 		for port := range removedPorts {
 			a.disablePatternForPort(port)
 			a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
@@ -3073,9 +3885,20 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 			// clean — pairs with the ClearPortShaping at session-
 			// allocation time as belt-and-braces (issue #352).
 			if a.traffic != nil {
-				_ = a.traffic.UpdateNetem(port, 0, 0)
+				_ = a.traffic.UpdateNetem(port, NetemParams{})
 				a.traffic.ClearPortShaping(port)
+				a.clearShapeApplyState(port)
 			}
+		}
+		// #944: a DELETE doesn't itself broadcast, so the v2 `player.deleted`
+		// event (a snapshot diff) only fires when a SURVIVING session next
+		// POSTs metrics. When this delete empties the list there's no survivor
+		// to trigger it, so poke the hub with an empty frame — otherwise the
+		// dashboard's session list stays stale after "release all" / deleting
+		// the last session. Deletes that leave survivors self-heal on the next
+		// metrics tick, so only the empties-the-list case needs the poke.
+		if len(removed) > 0 && len(a.getSessionList()) == 0 {
+			a.broadcastEmptySessions()
 		}
 		writeJSON(w, map[string]string{"message": "Session deleted successfully"})
 		return
@@ -3137,7 +3960,7 @@ func (a *App) handleGetNetworkLog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleGetExternalIPs(w http.ResponseWriter, r *http.Request) {
-	sessionList := a.getSessionList()
+	sessionList := a.sessionsView() // #740 read-only: builds ExternalIPEntry view, no mutation
 	if shouldScopeSessionsByRequesterIP(r) {
 		requesterIP := extractClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
 		sessionList = filterSessionsByOriginationIP(sessionList, requesterIP)
@@ -3196,14 +4019,21 @@ func (a *App) handleGetExternalIPs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
-	sessions := a.getSessionList()
+	// Capture the cleared sessions inside the (re-runnable) CAS closure;
+	// loop-state teardown / recordSessionEnd / kernel teardown run once on
+	// the committed result (mutateSessions side-effect rule).
+	var removed []SessionData
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		removed = append(removed[:0], sessions...)
+		return []SessionData{}, true
+	})
 	portSet := map[int]struct{}{}
 	a.shapeMu.Lock()
 	for port := range a.shapeLoops {
 		portSet[port] = struct{}{}
 	}
 	a.shapeMu.Unlock()
-	for _, session := range sessions {
+	for _, session := range removed {
 		a.removeServerLoopState(getString(session, "session_id"))
 		a.recordSessionEnd(session, "cleared")
 		portStr := getString(session, "x_forwarded_port")
@@ -3222,7 +4052,6 @@ func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
 		a.disablePatternForPort(port)
 		a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
 	}
-	a.saveSessionList([]SessionData{})
 	writeJSON(w, map[string]string{"message": "All sessions cleared successfully"})
 }
 
@@ -3304,13 +4133,27 @@ func (a *App) handleNftStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleNftCapabilities(w http.ResponseWriter, r *http.Request) {
-	status := "disabled"
-	reason := "traffic shaping requires Linux (tc/netem)"
-	if runtime.GOOS == "linux" {
-		status = "enabled"
-		reason = ""
+	// #910: report the real boot-time probe, not a bare GOOS check. "enabled"
+	// only when kernel shaping is actually usable (full or partial); "disabled"
+	// when there is no kernel shaping at all (http-only). The per-control
+	// booleans + mode let the dashboard grey out exactly what's missing rather
+	// than showing a phantom cap.
+	c := a.shaping
+	status := "enabled"
+	if !c.rate && !c.delay && !c.loss && !c.transportFault {
+		status = "disabled"
 	}
-	writeJSON(w, map[string]string{"status": status, "platform": runtime.GOOS, "reason": reason})
+	writeJSON(w, map[string]interface{}{
+		"status":          status,
+		"platform":        runtime.GOOS,
+		"reason":          c.reason,
+		"mode":            c.mode,
+		"forced":          c.forced,
+		"rate":            c.rate,
+		"delay":           c.delay,
+		"loss":            c.loss,
+		"transport_fault": c.transportFault,
+	})
 }
 
 func (a *App) handleNftPort(w http.ResponseWriter, r *http.Request) {
@@ -3413,10 +4256,11 @@ func (a *App) stopShapeLoop(port int) {
 	}
 }
 
-func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, loss float64) error {
+func (a *App) applyShapePattern(port int, steps []NftShapeStep, np NetemParams) error {
 	if a.traffic == nil {
 		return fmt.Errorf("traffic manager not initialized")
 	}
+	delayMs, loss := np.DelayMs, np.LossPct
 	cleanSteps := sanitizeShapeSteps(steps)
 	if len(cleanSteps) == 0 {
 		a.stopShapeLoop(port)
@@ -3439,7 +4283,7 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 		// the session update above so applySessionShaping sees the
 		// freshly cleared pattern_enabled flag and doesn't no-op via
 		// its "pattern owns the rate" guard.
-		for _, sess := range a.getSessionList() {
+		for _, sess := range a.sessionsView() { // #740 read-only: applySessionShaping reads sess, drives kernel
 			if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
 				if p, err := strconv.Atoi(portStr); err == nil && p == port {
 					a.applySessionShaping(sess, port)
@@ -3448,7 +4292,7 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 		}
 		return nil
 	}
-	if err := a.traffic.UpdateNetem(port, delayMs, loss); err != nil {
+	if err := a.traffic.UpdateNetem(port, np); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -3467,10 +4311,13 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 		oldCancel()
 	}
 	a.updateSessionsByPortWithControl(port, map[string]interface{}{
-		"nftables_pattern_enabled": true,
-		"nftables_pattern_steps":   cleanSteps,
-		"nftables_delay_ms":        delayMs,
-		"nftables_packet_loss":     loss,
+		"nftables_pattern_enabled":        true,
+		"nftables_pattern_steps":          cleanSteps,
+		"nftables_delay_ms":               delayMs,
+		"nftables_packet_loss":            loss,
+		"nftables_jitter_ms":              np.JitterMs,
+		"nftables_loss_correlation_pct":   np.LossCorrelationPct,
+		"nftables_jitter_correlation_pct": np.JitterCorrelationPct,
 	}, "")
 	// Emit pattern_enabled (per session on this port) so the
 	// dashboard's PlayLog Control bucket surfaces operator toggles
@@ -3487,7 +4334,7 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 	// above when the caller included it in the payload, so any session
 	// on this port has the freshest value.
 	mode := ""
-	for _, sess := range a.getSessionList() {
+	for _, sess := range a.sessionsView() { // #740 read-only: reads pattern template mode
 		if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
 			if pn, err := strconv.Atoi(portStr); err == nil && pn == port {
 				mode = getString(sess, "nftables_pattern_template_mode")
@@ -3495,14 +4342,41 @@ func (a *App) applyShapePattern(port int, steps []NftShapeStep, delayMs int, los
 			}
 		}
 	}
+	if mode == "" && stepCount > 0 {
+		// Custom / unnamed pattern — no template mode (hand-edited steps via the
+		// testing UI, or a pattern applied without a named template). Derive a
+		// stable signature from the step profile so it still earns a distinct
+		// `pattern_enabled_custom_<sig>` label instead of collapsing every custom
+		// pattern into one bare `pattern_enabled` — otherwise "which pattern is
+		// running", especially dynamically-applied ones, is unfilterable.
+		h := fnv.New32a()
+		for _, s := range cleanSteps {
+			fmt.Fprintf(h, "%.3f:%g;", s.RateMbps, s.DurationSeconds)
+		}
+		mode = fmt.Sprintf("custom_%08x", h.Sum32())
+	}
 	info := fmt.Sprintf(`{"mode":%q,"steps":%d,"rate_mbps_first":%.3f,"delay_ms":%d,"packet_loss":%.3f}`,
 		mode, stepCount, firstRate, delayMs, loss)
 	a.emitControlEventForPort(port, "proxy", "pattern_enabled", info)
-	go a.runShapePatternLoop(ctx, port, cleanSteps, delayMs, loss)
+	// Co-locate a label_changed with pattern_enabled: the session's harness labels
+	// (sweep RunLabels — platform/mode/recipe/… — set on _v2_labels at bootstrap but
+	// never surfaced as a control event) now land on the play with the SAME
+	// attribution pattern_enabled just proved. This is where the play_id is present,
+	// unlike the too-early config-on-connect / reattach binds. Forwarder edge-dedups
+	// re-arms; no-label sessions skip it.
+	for _, ls := range a.sessionsView() { // #740 read-only: reads _v2_labels
+		if getString(ls, "x_forwarded_port") == strconv.Itoa(port) {
+			if lbls, ok := ls["_v2_labels"]; ok && lbls != nil {
+				a.emitControlEventForPort(port, "proxy", "label_changed", labelsInfoJSON(lbls))
+			}
+			break
+		}
+	}
+	go a.runShapePatternLoop(ctx, port, cleanSteps, np)
 	return nil
 }
 
-func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShapeStep, delayMs int, loss float64) {
+func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShapeStep, np NetemParams) {
 	if len(steps) == 0 {
 		return
 	}
@@ -3513,6 +4387,9 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 			break
 		}
 	}
+	// Resolve the owner labels once (master identity + template) for the slave
+	// "driven by master" markers fanned out each tick.
+	drivenBy, drivenTemplate := a.patternOwnerLabels(port)
 	stepIndex := 0
 	for {
 		select {
@@ -3545,7 +4422,7 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 			stepIndex = (stepIndex + 1) % len(steps)
 			continue
 		}
-		if err := a.applyShapeIfChanged(port, step.RateMbps, delayMs, loss); err != nil {
+		if err := a.applyShapeIfChanged(port, step.RateMbps, np); err != nil {
 			log.Printf(
 				"NETSHAPE pattern_step ts=%s port=%d step=%d/%d rate_mbps=%.3f duration_s=%.1f enabled=%t status=rate_failed err=%v",
 				ts,
@@ -3577,12 +4454,16 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 			"nftables_pattern_step":              stepIndex + 1,
 			"nftables_pattern_step_runtime":      stepIndex + 1,
 			"nftables_pattern_rate_runtime_mbps": step.RateMbps,
+			"nftables_pattern_master":            true,
 		})
+		// Single-owner group shaping: mirror this step's cap onto the rest of the
+		// group so every member tracks the master in lock-step (no per-member loop).
+		a.fanPatternRateToGroup(port, step.RateMbps, np, drivenBy, drivenTemplate)
 		// Emit pattern_step as a control_event for every session on
 		// this port (issue #474 Milestone B). Info is a tiny JSON
 		// blob so downstream (graphs, harness archive) can read
 		// step / rate / duration without re-fetching pattern config.
-		for _, sess := range a.getSessionList() {
+		for _, sess := range a.sessionsView() { // #740 read-only: builds control-event info string
 			if portStr := getString(sess, "x_forwarded_port"); portStr != "" {
 				if pn, err := strconv.Atoi(portStr); err == nil && pn == port {
 					info := fmt.Sprintf(`{"step":%d,"rate_mbps":%.3f,"duration_s":%.1f}`,
@@ -3603,19 +4484,111 @@ func (a *App) runShapePatternLoop(ctx context.Context, port int, steps []NftShap
 	}
 }
 
+// disablePatternForPort is THE canonical "clear all pattern state" for a port.
+// A pattern lives in THREE representations that MUST be cleared together, or the
+// dashboard shows a phantom "pattern running" after a stop (issue #910):
+//
+//  1. the in-memory step loop            (shapeLoops + shapeStates)
+//  2. the v1 session fields              (nftables_pattern_*)
+//  3. the v2 stash                       (_v2_shape_pattern) — the dashboard's
+//     shape.pattern is built from THIS, not the nftables_pattern_* fields, so
+//     leaving it behind is exactly what made a stopped pattern re-read as
+//     running through the v2 API.
+//
+// Every disable path (shaping-mode switch, switch-to-sliders, group reset,
+// session release) MUST go through here so no representation can drift. If you
+// add a new pattern field/representation, clear it HERE and extend
+// TestDisablePatternClearsAllRepresentations so the invariant is enforced.
 func (a *App) disablePatternForPort(port int) {
-	a.stopShapeLoop(port)
+	a.stopShapeLoop(port) // (1) in-memory loop + shapeStates
 	a.updateSessionsByPortWithControl(port, map[string]interface{}{
-		"nftables_pattern_enabled": false,
-		"nftables_pattern_steps":   []NftShapeStep{},
-		"nftables_pattern_step":    nil,
+		// (2) v1 session fields — enabled/steps/step + the runtime display fields
+		// that otherwise linger and re-read as a running pattern.
+		"nftables_pattern_enabled":           false,
+		"nftables_pattern_steps":             []NftShapeStep{},
+		"nftables_pattern_step":              nil,
+		"nftables_pattern_step_runtime":      nil,
+		"nftables_pattern_rate_runtime_mbps": nil,
+		"nftables_pattern_step_runtime_at":   nil,
+		"nftables_pattern_template_mode":     "",
+		// (3) v2 stash. nil is equivalent to the v2 PATCH path's delete for every
+		// reader (all type-assert to map / nil-check first).
+		"_v2_shape_pattern": nil,
 	}, "")
-	// Emit pattern_disabled to control_events for every session on
-	// this port. Without this hook the dashboard's PlayLog "Control"
-	// bucket stayed silent on toggle paths that bypass
-	// applySessionSettingsUpdate (e.g. switching to sliders mode,
+	// Emit pattern_disabled to control_events for every session on this port.
+	// Without this hook the dashboard's PlayLog "Control" bucket stayed silent on
+	// toggle paths that bypass applySessionSettingsUpdate (switch-to-sliders,
 	// session release, group reset). Issue #474 follow-up.
 	a.emitControlEventForPort(port, "proxy", "pattern_disabled", "")
+}
+
+// fanPatternRateToGroup applies the master's current pattern rate to every OTHER
+// port in the master's group — the single-owner model. This pattern loop is the
+// only engine; each tick mirrors its cap onto the group's members so they track
+// in lock-step with zero drift. Members get the kernel cap via applyShapeIfChanged
+// (change-detected → an unchanged member is a no-op) plus display markers
+// (rate_runtime + driven_by + driven_template) so the dashboard shows "driven by
+// master" WITHOUT arming a per-member pattern (no steps, no step-clock). The group
+// is re-enumerated every call, so a member that connected/reattached after the
+// master armed is picked up on the next tick (no dependence on instantiation order).
+func (a *App) fanPatternRateToGroup(originPort int, rate float64, np NetemParams, drivenBy, drivenTemplate string) {
+	snap := a.sessionsView() // #740 read-only: group/port lookups only
+	gid := a.getGroupIdByPort(originPort, snap)
+	if gid == "" {
+		log.Printf("NETSHAPE group fan-out skipped port=%d reason=no_group_id sessions=%d", originPort, len(snap))
+		return
+	}
+	ports := a.getPortsForGroup(gid, snap)
+	fanned := 0
+	for _, gp := range ports {
+		if gp == originPort {
+			continue
+		}
+		if err := a.applyShapeIfChanged(gp, rate, np); err != nil {
+			log.Printf("NETSHAPE group pattern fan-out failed port=%d group=%s rate_mbps=%.3f: %v", gp, gid, rate, err)
+			continue
+		}
+		// Display only — the member's chart Limit line + slider track the master's
+		// cap. Deliberately NO setShapeRuntimeStep / nftables_pattern_steps: members
+		// stay template-less and step-clock-less (single owner = the master).
+		a.updateSessionsByPort(gp, map[string]interface{}{
+			"nftables_pattern_rate_runtime_mbps": rate,
+			"nftables_pattern_driven_by":         drivenBy,
+			"nftables_pattern_driven_template":   drivenTemplate,
+		})
+		fanned++
+	}
+	// #single-owner debug: surface what the fan-out resolved each tick so a
+	// non-firing group (slaves stuck at their connect cap) is diagnosable from
+	// the proxy log — origin port, resolved group, ALL member ports the group
+	// enumerated, and how many were actually fanned.
+	log.Printf("NETSHAPE group fan-out port=%d group=%s member_ports=%v fanned=%d rate_mbps=%.3f", originPort, gid, ports, fanned, rate)
+}
+
+// patternOwnerLabels reads the master (origin) session for the labels the slave
+// UI shows: the master's display label and the active template name. Best-effort —
+// empty strings just mean the slave badge omits that detail.
+func (a *App) patternOwnerLabels(originPort int) (drivenBy, drivenTemplate string) {
+	for _, s := range a.sessionsView() { // #740 read-only
+		if !a.sessionMatchesPort(s, originPort) {
+			continue
+		}
+		drivenBy = getString(s, "display_id")
+		if drivenBy == "" {
+			pid := getString(s, "player_id")
+			if len(pid) > 8 {
+				pid = pid[:8]
+			}
+			drivenBy = pid
+		}
+		if raw, ok := s["_v2_shape_pattern"]; ok {
+			if m, ok := raw.(map[string]interface{}); ok {
+				drivenTemplate = getString(m, "template")
+			}
+		}
+		break
+	}
+	return drivenBy, drivenTemplate
 }
 
 // emitControlEventsForDiff inspects a (before, after) session-state
@@ -3704,11 +4677,13 @@ func (a *App) emitControlEventsForDiff(sessionID string, before, after map[strin
 			emit("fault_rule_config_change", surface+":"+cur)
 		}
 	}
-	// Shaper (rate / delay / loss) — sliders.
-	if changed("nftables_bandwidth_mbps") || changed("nftables_delay_ms") || changed("nftables_packet_loss") {
+	// Shaper (rate / delay / loss + #826 jitter / correlations) — sliders.
+	if changed("nftables_bandwidth_mbps") || changed("nftables_delay_ms") || changed("nftables_packet_loss") ||
+		changed("nftables_jitter_ms") || changed("nftables_loss_correlation_pct") || changed("nftables_jitter_correlation_pct") {
 		emit("shaper_config_change",
-			fmt.Sprintf(`{"rate_mbps":%v,"delay_ms":%v,"packet_loss":%v}`,
-				after["nftables_bandwidth_mbps"], after["nftables_delay_ms"], after["nftables_packet_loss"]))
+			fmt.Sprintf(`{"rate_mbps":%v,"delay_ms":%v,"packet_loss":%v,"jitter_ms":%v,"loss_correlation_pct":%v,"jitter_correlation_pct":%v}`,
+				after["nftables_bandwidth_mbps"], after["nftables_delay_ms"], after["nftables_packet_loss"],
+				after["nftables_jitter_ms"], after["nftables_loss_correlation_pct"], after["nftables_jitter_correlation_pct"]))
 	}
 	// Pattern enable/disable is emitted by applyShapePattern /
 	// disablePatternForPort directly — skip here. Config-only edits
@@ -3809,7 +4784,7 @@ func (a *App) emitControlEventForPort(port int, source, event, info string) {
 	if a == nil || a.controlHub == nil || event == "" {
 		return
 	}
-	for _, sess := range a.getSessionList() {
+	for _, sess := range a.sessionsView() { // #740 read-only: matches port, emits control event
 		portStr := getString(sess, "x_forwarded_port")
 		if portStr == "" {
 			continue
@@ -3999,64 +4974,69 @@ func transportFaultConfigFromSession(session SessionData) (string, int, string, 
 
 func (a *App) getFirstSessionByPort(port int) SessionData {
 	portStr := strconv.Itoa(port)
-	for _, session := range a.getSessionList() {
+	// #740: scan the no-clone view, but return a clone of the single match —
+	// callers may mutate the result, so it must not alias the live snapshot.
+	for _, session := range a.sessionsView() {
 		if getString(session, "x_forwarded_port") == portStr {
-			return session
+			return cloneSession(session)
 		}
 	}
 	return nil
 }
 
 func (a *App) setTransportFaultSessionState(port int, faultType string, active bool, startedAt string, phaseSeconds float64, cycleSeconds float64) {
-	sessions := a.getSessionList()
-	changed := false
-	controlRevision := ""
 	phaseRounded := math.Round(phaseSeconds*1000) / 1000
 	cycleRounded := math.Round(cycleSeconds*1000) / 1000
-	for _, session := range sessions {
-		portStr := getString(session, "x_forwarded_port")
-		if portStr == "" {
-			continue
-		}
-		if portNum, err := strconv.Atoi(portStr); err == nil && portNum == port {
-			prevType := getString(session, "transport_fault_type")
-			if prevType == "" {
-				prevType = getString(session, "transport_failure_type")
+	controlRevision := newControlRevision()
+	// fault active-edge sessions captured inside the (re-runnable) CAS
+	// closure; the fault_on/fault_off control_events are emitted once on
+	// the committed result (mutateSessions side-effect rule).
+	var edges []string
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		edges = edges[:0]
+		changed := false
+		for _, session := range sessions {
+			portStr := getString(session, "x_forwarded_port")
+			if portStr == "" {
+				continue
 			}
-			prevActive := getBool(session, "transport_fault_active")
-			prevStarted := getString(session, "transport_fault_started_at")
-			session["transport_failure_type"] = faultType
-			session["transport_fault_type"] = faultType
-			session["transport_fault_active"] = active
-			session["transport_fault_started_at"] = startedAt
-			session["transport_fault_phase_seconds"] = phaseRounded
-			session["transport_fault_cycle_seconds"] = cycleRounded
-			controlChanged := prevType != faultType || prevActive != active
-			if !controlChanged && startedAt != "" && prevStarted != startedAt {
-				controlChanged = true
-			}
-			if controlChanged {
-				if controlRevision == "" {
-					controlRevision = newControlRevision()
+			if portNum, err := strconv.Atoi(portStr); err == nil && portNum == port {
+				prevType := getString(session, "transport_fault_type")
+				if prevType == "" {
+					prevType = getString(session, "transport_failure_type")
 				}
-				applyControlRevision(session, controlRevision)
-			}
-			// Emit control_event on the fault active edge — fault_on /
-			// fault_off (issue #474 Milestone B). Replaces the
-			// snapshot_failures classifier's transport_fault edge.
-			if prevActive != active {
-				sessionID := getString(session, "session_id")
-				ev := "fault_off"
-				if active {
-					ev = "fault_on"
+				prevActive := getBool(session, "transport_fault_active")
+				prevStarted := getString(session, "transport_fault_started_at")
+				session["transport_failure_type"] = faultType
+				session["transport_fault_type"] = faultType
+				session["transport_fault_active"] = active
+				session["transport_fault_started_at"] = startedAt
+				session["transport_fault_phase_seconds"] = phaseRounded
+				session["transport_fault_cycle_seconds"] = cycleRounded
+				controlChanged := prevType != faultType || prevActive != active
+				if !controlChanged && startedAt != "" && prevStarted != startedAt {
+					controlChanged = true
 				}
-				a.emitControlEventForSession(sessionID, "proxy", ev, faultType)
+				if controlChanged {
+					applyControlRevision(session, controlRevision)
+				}
+				if prevActive != active {
+					edges = append(edges, getString(session, "session_id"))
+				}
+				changed = true
 			}
-			changed = true
 		}
+		return sessions, changed
+	})
+	// Emit control_event on the fault active edge — fault_on / fault_off
+	// (issue #474 Milestone B). Replaces the snapshot_failures classifier's
+	// transport_fault edge.
+	ev := "fault_off"
+	if active {
+		ev = "fault_on"
 	}
-	if changed {
-		a.saveSessionList(sessions)
+	for _, sessionID := range edges {
+		a.emitControlEventForSession(sessionID, "proxy", ev, faultType)
 	}
 }
 
@@ -4093,6 +5073,16 @@ func (a *App) armTransportFaultLoop(port int, faultType string, consecutiveThres
 		log.Printf("FAULT transport_cleanup_failed port=%d err=%v", port, err)
 	}
 	if faultType == "none" {
+		a.setTransportFaultSessionState(port, "none", false, "", 0, 0)
+		return
+	}
+	// #910: honesty gate — if nftables can't back transport faults on this
+	// host, OR this session is forced degraded, don't arm the loop and pretend
+	// it's active. Per-session effective caps so one forced-degraded session
+	// is gated while others on the box keep faulting. The session-level
+	// shaping_degraded event marks the play; the dashboard greys the control.
+	if eff := a.effectiveShapingForPort(port); !eff.transportFault {
+		log.Printf("FAULT transport degraded port=%d control=transport_fault reason=capability_unavailable mode=%s requested_type=%s", port, eff.mode, faultType)
 		a.setTransportFaultSessionState(port, "none", false, "", 0, 0)
 		return
 	}
@@ -4213,7 +5203,7 @@ func (a *App) runTransportFaultLoop(ctx context.Context, port int, faultType str
 
 func (a *App) restoreTransportFaultSchedules() {
 	seenPorts := map[int]struct{}{}
-	for _, session := range a.getSessionList() {
+	for _, session := range a.sessionsView() { // #740 read-only: re-arms transport faults from config
 		portStr := getString(session, "x_forwarded_port")
 		if portStr == "" {
 			continue
@@ -4234,18 +5224,22 @@ func (a *App) restoreTransportFaultSchedules() {
 // restoreShapeApplication re-applies the tc rate/delay/loss state for
 // every session in the loaded session map. Required on boot because
 // the container's network namespace is recreated on restart — tc
-// classes/filters don't survive, but the session map (persisted on
-// disk via saveSessionList) does. Without this, sessions that
-// pre-existed the restart end up running uncapped, which silently
-// breaks both operator-set rate overrides and the deployment baseline
-// cap (issue #480). Matches restoreTransportFaultSchedules' pattern.
-func (a *App) restoreShapeApplication() {
+// classes/filters don't survive.
+//
+// CAVEAT (#686): this is currently a NO-OP across a real restart. The
+// session map is in-memory only (saveSessionList → publishSnapshot;
+// there is no disk persistence), so at boot the list is empty and this
+// restores nothing (the server_start marker reports restored=0). Until
+// #686 adds disk persistence, sessions that pre-existed a restart run
+// uncapped at the deployment baseline until shaping is re-applied —
+// which is the restore-window rate spike #686 tracks. Matches
+// restoreTransportFaultSchedules' pattern (and shares its limitation).
+func (a *App) restoreShapeApplication() (restored, skipped int) {
 	if a.traffic == nil {
-		return
+		return 0, 0
 	}
 	seenPorts := map[int]struct{}{}
-	restored, skipped := 0, 0
-	for _, session := range a.getSessionList() {
+	for _, session := range a.sessionsView() { // #740 read-only: re-applies shape from config
 		portStr := getString(session, "x_forwarded_port")
 		if portStr == "" {
 			skipped++
@@ -4270,6 +5264,7 @@ func (a *App) restoreShapeApplication() {
 		restored++
 	}
 	log.Printf("shape restoration on boot: restored=%d skipped=%d baseline_mbps=%d", restored, skipped, a.defaultRateMbps)
+	return restored, skipped
 }
 
 func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
@@ -4291,6 +5286,9 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		Steps                  []NftShapeStep `json:"steps"`
 		DelayMs                int            `json:"delay_ms"`
 		LossPct                float64        `json:"loss_pct"`
+		JitterMs               int            `json:"jitter_ms"`              // #826
+		LossCorrelationPct     float64        `json:"loss_correlation_pct"`   // #826
+		JitterCorrelationPct   float64        `json:"jitter_correlation_pct"` // #826
 		SegmentDurationSeconds float64        `json:"segment_duration_seconds"`
 		DefaultSegments        float64        `json:"default_segments"`
 		DefaultStepSeconds     float64        `json:"default_step_seconds"`
@@ -4303,7 +5301,7 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch payload.TemplateMode {
-	case "sliders", "square_wave", "ramp_up", "ramp_down", "pyramid":
+	case "sliders", "square_wave", "ramp_up", "ramp_down", "pyramid", "valley", "transient_shock":
 	default:
 		payload.TemplateMode = "sliders"
 	}
@@ -4333,7 +5331,11 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cleanSteps := sanitizeShapeSteps(payload.Steps)
-	if err := a.applyShapePattern(port, cleanSteps, payload.DelayMs, payload.LossPct); err != nil {
+	patternNetem := NetemParams{
+		DelayMs: payload.DelayMs, LossPct: payload.LossPct,
+		JitterMs: payload.JitterMs, LossCorrelationPct: payload.LossCorrelationPct, JitterCorrelationPct: payload.JitterCorrelationPct,
+	}
+	if err := a.applyShapePattern(port, cleanSteps, patternNetem); err != nil {
 		log.Printf("NETSHAPE pattern apply failed port=%d: %v", port, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": "Failed to apply pattern", "details": err.Error()})
@@ -4347,29 +5349,11 @@ func (a *App) handleNftPattern(w http.ResponseWriter, r *http.Request) {
 		"nftables_pattern_margin_pct":               payload.TemplateMarginPct,
 	}, "")
 
-	// Propagate to group members
-	snap := a.getSessionList()
-	groupID := a.getGroupIdByPort(port, snap)
-	if groupID != "" {
-		groupPorts := a.getPortsForGroup(groupID, snap)
-		for _, groupPort := range groupPorts {
-			if groupPort == port {
-				continue // Skip the original port
-			}
-			if err := a.applyShapePattern(groupPort, cleanSteps, payload.DelayMs, payload.LossPct); err != nil {
-				log.Printf("NETSHAPE group pattern propagation failed port=%d: %v", groupPort, err)
-				continue
-			}
-			a.updateSessionsByPortWithControl(groupPort, map[string]interface{}{
-				"nftables_pattern_segment_duration_seconds": payload.SegmentDurationSeconds,
-				"nftables_pattern_default_segments":         payload.DefaultSegments,
-				"nftables_pattern_default_step_seconds":     payload.DefaultStepSeconds,
-				"nftables_pattern_template_mode":            payload.TemplateMode,
-				"nftables_pattern_margin_pct":               payload.TemplateMarginPct,
-			}, "")
-			log.Printf("NETSHAPE group pattern propagation applied port=%d group=%s", groupPort, groupID)
-		}
-	}
+	// Single-owner group shaping: the origin port's pattern loop fans each tick's
+	// rate to the group's members (see fanPatternRateToGroup in runShapePatternLoop).
+	// We deliberately do NOT arm a second pattern loop on each member here — that was
+	// the double-arm: N independent per-member loops that drift apart and show the
+	// pattern template on every member instead of just the master.
 
 	writeJSON(w, map[string]interface{}{
 		"success":         true,
@@ -4434,6 +5418,133 @@ func (a *App) handleNftBandwidth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"success": true, "port": port, "rate": fmt.Sprintf("%g Mbps", rateMbps)})
 }
 
+// handleNftShapingMode sets (or clears) a per-session forced degraded shaping
+// mode on ONE session (#910). Body: {"mode":"http-only"|"off",
+// "player_id":"..."}. The session is addressed by the path {port} (harness /
+// curl) OR by player_id in the body (the dashboard, which works by player_id
+// and doesn't know the proxy port). Lets ONE session run degraded while others
+// on the same box shape normally — the A/B instrument.
+func (a *App) handleNftShapingMode(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		Mode     string `json:"mode"`
+		PlayerID string `json:"player_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid json"})
+		return
+	}
+	// Resolve the target port: explicit path {port} wins; else map player_id.
+	port := 0
+	if portStr := mux.Vars(r)["port"]; portStr != "" {
+		mappedPort, _ := a.portMap.MapExternalPort(portStr)
+		p, err := strconv.Atoi(mappedPort)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": "invalid port"})
+			return
+		}
+		port = p
+	} else if payload.PlayerID != "" {
+		p, ok := a.portForPlayerID(payload.PlayerID)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]string{"error": "no active session for player_id"})
+			return
+		}
+		port = p
+	} else {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "port or player_id required"})
+		return
+	}
+	mode := normalizeShapingMode(payload.Mode) // "" | http-only
+	log.Printf("SHAPING mode set port=%d mode=%q (#910)", port, mode)
+	// Persist the forced mode on the session(s) bound to the port, then
+	// reconcile the kernel + gate state.
+	a.updateSessionsByPortWithControl(port, map[string]interface{}{
+		"shaping_forced_mode": mode,
+	}, "")
+	a.applyForcedShapingModeForPort(port)
+	eff := a.effectiveShapingForPort(port)
+	writeJSON(w, map[string]interface{}{
+		"success":  true,
+		"port":     port,
+		"mode":     eff.mode,
+		"forced":   eff.forced,
+		"degraded": eff.degraded(),
+	})
+}
+
+// applyForcedShapingModeForPort reconciles kernel + gate state after a port's
+// session shaping_forced_mode changed. Degrading: tear down any kernel shaping
+// already on the port BEFORE closing the gate (a closed gate would no-op the
+// teardown), then close it and emit a shaping_degraded event. Clearing: re-open
+// the gate and re-apply the session's stored shape. Issue #910.
+func (a *App) applyForcedShapingModeForPort(port int) {
+	if a.traffic == nil {
+		return
+	}
+	sess, found := a.sessionForPort(port)
+	eff := a.shaping
+	if found {
+		eff = a.effectiveShapingForSession(sess)
+	}
+	degraded := !eff.kernelRateOn() || !eff.kernelNetemOn()
+	if degraded {
+		// Faults-only means NO kernel path at all, so tear down every kernel-backed
+		// control on the port — not just gate it (#910). Fully clear the pattern
+		// first (all 3 representations) so its next tick can't re-arm a rate
+		// mid-teardown and the dashboard stops showing a "running" pattern.
+		a.disablePatternForPort(port)
+		a.traffic.SetPortShapingGate(port, false, false) // open for teardown
+		_ = a.traffic.UpdateRateLimit(port, 0)
+		_ = a.traffic.UpdateNetem(port, NetemParams{})
+		a.clearShapeApplyState(port)
+		a.syncPortShapingGate(port, eff) // close per effective
+		// Transport faults (nftables drop/reject) are kernel-backed too — stop the
+		// loop and remove the rule so the session can't keep dropping packets while
+		// the UI shows the Transport control disabled. (#910)
+		a.stopTransportFaultLoop(port)
+		if err := clearTransportFaultRule(port); err != nil {
+			log.Printf("SHAPING degraded transport-clear failed port=%d err=%v", port, err)
+		}
+		a.setTransportFaultSessionState(port, "none", false, "", 0, 0)
+		// Reset the STORED shape (operator intent), not just the kernel state, so
+		// the dashboard's "Limit (rate_mbps)" line and the impairment values drop
+		// to 0 instead of charting a phantom cap the session no longer enforces.
+		// effective_rate_limit_mbps is re-derived on the next normalize. (#910)
+		a.updateSessionsByPortWithControl(port, map[string]interface{}{
+			"nftables_bandwidth_mbps":         float64(0),
+			"nftables_delay_ms":               float64(0),
+			"nftables_packet_loss":            float64(0),
+			"nftables_jitter_ms":              float64(0),
+			"nftables_loss_correlation_pct":   float64(0),
+			"nftables_jitter_correlation_pct": float64(0),
+		}, "")
+		if found {
+			a.emitControlEventForSession(getString(sess, "session_id"), "harness", "shaping_degraded", eff.degradedInfo())
+		}
+		log.Printf("SHAPING per-session degraded port=%d mode=%s (#910)", port, eff.mode)
+		return
+	}
+	a.syncPortShapingGate(port, eff) // open
+	// #910: returning to kernel is a clean slate — fully clear any pattern so one
+	// armed before the degrade doesn't resurrect in the editor or re-run.
+	a.disablePatternForPort(port)
+	a.clearShapeApplyState(port)
+	if found {
+		// Re-read: disablePatternForPort mutated the session, so applySessionShaping
+		// must see the pattern-free state (else it skips the rate apply thinking a
+		// pattern still owns it).
+		if s, ok := a.sessionForPort(port); ok {
+			sess = s
+		}
+		a.applySessionShaping(sess, port)
+	}
+	log.Printf("SHAPING per-session restored port=%d mode=%s (#910)", port, eff.mode)
+}
+
 func (a *App) handleNftLoss(w http.ResponseWriter, r *http.Request) {
 	if a.traffic == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -4467,17 +5578,19 @@ func (a *App) handleNftLoss(w http.ResponseWriter, r *http.Request) {
 			loss = parsed
 		}
 	}
+	lossCorr := getFloat(payload, "loss_correlation_pct")
 	a.disablePatternForPort(port)
-	if err := a.traffic.UpdateNetem(port, 0, loss); err != nil {
-		log.Printf("NETSHAPE packet loss failed port=%d loss=%.2f: %v", port, loss, err)
+	if err := a.traffic.UpdateNetem(port, NetemParams{LossPct: loss, LossCorrelationPct: lossCorr}); err != nil {
+		log.Printf("NETSHAPE packet loss failed port=%d loss=%.2f corr=%.1f: %v", port, loss, lossCorr, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": "Failed to update packet loss", "details": err.Error()})
 		return
 	}
 	a.updateSessionsByPortWithControl(port, map[string]interface{}{
-		"nftables_packet_loss": loss,
+		"nftables_packet_loss":          loss,
+		"nftables_loss_correlation_pct": lossCorr,
 	}, "")
-	writeJSON(w, map[string]interface{}{"success": true, "port": port, "loss_pct": loss})
+	writeJSON(w, map[string]interface{}{"success": true, "port": port, "loss_pct": loss, "loss_correlation_pct": lossCorr})
 }
 
 func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
@@ -4542,6 +5655,15 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 			loss = parsed
 		}
 	}
+	// #826 link-impairment knobs: jitter (delay stddev) + burst correlations.
+	// All optional; absent ⇒ 0 ⇒ server auto-jitter / uniform loss (legacy).
+	jitterMs := getInt(payload, "jitter_ms")
+	lossCorr := getFloat(payload, "loss_correlation_pct")
+	jitterCorr := getFloat(payload, "jitter_correlation_pct")
+	np := NetemParams{
+		DelayMs: delayMs, LossPct: loss,
+		JitterMs: jitterMs, LossCorrelationPct: lossCorr, JitterCorrelationPct: jitterCorr,
+	}
 	a.disablePatternForPort(port)
 	effectiveMbps := a.effectiveRate(rateMbps)
 	if err := a.traffic.UpdateRateLimit(port, effectiveMbps); err != nil {
@@ -4550,20 +5672,23 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "Failed to update rate limit", "details": err.Error()})
 		return
 	}
-	if err := a.traffic.UpdateNetem(port, delayMs, loss); err != nil {
-		log.Printf("NETSHAPE netem failed port=%d delay=%d loss=%.2f: %v", port, delayMs, loss, err)
+	if err := a.traffic.UpdateNetem(port, np); err != nil {
+		log.Printf("NETSHAPE netem failed port=%d delay=%d loss=%.2f jitter=%d loss_corr=%.1f del_corr=%.1f: %v", port, delayMs, loss, jitterMs, lossCorr, jitterCorr, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": "Failed to update delay/loss", "details": err.Error()})
 		return
 	}
 	a.updateSessionsByPortWithControl(port, map[string]interface{}{
-		"nftables_bandwidth_mbps": rateMbps, // operator intent; 0 = no override
-		"nftables_delay_ms":       delayMs,
-		"nftables_packet_loss":    loss,
+		"nftables_bandwidth_mbps":         rateMbps, // operator intent; 0 = no override
+		"nftables_delay_ms":               delayMs,
+		"nftables_packet_loss":            loss,
+		"nftables_jitter_ms":              jitterMs,
+		"nftables_loss_correlation_pct":   lossCorr,
+		"nftables_jitter_correlation_pct": jitterCorr,
 	}, "")
 
 	// Propagate to group members
-	snap2 := a.getSessionList()
+	snap2 := a.sessionsView() // #740 read-only: group/port lookups only
 	groupID := a.getGroupIdByPort(port, snap2)
 	if groupID != "" {
 		groupPorts := a.getPortsForGroup(groupID, snap2)
@@ -4576,14 +5701,17 @@ func (a *App) handleNftShape(w http.ResponseWriter, r *http.Request) {
 				log.Printf("NETSHAPE group propagation rate limit failed port=%d rate=%g (effective=%g): %v", groupPort, rateMbps, effectiveMbps, err)
 				continue
 			}
-			if err := a.traffic.UpdateNetem(groupPort, delayMs, loss); err != nil {
+			if err := a.traffic.UpdateNetem(groupPort, np); err != nil {
 				log.Printf("NETSHAPE group propagation netem failed port=%d delay=%d loss=%.2f: %v", groupPort, delayMs, loss, err)
 				continue
 			}
 			a.updateSessionsByPortWithControl(groupPort, map[string]interface{}{
-				"nftables_bandwidth_mbps": rateMbps,
-				"nftables_delay_ms":       delayMs,
-				"nftables_packet_loss":    loss,
+				"nftables_bandwidth_mbps":         rateMbps,
+				"nftables_delay_ms":               delayMs,
+				"nftables_packet_loss":            loss,
+				"nftables_jitter_ms":              jitterMs,
+				"nftables_loss_correlation_pct":   lossCorr,
+				"nftables_jitter_correlation_pct": jitterCorr,
 			}, "")
 			log.Printf("NETSHAPE group propagation applied port=%d rate=%g delay=%d loss=%.2f group=%s", groupPort, rateMbps, delayMs, loss, groupID)
 		}
@@ -4790,7 +5918,7 @@ func isSocketFaultType(faultType string) bool {
 // The canonical reference for every fault type's wire shape AND the
 // real-world failure mode it models is:
 //
-//   .claude/standards/fault-injection-wire-contract.md
+//	.claude/standards/fault-injection-wire-contract.md
 //
 // Read it before editing this function or any of the case branches
 // below. The doc lists: TCP-level shape, what the client OS surfaces,
@@ -5090,7 +6218,14 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// NetworkLogEntry created in this handler via the logEntry closure
 	// below.
 	playID := strings.TrimSpace(r.URL.Query().Get("play_id"))
+	// #911: hoisted above the logEntry closure so it can stamp entry.PlayerID
+	// off the request (warm from request #1), independent of session association.
+	playerID := strings.TrimSpace(r.URL.Query().Get("player_id"))
 	attemptIDStr := strings.TrimSpace(r.URL.Query().Get("attempt_id"))
+	// Client-supplied, play-scoped start (#587). Rotates with play_id;
+	// the proxy just carries it through to the session map so it reaches
+	// PlayRecord.start_time (live) and the session_events CH column.
+	startTime := strings.TrimSpace(r.URL.Query().Get("start_time"))
 	var attemptID uint32
 	if attemptIDStr != "" {
 		if n, err := strconv.ParseUint(attemptIDStr, 10, 32); err == nil {
@@ -5101,9 +6236,21 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if entry.PlayID == "" {
 			entry.PlayID = playID
 		}
+		if entry.PlayerID == "" {
+			entry.PlayerID = playerID // #911: attribute off the request itself
+		}
 		if entry.AttemptID == 0 {
 			entry.AttemptID = attemptID
 		}
+		// #613: TotalMs is provisionally set at upstream-headers-complete
+		// (~TTFB) by the fetch helper, before the body transfer happens.
+		// Lift it to TTFB+Transfer here — the single chokepoint every
+		// logged row passes through — so no response-serving path can ship
+		// a row with the pre-transfer value. Idempotent (max), so paths
+		// that already set TotalMs ≥ TTFB+Transfer (e.g. fault rows) are
+		// untouched.
+		mergeTotalTiming(&entry)
+
 		if entry.CMCD == nil {
 			entry.CMCD = cmcd
 		}
@@ -5136,7 +6283,8 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	a.removeInactiveSessions()
 	sessionList := a.getSessionList()
 	sessionNumber := thirdFromLastDigit(externalPort)
-	playerID := r.URL.Query().Get("player_id")
+	// playerID hoisted above the logEntry closure (#911); keep it as the
+	// primary player-id source here for the rest of the handler.
 	playerHeader := r.Header.Get("player_id")
 	playerHeaderAlt := r.Header.Get("Player-ID")
 	playbackSessionHeader := r.Header.Get("X-Playback-Session-Id")
@@ -5158,13 +6306,39 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				// content. Plain HTTP requests redirect to http://.
 				scheme := requestScheme(r)
 				newURL := fmt.Sprintf("%s://%s:%s/%s", scheme, host, newPort, escapedPath)
-				if r.URL.RawQuery != "" {
-					newURL = newURL + "?" + r.URL.RawQuery
+				// #712: drop any proxy.* config args on reattach — config is
+				// materialized once on first bind; a loop/auto-recovery restart
+				// re-hitting the base port must never re-apply or leak proxy.*
+				// onto the session port.
+				if stripped := stripProxyArgs(r.URL.RawQuery); stripped != "" {
+					newURL = newURL + "?" + stripped
+				}
+				// The app's first request on the base port reattaches to its pre-configured
+				// session; that bind/sweep-bootstrap path set labels but emitted no
+				// label_changed, and this reattach is the actual play-start — surface the
+				// session labels now, attributed to the play (same per-port channel + timing
+				// that makes pattern_enabled land). Harmless on auto-recovery/loop re-hits
+				// (forwarder edge-dedups labels); no-label sessions skip it.
+				if lbls, ok := existing["_v2_labels"]; ok && lbls != nil {
+					if p, perr := strconv.Atoi(getString(existing, "x_forwarded_port")); perr == nil {
+						a.emitControlEventForPort(p, "proxy", "label_changed", labelsInfoJSON(lbls))
+					}
 				}
 				log.Printf("Redirecting to existing session URL: %s %s -> %s", newURL, externalPort, newPort)
 				http.Redirect(w, r, newURL, http.StatusFound)
 				return
 			}
+		}
+		// #712 config-on-connect: parse proxy.* args before allocating a
+		// session so a malformed config is a 400 that consumes no session
+		// slot. Reattach (existing-session) requests already redirected above
+		// and never reach here, so config is materialized exactly once — on
+		// the player's first bind.
+		configPatch, hasConfig, cfgErr := parseProxyArgs(r.URL.Query())
+		if cfgErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]interface{}{"error": "invalid proxy config args", "detail": cfgErr.Error()})
+			return
 		}
 		if isExternalIP(requesterIP) {
 			activeForRequester := countActiveSessionsForIP(sessionList, requesterIP)
@@ -5179,12 +6353,65 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if len(sessionList) >= a.maxSessions {
+		// #740 reserve-then-fill: atomically claim a session slot via CAS
+		// instead of serialising the whole bootstrap under createMu. The
+		// closure re-reads the committed list and re-picks `allocated` on every
+		// retry, so two concurrent config-on-connect bootstraps (a fleet) can
+		// never claim the same slot — superseding #739's createMu and the
+		// snapshot→allocate→reserve lost-update that let one session's rate
+		// config land on the other's port (the loser created config-less →
+		// nftk=100 baseline leak). The reservation is a minimal placeholder
+		// carrying a stable session_id (so a concurrent allocateSessionNumber
+		// sees the slot used) plus player_id/group_id (so a concurrent
+		// same-player reattach still de-dupes) and a fresh last_request (so
+		// removeInactiveSessions won't evict it mid-bootstrap). The full
+		// session is CAS-filled below once the port-derived work and config
+		// materialization succeed; a rejected config triggers a cleanup CAS so
+		// no slot leaks.
+		createdAt := nowISO()
+		groupID := extractGroupId(playerID)
+		// #fleet-group: an explicit group_id connect param wins over the legacy
+		// `_G<num>` player_id suffix. Lets the harness born-group a fleet while
+		// keeping player_id a clean UUID — so the analytics layer doesn't derive
+		// a divergent v5 id from a non-UUID player_id (the suffix's fatal flaw).
+		if g := r.URL.Query().Get("group_id"); g != "" {
+			groupID = g
+		}
+		// #fleet-group display-only: group_broadcast=false makes the group a
+		// pure DISPLAY link — members share group_id (so the dashboard charts
+		// them together and the archive groups them) but a member PATCH is NOT
+		// mirrored to the other members. Used by the startup fleet, where every
+		// device runs its own cold-start plan and a broadcast would corrupt the
+		// per-device measurements. Default (absent / any non-false value) keeps
+		// the pyramid-style auto-broadcast group.
+		groupBroadcast := true
+		if gb := r.URL.Query().Get("group_broadcast"); gb == "false" || gb == "0" {
+			groupBroadcast = false
+		}
+		var allocated int
+		_, reserved := a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+			if len(sessions) >= a.maxSessions {
+				return sessions, false
+			}
+			allocated = allocateSessionNumber(sessions, a.maxSessions)
+			idStr := fmt.Sprintf("%d", allocated)
+			return append(sessions, SessionData{
+				"session_id":         idStr,
+				"session_number":     idStr,
+				"sid":                idStr,
+				"player_id":          playerID,
+				"group_id":           groupID,
+				"last_request":       createdAt,
+				"session_start_time": createdAt,
+				"_reserved":          true,
+			}), true
+		})
+		if !reserved {
+			// Only false path is at-capacity (closure always changes otherwise).
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		createdAt := nowISO()
-		allocated := allocateSessionNumber(sessionList, a.maxSessions)
+		idStr := fmt.Sprintf("%d", allocated)
 		assignedExternalPort := replaceThirdFromLastDigit(externalPort, allocated)
 		assignedInternalPort := assignedExternalPort
 		// Sweep any leftover tc rate-limit / filter on the assigned
@@ -5205,7 +6432,25 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			assignedInternalPort = replaceThirdFromLastDigit("30081", allocated)
 			log.Printf("PORT_MAP_DERIVE external=%s internal=%s allocated=%d", assignedExternalPort, assignedInternalPort, allocated)
 		}
-		groupID := extractGroupId(playerID)
+		// Sweep any leftover nftables transport fault (drop/reject) on the
+		// assigned internal port — the symmetric counterpart to the tc
+		// ClearPortShaping above (issue #716). Config-on-connect (#712)
+		// mints a fresh player_id per run, so tc state is well-isolated by
+		// the sweep above, but a transport fault left armed by a prior
+		// session whose teardown was skipped (crash / Ctrl-C / timeout
+		// before Session.Release fired) is the one kernel surface that can
+		// still carry over via port reuse inside the 5-min idle-reap window.
+		// armTransportFaultLoop(…, "none", …) is the same teardown used on
+		// session DELETE (above): it cancels any still-running fault-loop
+		// goroutine (which would otherwise re-arm the rule after a bare
+		// clear) AND deletes the leftover rule. Idempotent and quiet on a
+		// clean port. Unlike the tc sweep (which keys on port%1000), this
+		// must run *after* the external→internal mapping, because faults
+		// are armed on x_forwarded_port (the internal port) — see the arm
+		// calls keyed on x_forwarded_port elsewhere in this file.
+		if internalPortInt, err := strconv.Atoi(assignedInternalPort); err == nil {
+			a.armTransportFaultLoop(internalPortInt, "none", 1, transportUnitsSeconds, 0)
+		}
 		// Optional play_id from the client. iOS/tvOS/Roku don't mint one
 		// (the v2 read path derives a stable fallback), but the v3 web
 		// player (VideoPlayerFrame) does — surfacing it here lets the
@@ -5219,6 +6464,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"player_id":                                playerID,
 			"play_id":                                  playID,
 			"group_id":                                 groupID,
+			"group_broadcast":                          groupBroadcast,
 			"control_revision":                         newControlRevision(),
 			"headers_player_id":                        playerHeader,
 			"headers_player-ID":                        playerHeaderAlt,
@@ -5230,70 +6476,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"last_request":                             createdAt,
 			"first_request_time":                       createdAt,
 			"session_start_time":                       createdAt,
-			// Segment / manifest / master_manifest fault config —
-			// initialise mode + units explicitly so both server
-			// (NewFailureHandler) and dashboard (Mode dropdown) read
-			// the same value from a single source of truth instead
-			// of falling back to duplicated hard-coded defaults.
-			// "failures_per_seconds" mode → consecutive=requests,
-			// frequency=seconds, matching the dashboard's visible
-			// default Mode for a fresh session.
-			"segment_failure_type":                     "none",
-			"segment_failure_frequency":                0,
-			"segment_consecutive_failures":             0,
-			"segment_failure_units":                    "requests",
-			"segment_consecutive_units":                "requests",
-			"segment_frequency_units":                  "seconds",
-			"segment_failure_mode":                     "failures_per_seconds",
-			"manifest_failure_type":                    "none",
-			"manifest_failure_frequency":               0,
-			"manifest_failure_units":                   "requests",
-			"manifest_consecutive_units":               "requests",
-			"manifest_frequency_units":                 "seconds",
-			"manifest_failure_mode":                    "failures_per_seconds",
-			"manifest_consecutive_failures":            0,
-			"master_manifest_failure_type":             "none",
-			"master_manifest_failure_frequency":        0,
-			"master_manifest_failure_units":            "requests",
-			"master_manifest_consecutive_units":        "requests",
-			"master_manifest_frequency_units":          "seconds",
-			"master_manifest_failure_mode":             "failures_per_seconds",
-			"master_manifest_consecutive_failures":     0,
-			// "All" fault override — when all_failure_type != "none",
-			// HandleRequest uses this rule for every HTTP request and
-			// ignores the per-kind tabs above. Same control shape as
-			// segment, plus all_failure_urls for variant scoping.
-			"all_failure_type":                         "none",
-			"all_failure_frequency":                    0,
-			"all_consecutive_failures":                 0,
-			"all_failure_units":                        "requests",
-			"all_consecutive_units":                    "requests",
-			"all_frequency_units":                      "seconds",
-			"all_failure_mode":                         "failures_per_seconds",
-			"current_failures":                         0,
-			"consecutive_failures_count":               0,
 			"player_ip":                                requesterIP,
 			"user_agent":                               "",
 			"origination_ip":                           requesterIP,
 			"origination_time":                         createdAt,
 			"is_external_ip":                           isExternalIP(requesterIP),
-			"manifest_failure_at":                      nil,
-			"manifest_failure_recover_at":              nil,
-			// nil (not []string{}) so the dashboard can tell "fresh
-			// session, default to all-URLs filter" from "user
-			// explicitly cleared the list" — both serialize to JSON
-			// the same when both are []string{}, which made unchecking
-			// "All" silently snap back via the empty-defaults-to-all
-			// rule on the dashboard (#409).
-			"manifest_failure_urls":                    nil,
-			"segment_failure_urls":                     nil,
-			"segment_failure_at":                       nil,
-			"segment_failure_recover_at":               nil,
-			"master_manifest_failure_at":               nil,
-			"master_manifest_failure_recover_at":       nil,
-			"all_failure_at":                           nil,
-			"all_failure_recover_at":                   nil,
-			"all_failure_urls":                         nil,
 			"transport_failure_type":                   "none",
 			"transport_failure_frequency":              0,
 			"transport_consecutive_failures":           1,
@@ -5348,24 +6535,96 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// haven't touched this." The derived effective_rate_mbps
 			// field surfaces what the kernel is actually enforcing.
 			// Issue #480.
-			"nftables_bandwidth_mbps":                  float64(0),
+			"nftables_bandwidth_mbps": float64(0),
 		}
-		a.resetServerLoopState(fmt.Sprintf("%d", allocated))
-		sessionList = append(sessionList, sessionData)
-		a.saveSessionList(sessionList)
+		// #712: materialize proxy.* config onto the fresh SessionData before
+		// it's published. ApplyConfigPatch runs the SAME translator the PATCH
+		// API uses, so the URL-arg vocabulary can't drift from the API model.
+		// Translation only — the kernel is driven below, after the save.
+		if hasConfig {
+			if aerr := v2server.ApplyConfigPatch(sessionData, configPatch); aerr != nil {
+				// #740: a rejected config must not leak the reserved slot —
+				// CAS the placeholder back out before returning the 400.
+				a.removeReservedSession(idStr)
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]interface{}{"error": "proxy config rejected", "detail": aerr.Error()})
+				return
+			}
+		}
+		a.resetServerLoopState(idStr)
+		// #740 fill: CAS the placeholder reservation up to the full session.
+		a.fillReservedSession(idStr, sessionData)
 		// Apply the deployment baseline to the kernel BEFORE the
 		// redirect fires — the client reconnects on the new port
 		// immediately and the first segment burst would otherwise run
 		// uncapped. effectiveRate(0) returns the baseline (or 0 on
 		// prod-style deployments). No-op when traffic is nil
 		// (non-Linux dev). Issue #480.
-		if a.defaultRateMbps > 0 && a.traffic != nil {
-			if internalPortInt, err := strconv.Atoi(assignedInternalPort); err == nil {
-				effective := a.effectiveRate(0)
-				if err := a.traffic.UpdateRateLimit(internalPortInt, effective); err != nil {
-					log.Printf("baseline rate cap apply failed port=%d rate=%g: %v", internalPortInt, effective, err)
+		if hasConfig {
+			// #712: drive the kernel from the just-materialized config before
+			// the redirect fires — the client reconnects on the new port
+			// immediately and the first segment burst would otherwise run
+			// unshaped. applySessionShaping resolves the deployment baseline
+			// via effectiveRate, so the no-rate-override case (e.g. labels- or
+			// fault_rules-only config) still gets the baseline cap — this
+			// supersedes the plain baseline apply in the else branch.
+			if port, err := strconv.Atoi(assignedInternalPort); err == nil {
+				// The session-start sweep (ClearPortShaping, above) wiped any
+				// leftover kernel tc rule on this reused port, but the
+				// apply-state cache still holds the prior session's rate.
+				// Invalidate it so the apply below actually fires tc instead of
+				// being skipped as "unchanged" — otherwise the player cold-starts
+				// unshaped (config present, no kernel rule). Regression from #712
+				// re-applying at session-start after #352's ClearPortShaping.
+				a.clearShapeApplyState(port)
+				if steps := v2server.PatternStepsFromSession(sessionData); len(steps) > 0 {
+					v1steps := make([]NftShapeStep, 0, len(steps))
+					for _, s := range steps {
+						v1steps = append(v1steps, NftShapeStep{
+							RateMbps:        s.RateMbps,
+							DurationSeconds: s.DurationSeconds,
+							Enabled:         s.Enabled,
+						})
+					}
+					np := netemParamsFromSession(sessionData)
+					if perr := a.applyShapePattern(port, v1steps, np); perr != nil {
+						log.Printf("config-on-connect pattern apply failed port=%d: %v", port, perr)
+					}
 				} else {
-					log.Printf("baseline rate cap applied port=%d rate=%g Mbps (#480)", internalPortInt, effective)
+					a.applySessionShaping(sessionData, port)
+				}
+				if ft := getString(sessionData, "transport_failure_type"); ft != "" && ft != "none" {
+					consec := getInt(sessionData, "transport_consecutive_failures")
+					if consec < 1 {
+						consec = 1
+					}
+					units := getString(sessionData, "transport_consecutive_units")
+					if units == "" {
+						units = "seconds"
+					}
+					freq := getInt(sessionData, "transport_failure_frequency")
+					a.armTransportFaultLoop(port, ft, consec, units, freq)
+				}
+			}
+		} else if a.defaultRateMbps > 0 && a.traffic != nil {
+			if internalPortInt, err := strconv.Atoi(assignedInternalPort); err == nil {
+				// #910 honesty gate: the #480 baseline cap is a direct kernel
+				// apply that bypasses applyShapeIfChanged, so it needs its own
+				// capability check — otherwise a forced-degraded session (on a
+				// box where tc works) would silently cap at the baseline while
+				// reporting shaping off. This else-branch skips applySessionShaping
+				// so we also register the per-port gate here for consistency.
+				eff := a.effectiveShapingForSession(sessionData)
+				a.syncPortShapingGate(internalPortInt, eff)
+				if !eff.kernelRateOn() {
+					log.Printf("baseline rate cap skipped port=%d reason=capability_unavailable mode=%s (#480/#910)", internalPortInt, eff.mode)
+				} else {
+					effective := a.effectiveRate(0)
+					if err := a.traffic.UpdateRateLimit(internalPortInt, effective); err != nil {
+						log.Printf("baseline rate cap apply failed port=%d rate=%g: %v", internalPortInt, effective, err)
+					} else {
+						log.Printf("baseline rate cap applied port=%d rate=%g Mbps (#480)", internalPortInt, effective)
+					}
 				}
 			}
 		}
@@ -5374,11 +6633,30 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			manifestURL = manifestURL + "?" + r.URL.RawQuery
 		}
 		a.recordSessionStart(sessionData, manifestURL)
+		// Config-on-connect materialized labels onto the session (harness
+		// RunLabels: sweep/exp_id/platform/mode/recipe/… ) but — unlike the PATCH
+		// API — never surfaced them as a `label_changed` control event, so they
+		// never reached the forwarder's `testing=` tier and sweep plays were
+		// unattributable in the Sessions Test/Platform facets. Emit it here, right
+		// after session_start, so config-on-connect plays carry the same testing=
+		// metadata PATCH-stamped plays do. Mirrors the pattern_enabled emit, which
+		// already lands on these plays via the same per-port control channel.
+		if hasConfig {
+			if lbls, ok := configPatch["labels"]; ok && lbls != nil {
+				if p, perr := strconv.Atoi(assignedInternalPort); perr == nil {
+					a.emitControlEventForPort(p, "proxy", "label_changed", labelsInfoJSON(lbls))
+				}
+			}
+		}
 		host := hostWithoutPort(r.Host)
 		scheme := requestScheme(r)
 		newURL := fmt.Sprintf("%s://%s:%s/%s", scheme, host, assignedExternalPort, escapedPath)
-		if r.URL.RawQuery != "" {
-			newURL = newURL + "?" + r.URL.RawQuery
+		// #712: strip proxy.* config args from the redirect — config is already
+		// materialized on the session; the player follows this clean URL and
+		// resolves all child requests against it, so proxy.* never reach the
+		// session port or the child-request space.
+		if stripped := stripProxyArgs(r.URL.RawQuery); stripped != "" {
+			newURL = newURL + "?" + stripped
 		}
 		log.Printf("Redirecting to new URL with port: %s %s -> %s", newURL, externalPort, assignedExternalPort)
 		http.Redirect(w, r, newURL, http.StatusFound)
@@ -5406,6 +6684,12 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sessionData["last_request"] = nowISO()
 	sessionData["last_request_url"] = filename
 	sessionData["user_agent"] = r.UserAgent()
+	// #550 Phase 4: best-effort device taxonomy from UA for
+	// non-instrumented clients (VLC, ffplay, hls.js, Roku channels,
+	// etc.). Idempotent + non-overwriting — iOS-emitted DeviceInfo
+	// values from the metrics POST channel take precedence by virtue
+	// of stampDeviceFromUserAgent's setIfEmpty check.
+	stampDeviceFromUserAgent(sessionData)
 	// Stamp the player's current play_id + attempt_id on the session
 	// so the SSE stream (and downstream analytics) can partition by
 	// playback episode (play_id) and recovery attempt (attempt_id).
@@ -5415,6 +6699,13 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// the proxy guessing.
 	if playID != "" {
 		sessionData["play_id"] = playID
+	}
+	// Play-scoped client start (#587). Carried on the session map so
+	// v2translate can project PlayRecord.start_time and the SSE
+	// session_events frame can carry it to ClickHouse. The client
+	// rotates it with play_id, so it always reflects THIS play.
+	if startTime != "" {
+		sessionData["start_time"] = startTime
 	}
 	// Store the raw string so sessionStickyField (a generic
 	// type-asserts-as-string helper) can read it back uniformly
@@ -5507,8 +6798,21 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamURL := fmt.Sprintf("http://%s:%s/%s", a.upstreamHost, a.upstreamPort, escapedPath)
-	contentType, isMasterManifest, isManifest, isSegment, playlistInfo := a.getContentType(upstreamURL)
+	contentType, isMasterManifest, isManifest, isSegment, playlistInfo, audioURIs, renditionDir := a.getContentType(upstreamURL, sessionData)
 	requestKind := requestKindLabel(isSegment, isManifest, isMasterManifest)
+	// #919 Tier 1: cache the manifest-declared audio rendition URIs so the fault
+	// classifier can identify audio playlists structurally. Only the master
+	// parse yields these; preserve the prior list on non-master requests.
+	if len(audioURIs) > 0 {
+		sessionData["manifest_audio_uris"] = audioURIs
+	}
+	// #922 Tier 2: when a media playlist transits, record the rendition its
+	// segment directory belongs to (video resolution/rung or audio) — parsed
+	// from the playlist's own segment list, so segment classification is
+	// authoritative instead of URL-token guessing.
+	if isManifest && renditionDir != "" {
+		recordRenditionDir(sessionData, filename, renditionDir)
+	}
 	segmentTransferStartedAt := time.Time{}
 	segmentTransferStartBytes := int64(0)
 	var flightPortNum int
@@ -5528,6 +6832,20 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionData["manifest_url"] = filename
 	}
 	if playlistInfo != nil {
+		// getContentType parsed the UNMANIPULATED upstream master, so playlistInfo
+		// is the full ladder. Keep the FULL set as manifest_variants_all: the
+		// config/control panels (fault injection, the content-manipulation variant
+		// picker, the shaping pattern) must enumerate EVERY available rung so a
+		// DESELECTED variant stays listed and can be re-selected — not just the
+		// allowed subset. Then thin manifest_variants to the session's
+		// allowed_variants so the bandwidth chart (#815) and the per-session compare
+		// (#820) keep reflecting the MANIPULATED master the player receives.
+		// filterPlaylistInfoByAllowed allocates a fresh slice, so the _all reference
+		// retains the full ladder.
+		sessionData["manifest_variants_all"] = playlistInfo
+		if allowed := getStringSlice(sessionData, "content_allowed_variants"); len(allowed) > 0 {
+			playlistInfo = filterPlaylistInfoByAllowed(playlistInfo, allowed)
+		}
 		sessionData["manifest_variants"] = playlistInfo
 	}
 	inferServerVideoRendition(sessionData, filename, isManifest, isSegment)
@@ -5535,15 +6853,23 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		a.observeServerSegmentLoop(sessionData, filename)
 	}
 
-	handler := NewRequestHandler(isSegment, isManifest, isMasterManifest, sessionData)
+	// #919: native v2 fault evaluation. classifyRequest maps the request to
+	// its v2 request_kind + variant (read-only over the cached manifest, like
+	// inferServerVideoRendition above); evaluateFaultRules then matches it
+	// first-rule-wins against fault_rules and runs the cadence engine. This
+	// replaces the v1 surface-prefix RequestHandler dispatch — a rule's
+	// FaultFilter decides what it applies to, so audio/init/variant scope work
+	// (#917/#918) with no translation to v1's fixed surfaces.
+	reqClass := classifyRequest(sessionData, filename, isSegment, isManifest, isMasterManifest)
 	// Serialise the failure-decision read-modify-write so video+audio
 	// requests arriving in the same millisecond don't both pass the
 	// "1 per N seconds" filter and double-fire.
 	//
 	// The full atomic sequence is:
 	//   1. Refresh dedup state from the latest snap (defeats stale
-	//      clones).
-	//   2. Run HandleRequest (decides + writes to local clone).
+	//      clones) — includes _faultrule_state, the native per-rule
+	//      cadence state.
+	//   2. Run evaluateFaultRules (decides + writes to local clone).
 	//   3. Save back to the snap BEFORE unlocking, so the next
 	//      goroutine to take the lock sees this goroutine's writes
 	//      when it refreshes.
@@ -5553,7 +6879,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// and the rule fires twice.
 	sessionStateMu.Lock()
 	refreshFailureStateFromLatest(a, sessionData, sessionNumber)
-	failureType := handler.HandleRequest(filename)
+	failureType := evaluateFaultRules(sessionData, reqClass, time.Now())
 	a.saveSessionByID(sessionNumber, sessionData)
 	sessionStateMu.Unlock()
 
@@ -5572,9 +6898,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				sessionID := getString(sessionData, "session_id")
 				netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, http.StatusBadGateway, requestBytes, requestReceivedAt)
 				stampNetMeta(&netEntry, requestHeaders, queryString, nil)
-				logEntry(sessionID,netEntry)
-				sessionList[index] = sessionData
-				a.saveSessionList(sessionList)
+				logEntry(sessionID, netEntry)
+				// #740: persist the fault-path mutations as a single-session
+				// atomic merge instead of re-publishing the stale full list
+				// captured at handler top (which clobbered concurrent sessions).
+				a.saveSessionByID(sessionNumber, sessionData)
 				return
 			}
 			resp, netEntry, err := a.doRequestWithTracing(r.Context(), proxyReq)
@@ -5606,9 +6934,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				netEntry.FaultAction = actionTaken
 				netEntry.FaultCategory = categorizeFaultType(failureType)
 				stampNetMeta(netEntry, requestHeaders, queryString, nil)
-				logEntry(sessionID,*netEntry)
-				sessionList[index] = sessionData
-				a.saveSessionList(sessionList)
+				logEntry(sessionID, *netEntry)
+				// #740: persist the fault-path mutations as a single-session
+				// atomic merge instead of re-publishing the stale full list
+				// captured at handler top (which clobbered concurrent sessions).
+				a.saveSessionByID(sessionNumber, sessionData)
 				return
 			}
 			defer resp.Body.Close()
@@ -5628,9 +6958,11 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				netEntry.FaultAction = actionTaken
 				netEntry.FaultCategory = categorizeFaultType(failureType)
 				stampNetMeta(netEntry, requestHeaders, queryString, resp)
-				logEntry(sessionID,*netEntry)
-				sessionList[index] = sessionData
-				a.saveSessionList(sessionList)
+				logEntry(sessionID, *netEntry)
+				// #740: persist the fault-path mutations as a single-session
+				// atomic merge instead of re-publishing the stale full list
+				// captured at handler top (which clobbered concurrent sessions).
+				a.saveSessionByID(sessionNumber, sessionData)
 				return
 			}
 			if contentType != "" {
@@ -5644,7 +6976,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 				log.Printf("segment_corrupted write error session_id=%s err=%v", getString(sessionData, "session_id"), copyErr)
 			}
 			netEntry.TransferMs = transferMs
-			mergeTotalTiming(netEntry)
+			// TotalMs lift now happens uniformly in the logEntry closure (#613).
 			actionTaken = "segment_corrupted_zero_fill"
 			bumpFaultCounter(sessionData, failureType)
 			logFaultEvent(sessionData, externalPort, failureType, requestKind, actionTaken)
@@ -5662,9 +6994,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			netEntry.FaultAction = actionTaken
 			netEntry.FaultCategory = categorizeFaultType(failureType)
 			stampNetMeta(netEntry, requestHeaders, queryString, resp)
-			logEntry(sessionID,*netEntry)
-			sessionList[index] = sessionData
-			a.saveSessionList(sessionList)
+			logEntry(sessionID, *netEntry)
+			// #740: single-session atomic merge (see note above) — was a
+			// stale full-list re-publish.
+			a.saveSessionByID(sessionNumber, sessionData)
 			return
 		}
 		if isSocketFaultType(failureType) {
@@ -5702,14 +7035,16 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, status, requestBytes, requestReceivedAt)
 			stampNetMeta(&netEntry, requestHeaders, queryString, nil)
-			logEntry(sessionID,netEntry)
-			sessionList[index] = sessionData
-			a.saveSessionList(sessionList)
+			logEntry(sessionID, netEntry)
+			// #740: single-session atomic merge (see note above) — was a
+			// stale full-list re-publish.
+			a.saveSessionByID(sessionNumber, sessionData)
 			return
 		}
 		updateSessionTraffic(sessionData, requestBytes, 0)
-		sessionList[index] = sessionData
-		a.saveSessionList(sessionList)
+		// #740: single-session atomic merge (see note above) — was a
+		// stale full-list re-publish.
+		a.saveSessionByID(sessionNumber, sessionData)
 		status := http.StatusInternalServerError
 		switch failureType {
 		case "404":
@@ -5754,7 +7089,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionID := getString(sessionData, "session_id")
 		netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, failureType, actionTaken, status, requestBytes, requestReceivedAt)
 		stampNetMeta(&netEntry, requestHeaders, queryString, nil)
-		logEntry(sessionID,netEntry)
+		logEntry(sessionID, netEntry)
 		return
 	}
 
@@ -5777,7 +7112,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		sessionID := getString(sessionData, "session_id")
 		netEntry := createFaultLogEntry(playerURL, upstreamURL, requestKind, "none", "http_502_request_failed", http.StatusBadGateway, requestBytes, requestReceivedAt)
 		stampNetMeta(&netEntry, requestHeaders, queryString, nil)
-		logEntry(sessionID,netEntry)
+		logEntry(sessionID, netEntry)
 		return
 	}
 	clientRange := r.Header.Get("Range")
@@ -5828,7 +7163,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		netEntry.RequestKind = requestKind
 		netEntry.BytesIn = requestBytes
 		stampNetMeta(netEntry, requestHeaders, queryString, nil)
-		logEntry(sessionID,*netEntry)
+		logEntry(sessionID, *netEntry)
 		return
 	}
 	defer resp.Body.Close()
@@ -5854,7 +7189,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		netEntry.RequestKind = requestKind
 		netEntry.BytesIn = requestBytes
 		stampNetMeta(netEntry, requestHeaders, queryString, resp)
-		logEntry(sessionID,*netEntry)
+		logEntry(sessionID, *netEntry)
 		return
 	}
 	copyUpstreamHeaders(w, resp)
@@ -5865,11 +7200,16 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	var bytesOut int64
 
-	// Apply content manipulation for master playlists
-	if isMasterManifest && shouldApplyContentManipulation(sessionData) {
+	// Apply content manipulation. Master playlists get the full set (strip /
+	// overstate / live-offset EXT-X-START). Media (VARIANT) playlists get the
+	// live-offset rewrite too — HOLD-BACK + EXT-X-START live in the variant and
+	// are what players actually key off, so a master-only rewrite has no effect
+	// (#793, regression caught by server_content_test master_live_offset).
+	liveOffsetOnVariant := isManifest && !isMasterManifest && getInt(sessionData, "content_live_offset") > 0
+	if (isMasterManifest && shouldApplyContentManipulation(sessionData)) || liveOffsetOnVariant {
 		bodyBytes, err := io.ReadAll(resp.Body)
 		if err != nil {
-			log.Printf("ERROR: Failed to read master playlist body: %v", err)
+			log.Printf("ERROR: Failed to read playlist body for manipulation: %v", err)
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(proxyCtx.Err(), context.DeadlineExceeded) {
 				bumpFaultCounter(sessionData, "transfer_active_timeout")
 				logFaultEvent(sessionData, externalPort, "transfer_active_timeout", requestKind, "transfer_active_timeout_mid_body")
@@ -5878,11 +7218,17 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		modifiedBody, err := a.applyContentManipulation(bodyBytes, sessionData, contentType)
-		if err != nil {
-			log.Printf("ERROR: Failed to manipulate master playlist: %v", err)
-			// Fall back to original content
-			modifiedBody = bodyBytes
+		var modifiedBody []byte
+		if isMasterManifest {
+			modifiedBody, err = a.applyContentManipulation(bodyBytes, sessionData, contentType)
+			if err != nil {
+				log.Printf("ERROR: Failed to manipulate master playlist: %v", err)
+				modifiedBody = bodyBytes // fall back to original
+			}
+		} else {
+			// Media (variant) playlist: live-offset only — rewrite HOLD-BACK +
+			// EXT-X-START to the requested value.
+			modifiedBody = rewriteVariantLiveOffsetTags(bodyBytes, getInt(sessionData, "content_live_offset"))
 		}
 
 		w.Header().Set("Content-Length", strconv.Itoa(len(modifiedBody)))
@@ -5898,6 +7244,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		_, writeErr := writer.Write(modifiedBody)
 		flushErr := writer.Flush()
 		netEntry.TransferMs = elapsedMs(transferStart)
+		stampDeliveryRate(tcpConnFromContext(r.Context()), netEntry)
 		if idleW != nil {
 			idleW.Stop()
 		}
@@ -5952,6 +7299,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		bytesOut, copyErr = io.Copy(writer, resp.Body)
 		flushErr := writer.Flush()
 		netEntry.TransferMs = elapsedMs(transferStart)
+		stampDeliveryRate(tcpConnFromContext(r.Context()), netEntry)
 		if idleW != nil {
 			idleW.Stop()
 		}
@@ -6010,7 +7358,7 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	netEntry.BytesIn = requestBytes
 	netEntry.BytesOut = bytesOut
 	stampNetMeta(netEntry, requestHeaders, queryString, resp)
-	logEntry(sessionID,*netEntry)
+	logEntry(sessionID, *netEntry)
 	a.saveSessionByID(sessionNumber, sessionData)
 }
 
@@ -6035,21 +7383,50 @@ func shouldApplyContentManipulation(session SessionData) bool {
 	if len(allowedVariants) > 0 {
 		return true
 	}
+	if vo := getString(session, "content_variant_order"); vo != "" && vo != "default" {
+		return true
+	}
 	return false
+}
+
+// ContentManipulation bundles the per-session master-playlist / manifest
+// manipulation knobs into one value so adding a future option is a struct
+// field rather than another positional parameter rippling through every
+// manipulate* signature and its callers. Built once from the session's
+// content_* fields via newContentManipulation.
+//
+// VariantOrder is HLS-only — manipulateDASHManifest ignores it.
+type ContentManipulation struct {
+	StripCodecs        bool
+	StripAvgBandwidth  bool
+	StripResolution    bool
+	OverstateBandwidth bool
+	LiveOffset         int
+	AllowedVariants    []string
+	VariantOrder       string
+}
+
+// newContentManipulation reads the session's content_* fields into a
+// ContentManipulation struct.
+func newContentManipulation(session SessionData) ContentManipulation {
+	return ContentManipulation{
+		StripCodecs:        getBool(session, "content_strip_codecs"),
+		StripAvgBandwidth:  getBool(session, "content_strip_average_bandwidth"),
+		StripResolution:    getBool(session, "content_strip_resolution"),
+		OverstateBandwidth: getBool(session, "content_overstate_bandwidth"),
+		LiveOffset:         getInt(session, "content_live_offset"),
+		AllowedVariants:    getStringSlice(session, "content_allowed_variants"),
+		VariantOrder:       getString(session, "content_variant_order"),
+	}
 }
 
 // applyContentManipulation modifies master playlist/manifest content based on session settings
 func (a *App) applyContentManipulation(body []byte, session SessionData, contentType string) ([]byte, error) {
-	stripCodecs := getBool(session, "content_strip_codecs")
-	stripAvgBandwidth := getBool(session, "content_strip_average_bandwidth")
-	stripResolution := getBool(session, "content_strip_resolution")
-	overstateBandwidth := getBool(session, "content_overstate_bandwidth")
-	liveOffset := getInt(session, "content_live_offset")
-	allowedVariants := getStringSlice(session, "content_allowed_variants")
+	cm := newContentManipulation(session)
 
 	// Handle HLS master playlists
 	if strings.Contains(strings.ToLower(contentType), "mpegurl") || strings.Contains(strings.ToLower(contentType), "m3u8") {
-		result, err := manipulateHLSMaster(body, stripCodecs, stripAvgBandwidth, stripResolution, overstateBandwidth, liveOffset, allowedVariants)
+		result, err := manipulateHLSMaster(body, cm)
 		if err != nil {
 			return nil, err
 		}
@@ -6058,22 +7435,80 @@ func (a *App) applyContentManipulation(body []byte, session SessionData, content
 		// notably hls.js, which would otherwise park at the oldest segment).
 		// Master EXT-X-START is rewritten inside manipulateHLSMaster; this
 		// pass handles the variant side. No-op on master playlists.
-		if liveOffset > 0 {
-			result = rewriteVariantLiveOffsetTags(result, liveOffset)
+		if cm.LiveOffset > 0 {
+			result = rewriteVariantLiveOffsetTags(result, cm.LiveOffset)
 		}
 		return result, nil
 	}
 
 	// Handle DASH manifests
 	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
-		return manipulateDASHManifest(body, stripCodecs, stripAvgBandwidth, stripResolution, overstateBandwidth, liveOffset, allowedVariants)
+		return manipulateDASHManifest(body, cm)
 	}
 
 	return body, nil
 }
 
 // manipulateHLSMaster modifies an HLS master playlist
-func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, stripResolution bool, overstateBandwidth bool, liveOffset int, allowedVariants []string) ([]byte, error) {
+// variantAllowed reports whether a master variant is whitelisted by
+// allowed_variants. It matches either the exact served URI (e.g.
+// "playlist_6s_360p.m3u8" — back-compat) OR the variant's resolution: the full
+// "640x360", the bare height "360", or "360p". Resolution matching lets a
+// keep-set expressed in resolution terms (e.g. derived from the content
+// catalogue's variants[], which is resolution-keyed) survive across segment
+// durations whose served URIs differ — the harness/dashboard need not know the
+// per-segment URI scheme.
+func variantAllowed(v *m3u8.Variant, allowed map[string]bool) bool {
+	return variantSelectorAllowed(v.URI, v.Resolution, allowed)
+}
+
+// variantSelectorAllowed is the shared allowed_variants matcher: an entry is
+// kept if the allow-set contains its served URI, its full resolution
+// ("640x360"), its bare height ("360"), or "360p". Both the master rewrite
+// (variantAllowed) and the manifest_variants metric (filterPlaylistInfoByAllowed)
+// route through it so they agree on exactly which rungs the player ends up with.
+func variantSelectorAllowed(uri, resolution string, allowed map[string]bool) bool {
+	if uri != "" && allowed[uri] {
+		return true
+	}
+	if resolution == "" || resolution == "unknown" {
+		return false
+	}
+	if allowed[resolution] {
+		return true
+	}
+	if i := strings.LastIndex(resolution, "x"); i >= 0 {
+		h := resolution[i+1:] // "360"
+		if allowed[h] || allowed[h+"p"] {
+			return true
+		}
+	}
+	return false
+}
+
+// filterPlaylistInfoByAllowed thins a parsed master variant list to the
+// allowed_variants keep-set, so the `manifest_variants` metric reflects the
+// MANIPULATED master the player actually receives — not the unmanipulated
+// upstream getContentType parsed (#820). Returns the input unchanged when no
+// allow-set is configured.
+func filterPlaylistInfoByAllowed(infos []PlaylistInfo, allowed []string) []PlaylistInfo {
+	if len(allowed) == 0 || len(infos) == 0 {
+		return infos
+	}
+	allowedMap := make(map[string]bool, len(allowed))
+	for _, a := range allowed {
+		allowedMap[a] = true
+	}
+	out := make([]PlaylistInfo, 0, len(infos))
+	for _, p := range infos {
+		if variantSelectorAllowed(p.URL, p.Resolution, allowedMap) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func manipulateHLSMaster(body []byte, cm ContentManipulation) ([]byte, error) {
 	playlist, listType, err := m3u8.DecodeFrom(bufio.NewReader(bytes.NewReader(body)), true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode HLS playlist: %w", err)
@@ -6087,16 +7522,16 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	master := playlist.(*m3u8.MasterPlaylist)
 	modified := false
 
-	// Filter variants if allowedVariants is specified
-	if len(allowedVariants) > 0 {
+	// Filter variants if allowed_variants is specified
+	if len(cm.AllowedVariants) > 0 {
 		allowedMap := make(map[string]bool)
-		for _, v := range allowedVariants {
+		for _, v := range cm.AllowedVariants {
 			allowedMap[v] = true
 		}
 
 		filteredVariants := make([]*m3u8.Variant, 0)
 		for _, variant := range master.Variants {
-			if variant != nil && allowedMap[variant.URI] {
+			if variant != nil && variantAllowed(variant, allowedMap) {
 				filteredVariants = append(filteredVariants, variant)
 			}
 		}
@@ -6108,7 +7543,7 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	}
 
 	// Strip codecs if requested
-	if stripCodecs {
+	if cm.StripCodecs {
 		hasCodecs := false
 		for _, variant := range master.Variants {
 			if variant != nil && variant.Codecs != "" {
@@ -6122,7 +7557,7 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	}
 
 	// Strip AVERAGE-BANDWIDTH if requested
-	if stripAvgBandwidth {
+	if cm.StripAvgBandwidth {
 		for _, variant := range master.Variants {
 			if variant != nil && variant.AverageBandwidth > 0 {
 				variant.AverageBandwidth = 0
@@ -6138,7 +7573,7 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	// payload) handle missing resolution metadata. Apple's HLS
 	// validator (mediastreamvalidator) rejects this; AVPlayer
 	// continues but loses resolution-aware ABR and UI badges.
-	if stripResolution {
+	if cm.StripResolution {
 		for _, variant := range master.Variants {
 			if variant != nil && variant.Resolution != "" {
 				variant.Resolution = ""
@@ -6148,7 +7583,7 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	}
 
 	// Overstate BANDWIDTH and AVERAGE-BANDWIDTH by 10% if requested
-	if overstateBandwidth {
+	if cm.OverstateBandwidth {
 		for _, variant := range master.Variants {
 			if variant == nil {
 				continue
@@ -6164,8 +7599,29 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 		}
 	}
 
+	// Reorder video variants by BANDWIDTH (issue #682). Probes whether
+	// the master-playlist order biases AVPlayer's initial-variant pick —
+	// the pre-iOS-13 / startsOnFirstEligibleVariant path keys off
+	// first-listed. Re-sorts master.Variants in place; the m3u8 encoder
+	// emits EXT-X-STREAM-INF lines in slice order. EXT-X-MEDIA audio/
+	// subtitle renditions travel on each variant's Alternatives and stay
+	// glued to their owning variant, so they are unaffected.
+	switch cm.VariantOrder {
+	case "ascending":
+		sortVariantsByBandwidth(master.Variants, true)
+		modified = true
+	case "descending":
+		sortVariantsByBandwidth(master.Variants, false)
+		modified = true
+	case "first_4mbps":
+		// Promote the variant nearest 4 Mbps to first-listed (rest ascending)
+		// to force a mid-tier initial pick on the first-eligible-variant path.
+		promoteVariantNearestBandwidth(master.Variants, 4_000_000)
+		modified = true
+	}
+
 	// Inject #EXT-X-START with negative offset for live edge positioning
-	if liveOffset > 0 {
+	if cm.LiveOffset > 0 {
 		modified = true
 	}
 
@@ -6190,9 +7646,9 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	// #EXT-X-VERSION so AVPlayer sees the version before any higher-version
 	// tags — inserting between #EXTM3U and #EXT-X-VERSION triggers -12646
 	// "playlist parse error".
-	if liveOffset > 0 {
+	if cm.LiveOffset > 0 {
 		encoded := buf.String()
-		startTag := fmt.Sprintf("#EXT-X-START:TIME-OFFSET=-%d,PRECISE=YES\n", liveOffset)
+		startTag := fmt.Sprintf("#EXT-X-START:TIME-OFFSET=-%d,PRECISE=YES\n", cm.LiveOffset)
 		if idx := strings.Index(encoded, "#EXT-X-START:"); idx >= 0 {
 			end := strings.Index(encoded[idx:], "\n")
 			if end < 0 {
@@ -6214,6 +7670,57 @@ func manipulateHLSMaster(body []byte, stripCodecs bool, stripAvgBandwidth bool, 
 	}
 
 	return buf.Bytes(), nil
+}
+
+// variantBandwidth returns a variant's BANDWIDTH (peak) as the sort key,
+// 0 for a nil variant.
+func variantBandwidth(v *m3u8.Variant) uint32 {
+	if v == nil {
+		return 0
+	}
+	return v.Bandwidth
+}
+
+// sortVariantsByBandwidth re-sorts the variants in place by BANDWIDTH,
+// ascending (lowest first) or descending. Stable so equal-bandwidth
+// variants keep their authored relative order.
+func sortVariantsByBandwidth(vs []*m3u8.Variant, ascending bool) {
+	sort.SliceStable(vs, func(i, j int) bool {
+		if ascending {
+			return variantBandwidth(vs[i]) < variantBandwidth(vs[j])
+		}
+		return variantBandwidth(vs[i]) > variantBandwidth(vs[j])
+	})
+}
+
+// promoteVariantNearestBandwidth orders the variants ascending, then moves
+// the one whose BANDWIDTH is closest to target to the front — leaving a
+// master playlist whose first-listed variant is the ~target-bitrate rendition.
+// Used by the "first_4mbps" probe (#682).
+func promoteVariantNearestBandwidth(vs []*m3u8.Variant, target uint32) {
+	if len(vs) < 2 {
+		return
+	}
+	sortVariantsByBandwidth(vs, true)
+	best, bestDelta := 0, absDiffUint32(variantBandwidth(vs[0]), target)
+	for i := 1; i < len(vs); i++ {
+		if d := absDiffUint32(variantBandwidth(vs[i]), target); d < bestDelta {
+			best, bestDelta = i, d
+		}
+	}
+	if best == 0 {
+		return
+	}
+	chosen := vs[best]
+	copy(vs[1:best+1], vs[0:best])
+	vs[0] = chosen
+}
+
+func absDiffUint32(a, b uint32) uint32 {
+	if a > b {
+		return a - b
+	}
+	return b - a
 }
 
 // rewriteVariantLiveOffsetTags updates HOLD-BACK inside EXT-X-SERVER-CONTROL
@@ -6264,20 +7771,80 @@ func rewriteVariantLiveOffsetTags(body []byte, liveOffsetSecs int) []byte {
 	return body
 }
 
-// manipulateDASHManifest modifies a DASH manifest
-// Note: stripCodecs and allowedVariants parameters are reserved for future DASH implementation
-func manipulateDASHManifest(body []byte, stripCodecs bool, stripAvgBandwidth bool, stripResolution bool, overstateBandwidth bool, liveOffset int, allowedVariants []string) ([]byte, error) {
+// manipulateDASHManifest modifies a DASH manifest.
+// Note: the ContentManipulation knobs are reserved for a future DASH
+// implementation. cm.VariantOrder is HLS-only and intentionally ignored here.
+func manipulateDASHManifest(body []byte, cm ContentManipulation) ([]byte, error) {
 	// DASH manifest manipulation would require XML parsing and manipulation
 	// using libraries like encoding/xml or third-party XML processors.
 	// This is deferred to keep the initial implementation focused on HLS.
-	_ = stripCodecs        // Silence unused parameter warning
-	_ = stripAvgBandwidth  // Silence unused parameter warning
-	_ = stripResolution    // Silence unused parameter warning
-	_ = overstateBandwidth // Silence unused parameter warning
-	_ = liveOffset         // Silence unused parameter warning
-	_ = allowedVariants    // Silence unused parameter warning
+	_ = cm // Silence unused parameter warning
 	log.Printf("[GO-PROXY][CONTENT] DASH manifest manipulation not yet implemented")
 	return body, nil
+}
+
+// effectiveShapingForSession resolves the capabilities in force for one
+// session: the host probe (a.shaping) narrowed by any per-session
+// shaping_forced_mode. A session can only be MORE degraded than the host,
+// never more capable, so a forced degraded mode always wins. Issue #910.
+func (a *App) effectiveShapingForSession(session SessionData) shapingCaps {
+	if c, ok := forcedShapingCaps(getString(session, "shaping_forced_mode")); ok {
+		return c
+	}
+	return a.shaping
+}
+
+// portForPlayerID resolves the proxy port bound to a player_id (via its
+// session's x_forwarded_port), or (0, false) when the player has no active
+// session. Lets the dashboard (which addresses players by id) drive the
+// per-session shaping-mode endpoint. #910.
+func (a *App) portForPlayerID(playerID string) (int, bool) {
+	if playerID == "" {
+		return 0, false
+	}
+	for _, sess := range a.sessionsView() {
+		// Case-insensitive: iOS emits UPPERCASE UUIDs, but the dashboard
+		// canonicalises player_ids to lowercase before calling — an exact
+		// match silently misses (the documented case-sensitivity trap).
+		if strings.EqualFold(getString(sess, "player_id"), playerID) {
+			if p, err := strconv.Atoi(getString(sess, "x_forwarded_port")); err == nil {
+				return p, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// sessionForPort returns the session bound to a proxy port (matched on
+// x_forwarded_port), or (nil, false) when none is bound. #910.
+func (a *App) sessionForPort(port int) (SessionData, bool) {
+	portStr := strconv.Itoa(port)
+	for _, sess := range a.sessionsView() {
+		if getString(sess, "x_forwarded_port") == portStr {
+			return sess, true
+		}
+	}
+	return nil, false
+}
+
+// effectiveShapingForPort looks up the session bound to a proxy port and
+// returns its effective shaping caps, falling back to the host caps when no
+// session is bound. Used by the port-keyed apply paths (transport arm). #910.
+func (a *App) effectiveShapingForPort(port int) shapingCaps {
+	if sess, ok := a.sessionForPort(port); ok {
+		return a.effectiveShapingForSession(sess)
+	}
+	return a.shaping
+}
+
+// syncPortShapingGate pushes a session's effective kernel-apply gate down to
+// the traffic manager so the per-port backstop no-ops the kernel for a
+// forced-degraded session (and re-opens it when the force is lifted). #910.
+func (a *App) syncPortShapingGate(port int, eff shapingCaps) {
+	if a.traffic == nil {
+		return
+	}
+	a.traffic.SetPortShapingGate(port, !eff.kernelRateOn(), !eff.kernelNetemOn())
 }
 
 func (a *App) applySessionShaping(session SessionData, port int) {
@@ -6285,19 +7852,22 @@ func (a *App) applySessionShaping(session SessionData, port int) {
 		log.Printf("NETSHAPE apply skipped port=%d reason=traffic_unavailable_or_non_linux runtime=%s traffic_nil=%t", port, runtime.GOOS, a.traffic == nil)
 		return
 	}
+	// #910: register/refresh this session's per-port kernel gate before any
+	// apply, so a forced-degraded session no-ops the kernel while others on
+	// the same box keep shaping. Applies whether or not a pattern is running.
+	a.syncPortShapingGate(port, a.effectiveShapingForSession(session))
 	if getBool(session, "nftables_pattern_enabled") || sessionHasPatternSteps(session) {
 		// Pattern loop owns the rate while enabled; avoid per-request overrides.
 		log.Printf("NETSHAPE apply skipped port=%d reason=pattern_enabled pattern_enabled=%t pattern_steps=%t", port, getBool(session, "nftables_pattern_enabled"), sessionHasPatternSteps(session))
 		return
 	}
 	rate := getFloat(session, "nftables_bandwidth_mbps")
-	delay := getInt(session, "nftables_delay_ms")
-	loss := getFloat(session, "nftables_packet_loss")
+	np := netemParamsFromSession(session)
 	// rate=0 in storage means "operator did not override." Resolve to
 	// the deployment baseline before pushing to the kernel. Issue #480.
 	effective := a.effectiveRate(rate)
-	if err := a.applyShapeIfChanged(port, effective, delay, loss); err != nil {
-		log.Printf("NETSHAPE apply failed port=%d rate=%g (effective=%g) delay=%d loss=%.2f: %v", port, rate, effective, delay, loss, err)
+	if err := a.applyShapeIfChanged(port, effective, np); err != nil {
+		log.Printf("NETSHAPE apply failed port=%d rate=%g (effective=%g) delay=%d loss=%.2f jitter=%d loss_corr=%.1f del_corr=%.1f: %v", port, rate, effective, np.DelayMs, np.LossPct, np.JitterMs, np.LossCorrelationPct, np.JitterCorrelationPct, err)
 		return
 	}
 }
@@ -6305,8 +7875,11 @@ func (a *App) applySessionShaping(session SessionData, port int) {
 func almostEqualShape(a ShapeApplyState, b ShapeApplyState) bool {
 	const eps = 0.0001
 	return a.delay == b.delay &&
+		a.jitter == b.jitter &&
 		math.Abs(a.rate-b.rate) <= eps &&
-		math.Abs(a.loss-b.loss) <= eps
+		math.Abs(a.loss-b.loss) <= eps &&
+		math.Abs(a.lossCorr-b.lossCorr) <= eps &&
+		math.Abs(a.delCorr-b.delCorr) <= eps
 }
 
 func copyUpstreamHeaders(w http.ResponseWriter, resp *http.Response) {
@@ -6331,59 +7904,89 @@ func copyUpstreamHeaders(w http.ResponseWriter, resp *http.Response) {
 	}
 }
 
-func (a *App) applyShapeIfChanged(port int, rate float64, delay int, loss float64) error {
+func (a *App) applyShapeIfChanged(port int, rate float64, np NetemParams) error {
 	const eps = 0.0001
-	desired := ShapeApplyState{rate: rate, delay: delay, loss: loss}
+	delay, loss := np.DelayMs, np.LossPct
+	desired := ShapeApplyState{
+		rate: rate, delay: delay, loss: loss,
+		jitter: np.JitterMs, lossCorr: np.LossCorrelationPct, delCorr: np.JitterCorrelationPct,
+	}
 	last, ok := a.getShapeApplyState(port)
 	if ok && almostEqualShape(last, desired) {
 		log.Printf("NETSHAPE apply skipped port=%d reason=unchanged rate_mbps=%.3f delay_ms=%d loss_pct=%.3f", port, rate, delay, loss)
 		return nil
 	}
+	// #910: honesty gate. When the host (or a forced degraded mode) can't
+	// back a control, we must NOT touch the kernel for it — on the forced-
+	// degraded A/B box tc actually works, so applying anyway would silently
+	// shape while the operator believes shaping is off. We skip the kernel
+	// call, log it, and still converge the apply state so we don't spin. The
+	// session_start `shaping_degraded` control event + the labels[] marker
+	// make the degraded condition visible; the request value is retained but
+	// the dashboard greys it out (task #3).
+	canRate := a.shaping.rate
+	canNetem := a.shaping.delay || a.shaping.loss // one netem qdisc backs both
 	if rate == 0 && delay == 0 && loss == 0 {
 		log.Printf("NETSHAPE apply clear port=%d", port)
-		if err := a.traffic.UpdateRateLimit(port, 0); err != nil {
-			return err
+		if canRate {
+			if err := a.traffic.UpdateRateLimit(port, 0); err != nil {
+				return err
+			}
 		}
 		a.setShapeApplyState(port, desired)
 		return nil
 	}
 	rateChanged := !ok || math.Abs(last.rate-rate) > eps
 	if rateChanged {
-		log.Printf("NETSHAPE apply rate_change port=%d from_mbps=%.3f to_mbps=%.3f", port, last.rate, rate)
-		if err := a.traffic.UpdateRateLimit(port, rate); err != nil {
-			return err
+		if canRate {
+			log.Printf("NETSHAPE apply rate_change port=%d from_mbps=%.3f to_mbps=%.3f", port, last.rate, rate)
+			if err := a.traffic.UpdateRateLimit(port, rate); err != nil {
+				return err
+			}
+		} else {
+			log.Printf("NETSHAPE apply degraded port=%d control=rate reason=capability_unavailable mode=%s requested_mbps=%.3f", port, a.shaping.mode, rate)
 		}
 	}
-	delayChanged := !ok || last.delay != delay
-	lossChanged := !ok || math.Abs(last.loss-loss) > eps
-	if delayChanged || lossChanged {
-		log.Printf("NETSHAPE apply netem_change port=%d from_delay_ms=%d to_delay_ms=%d from_loss_pct=%.3f to_loss_pct=%.3f", port, last.delay, delay, last.loss, loss)
-		if err := a.traffic.UpdateNetem(port, delay, loss); err != nil {
-			return err
+	netemChanged := !ok || last.delay != delay || last.jitter != np.JitterMs ||
+		math.Abs(last.loss-loss) > eps || math.Abs(last.lossCorr-np.LossCorrelationPct) > eps ||
+		math.Abs(last.delCorr-np.JitterCorrelationPct) > eps
+	if netemChanged {
+		if canNetem {
+			log.Printf("NETSHAPE apply netem_change port=%d from_delay_ms=%d to_delay_ms=%d from_loss_pct=%.3f to_loss_pct=%.3f jitter_ms=%d loss_corr_pct=%.1f del_corr_pct=%.1f", port, last.delay, delay, last.loss, loss, np.JitterMs, np.LossCorrelationPct, np.JitterCorrelationPct)
+			if err := a.traffic.UpdateNetem(port, np); err != nil {
+				return err
+			}
+		} else {
+			log.Printf("NETSHAPE apply degraded port=%d control=netem reason=capability_unavailable mode=%s requested_delay_ms=%d requested_loss_pct=%.3f", port, a.shaping.mode, delay, loss)
 		}
 	}
 	a.setShapeApplyState(port, desired)
 	return nil
 }
 
-func (a *App) getContentType(target string) (string, bool, bool, bool, []PlaylistInfo) {
+// getContentType HEAD/GET-probes an upstream URL to classify it (master /
+// media manifest / segment) and, for a master, parses out the video variant
+// ladder (EXT-X-STREAM-INF) plus the audio rendition URIs (EXT-X-MEDIA
+// TYPE=AUDIO). The audio URIs are the structure-driven signal the fault
+// classifier uses to identify audio playlists — replacing filename guessing.
+func (a *App) getContentType(target string, session SessionData) (string, bool, bool, bool, []PlaylistInfo, []string, string) {
 	parsed, err := url.Parse(target)
 	if err != nil {
-		return "", false, false, false, nil
+		return "", false, false, false, nil, nil, ""
 	}
 	if parsed.Hostname() != "" {
 		parsed.Host = fmt.Sprintf("%s:%s", parsed.Hostname(), a.upstreamPort)
 	}
 	headReq, err := http.NewRequest(http.MethodHead, parsed.String(), nil)
 	if err != nil {
-		return "", false, false, false, nil
+		return "", false, false, false, nil, nil, ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	headReq = headReq.WithContext(ctx)
 	resp, err := a.client.Do(headReq)
 	if err != nil {
-		return "", false, false, false, nil
+		return "", false, false, false, nil, nil, ""
 	}
 	contentType := resp.Header.Get("Content-Type")
 	resp.Body.Close()
@@ -6405,11 +8008,11 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 		getReq = getReq.WithContext(ctxGet)
 		getResp, err := a.client.Do(getReq)
 		if err != nil {
-			return contentType, false, true, false, nil
+			return contentType, false, true, false, nil, nil, ""
 		}
 		defer getResp.Body.Close()
 		if getResp.StatusCode >= 400 {
-			return contentType, false, true, false, nil
+			return contentType, false, true, false, nil, nil, ""
 		}
 		contentType = getResp.Header.Get("Content-Type")
 		body, _ := io.ReadAll(getResp.Body)
@@ -6432,18 +8035,110 @@ func (a *App) getContentType(target string) (string, bool, bool, bool, []Playlis
 							Resolution:       resolution,
 						})
 					}
-					return contentType, true, false, false, infos
+					// Structure-driven audio: EXT-X-MEDIA renditions hang off each
+					// variant's Alternatives. Collect the TYPE=AUDIO URIs so the
+					// fault classifier can identify audio playlists by manifest
+					// declaration instead of filename spelling. Dedup across variants
+					// (all video variants reference the same audio GROUP-ID).
+					audioURIs := extractAudioURIs(master)
+					return contentType, true, false, false, infos, audioURIs, ""
 				case m3u8.MEDIA:
-					return contentType, false, true, false, nil
+					// #922 Tier 2: the media playlist authoritatively lists its
+					// segment (and EXT-X-MAP init) paths, so the rendition dir it
+					// belongs to is unambiguous — the caller maps that dir to this
+					// playlist's rendition (video resolution/rung or audio).
+					media := playlist.(*m3u8.MediaPlaylist)
+					return contentType, false, true, false, nil, nil, mediaRenditionDir(media)
 				}
 			}
 		}
-		return contentType, false, true, false, nil
+		return contentType, false, true, false, nil, nil, ""
 	}
 	if strings.Contains(strings.ToLower(contentType), "dash") || strings.Contains(strings.ToLower(contentType), "mpd") {
-		return contentType, false, true, false, nil
+		// #926: parse the MPD to build the video ladder + segmentDir→rendition
+		// map. go-live's DASH is CMAF — the same segment dirs as HLS — so once
+		// the map is populated the classifier scopes DASH segments unchanged.
+		if getReq, err := http.NewRequest(http.MethodGet, parsed.String(), nil); err == nil {
+			ctxGet, cancelGet := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelGet()
+			getReq = getReq.WithContext(ctxGet)
+			if getResp, derr := a.client.Do(getReq); derr == nil {
+				defer getResp.Body.Close()
+				if getResp.StatusCode < 400 {
+					body, _ := io.ReadAll(io.LimitReader(getResp.Body, 8<<20))
+					if variants, renditions := parseDASHManifest(body); len(renditions) > 0 {
+						mergeRenditionMap(session, renditions)
+						return contentType, false, true, false, variants, nil, ""
+					}
+				}
+			}
+		}
+		return contentType, false, true, false, nil, nil, ""
 	}
-	return contentType, false, false, true, nil
+	return contentType, false, false, true, nil, nil, ""
+}
+
+// extractAudioURIs collects the EXT-X-MEDIA TYPE=AUDIO rendition URIs declared
+// in a master playlist, deduped. grafov/m3u8 hangs the EXT-X-MEDIA renditions
+// off each variant's Alternatives, and every video variant references the same
+// audio GROUP-ID, so the raw list is highly duplicated. This is the
+// structure-driven audio signal the fault classifier consumes (#919 Tier 1) —
+// what the manifest DECLARES as audio, not what a filename spells.
+func extractAudioURIs(master *m3u8.MasterPlaylist) []string {
+	if master == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var uris []string
+	for _, variant := range master.Variants {
+		if variant == nil {
+			continue
+		}
+		for _, alt := range variant.Alternatives {
+			if alt == nil || !strings.EqualFold(alt.Type, "AUDIO") || alt.URI == "" {
+				continue
+			}
+			if !seen[alt.URI] {
+				seen[alt.URI] = true
+				uris = append(uris, alt.URI)
+			}
+		}
+	}
+	return uris
+}
+
+// mediaRenditionDir returns the directory a media playlist's segments live under
+// — the stable, STRUCTURE-DRIVEN rendition identifier (#922 Tier 2). The
+// playlist lists its segment + EXT-X-MAP init paths authoritatively, so the dir
+// is unambiguous no matter how the playlist file itself is named. "" if the
+// playlist carries no segment/map to key off.
+func mediaRenditionDir(media *m3u8.MediaPlaylist) string {
+	if media == nil {
+		return ""
+	}
+	for _, seg := range media.Segments {
+		if seg == nil {
+			continue
+		}
+		if seg.Map != nil && seg.Map.URI != "" {
+			return renditionDirOf(seg.Map.URI)
+		}
+		if seg.URI != "" {
+			return renditionDirOf(seg.URI)
+		}
+	}
+	return ""
+}
+
+// renditionDirOf extracts the rendition directory token (lowercased) from a
+// segment/init path or URL — the last path element before the file. e.g.
+// "/go-live/c/720p/segment_00047.m4s" → "720p"; "audio/init.mp4" → "audio".
+func renditionDirOf(uri string) string {
+	u := uri
+	if parsed, err := url.Parse(uri); err == nil && parsed.Path != "" {
+		u = parsed.Path
+	}
+	return strings.ToLower(pathParent(strings.TrimPrefix(u, "/")))
 }
 
 func (a *App) trackPortThroughput() {
@@ -6460,16 +8155,16 @@ func (a *App) trackPortThroughput() {
 		mbps float64
 	}
 	type throughputState struct {
-		bytes                int64
-		timestamp            time.Time
-		samples              []throughputSample
-		a1sHistory           []a1sSample // rolling buffer of a1s values for a6s averaging
+		bytes      int64
+		timestamp  time.Time
+		samples    []throughputSample
+		a1sHistory []a1sSample // rolling buffer of a1s values for a6s averaging
 	}
 	const (
 		sampleInterval      = 100 * time.Millisecond
 		shortWindow         = 1 * time.Second
 		mediumWindow        = 6 * time.Second
-		transferRateWindow   = 400 * time.Millisecond
+		transferRateWindow  = 400 * time.Millisecond
 		activeByteThreshold = int64(8192)
 	)
 	cache := map[int]throughputState{}
@@ -6483,10 +8178,10 @@ func (a *App) trackPortThroughput() {
 		state, ok := cache[port]
 		if !ok || state.timestamp.IsZero() {
 			cache[port] = throughputState{
-				bytes:                bytesValue,
-				timestamp:            now,
-				samples:              state.samples,
-				a1sHistory:           state.a1sHistory,
+				bytes:      bytesValue,
+				timestamp:  now,
+				samples:    state.samples,
+				a1sHistory: state.a1sHistory,
 			}
 			return
 		}
@@ -6560,11 +8255,21 @@ func (a *App) trackPortThroughput() {
 		}
 		adjacent1sRate, hasAdjacent1s := adjacentBacklogActiveRate(state.samples, shortCutoff)
 
+		// #910: mbps_shaper_* is derived from the TC HTB queue backlog — a
+		// KERNEL-shaper metric. In a degraded (faults-only) session the rate gate
+		// is closed and no kernel shaping applies, so the shaper metric is
+		// meaningless. Suppress it (and its rolling average) so it goes away
+		// rather than reporting a phantom shaper — matching a host with no tc.
+		shaperGated := a.traffic != nil && a.traffic.portRateGated(port)
+
 		var mbpsShaperRate interface{}
-		if backlogActive && hasAdjacent1s {
+		if backlogActive && hasAdjacent1s && !shaperGated {
 			mbpsShaperRate = math.Round((adjacent1sRate * 100)) / 100
 		} else {
 			mbpsShaperRate = nil
+		}
+		if shaperGated {
+			state.a1sHistory = state.a1sHistory[:0]
 		}
 		// Record non-nil a1s values and compute a6s as their rolling average over 6s.
 		if v, ok := mbpsShaperRate.(float64); ok {
@@ -6613,19 +8318,16 @@ func (a *App) trackPortThroughput() {
 			}
 		}
 
-
-
-
 		cache[port] = state
 		payload := map[string]interface{}{
-			"bytes":                       deltaBytes,
-			"wire_tc_bytes_now":           bytesValue,
-			"timestamp":                   now.Unix(),
-			"timestamp_ms":                now.UnixMilli(),
-			"mbps_shaper_rate":               mbpsShaperRate,
-			"mbps_shaper_avg":               mbpsShaperAvg,
-			"mbps_transfer_rate":           mbpsTransferRate,
-			"mbps_transfer_complete":          mbpsTransferComplete,
+			"bytes":                  deltaBytes,
+			"wire_tc_bytes_now":      bytesValue,
+			"timestamp":              now.Unix(),
+			"timestamp_ms":           now.UnixMilli(),
+			"mbps_shaper_rate":       mbpsShaperRate,
+			"mbps_shaper_avg":        mbpsShaperAvg,
+			"mbps_transfer_rate":     mbpsTransferRate,
+			"mbps_transfer_complete": mbpsTransferComplete,
 		}
 		a.throughputMu.Lock()
 		a.throughputData[port] = payload
@@ -6642,7 +8344,7 @@ func (a *App) trackPortThroughput() {
 	for {
 		tickNow := time.Now()
 		if lastPortsRefresh.IsZero() || tickNow.Sub(lastPortsRefresh) >= time.Second {
-			sessions := a.getSessionList()
+			sessions := a.sessionsView() // #740 read-only: collects ports for throughput refresh
 			refreshed := map[int]struct{}{}
 			addPort := func(portStr string) {
 				if portStr == "" {
@@ -6719,10 +8421,12 @@ func (a *App) getSessionData(identifier string) SessionData {
 	if identifier == "" {
 		return nil
 	}
-	sessions := a.getSessionList()
-	for _, session := range sessions {
+	// #740: scan the no-clone view, return a clone of the single match —
+	// callers mutate this (and feed it to normalizeSessionsForResponse, which
+	// writes in place), so it must not alias the live snapshot.
+	for _, session := range a.sessionsView() {
 		if getString(session, "session_id") == identifier {
-			return session
+			return cloneSession(session)
 		}
 	}
 	return nil
@@ -6760,6 +8464,9 @@ func copySessionControlState(target SessionData, source SessionData) {
 		"nftables_bandwidth_mbps",
 		"nftables_delay_ms",
 		"nftables_packet_loss",
+		"nftables_jitter_ms",
+		"nftables_loss_correlation_pct",
+		"nftables_jitter_correlation_pct",
 		"nftables_pattern_enabled",
 		"nftables_pattern_steps",
 		"nftables_pattern_step",
@@ -6831,9 +8538,9 @@ func (a *App) getOrCreateNetworkLog(sessionID string) *NetworkLogRingBuffer {
 // and segments — iOS HLS doesn't preserve the master manifest's
 // `?play_id=…` query string on derived URLs), fall back to the session's
 // last-known sticky play_id from the live session map. session_snapshots
-// already does this implicitly via the "if playID != ''" guard at the
+// already does this implicitly via the "if playID != ”" guard at the
 // session level; without this fallback the network_requests table ends
-// up with most rows attributed to play_id='' and the session-viewer's
+// up with most rows attributed to play_id=” and the session-viewer's
 // play_id filter only catches the master manifest hits.
 func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 	if sessionID == "" {
@@ -6841,6 +8548,11 @@ func (a *App) addNetworkLogEntry(sessionID string, entry NetworkLogEntry) {
 	}
 	if entry.PlayID == "" {
 		entry.PlayID = a.sessionStickyPlayID(sessionID)
+	}
+	if entry.PlayerID == "" {
+		// #911: sticky fallback for entries that didn't carry a player_id on the
+		// request (some sub-requests) — warms once the session is associated.
+		entry.PlayerID = a.sessionStickyPlayerID(sessionID)
 	}
 	if entry.AttemptID == 0 {
 		entry.AttemptID = a.sessionStickyAttemptID(sessionID)
@@ -7020,11 +8732,19 @@ func (a *App) doRequestWithTracing(ctx context.Context, req *http.Request) (*htt
 
 	req = req.WithContext(httptrace.WithClientTrace(ctx, trace))
 
+	// Time the upstream fetch itself: a.client.Do returns once the response
+	// HEADERS arrive, so do_ms is how long the origin (nginx/go-live) took to
+	// start answering. If the audio request's do_ms is ~1.5s while video's is
+	// ~10ms, the stall is the origin fetch — not go-proxy's streaming.
+	doStart := time.Now()
 	resp, err := a.client.Do(req)
+	doMs := float64(time.Since(doStart).Microseconds()) / 1000.0
 	if err != nil {
 		entry.TotalMs = float64(time.Since(start).Microseconds()) / 1000.0
+		log.Printf("[UPSTREAM_DO] url=%s do_ms=%.1f err=%v", req.URL.String(), doMs, err)
 		return nil, entry, err
 	}
+	log.Printf("[UPSTREAM_DO] url=%s do_ms=%.1f upstream_ttfb_ms=%.1f status=%d", req.URL.String(), doMs, entry.TTFBMs, resp.StatusCode)
 
 	// If we got first byte, calculate transfer time after body is read
 	// Note: We'll update TransferMs after body is copied
@@ -7128,28 +8848,47 @@ func (a *App) normalizeSessionForResponse(session SessionData) SessionData {
 }
 
 func (a *App) updateSessionsByPortWithControl(port int, updates map[string]interface{}, controlRevision string) {
-	sessions := a.getSessionList()
-	changed := false
 	rev := controlRevision
 	if rev == "" {
 		rev = newControlRevision()
 	}
-	for _, session := range sessions {
-		if a.sessionMatchesPort(session, port) {
-			log.Printf("NETSHAPE session_match port=%d session_id=%s before: x_forwarded_port=%s x_forwarded_port_external=%s nftables_bandwidth_mbps=%v",
-				port, getString(session, "session_id"), getString(session, "x_forwarded_port"),
-				getString(session, "x_forwarded_port_external"), session["nftables_bandwidth_mbps"])
-			for key, value := range updates {
-				session[key] = value
-			}
-			applyControlRevision(session, rev)
-			log.Printf("NETSHAPE session_updated port=%d session_id=%s after: nftables_bandwidth_mbps=%v",
-				port, getString(session, "session_id"), session["nftables_bandwidth_mbps"])
-			changed = true
-		}
+	// Diagnostics captured inside the (re-runnable) CAS closure and logged
+	// once on the committed result — see mutateSessions' side-effect rule.
+	type netshapeLog struct {
+		sessionID  string
+		fwdPort    string
+		fwdPortExt string
+		beforeBW   interface{}
+		afterBW    interface{}
 	}
-	if changed {
-		a.saveSessionList(sessions)
+	var captured []netshapeLog
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		captured = captured[:0]
+		changed := false
+		for _, session := range sessions {
+			if a.sessionMatchesPort(session, port) {
+				entry := netshapeLog{
+					sessionID:  getString(session, "session_id"),
+					fwdPort:    getString(session, "x_forwarded_port"),
+					fwdPortExt: getString(session, "x_forwarded_port_external"),
+					beforeBW:   session["nftables_bandwidth_mbps"],
+				}
+				for key, value := range updates {
+					session[key] = value
+				}
+				applyControlRevision(session, rev)
+				entry.afterBW = session["nftables_bandwidth_mbps"]
+				captured = append(captured, entry)
+				changed = true
+			}
+		}
+		return sessions, changed
+	})
+	for _, e := range captured {
+		log.Printf("NETSHAPE session_match port=%d session_id=%s before: x_forwarded_port=%s x_forwarded_port_external=%s nftables_bandwidth_mbps=%v",
+			port, e.sessionID, e.fwdPort, e.fwdPortExt, e.beforeBW)
+		log.Printf("NETSHAPE session_updated port=%d session_id=%s after: nftables_bandwidth_mbps=%v",
+			port, e.sessionID, e.afterBW)
 	}
 }
 
@@ -7198,19 +8937,18 @@ func (a *App) sessionMatchesPort(session SessionData, port int) bool {
 }
 
 func (a *App) updateSessionsByPort(port int, updates map[string]interface{}) {
-	sessions := a.getSessionList()
-	changed := false
-	for _, session := range sessions {
-		if a.sessionMatchesPort(session, port) {
-			for key, value := range updates {
-				session[key] = value
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		changed := false
+		for _, session := range sessions {
+			if a.sessionMatchesPort(session, port) {
+				for key, value := range updates {
+					session[key] = value
+				}
+				changed = true
 			}
-			changed = true
 		}
-	}
-	if changed {
-		a.saveSessionList(sessions)
-	}
+		return sessions, changed
+	})
 }
 
 func (a *App) getSessionList() []SessionData {
@@ -7221,28 +8959,91 @@ func (a *App) getSessionList() []SessionData {
 	return cloneSessionList(*snap)
 }
 
-func (a *App) publishSnapshot(sessions []SessionData) {
-	uiVersion := atomic.AddUint64(&a.uiStateVersionSeq, 1)
-	uiRevision := newControlRevision()
-	for _, session := range sessions {
-		session["ui_state_version"] = uiVersion
-		session["ui_state_revision"] = uiRevision
+// sessionsView returns the current session snapshot WITHOUT cloning — a
+// read-only borrow of the immutable published slice (issue #740 Commit B).
+// The dominant per-read cost was cloneSession (a deep copy of ~110 fields × N
+// sessions) on every getSessionList, and ~half the call sites only read.
+//
+// CONTRACT — callers MUST treat the result, and every map inside it, as
+// read-only. This is sound only because writers never mutate in place:
+// mutateSessions always copy-on-writes and CAS-publishes a fresh slice, so the
+// snapshot a caller borrows is frozen for its lifetime (a concurrent writer
+// publishes a new slice; it never touches this one). A caller that needs to
+// mutate a session — or hands maps to normalizeSessionsForResponse, which
+// writes in place — must use getSessionList (which clones) or cloneSession the
+// specific map it retains.
+func (a *App) sessionsView() []SessionData {
+	snap := a.sessionsSnap.Load()
+	if snap == nil {
+		return nil
 	}
-	a.sessionsSnap.Store(&sessions)
-	// Issue #470: stopped broadcasting the full session list on every
-	// snapshot publish. /api/sessions/stream is now a per-event channel
-	// driven by emitSessionEvent; the debounced full-state path served
-	// only the forwarder and produced duplicates in session_events as
-	// stale `player_metrics_last_event` markers leaked across emissions.
-	// The in-memory snapshot (sessionsSnap) is still maintained because
-	// GET /api/sessions reads from it.
+	return *snap
 }
 
-func (a *App) saveSessionList(sessions []SessionData) {
-	a.sessionsMu.Lock()
-	a.publishSnapshot(cloneSessionList(sessions))
-	a.sessionsMu.Unlock()
+// mutateSessions is the lock-free read-modify-write primitive for the
+// in-memory session list (issue #740). It loads the current immutable
+// snapshot, hands `fn` a PRIVATE deep clone it may freely mutate, and
+// publishes the result via atomic CompareAndSwap — retrying from a fresh
+// clone on every conflict so no concurrent writer's update is lost. This
+// replaces the old `getSessionList → mutate → saveSessionList` pattern,
+// which held no lock across the read and the write and was therefore a
+// last-writer-wins lost-update race against every other writer.
+//
+// CONTRACT — `fn` MUST be pure / re-runnable:
+//   - It receives a private clone (never the live snapshot) and returns the
+//     new list plus a `changed` flag. Returning changed=false aborts with no
+//     store (and no ui-version bump).
+//   - It MUST NOT perform side effects (kernel/tc calls, control-event emits,
+//     recordSessionEnd, resetServerLoopState, logging of committed state):
+//     fn can run multiple times under contention. Hoist side effects OUT and
+//     run them once on the committed result this returns — the idiomatic shape
+//     is to reset a captured slice at the TOP of fn and append to it as fn
+//     walks the list, so only the committed run's captures survive.
+//
+// Returns the published slice (the committed clone) and true on a successful
+// store, or (nil, false) when fn reported no change.
+func (a *App) mutateSessions(fn func([]SessionData) ([]SessionData, bool)) ([]SessionData, bool) {
+	for {
+		oldPtr := a.sessionsSnap.Load()
+		var current []SessionData
+		if oldPtr != nil {
+			current = *oldPtr
+		}
+		// Hand fn a private deep clone: a retry starts clean and the
+		// committed snapshot is never aliased by the caller.
+		next, changed := fn(cloneSessionList(current))
+		if !changed {
+			return nil, false
+		}
+		// Stamp the ui-version on the to-be-published slice — same shape
+		// the retired publishSnapshot used. A burned version on a lost CAS
+		// is harmless (the field is monotonic, never read for an exact value).
+		uiVersion := atomic.AddUint64(&a.uiStateVersionSeq, 1)
+		uiRevision := newControlRevision()
+		for _, session := range next {
+			session["ui_state_version"] = uiVersion
+			session["ui_state_revision"] = uiRevision
+		}
+		if a.sessionsSnap.CompareAndSwap(oldPtr, &next) {
+			return next, true
+		}
+		// Lost the race — another writer published between our Load and
+		// CompareAndSwap. Re-clone from the new snapshot and re-run fn.
+	}
 }
+
+// Issue #470: the proxy stopped broadcasting the full session list on every
+// snapshot publish. /api/sessions/stream is now a per-event channel driven by
+// emitSessionEvent; the debounced full-state path served only the forwarder
+// and produced duplicates in session_events as stale `player_metrics_last_event`
+// markers leaked across emissions. The in-memory snapshot (sessionsSnap) is
+// still maintained because GET /api/sessions reads from it.
+//
+// Issue #740: publishSnapshot and saveSessionList were retired in favour of
+// mutateSessions (lock-free CAS) — every full-list write now composes the
+// read, mutate, ui-version stamp, and store into one atomic step, so a
+// concurrent writer can no longer clobber another's update. sessionsMu and
+// createMu went with them.
 
 func (a *App) saveSessionByID(sessionID string, session SessionData) {
 	a.saveSessionByIDReturning(sessionID, session)
@@ -7261,15 +9062,22 @@ func (a *App) saveSessionByID(sessionID string, session SessionData) {
 // in-memory snapshot for GET /api/sessions, but no longer queues a
 // hub broadcast.
 func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (SessionData, bool) {
-	a.sessionsMu.Lock()
-	defer a.sessionsMu.Unlock()
-	snap := a.getSessionList()
-	updated := make([]SessionData, len(snap))
-	copy(updated, snap)
+	// #740: the merge is now a mutateSessions CAS closure rather than an
+	// RMW under sessionsMu. metricsPostMu (held by the caller) still
+	// serialises same-session POSTs for arrival ordering; the CAS guards
+	// cross-session writers. resetServerLoopState is the one side effect and
+	// is hoisted out to run once on the committed result.
 	var merged SessionData
 	var found bool
-	for i, s := range updated {
-		if getString(s, "session_id") == sessionID {
+	var playRotated bool
+	a.mutateSessions(func(updated []SessionData) ([]SessionData, bool) {
+		merged = nil
+		found = false
+		playRotated = false
+		for i, s := range updated {
+			if getString(s, "session_id") != sessionID {
+				continue
+			}
 			// Drop the merge if it's a player_metrics POST whose
 			// `player_metrics_event_time` predates what we already have.
 			// One goroutine per request means two near-simultaneous
@@ -7279,7 +9087,7 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 			// event_time jumps in session_snapshots and zigzag charts
 			// at step boundaries (issue #403 follow-up).
 			if isStalePlayerMetricsUpdate(s, session) {
-				return nil, false
+				return updated, false
 			}
 			merged = cloneSession(s)
 			for k, v := range session {
@@ -7323,16 +9131,146 @@ func (a *App) saveSessionByIDReturning(sessionID string, session SessionData) (S
 					merged["player_metrics_event_time"] = nowStr
 				}
 			}
+			// #587 — play_id rotation resets the proxy-accumulated per-play
+			// counters so the new play measures from zero, mirroring the
+			// clients' own per-play reset. Detected at this single merge
+			// chokepoint (every GET/POST that stamps play_id flows through
+			// here). retry()/auto-recovery bumps attempt_id but keeps play_id
+			// stable, so this does NOT fire on recovery. Fault/shaping config,
+			// session identity/timing, and control state are preserved.
+			prevPlay := getString(s, "play_id")
+			newPlay := getString(session, "play_id")
+			if prevPlay != "" && newPlay != "" && prevPlay != newPlay {
+				resetPlayScopedServerCounters(merged)
+				playRotated = true
+			}
 			updated[i] = merged
 			found = true
 			break
 		}
+		return updated, found
+	})
+	// Hoisted out of the CAS closure (non-idempotent in-memory reset).
+	if playRotated {
+		a.resetServerLoopState(sessionID)
 	}
-	a.publishSnapshot(updated)
 	if !found {
 		return nil, false
 	}
 	return cloneSession(merged), true
+}
+
+// fillReservedSession replaces the bootstrap placeholder (see the reserve CAS
+// in handleProxy, #740) with the fully-built session, matched by session_id.
+// A clone of `full` is published — the caller keeps mutating its own
+// sessionData for the kernel apply / recordSessionStart that follow, exactly
+// as the pre-#740 saveSessionList (which cloned at publish) allowed. If the
+// reservation is somehow gone (e.g. reaped mid-bootstrap), the full session is
+// appended so the bootstrap still completes.
+func (a *App) fillReservedSession(sessionID string, full SessionData) {
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		clone := cloneSession(full)
+		for i, s := range sessions {
+			if getString(s, "session_id") == sessionID {
+				sessions[i] = clone
+				return sessions, true
+			}
+		}
+		return append(sessions, clone), true
+	})
+}
+
+// removeReservedSession CAS-removes the bootstrap placeholder when config
+// materialization fails, so a rejected config leaks no session slot (#740).
+func (a *App) removeReservedSession(sessionID string) {
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		filtered := make([]SessionData, 0, len(sessions))
+		removed := false
+		for _, s := range sessions {
+			if getString(s, "session_id") == sessionID {
+				removed = true
+				continue
+			}
+			filtered = append(filtered, s)
+		}
+		return filtered, removed
+	})
+}
+
+// resetFailureWindowState clears the persisted per-surface failure
+// window cursor (`<prefix>_failure_at` / `<prefix>_failure_recover_at`)
+// for every surface whose fault CONFIG the incoming settings payload
+// touches (#643). The cursor is the engine's "where in the
+// fault/recover cycle am I" state, written back by the per-request
+// handlers; without this reset a re-arm RESUMES the previous arm's
+// half-consumed window — e.g. arm `--consecutive 10`, consume 4, re-arm
+// ×10 → only 6 more faults fire before the OLD recover point is hit and
+// the rule silently goes quiet. The next matching request after a
+// config change must always open a fresh window.
+//
+// Covers the `all` surface too — the normalization loops above it
+// historically listed only segment/manifest/master_manifest.
+func resetFailureWindowState(payload map[string]interface{}, target SessionData) {
+	for _, prefix := range []string{"segment", "manifest", "master_manifest", "all"} {
+		touched := false
+		for _, suffix := range []string{"_failure_type", "_failure_frequency", "_consecutive_failures", "_failure_mode"} {
+			if _, ok := payload[prefix+suffix]; ok {
+				touched = true
+				break
+			}
+		}
+		if !touched {
+			continue
+		}
+		delete(target, prefix+"_failure_at")
+		delete(target, prefix+"_failure_recover_at")
+	}
+}
+
+// resetPlayScopedServerCounters zeroes the proxy-ACCUMULATED counters that
+// should restart at a fresh play (#587). Called from saveSessionByIDReturning
+// when the player rotates play_id. Deliberately preserves fault/shaping
+// CONFIG, session identity/timing (session_start_time, origination_*), and
+// control state. The server-side loop-detection in-memory state is reset by
+// the caller via resetServerLoopState.
+//
+// IMPORTANT — what is NOT reset, and why:
+//   - The *_requests_count counters (manifest/master/segments/all) are the
+//     fault-pattern CLOCK: FailureHandler.handleFailureCount compares the
+//     running request count against the count-based *_failure_at /
+//     *_failure_recover_at thresholds to decide when to fire. Zeroing the
+//     count without rewinding those thresholds would suppress faults until
+//     the count climbed back, desyncing operator fault patterns. Left
+//     running so injection behaviour is unchanged across a play rotation.
+//   - transport_fault_*_packets can be the "packets"-units cycle counter for
+//     transport faults (and self-reset each on/off cycle), so they're left
+//     alone too.
+//
+// The fault_count_* family below is purely a write-only reporting tally
+// (bumpFaultCounter only writes; every read is reporting/init/projection),
+// so resetting it does NOT affect fault firing.
+func resetPlayScopedServerCounters(m SessionData) {
+	// Server-side loop counter (in-memory seq state reset separately).
+	m["loop_count_server"] = 0
+	delete(m, "loop_count_server_last_at")
+	// Cumulative byte totals + the rolling-window state behind the Mbps
+	// derivations, so the new play measures throughput from zero. These feed
+	// dashboard display only — no control decision reads them.
+	m["bytes_in_total"] = int64(0)
+	m["bytes_out_total"] = int64(0)
+	m["bytes_in_last"] = int64(0)
+	m["bytes_out_last"] = int64(0)
+	delete(m, "bytes_last_ts")
+	delete(m, "io_samples")
+	delete(m, "active_io_samples")
+	// Fault-injection REPORTING tally — one key per category
+	// (fault_count_total, fault_count_socket_*, fault_count_request_*,
+	// fault_count_transfer_*). Write-only; resetting does not change firing.
+	for k := range m {
+		if strings.HasPrefix(k, "fault_count_") {
+			m[k] = 0
+		}
+	}
 }
 
 // hasDeviceFamilyToken reports whether the given User-Agent string
@@ -7908,8 +9846,8 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 			portStr = getString(session, "x_forwarded_port_external")
 		}
 		if portNum, ok := a.sessionPortToInternal(portStr); ok {
-			if pattern, ok := a.getShapePattern(portNum); ok {
-				session["nftables_pattern_enabled"] = len(pattern.Steps) > 0
+			if pattern, ok := a.getShapePattern(portNum); ok && len(pattern.Steps) > 0 {
+				session["nftables_pattern_enabled"] = true
 				session["nftables_pattern_steps"] = pattern.Steps
 				if pattern.ActiveAt != "" {
 					session["nftables_pattern_step"] = pattern.ActiveStep
@@ -7920,6 +9858,12 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 			} else {
 				session["nftables_pattern_enabled"] = false
 				session["nftables_pattern_steps"] = []NftShapeStep{}
+				if getString(session, "nftables_pattern_driven_by") == "" {
+					session["nftables_pattern_step"] = nil
+					session["nftables_pattern_step_runtime"] = nil
+					session["nftables_pattern_rate_runtime_mbps"] = nil
+					session["nftables_pattern_step_runtime_at"] = nil
+				}
 			}
 		}
 		// nftables_bandwidth_mbps holds the operator's raw intent —
@@ -7941,6 +9885,9 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		session["effective_rate_limit_mbps"] = a.effectiveRateForSession(session)
 		setDefault("nftables_delay_ms", 0)
 		setDefault("nftables_packet_loss", 0)
+		setDefault("nftables_jitter_ms", 0)
+		setDefault("nftables_loss_correlation_pct", 0)
+		setDefault("nftables_jitter_correlation_pct", 0)
 		setDefault("nftables_pattern_enabled", false)
 		setDefault("nftables_pattern_steps", []NftShapeStep{})
 		setDefault("nftables_pattern_step", 0)
@@ -7954,12 +9901,23 @@ func (a *App) normalizeSessionsForResponse(sessions []SessionData) []SessionData
 		setDefault("player_metrics_profile_shift_count", 0)
 		setDefault("loop_count_server", 0)
 		setDefault("player_metrics_loop_count_player", 0)
-		setDefault("player_metrics_loop_count_increment", 0)
-		bestMbps := bestVariantMbps(session)
+		setDefault("player_metrics_loop_count_delta", 0)
+		// Perceptual (Weber-Fechner) video quality: the played bitrate's
+		// position on the ladder measured in log space, so doubling the
+		// bitrate near the top barely moves the score while the bottom
+		// rungs spread out. Mirrors the iOS log-bitrate model in
+		// PlayerViewModel.swift (qualityWeightForBitrate), including the
+		// 0.20 baseline floor, so this server snapshot metric and the iOS
+		// avg/60s metrics share one model. NB: the ladder here is the full
+		// advertised manifest; iOS uses its post-cap *selectable* peaks, so
+		// the two agree in shape, not to the decimal. A single-rung ladder
+		// leaves the field unset (the log ratio is undefined).
 		videoMbps := getFloat(session, "player_metrics_video_bitrate_mbps")
-		if bestMbps > 0 && videoMbps > 0 {
-			quality := (videoMbps / bestMbps) * 100
-			session["player_metrics_video_quality_pct"] = math.Round(quality*100) / 100
+		if minMbps, maxMbps, ok := variantMbpsRange(session); ok && videoMbps > 0 {
+			const qualityFloor = 0.20 // matches PlayerViewModel.qualityBaselineFloor
+			weight := math.Log(videoMbps/minMbps) / math.Log(maxMbps/minMbps)
+			weight = math.Max(qualityFloor, math.Min(1.0, weight))
+			session["player_metrics_video_quality_pct"] = math.Round(weight*100*100) / 100
 		} else {
 			delete(session, "player_metrics_video_quality_pct")
 		}
@@ -8106,50 +10064,118 @@ func (a *App) emitSessionEvent(session SessionData) {
 	a.sessionsHub.Broadcast(normalized, rev, preMarshaled)
 }
 
-func (a *App) removeInactiveSessions() {
-	sessions := a.getSessionList()
-	if len(sessions) == 0 {
+// broadcastEmptySessions pokes the session hub with a zero-length frame so the
+// v2 SSE `player.deleted` diff advances when NO live session remains to trigger
+// it (#944). The v2 adapter (SubscribeSessions) re-reads the live session list
+// on any hub broadcast and diffs it — but the hub only broadcasts on a live
+// session's metrics POST (emitSessionEvent), never on a DELETE. So deleting the
+// LAST session leaves nothing to POST, the diff never runs, and the dashboard
+// keeps showing the gone session. An EMPTY payload drives that diff while
+// keeping /api/sessions/stream consumers (the forwarder) from writing rows —
+// see the #470 note above on why a full-list re-broadcast is off the table.
+func (a *App) broadcastEmptySessions() {
+	if a.sessionsHub == nil {
 		return
 	}
-	active := make([]SessionData, 0, len(sessions))
+	rev := atomic.AddUint64(&a.sessionsBroadcastSeq, 1)
+	preMarshaled := a.buildSessionsEvent(nil, rev, 0, nil)
+	a.sessionsHub.Broadcast(nil, rev, preMarshaled)
+}
+
+func (a *App) removeInactiveSessions() {
+	// A player that makes no request for this long is treated as gone and
+	// its session synthesized to a terminal inactive_timeout. Kept generous
+	// (5m) so a *legitimately rebuffering* play isn't evicted mid-stream: a
+	// characterization sweep that slams the cap from a 4K rung back to the
+	// ~2 Mbps floor between cycles can stall ~50s+ while AVPlayer drains a
+	// stranded 4K segment — well under any real abandonment but over the old
+	// 60s window, which killed the play (and orphaned later cycles).
+	const inactiveWindow = 5 * time.Minute
+	// Pin the cut point once so a CAS retry can't flip a borderline session
+	// active/inactive on micro-timing.
 	now := time.Now()
-	removedPorts := map[int]struct{}{}
-	for _, session := range sessions {
-		lastRequest := getString(session, "last_request")
-		if lastRequest == "" {
-			continue
-		}
-		lastTime, err := time.Parse("2006-01-02T15:04:05.000", lastRequest)
-		if err != nil {
-			continue
-		}
-		if now.Sub(lastTime) < 60*time.Second {
-			active = append(active, session)
-		} else {
-			a.recordSessionEnd(session, "inactive_timeout")
-			if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
-				removedPorts[port] = struct{}{}
+	// removed/active captured inside the (re-runnable) CAS closure;
+	// recordSessionEnd + kernel teardown run once on the committed result
+	// (mutateSessions side-effect rule). active is reused for auto-ungroup.
+	var removed []SessionData
+	var active []SessionData
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		removed = removed[:0]
+		active = make([]SessionData, 0, len(sessions))
+		for _, session := range sessions {
+			lastRequest := getString(session, "last_request")
+			if lastRequest == "" {
+				continue
 			}
-			// session removed from active list — no separate cleanup needed
+			lastTime, err := time.Parse("2006-01-02T15:04:05.000", lastRequest)
+			if err != nil {
+				continue
+			}
+			if now.Sub(lastTime) < inactiveWindow {
+				active = append(active, session)
+			} else {
+				removed = append(removed, session)
+				// session removed from active list — no separate cleanup needed
+			}
+		}
+		// Republish whenever the list is non-empty, matching the pre-#740
+		// unconditional saveSessionList(active) (which also dropped sessions
+		// with empty/unparseable last_request). Empty input → no-op.
+		return active, len(sessions) > 0
+	})
+	removedPorts := map[int]struct{}{}
+	for _, session := range removed {
+		a.recordSessionEnd(session, "inactive_timeout")
+		if port, err := strconv.Atoi(getString(session, "x_forwarded_port")); err == nil {
+			removedPorts[port] = struct{}{}
 		}
 	}
-	a.saveSessionList(active)
 	for port := range removedPorts {
 		a.disablePatternForPort(port)
 		a.armTransportFaultLoop(port, "none", 1, transportUnitsSeconds, 0)
 	}
-	// Auto-ungroup single-member groups
-	groupMembers := map[string][]string{}
+	// Auto-ungroup groups that have DECAYED to a single member — but never a
+	// group that is still ASSEMBLING. A fleet (token `_G<num>` suffix or
+	// CreateGroup) can pass through a transient 1-member state as its sims
+	// connect sequentially; clearing the group then would PERMANENTLY break it,
+	// because group_id is only derived at session creation and never re-derived.
+	// So we collapse a singleton ONLY if we've previously seen its group with ≥2
+	// concurrent members — tracked per-session via group_ever_multi. This is
+	// mechanism-agnostic: it protects suffix groups and operator/API groups
+	// alike while still cleaning up a real group that lost all but one member.
+	type groupMember struct {
+		sessionID string
+		everMulti bool
+	}
+	groupMembers := map[string][]groupMember{}
 	for _, session := range active {
 		gid := getString(session, "group_id")
 		if gid != "" {
-			groupMembers[gid] = append(groupMembers[gid], getString(session, "session_id"))
+			groupMembers[gid] = append(groupMembers[gid], groupMember{
+				sessionID: getString(session, "session_id"),
+				everMulti: getString(session, "group_ever_multi") == "1",
+			})
 		}
 	}
 	for _, members := range groupMembers {
-		if len(members) == 1 {
-			a.saveSessionByID(members[0], SessionData{
-				"session_id": members[0],
+		if len(members) >= 2 {
+			// A real multi-member group right now — stamp every member so a
+			// later decay-to-1 is distinguishable from a still-assembling group.
+			for _, m := range members {
+				if !m.everMulti {
+					a.saveSessionByID(m.sessionID, SessionData{
+						"session_id":       m.sessionID,
+						"group_ever_multi": "1",
+					})
+				}
+			}
+			continue
+		}
+		// Exactly one member: ungroup only if this group was previously ≥2
+		// (decayed). A never-multi singleton is still assembling — keep it.
+		if members[0].everMulti {
+			a.saveSessionByID(members[0].sessionID, SessionData{
+				"session_id": members[0].sessionID,
 				"group_id":   "",
 			})
 		}
@@ -8374,21 +10400,27 @@ func inferServerVideoRendition(session SessionData, filename string, isManifest,
 	}
 }
 
-func bestVariantMbps(session SessionData) float64 {
-	variants := getManifestVariants(session)
-	if len(variants) == 0 {
-		return 0
-	}
-	maxBandwidth := 0
-	for _, variant := range variants {
+// variantMbpsRange returns the min and max declared BANDWIDTH across the
+// active manifest ladder, in Mbps. ok is false unless there are at least
+// two distinct positive-bandwidth rungs — the log-quality ratio is
+// undefined for a single-rung ladder (log(max/min) would be 0).
+func variantMbpsRange(session SessionData) (minMbps, maxMbps float64, ok bool) {
+	minBandwidth, maxBandwidth := 0, 0
+	for _, variant := range getManifestVariants(session) {
+		if variant.Bandwidth <= 0 {
+			continue
+		}
+		if minBandwidth == 0 || variant.Bandwidth < minBandwidth {
+			minBandwidth = variant.Bandwidth
+		}
 		if variant.Bandwidth > maxBandwidth {
 			maxBandwidth = variant.Bandwidth
 		}
 	}
-	if maxBandwidth <= 0 {
-		return 0
+	if minBandwidth <= 0 || maxBandwidth <= minBandwidth {
+		return 0, 0, false
 	}
-	return float64(maxBandwidth) / 1_000_000
+	return float64(minBandwidth) / 1_000_000, float64(maxBandwidth) / 1_000_000, true
 }
 
 func nowISO() string {
@@ -8833,6 +10865,12 @@ type FailureHandler struct {
 	failureAt        interface{}
 	failureRecoverAt interface{}
 	resetFailureType interface{}
+	// continuous faults EVERY matching request until the rule is cleared —
+	// the "on until I cancel it" mode. Set when both consecutive and
+	// frequency are 0 (see failureHandlerFromMatch). Short-circuits the
+	// cadence math so the rule never schedules a recovery window and never
+	// one-shot self-clears.
+	continuous bool
 }
 
 // refreshFailureStateFromLatest copies the fault-decision-relevant
@@ -8846,67 +10884,19 @@ func refreshFailureStateFromLatest(a *App, dst SessionData, sessionID string) {
 	if a == nil || dst == nil || sessionID == "" {
 		return
 	}
-	latest := a.getSessionList()
+	latest := a.sessionsView() // #740 read-only: reads matched session into dst, never writes the snapshot
 	for _, s := range latest {
 		if getString(s, "session_id") != sessionID {
 			continue
 		}
-		// Counters and timestamps that gate the dedup. Order matters
-		// only in the sense that all of these need to come from the
-		// same snapshot.
-		for _, k := range []string{
-			"segments_count", "manifest_requests_count", "master_manifest_requests_count",
-			"all_requests_count",
-			"segment_failure_at", "segment_failure_recover_at",
-			"manifest_failure_at", "manifest_failure_recover_at",
-			"master_manifest_failure_at", "master_manifest_failure_recover_at",
-			"all_failure_at", "all_failure_recover_at",
-		} {
-			if v, ok := s[k]; ok {
-				dst[k] = v
-			}
+		// The native per-rule cadence state gates the fault dedup: copied
+		// wholesale so the evaluator's read-modify-write sees the latest
+		// per-rule count / schedule and can't double-fire concurrent requests
+		// (#919). The v1 surface cursors it used to also copy are gone (#925).
+		if v, ok := s["_faultrule_state"]; ok {
+			dst["_faultrule_state"] = v
 		}
 		return
-	}
-}
-
-func NewFailureHandler(prefix string, session SessionData) *FailureHandler {
-	failureUnits := getString(session, prefix+"_failure_units")
-	consecutiveUnits := getString(session, prefix+"_consecutive_units")
-	frequencyUnits := getString(session, prefix+"_frequency_units")
-	if consecutiveUnits == "" {
-		consecutiveUnits = failureUnits
-	}
-	if frequencyUnits == "" {
-		frequencyUnits = failureUnits
-	}
-	// Defaults match the dashboard's visible default Mode
-	// ("Failures / Seconds"), which maps to consecutiveUnits=requests
-	// and frequencyUnits=seconds. The dashboard only PATCHes Mode
-	// when the user actively changes it, so a session whose
-	// `<prefix>_failure_mode` field was never set still has empty
-	// units here. Defaulting to the same shape as the visible Mode
-	// avoids "rate limit doesn't fire as expected" on first use.
-	if consecutiveUnits == "" {
-		consecutiveUnits = "requests"
-	}
-	if frequencyUnits == "" {
-		frequencyUnits = "seconds"
-	}
-	resetFailureType := session[prefix+"_reset_failure_type"]
-	if resetString, ok := resetFailureType.(string); ok {
-		resetFailureType = normalizeRequestFailureType(resetString)
-	}
-	return &FailureHandler{
-		failureType:      normalizeRequestFailureType(getString(session, prefix+"_failure_type")),
-		failureUnits:     failureUnits,
-		consecutiveUnits: consecutiveUnits,
-		frequencyUnits:   frequencyUnits,
-		failureFrequency: getInt(session, prefix+"_failure_frequency"),
-		consecutive:      getInt(session, prefix+"_consecutive_failures"),
-		failureAt:        session[prefix+"_failure_at"],
-		failureRecoverAt: session[prefix+"_failure_recover_at"],
-		resetFailureType: resetFailureType,
 	}
 }
 
@@ -8916,6 +10906,13 @@ func (h *FailureHandler) HandleFailure(count int, now time.Time) string {
 	}
 	if h.failureType == "none" {
 		return "none"
+	}
+	// Continuous mode: fault every matching request, no recovery window, no
+	// one-shot self-clear. The rule stays armed until the operator changes or
+	// clears it. This is what consecutive=0 & frequency=0 means (the UI's
+	// default) — "keep failing until I cancel it".
+	if h.continuous {
+		return h.failureType
 	}
 	if h.frequencyUnits == "seconds" {
 		h.handleFailureTime(count, now)
@@ -9173,7 +11170,7 @@ func (a *App) resolveSessionList(sessions [][]SessionData) []SessionData {
 	if len(sessions) > 0 && sessions[0] != nil {
 		return sessions[0]
 	}
-	return a.getSessionList()
+	return a.sessionsView() // #740 read-only: callers (getGroupIdByPort/getPortsForGroup) only read
 }
 
 // updateSessionGroup updates all sessions in a group with the given updates
@@ -9181,228 +11178,18 @@ func (a *App) updateSessionGroup(groupID string, updates map[string]interface{})
 	if groupID == "" {
 		return
 	}
-	sessions := a.getSessionList()
-	changed := false
-	for _, session := range sessions {
-		sessionGroupID := getString(session, "group_id")
-		if sessionGroupID == groupID {
-			for key, value := range updates {
-				session[key] = value
-			}
-			changed = true
-		}
-	}
-	if changed {
-		a.saveSessionList(sessions)
-	}
-}
-
-type RequestHandler struct {
-	mode       string
-	session    SessionData
-	failureKey string
-}
-
-func NewRequestHandler(isSegment, isUpdateManifest, isMasterManifest bool, session SessionData) *RequestHandler {
-	if isSegment {
-		return &RequestHandler{mode: "segment", session: session}
-	}
-	if isMasterManifest {
-		return &RequestHandler{mode: "master_manifest", session: session}
-	}
-	if isUpdateManifest {
-		return &RequestHandler{mode: "manifest", session: session}
-	}
-	return &RequestHandler{mode: "unknown", session: session}
-}
-
-func (h *RequestHandler) HandleRequest(filename string) string {
-	// "All" override — when set, every HTTP request runs through the
-	// single all-rule and the per-kind tabs (segment/manifest/master)
-	// are bypassed. The dashboard reflects this by disabling those
-	// tabs and showing an "All override active" banner.
-	if getString(h.session, "all_failure_type") != "" &&
-		getString(h.session, "all_failure_type") != "none" {
-		return h.handleAllFailure(filename)
-	}
-	switch h.mode {
-	case "segment":
-		return h.handleSegmentFailure(filename)
-	case "manifest":
-		return h.handleManifestFailure(filename)
-	case "master_manifest":
-		return h.handleFailure("master_manifest", "master_manifest_requests_count")
-	default:
-		return "none"
-	}
-}
-
-func (h *RequestHandler) handleAllFailure(filename string) string {
-	h.session["all_requests_count"] = getInt(h.session, "all_requests_count") + 1
-	allURLs := getStringSlice(h.session, "all_failure_urls")
-	if len(allURLs) > 0 {
-		if !shouldApplyFailure(allURLs, filename, pathParent(filename)) {
-			return "none"
-		}
-	}
-	preFailureAt := h.session["all_failure_at"]
-	preFailureRecoverAt := h.session["all_failure_recover_at"]
-	failure := NewFailureHandler("all", h.session)
-	count := getInt(h.session, "all_requests_count")
-	failureType := failure.HandleFailure(count, time.Now())
-	log.Printf(
-		"ALL FAILURE DEBUG count=%d type_in=%s type_out=%s units=%s consecutiveUnits=%s frequencyUnits=%s freq=%d consecutive=%d preFailureAt=%v preFailureRecoverAt=%v postFailureAt=%v postFailureRecoverAt=%v file=%s",
-		count,
-		getString(h.session, "all_failure_type"),
-		failureType,
-		failure.failureUnits,
-		failure.consecutiveUnits,
-		failure.frequencyUnits,
-		failure.failureFrequency,
-		failure.consecutive,
-		preFailureAt,
-		preFailureRecoverAt,
-		failure.failureAt,
-		failure.failureRecoverAt,
-		filename,
-	)
-	h.session["all_failure_at"] = failure.failureAt
-	h.session["all_failure_recover_at"] = failure.failureRecoverAt
-	if failure.resetFailureType != nil {
-		h.session["all_failure_type"] = failure.resetFailureType
-		h.session["all_reset_failure_type"] = nil
-		h.session["control_revision"] = newControlRevision()
-	}
-	return failureType
-}
-
-func (h *RequestHandler) handleFailure(prefix, countKey string) string {
-	count := getInt(h.session, countKey) + 1
-	h.session[countKey] = count
-	failure := NewFailureHandler(prefix, h.session)
-	failureType := failure.HandleFailure(count, time.Now())
-	if prefix == "segment" {
-		log.Printf(
-			"SEGMENT FAILURE DEBUG count=%d type=%s units=%s consecutiveUnits=%s frequencyUnits=%s freq=%d consecutive=%d failureAt=%v recoverAt=%v resetType=%v",
-			count,
-			failure.failureType,
-			failure.failureUnits,
-			failure.consecutiveUnits,
-			failure.frequencyUnits,
-			failure.failureFrequency,
-			failure.consecutive,
-			failure.failureAt,
-			failure.failureRecoverAt,
-			failure.resetFailureType,
-		)
-	}
-	h.session[prefix+"_failure_at"] = failure.failureAt
-	h.session[prefix+"_failure_recover_at"] = failure.failureRecoverAt
-	if failure.resetFailureType != nil {
-		h.session[prefix+"_failure_type"] = failure.resetFailureType
-		h.session[prefix+"_reset_failure_type"] = nil
-		h.session["control_revision"] = newControlRevision()
-	}
-	return failureType
-}
-
-func (h *RequestHandler) handleManifestFailure(filename string) string {
-	h.session["manifest_requests_count"] = getInt(h.session, "manifest_requests_count") + 1
-	manifestURLs := getStringSlice(h.session, "manifest_failure_urls")
-	match := shouldApplyFailure(manifestURLs, filename, pathParent(filename))
-	if !match {
-		return "none"
-	}
-	failure := NewFailureHandler("manifest", h.session)
-	failureType := failure.HandleFailure(getInt(h.session, "manifest_requests_count"), time.Now())
-	h.session["manifest_failure_at"] = failure.failureAt
-	h.session["manifest_failure_recover_at"] = failure.failureRecoverAt
-	if failure.resetFailureType != nil {
-		h.session["manifest_failure_type"] = failure.resetFailureType
-		h.session["manifest_reset_failure_type"] = nil
-		h.session["control_revision"] = newControlRevision()
-	}
-	return failureType
-}
-
-func (h *RequestHandler) handleSegmentFailure(filename string) string {
-	h.session["segments_count"] = getInt(h.session, "segments_count") + 1
-	segmentURLs := getStringSlice(h.session, "segment_failure_urls")
-	match := shouldApplyFailure(segmentURLs, filename, pathParent(filename))
-	if !match {
-		return "none"
-	}
-	failure := NewFailureHandler("segment", h.session)
-	failureType := failure.HandleFailure(getInt(h.session, "segments_count"), time.Now())
-	log.Printf(
-		"SEGMENT FAILURE DEBUG count=%d type=%s units=%s consecutiveUnits=%s frequencyUnits=%s freq=%d consecutive=%d failureAt=%v recoverAt=%v resetType=%v",
-		getInt(h.session, "segments_count"),
-		failure.failureType,
-		failure.failureUnits,
-		failure.consecutiveUnits,
-		failure.frequencyUnits,
-		failure.failureFrequency,
-		failure.consecutive,
-		failure.failureAt,
-		failure.failureRecoverAt,
-		failure.resetFailureType,
-	)
-	h.session["segment_failure_at"] = failure.failureAt
-	h.session["segment_failure_recover_at"] = failure.failureRecoverAt
-	if failure.resetFailureType != nil {
-		h.session["segment_failure_type"] = failure.resetFailureType
-		h.session["segment_reset_failure_type"] = nil
-		h.session["control_revision"] = newControlRevision()
-	}
-	return failureType
-}
-
-func shouldApplyFailure(entries []string, filename, variant string) bool {
-	if len(entries) == 0 {
-		return false
-	}
-	decodedFilename := filename
-	if unescaped, err := url.PathUnescape(filename); err == nil {
-		decodedFilename = unescaped
-	}
-	base := pathBase(decodedFilename)
-	decodedVariant := variant
-	if unescaped, err := url.PathUnescape(variant); err == nil {
-		decodedVariant = unescaped
-	}
-	for _, entry := range entries {
-		if entry == "" {
-			continue
-		}
-		decodedEntry := entry
-		if unescaped, err := url.PathUnescape(entry); err == nil {
-			decodedEntry = unescaped
-		}
-		entryBase := pathBase(decodedEntry)
-		if entryBase == "All" || decodedEntry == "All" {
-			return true
-		}
-		if decodedEntry == decodedVariant || entry == variant {
-			return true
-		}
-		if decodedEntry == base || entry == base {
-			return true
-		}
-		if strings.Contains(decodedFilename, decodedEntry) || strings.Contains(filename, entry) {
-			return true
-		}
-		if strings.Contains(entryBase, "playlist_") {
-			trimmed := strings.TrimSuffix(entryBase, ".m3u8")
-			parts := strings.Split(trimmed, "_")
-			if len(parts) > 0 {
-				candidate := parts[len(parts)-1]
-				if candidate != "" && strings.Contains(decodedFilename, "/"+candidate+"/") {
-					return true
+	a.mutateSessions(func(sessions []SessionData) ([]SessionData, bool) {
+		changed := false
+		for _, session := range sessions {
+			if getString(session, "group_id") == groupID {
+				for key, value := range updates {
+					session[key] = value
 				}
+				changed = true
 			}
 		}
-	}
-	return false
+		return sessions, changed
+	})
 }
 
 func updateSessionTraffic(session SessionData, bytesIn, bytesOut int64) {

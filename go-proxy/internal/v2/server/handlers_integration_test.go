@@ -179,16 +179,16 @@ func TestGet_PlayersByID_Projections_Telemetry(t *testing.T) {
 	pid := uuid.New().String()
 	a.addPlayer(pid, "rev1", map[string]any{
 		// Player metrics
-		"player_metrics_video_resolution":     "1920x1080",
-		"player_metrics_video_bitrate_mbps":   5.5,
-		"player_metrics_video_quality_pct":    72.5,
-		"player_metrics_buffer_depth_s":       12.3,
-		"player_metrics_stalls":               2,
-		"player_metrics_loop_count_player":    7,
-		"player_metrics_loop_count_increment": 1,
-		"player_metrics_profile_shift_count":  4,
-		"player_metrics_last_event":           "playing",
-		"player_metrics_source":               "avplayer-ios",
+		"player_metrics_video_resolution":    "1920x1080",
+		"player_metrics_video_bitrate_mbps":  5.5,
+		"player_metrics_video_quality_pct":   72.5,
+		"player_metrics_buffer_depth_s":      12.3,
+		"player_metrics_stalls":              2,
+		"player_metrics_loop_count_player":   7,
+		"player_metrics_loop_count_delta":    1,
+		"player_metrics_profile_shift_count": 4,
+		"player_metrics_last_event":          "playing",
+		"player_metrics_source":              "avplayer-ios",
 		// Server metrics (TCP_INFO + ICMP + bytes)
 		"client_rtt_ms":           42.0,
 		"client_rtt_min_ms":       12.0,
@@ -295,9 +295,9 @@ func TestGet_PlayersByID_Projections_TransferTimeouts(t *testing.T) {
 	a, _, ts := newTestServer(t)
 	pid := uuid.New().String()
 	a.addPlayer(pid, "rev1", map[string]any{
-		"transfer_active_timeout_seconds":   12,
-		"transfer_idle_timeout_seconds":     5,
-		"transfer_timeout_applies_segments": true,
+		"transfer_active_timeout_seconds":    12,
+		"transfer_idle_timeout_seconds":      5,
+		"transfer_timeout_applies_segments":  true,
 		"transfer_timeout_applies_manifests": true,
 	})
 	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
@@ -345,10 +345,10 @@ func TestGet_PlayersByID_Projections_Content(t *testing.T) {
 	a, _, ts := newTestServer(t)
 	pid := uuid.New().String()
 	a.addPlayer(pid, "rev1", map[string]any{
-		"content_strip_codecs":     true,
+		"content_strip_codecs":        true,
 		"content_overstate_bandwidth": true,
-		"content_live_offset":      18,
-		"content_allowed_variants": []any{"720p", "1080p"},
+		"content_live_offset":         18,
+		"content_allowed_variants":    []any{"720p", "1080p"},
 	})
 	_, body, _ := mustGet(t, ts, "/api/v2/players/"+pid)
 	var rec map[string]any
@@ -617,16 +617,49 @@ func TestPatch_ShapePatternDisarm(t *testing.T) {
 	}
 }
 
-func TestPatch_FaultRules_UnsupportedFilter_501(t *testing.T) {
+// TestPatch_FaultRules_RichFilterAccepted is the #919 reversal: variant / audio
+// / init / regex filters used to 501 (v1 couldn't express them). Now the native
+// engine evaluates fault_rules directly, so these must be ACCEPTED (200) and
+// round-trip on `_v2_fault_rules` — this is what lets the dashboard's scope line
+// actually save a scoped fault.
+func TestPatch_FaultRules_RichFilterAccepted(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	bodies := []string{
+		`{"fault_rules":[{"id":"r1","type":"500","filter":{"variant":{"rung_positions":["top"]}}}]}`,
+		`{"fault_rules":[{"id":"r2","type":"404","filter":{"request_kind":["audio_segment"]}}]}`,
+		`{"fault_rules":[{"id":"r3","type":"404","filter":{"request_kind":["init"]}}]}`,
+		`{"fault_rules":[{"id":"r4","type":"500","filter":{"url_match":{"mode":"regex","patterns":["seg_\\d+"]}}}]}`,
+	}
+	for _, body := range bodies {
+		pid := uuid.New().String()
+		initialRev := "2020-01-01T00:00:00.000000000Z"
+		a.addPlayer(pid, initialRev, nil)
+		status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+			map[string]string{"If-Match": `"` + initialRev + `"`})
+		if status != http.StatusOK {
+			t.Errorf("status %d, want 200 (rich filters must be accepted post-#919); body=%s", status, respBody)
+			continue
+		}
+		stored, _ := a.SessionByPlayerID(pid)
+		if rules, ok := stored["_v2_fault_rules"].([]any); !ok || len(rules) != 1 {
+			t.Errorf("rule not stored on _v2_fault_rules; body=%s stored=%v", body, stored["_v2_fault_rules"])
+		}
+	}
+}
+
+// TestPatch_FaultRules_MalformedStill400or501 keeps the genuine-input-error
+// rejections: a malformed filter / empty url patterns are client errors
+// regardless of engine.
+func TestPatch_FaultRules_MalformedStill400or501(t *testing.T) {
 	a, _, ts := newTestServer(t)
 	pid := uuid.New().String()
 	initialRev := "2020-01-01T00:00:00.000000000Z"
 	a.addPlayer(pid, initialRev, nil)
-	body := `{"fault_rules":[{"id":"r1","type":"500","filter":{"variant":{"rung_positions":["top"]}}}]}`
+	body := `{"fault_rules":[{"id":"r1","type":"500","filter":{"url_match":{"mode":"substring","patterns":[]}}}]}`
 	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
 		map[string]string{"If-Match": `"` + initialRev + `"`})
-	if status != http.StatusNotImplemented {
-		t.Errorf("status %d, want 501; body=%s", status, respBody)
+	if status == http.StatusOK {
+		t.Errorf("empty url_match.patterns should be rejected, got 200; body=%s", respBody)
 	}
 }
 
@@ -642,12 +675,18 @@ func TestPatch_FaultRules_RoundTrip(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status %d body=%s", status, respBody)
 	}
+	// #925: faults persist ONLY on _v2_fault_rules (no v1 surface projection).
 	stored, _ := a.SessionByPlayerID(pid)
-	if stored["segment_failure_type"] != "500" {
-		t.Errorf("segment_failure_type = %v, want 500", stored["segment_failure_type"])
+	rules, ok := stored["_v2_fault_rules"].([]any)
+	if !ok || len(rules) != 1 {
+		t.Fatalf("_v2_fault_rules = %v, want one rule", stored["_v2_fault_rules"])
 	}
-	if stored["segment_failure_frequency"] != 5 {
-		t.Errorf("segment_failure_frequency = %v, want 5", stored["segment_failure_frequency"])
+	rule, _ := rules[0].(map[string]any)
+	if rule["type"] != "500" {
+		t.Errorf("rule.type = %v, want 500", rule["type"])
+	}
+	if f, _ := numericFloat(rule["frequency"]); f != 5 {
+		t.Errorf("rule.frequency = %v, want 5", rule["frequency"])
 	}
 }
 
@@ -664,8 +703,12 @@ func TestPost_FaultRule_AppendOne(t *testing.T) {
 		t.Fatalf("status %d body=%s", status, respBody)
 	}
 	stored, _ := a.SessionByPlayerID(pid)
-	if stored["segment_failure_type"] != "500" {
-		t.Errorf("segment_failure_type = %v, want 500", stored["segment_failure_type"])
+	rules, _ := stored["_v2_fault_rules"].([]any)
+	if len(rules) != 1 {
+		t.Fatalf("_v2_fault_rules = %v, want one appended rule", stored["_v2_fault_rules"])
+	}
+	if rule, _ := rules[0].(map[string]any); rule["type"] != "500" {
+		t.Errorf("rule.type = %v, want 500", rules[0])
 	}
 }
 
@@ -689,9 +732,9 @@ func TestDelete_FaultRule(t *testing.T) {
 		t.Fatalf("status %d", status)
 	}
 	stored, _ = a.SessionByPlayerID(pid)
-	// segment surface should be cleared after the delete.
-	if stored["segment_failure_type"] != "none" {
-		t.Errorf("segment_failure_type after delete = %v, want none", stored["segment_failure_type"])
+	// The rule is gone from the array after delete.
+	if rules, _ := stored["_v2_fault_rules"].([]any); len(rules) != 0 {
+		t.Errorf("_v2_fault_rules after delete = %v, want empty", stored["_v2_fault_rules"])
 	}
 }
 
@@ -731,6 +774,117 @@ func TestPatch_ShapeRoundTrip(t *testing.T) {
 	if !found {
 		t.Errorf("ApplyShapeToPlayer not called for %s; calls=%v", pid, calls)
 	}
+}
+
+// TestPatch_ImpairmentKnobsRoundTrip is the regression guard for the #826
+// flash-then-reset-to-0 bug: jitter_ms / loss_correlation_pct /
+// jitter_correlation_pct were missing from unsupportedPaths, so a PATCH
+// touching them 501'd and the dashboard rolled the optimistic update back to 0.
+// They must be ADMITTED (200, not 501), STORED on the session, and trigger the
+// kernel apply.
+func TestPatch_ImpairmentKnobsRoundTrip(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	body := `{"shape":{"delay_ms":150,"loss_pct":3,"jitter_ms":80,"loss_correlation_pct":50,"jitter_correlation_pct":25}}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("status %d body=%s (impairment knobs must be supported paths, not 501)", status, respBody)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	if stored["nftables_jitter_ms"] != 80 {
+		t.Errorf("nftables_jitter_ms = %v, want 80", stored["nftables_jitter_ms"])
+	}
+	if stored["nftables_loss_correlation_pct"] != float64(50) {
+		t.Errorf("nftables_loss_correlation_pct = %v, want 50", stored["nftables_loss_correlation_pct"])
+	}
+	if stored["nftables_jitter_correlation_pct"] != float64(25) {
+		t.Errorf("nftables_jitter_correlation_pct = %v, want 25", stored["nftables_jitter_correlation_pct"])
+	}
+	// The PATCH response shape must round-trip the knobs back so the dashboard
+	// slider reads the real value instead of resetting to 0.
+	rb := string(respBody)
+	if !strings.Contains(rb, `"jitter_ms":80`) ||
+		!strings.Contains(rb, `"loss_correlation_pct":50`) ||
+		!strings.Contains(rb, `"jitter_correlation_pct":25`) {
+		t.Errorf("PATCH response shape did not round-trip impairment knobs; body=%s", rb)
+	}
+	// A jitter-only edit must also fire the kernel apply (shapeFieldsTouched).
+	a.mu.Lock()
+	calls := append([]string{}, a.shapeApplyCalls...)
+	a.mu.Unlock()
+	found := false
+	for _, p := range calls {
+		if p == pid {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ApplyShapeToPlayer not called for %s; calls=%v", pid, calls)
+	}
+}
+
+// TestPatch_ShapingMode_DegradeAndClear is the #920 parity guard: a v2
+// `shape.mode` PATCH must drive v1's `shaping_forced_mode` and fire the kernel
+// gate reconcile (ApplyShapingModeToPlayer) — the same effect the legacy
+// POST /api/nftables/shaping-mode endpoint had. This is the field that
+// unblocks the #919 native-evaluator refactor.
+func TestPatch_ShapingMode_DegradeAndClear(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	pid := uuid.New().String()
+	initialRev := "2020-01-01T00:00:00.000000000Z"
+	a.addPlayer(pid, initialRev, nil)
+
+	// Degrade: shape.mode=http_only → v1 shaping_forced_mode="http-only".
+	body := `{"shape":{"mode":"http_only"}}`
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, body,
+		map[string]string{"If-Match": `"` + initialRev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("degrade status %d body=%s (shape.mode must be a supported path, not 501)", status, respBody)
+	}
+	stored, _ := a.SessionByPlayerID(pid)
+	if stored["shaping_forced_mode"] != "http-only" {
+		t.Errorf("shaping_forced_mode = %v, want %q", stored["shaping_forced_mode"], "http-only")
+	}
+	// Response shape must round-trip the mode so the dashboard control reflects it.
+	if !strings.Contains(string(respBody), `"mode":"http_only"`) {
+		t.Errorf("PATCH response did not round-trip shape.mode; body=%s", respBody)
+	}
+	// The kernel gate reconcile must have fired.
+	a.mu.Lock()
+	degradeCalls := append([]string{}, a.shapingModeApplyCalls...)
+	a.mu.Unlock()
+	if !containsString(degradeCalls, pid) {
+		t.Errorf("ApplyShapingModeToPlayer not called on degrade for %s; calls=%v", pid, degradeCalls)
+	}
+
+	// Clear: shape.mode=kernel → v1 shaping_forced_mode="" (inherit host caps).
+	rev2, _ := stored["control_revision"].(string)
+	if rev2 == "" {
+		t.Fatalf("no control_revision after degrade PATCH; stored=%v", stored["control_revision"])
+	}
+	status2, respBody2, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+pid, `{"shape":{"mode":"kernel"}}`,
+		map[string]string{"If-Match": `"` + rev2 + `"`})
+	if status2 != http.StatusOK {
+		t.Fatalf("clear status %d body=%s", status2, respBody2)
+	}
+	stored2, _ := a.SessionByPlayerID(pid)
+	if stored2["shaping_forced_mode"] != "" {
+		t.Errorf("shaping_forced_mode after clear = %v, want empty", stored2["shaping_forced_mode"])
+	}
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPatch_TransportFault_ArmsKernel(t *testing.T) {
@@ -948,6 +1102,128 @@ func TestPatch_GroupedMember_Broadcasts(t *testing.T) {
 	}
 }
 
+// TestPatch_DisplayOnlyGroup_NoBroadcast covers the connect-param display-only
+// group: two sessions share a group_id but were born with group_broadcast=false
+// (the startup fleet path). A PATCH to one member must NOT mirror to the other —
+// each device is shaped/labelled independently, even though the dashboard charts
+// them together by group_id.
+func TestPatch_DisplayOnlyGroup_NoBroadcast(t *testing.T) {
+	a, _, ts := newTestServer(t)
+	p1, p2 := uuid.New().String(), uuid.New().String()
+	rev := "2020-01-01T00:00:00.000000000Z"
+	// Born-grouped display-only (what the proxy's connect path writes when the
+	// bootstrap carries group_id=G1&group_broadcast=false).
+	a.addSession(map[string]any{
+		"player_id": p1, "session_id": "s1", "control_revision": rev,
+		"group_id": "G1", "group_broadcast": false,
+	})
+	a.addSession(map[string]any{
+		"player_id": p2, "session_id": "s2", "control_revision": rev,
+		"group_id": "G1", "group_broadcast": false,
+	})
+
+	// PATCH p1's labels — must NOT reach p2.
+	status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+p1,
+		`{"labels":{"only":"p1"}}`,
+		map[string]string{"If-Match": `"` + rev + `"`})
+	if status != http.StatusOK {
+		t.Fatalf("PATCH p1 %d body=%s", status, respBody)
+	}
+	stored2, _ := a.SessionByPlayerID(p2)
+	l2, _ := stored2["_v2_labels"].(map[string]any)
+	if l2["only"] == "p1" {
+		t.Errorf("p2 received p1's label — display-only group still broadcast: %v", l2)
+	}
+}
+
+// TestPatch_BroadcastOverride covers the per-mutation ?broadcast=true|false
+// query param (#766). The override wins over the group's connect-time default
+// for a single PATCH: it can suppress fan-out on a broadcast=true group, and it
+// can force fan-out on a display-only (group_broadcast=false) group. Drives both
+// directions; mirrors TestPatch_GroupedMember_Broadcasts' labels-based assert.
+func TestPatch_BroadcastOverride(t *testing.T) {
+	// labelOf reads a member's stored _v2_labels[key].
+	labelOf := func(a *fakeAdapter, pid, key string) any {
+		stored, _ := a.SessionByPlayerID(pid)
+		l, _ := stored["_v2_labels"].(map[string]any)
+		return l[key]
+	}
+
+	// newBroadcastGroup wires p1+p2 into a real broadcast=true group (the POST
+	// path) and returns p1's post-grouping control_revision for the If-Match.
+	newBroadcastGroup := func(t *testing.T, a *fakeAdapter, ts *httptest.Server) (p1, p2, rev1 string) {
+		p1, p2 = uuid.New().String(), uuid.New().String()
+		a.addPlayer(p1, "rev1", nil)
+		a.addPlayer(p2, "rev2", nil)
+		body, _ := json.Marshal(map[string]any{"member_player_ids": []string{p1, p2}})
+		mustDo(t, ts, "POST", "/api/v2/player-groups", string(body), nil)
+		stored1, _ := a.SessionByPlayerID(p1)
+		return p1, p2, asString(stored1["control_revision"])
+	}
+
+	t.Run("broadcast_group/override_false_isolates", func(t *testing.T) {
+		a, _, ts := newTestServer(t)
+		p1, p2, rev1 := newBroadcastGroup(t, a, ts)
+
+		// ?broadcast=false on a broadcast=true group → THIS patch must not fan out.
+		status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+p1+"?broadcast=false",
+			`{"labels":{"only":"p1"}}`,
+			map[string]string{"If-Match": `"` + rev1 + `"`})
+		if status != http.StatusOK {
+			t.Fatalf("PATCH p1 %d body=%s", status, respBody)
+		}
+		if got := labelOf(a, p1, "only"); got != "p1" {
+			t.Errorf("p1 label = %v, want only=p1", got)
+		}
+		if got := labelOf(a, p2, "only"); got == "p1" {
+			t.Errorf("p2 received p1's label despite ?broadcast=false: %v", got)
+		}
+	})
+
+	t.Run("broadcast_group/override_true_fans_out", func(t *testing.T) {
+		a, _, ts := newTestServer(t)
+		p1, p2, rev1 := newBroadcastGroup(t, a, ts)
+
+		// ?broadcast=true matches the group default → still fans out (override
+		// is a no-op relative to the connect-time mode here).
+		status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+p1+"?broadcast=true",
+			`{"labels":{"only":"p1"}}`,
+			map[string]string{"If-Match": `"` + rev1 + `"`})
+		if status != http.StatusOK {
+			t.Fatalf("PATCH p1 %d body=%s", status, respBody)
+		}
+		if got := labelOf(a, p2, "only"); got != "p1" {
+			t.Errorf("p2 label = %v, want only=p1 (override-true should broadcast)", got)
+		}
+	})
+
+	t.Run("display_only_group/override_true_forces_broadcast", func(t *testing.T) {
+		a, _, ts := newTestServer(t)
+		p1, p2 := uuid.New().String(), uuid.New().String()
+		rev := "2020-01-01T00:00:00.000000000Z"
+		// Born display-only (group_broadcast=false) — the startup-fleet path.
+		a.addSession(map[string]any{
+			"player_id": p1, "session_id": "s1", "control_revision": rev,
+			"group_id": "G1", "group_broadcast": false,
+		})
+		a.addSession(map[string]any{
+			"player_id": p2, "session_id": "s2", "control_revision": rev,
+			"group_id": "G1", "group_broadcast": false,
+		})
+
+		// ?broadcast=true overrides the display-only default → forces fan-out to p2.
+		status, respBody, _ := mustDo(t, ts, "PATCH", "/api/v2/players/"+p1+"?broadcast=true",
+			`{"labels":{"only":"p1"}}`,
+			map[string]string{"If-Match": `"` + rev + `"`})
+		if status != http.StatusOK {
+			t.Fatalf("PATCH p1 %d body=%s", status, respBody)
+		}
+		if got := labelOf(a, p2, "only"); got != "p1" {
+			t.Errorf("p2 label = %v, want only=p1 (?broadcast=true should force fan-out)", got)
+		}
+	})
+}
+
 // ----- Plays --------------------------------------------------------------
 
 func TestGet_PlaysPlayId_404_Unknown(t *testing.T) {
@@ -1068,8 +1344,8 @@ func TestPost_PlayFaultRule_Append(t *testing.T) {
 		t.Fatalf("status %d body=%s", status, respBody)
 	}
 	stored, _ = a.SessionByPlayerID(pid)
-	if stored["segment_failure_type"] != "500" {
-		t.Errorf("segment_failure_type = %v, want 500", stored["segment_failure_type"])
+	if rules, _ := stored["_v2_fault_rules"].([]any); len(rules) == 0 {
+		t.Errorf("_v2_fault_rules = %v, want the appended play rule", stored["_v2_fault_rules"])
 	}
 }
 

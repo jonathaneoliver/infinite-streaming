@@ -1,0 +1,18 @@
+# #942 verification: two iOS sims, two servers. control streams against test-dev
+# (:21000, full kernel stack), variant against the degraded stack (:28000). Same
+# content, no shaping/pattern — the ONLY thing that varies is the server, so a
+# clean run proves the per-launch -is.server_url override routes each arm to its
+# own backend (each play lands in its own server's archive).
+name: server-split
+class: config
+parallel: true
+reps: 1
+duration_s: 90
+defaults:
+  platform: ipad-sim
+  content: insane_newer_p200_h264
+groups:
+  - id: srv
+    control: { server: https://dev.jeoliver.com:21000 }
+    variants:
+      - { server: https://dev.jeoliver.com:28000 }

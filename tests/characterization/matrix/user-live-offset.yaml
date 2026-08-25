@@ -1,0 +1,31 @@
+# User (app) live-offset honored-band study — does is.live_offset (the
+# Settings→Advanced Live Offset seek) take effect, and where does AVPlayer
+# override it? Two hypotheses, resolved by the sub-3×seg arms:
+#   H-floor: ignored until N ≥ 3×max-seg (s6~21, s2~9, s1~3-6) → wall stays ~3×seg
+#   H-seek : honored down to the seekable end-gap (~1-2 seg) → wall ≈ N
+# No shaping — plain play, full bandwidth; only the live offset varies.
+# Signal is player_metrics wall_offset (seekable_end − position), read manually
+# (the #793 gate only scores the manifest lever via recommended_offset_s).
+name: user-live-offset
+class: config
+duration_s: 60
+reps: 1
+defaults:
+  platform: ipad-sim
+  is.protocol: hls
+  content: insane_newer_p200_h264
+arms:
+  # s6 sweep — dense around the 21s (3×seg) threshold, below and above
+  - { id: U-s6-00, is.segment: s6, is.live_offset: 0 }   # baseline / no-op → native ~21
+  - { id: U-s6-06, is.segment: s6, is.live_offset: 6 }   # both models say "not 6"
+  - { id: U-s6-12, is.segment: s6, is.live_offset: 12 }  # ⭐ H-floor:~21  H-seek:~12
+  - { id: U-s6-18, is.segment: s6, is.live_offset: 18 }  # ⭐ H-floor:~21  H-seek:~18
+  - { id: U-s6-24, is.segment: s6, is.live_offset: 24 }  # honored (just above floor)
+  - { id: U-s6-30, is.segment: s6, is.live_offset: 30 }  # honored, deeper than native
+  # segment moves the threshold — straddle each segment's 3×seg
+  - { id: U-s2-06, is.segment: s2, is.live_offset: 6 }   # is s2 threshold ~9?
+  - { id: U-s2-12, is.segment: s2, is.live_offset: 12 }  # above s2 floor
+  - { id: U-s1-02, is.segment: s1, is.live_offset: 2 }   # is s1 threshold ~3-6?
+  - { id: U-s1-06, is.segment: s1, is.live_offset: 6 }   # above s1 floor
+  # precedence — both levers in the honored regime; which wins the playhead?
+  - { id: UX-s6, is.segment: s6, is.live_offset: 24, proxy.live_offset: 30, reps: 3 }

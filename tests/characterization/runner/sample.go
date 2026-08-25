@@ -49,7 +49,7 @@ type Sample struct {
 	// (100 Mbps cap) is what seeds this with a reasonable baseline before
 	// the sweep begins.
 	AvgNetworkBitrateMbps float64   `json:"avg_network_bitrate_mbps,omitempty"`
-	DroppedFrames         int       `json:"dropped_frames"`
+	FramesDropped         int       `json:"frames_dropped"`
 	PositionS             float64   `json:"position_s"`
 	// VariantIdx is what the player is currently *fetching*, derived from
 	// video_bitrate_mbps (closest variant by raw rate). Leading indicator
@@ -163,7 +163,7 @@ func (s *Sampler) tick(ctx context.Context) {
 		VideoResolution:       m.VideoResolution,
 		NetworkBitrateMbps:    m.NetworkBitrateMbps,
 		AvgNetworkBitrateMbps: m.AvgNetworkBitrateMbps,
-		DroppedFrames:         m.DroppedFrames,
+		FramesDropped:         m.FramesDropped,
 		PositionS:             m.PositionS,
 	})
 }

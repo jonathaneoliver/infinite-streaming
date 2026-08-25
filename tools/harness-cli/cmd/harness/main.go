@@ -67,6 +67,14 @@ Operator/CLI:
   finding add <target>         capture state+note into .claude/findings/
   procedure soak|abr-sweep|fault-soak <target>
                                multi-step composed test procedures
+  sweep seed|status|ls|next    automated fault-sweep queue (#772)
+  devices [--free]             list the live Appium device-farm roster —
+                               capability + availability (--free = only
+                               allocatable right now; #948)
+  char matrix <spec.yaml>      run a declarative YAML characterization
+                               matrix: axes → cartesian arms, per-arm
+                               config-on-connect + probe + offset table
+                               (--dry-run to just expand; #811)
   post characterization <file> upload a characterization-test report
                                JSON to the forwarder (test framework
                                calls this from WriteReport)
@@ -120,6 +128,8 @@ func main() {
 		exit(cmdFault(client, args[1:], g.asJSON))
 	case "shape":
 		exit(cmdShape(client, args[1:], g.asJSON))
+	case "reset":
+		exit(cmdReset(client, args[1:], g.asJSON))
 	case "tail":
 		exit(cmdTail(client, args[1:], g.asJSON))
 	case "ts":
@@ -141,6 +151,8 @@ func main() {
 		exit(cmdTimeouts(client, args[1:], g.asJSON))
 	case "content":
 		exit(cmdContent(client, args[1:], g.asJSON))
+	case "app-config", "appconfig":
+		exit(cmdAppConfig(client, args[1:], g.asJSON))
 	case "play":
 		exit(cmdPlay(client, args[1:], g.asJSON))
 	case "network":
@@ -161,6 +173,12 @@ func main() {
 		exit(cmdFinding(client, args[1:], g.asJSON))
 	case "procedure":
 		exit(cmdProcedure(client, args[1:], g.asJSON))
+	case "sweep":
+		exit(cmdSweep(client, args[1:], g.asJSON))
+	case "char":
+		exit(cmdChar(client, args[1:], g.asJSON))
+	case "devices":
+		exit(cmdDevices(args[1:], g.asJSON))
 	case "post":
 		exit(cmdPost(client, args[1:], g.asJSON))
 	case "help", "--help", "-h":

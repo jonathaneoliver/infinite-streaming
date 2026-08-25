@@ -28,6 +28,22 @@ var (
 	goLiveDir          = getEnv("GO_LIVE_OUTPUT_DIR", filepath.Join(infiniteContentDir, "go-live"))
 )
 
+// BuildVersion is the go-live build identifier (git SHA), injected at compile
+// time via -ldflags "-X .../internal/api.BuildVersion=<sha>". Empty on a
+// plain `go build` (local dev). #679: it rides the X-Served-By response
+// header so the proxy captures it and the forwarder can stamp each play's
+// scenario.server_build with the build that served it.
+var BuildVersion string
+
+// servedBy is the X-Served-By header value: "go-live" for an un-stamped dev
+// build, "go-live/<build>" once compiled with the ldflags above.
+func servedBy() string {
+	if BuildVersion == "" {
+		return "go-live"
+	}
+	return "go-live/" + BuildVersion
+}
+
 var llhlsGen = &generator.LLHLSGenerator{}
 
 type dashCacheEntry struct {
@@ -166,7 +182,7 @@ type Handler struct {
 }
 
 func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	w.Write([]byte("go-live OK"))
 }
 
@@ -212,7 +228,7 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -229,7 +245,7 @@ func (h *Handler) TickStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	json.NewEncoder(w).Encode(stats)
 }
 
@@ -251,7 +267,7 @@ func (h *Handler) DashTickStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	json.NewEncoder(w).Encode(stats)
 }
 
@@ -369,6 +385,7 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 	}
 	content := worker.content
 	inputPath := worker.inputPath
+	workerStart := time.Now()
 	logf("[GO-LIVE] HLS worker started: content=%s\n", content)
 	logf("  Input: %s\n", inputPath)
 
@@ -427,18 +444,30 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 	}
 
 	llMasterWritten := false
+	master1sWritten := false
 	master2sWritten := false
 	master6sWritten := false
+	// One-shot "content fully warm" timing: how long from worker spawn until all
+	// three master playlists (LL + 2s + 6s) are generated — i.e. how long a
+	// pre-warm curl must wait before every variant is discoverable. The per-
+	// variant media-playlist gen times are logged separately below.
+	warmupLogged := false
 	lastLLUpdate := time.Time{}
 	lastSegLL := int64(-1)
+	lastSeg1 := int64(-1)
 	lastSeg2 := int64(-1)
 	lastSeg6 := int64(-1)
 	loopCountLL := 0
+	loopCount1 := 0
 	loopCount2 := 0
 	loopCount6 := 0
 	lastDashSeg2 := int64(-1)
 	lastDashSeg6 := int64(-1)
 	var recentLLTicks []struct {
+		at  time.Time
+		dur time.Duration
+	}
+	var recent1sTicks []struct {
 		at  time.Time
 		dur time.Duration
 	}
@@ -494,6 +523,17 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 				llMasterWritten = true
 			}
 		}
+		if !master1sWritten {
+			masterData, err := os.ReadFile(inputPath)
+			if err == nil {
+				updated := rewriteMasterForDuration(masterData, "1s", variantURIs, audioURIs)
+				if err := fileutil.WriteAtomic(durationOutputPath(content, durationMasterFilename("1s")), updated); err == nil {
+					master1sWritten = true
+				} else {
+					logf("ERROR: Failed to write 1s master playlist: %v\n", err)
+				}
+			}
+		}
 		if !master2sWritten {
 			masterData, err := os.ReadFile(inputPath)
 			if err == nil {
@@ -515,6 +555,11 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 					logf("ERROR: Failed to write 6s master playlist: %v\n", err)
 				}
 			}
+		}
+		if !warmupLogged && llMasterWritten && master1sWritten && master2sWritten && master6sWritten {
+			warmupLogged = true
+			logf("[GO-LIVE][WARMUP] all master playlists ready: content=%s warmup=%.3fs variants=%d\n",
+				content, time.Since(workerStart).Seconds(), len(variantURIs))
 		}
 
 		updatedLL := false
@@ -544,6 +589,8 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 					loopCountLL,
 					minDuration,
 					maxDuration,
+					totalDuration,
+					timeOffset,
 				)
 				if err != nil {
 					logf("ERROR: Failed to generate variant %s: %v\n", variant.URI, err)
@@ -571,6 +618,8 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 					loopCountLL,
 					minDuration,
 					maxDuration,
+					totalDuration,
+					timeOffset,
 				)
 				if err != nil {
 					logf("ERROR: Failed to generate audio %s: %v\n", audioURI, err)
@@ -616,6 +665,121 @@ func runUnifiedHLSWorker(ctx context.Context, worker *hlsWorker) {
 			lastLLUpdate = now
 			updatedLL = true
 			_ = updatedLL
+		}
+
+		currentSeg1 := int64(math.Floor(timeOffset / 1.0))
+		if lastSeg1 >= 0 && currentSeg1 < lastSeg1 {
+			loopCount1++
+			logf("[GO-LIVE:LOOP][1s] wrap_detected content=%s loop_count=%d prev_seg=%d seg=%d\n", content, loopCount1, lastSeg1, currentSeg1)
+		}
+		if currentSeg1 != lastSeg1 {
+			tickStart := time.Now()
+			for _, variant := range masterInfo.MasterPlaylist.Variants {
+				if variant == nil {
+					continue
+				}
+				variantInfo, byteranges, err := loader.LoadPlaylistInfoWithByteranges(folder, variant.URI)
+				if err != nil {
+					logf("ERROR: Failed to load variant %s: %v\n", variant.URI, err)
+					continue
+				}
+				variantFilename := filepath.Base(variant.URI)
+				if strings.Contains(variant.URI, "/") {
+					variantFilename = variant.URI
+				}
+				variantOutputPath := durationVariantOutputPath(content, "1s", variantFilename)
+				os.MkdirAll(filepath.Dir(variantOutputPath), 0755)
+				rangeGen := &generator.RangeHLSGenerator{}
+				playlistContent, err := rangeGen.GenerateVariantPlaylist(
+					variantInfo.MediaPlaylist,
+					byteranges,
+					variantInfo.RelPath,
+					variantInfo.SegmentMap,
+					timeNow,
+					loopCount1,
+					minDuration,
+					maxDuration,
+					"1s",
+					prefix,
+					content,
+					totalDuration,
+					timeOffset,
+				)
+				if err != nil {
+					logf("ERROR: Failed to generate 1s variant %s: %v\n", variant.URI, err)
+					continue
+				}
+				if err := fileutil.WriteAtomic(variantOutputPath, []byte(playlistContent)); err != nil {
+					logf("ERROR: Failed to write 1s variant %s: %v\n", variant.URI, err)
+					continue
+				}
+			}
+			for _, audioURI := range audioURIs {
+				variantInfo, byteranges, err := loader.LoadPlaylistInfoWithByteranges(folder, audioURI)
+				if err != nil {
+					logf("ERROR: Failed to load audio %s: %v\n", audioURI, err)
+					continue
+				}
+				audioOutputPath := durationVariantOutputPath(content, "1s", audioURI)
+				os.MkdirAll(filepath.Dir(audioOutputPath), 0755)
+				rangeGen := &generator.RangeHLSGenerator{}
+				playlistContent, err := rangeGen.GenerateVariantPlaylist(
+					variantInfo.MediaPlaylist,
+					byteranges,
+					variantInfo.RelPath,
+					variantInfo.SegmentMap,
+					timeNow,
+					loopCount1,
+					minDuration,
+					maxDuration,
+					"1s",
+					prefix,
+					content,
+					totalDuration,
+					timeOffset,
+				)
+				if err != nil {
+					logf("ERROR: Failed to generate 1s audio %s: %v\n", audioURI, err)
+					continue
+				}
+				if err := fileutil.WriteAtomic(audioOutputPath, []byte(playlistContent)); err != nil {
+					logf("ERROR: Failed to write 1s audio %s: %v\n", audioURI, err)
+					continue
+				}
+			}
+			tickElapsed := time.Since(tickStart)
+			recent1sTicks = append(recent1sTicks, struct {
+				at  time.Time
+				dur time.Duration
+			}{at: time.Now(), dur: tickElapsed})
+			cutoff := time.Now().Add(-5 * time.Minute)
+			total := time.Duration(0)
+			count := 0
+			pruned := recent1sTicks[:0]
+			for _, sample := range recent1sTicks {
+				if sample.at.After(cutoff) {
+					pruned = append(pruned, sample)
+					total += sample.dur
+					count++
+				}
+			}
+			recent1sTicks = pruned
+			avg := 0.0
+			if count > 0 {
+				avg = total.Seconds() / float64(count)
+			}
+			logf("[GO-LIVE:HLS][1s] tick=%.3fs avg_5m=%.3fs\n",
+				tickElapsed.Seconds(), avg)
+			rangeTickMu.Lock()
+			rangeTickByKey[fmt.Sprintf("%s|%s", content, "1s")] = tickStats{
+				LastTick:  tickElapsed.Seconds(),
+				Avg5m:     avg,
+				Variants:  len(masterInfo.MasterPlaylist.Variants),
+				Audio:     len(audioURIs),
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			}
+			rangeTickMu.Unlock()
+			lastSeg1 = currentSeg1
 		}
 
 		currentSeg2 := int64(math.Floor(timeOffset / 2.0))
@@ -1028,7 +1192,7 @@ func (h *Handler) ServeSegment(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	http.ServeFile(w, r, segmentPath)
 }
 
@@ -1046,7 +1210,11 @@ func (h *Handler) OnDemandDashManifest(w http.ResponseWriter, r *http.Request) {
 
 	variant, duration, llMode, mpdPathForLoad := parseDashVariant(pathPart)
 	if variant == "ll" {
-		if strings.Contains(pathPart, "manifest_2s.mpd") {
+		if strings.Contains(pathPart, "manifest_1s.mpd") {
+			variant = "1s"
+			duration = 1
+			llMode = false
+		} else if strings.Contains(pathPart, "manifest_2s.mpd") {
 			variant = "2s"
 			duration = 2
 			llMode = false
@@ -1055,6 +1223,10 @@ func (h *Handler) OnDemandDashManifest(w http.ResponseWriter, r *http.Request) {
 			duration = 6
 			llMode = false
 		}
+	}
+
+	if rejectPinnedVariant(w, content, variant, duration, llMode) {
+		return
 	}
 
 	mpdRelPath := filepath.Clean(filepath.Join(content, mpdPathForLoad))
@@ -1095,7 +1267,7 @@ func (h *Handler) OnDemandDashManifest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(cached)))
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	w.Write(cached)
 }
 
@@ -1137,6 +1309,11 @@ func parseDashVariant(pathPart string) (string, int, bool, string) {
 	lookupBase := base
 
 	switch base {
+	case "manifest_1s.mpd":
+		variant = "1s"
+		duration = 1
+		llMode = false
+		lookupBase = "manifest.mpd"
 	case "manifest_2s.mpd":
 		variant = "2s"
 		duration = 2
@@ -1150,7 +1327,7 @@ func parseDashVariant(pathPart string) (string, int, bool, string) {
 	case "manifest.mpd":
 		variant = "ll"
 	default:
-		if len(parts) >= 2 && (parts[0] == "2s" || parts[0] == "6s") {
+		if len(parts) >= 2 && (parts[0] == "1s" || parts[0] == "2s" || parts[0] == "6s") {
 			variant = parts[0]
 			llMode = false
 			if parsed, err := strconv.Atoi(strings.TrimSuffix(parts[0], "s")); err == nil {
@@ -1180,6 +1357,7 @@ func runDashGeneratorAll(ctx context.Context, genKey string, mpdData *dash.MPDDa
 
 	variants := []dashVariantSpec{
 		{name: "ll", duration: 6, llMode: true},
+		{name: "1s", duration: 1, llMode: false},
 		{name: "2s", duration: 2, llMode: false},
 		{name: "6s", duration: 6, llMode: false},
 	}
@@ -1289,9 +1467,9 @@ func runDashGeneratorAll(ctx context.Context, genKey string, mpdData *dash.MPDDa
 			}
 			dashCacheMu.Unlock()
 
-			logf("[GO-LIVE:DASH] Tick generation: total=%.3fs avg_5m=%.3fs content=%s ll=%.3fs 2s=%.3fs 6s=%.3fs\n",
+			logf("[GO-LIVE:DASH] Tick generation: total=%.3fs avg_5m=%.3fs content=%s ll=%.3fs 1s=%.3fs 2s=%.3fs 6s=%.3fs\n",
 				tickElapsed.Seconds(), avg, content,
-				durByVariant["ll"].Seconds(), durByVariant["2s"].Seconds(), durByVariant["6s"].Seconds())
+				durByVariant["ll"].Seconds(), durByVariant["1s"].Seconds(), durByVariant["2s"].Seconds(), durByVariant["6s"].Seconds())
 		}
 		select {
 		case <-ctx.Done():
@@ -1341,7 +1519,7 @@ func (h *Handler) ServeDashSegment(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	http.ServeFile(w, r, segmentPath)
 }
 
@@ -1393,7 +1571,7 @@ func (h *Handler) OnDemandMasterPlaylist(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	w.Write(data)
 }
 
@@ -1405,6 +1583,10 @@ func (h *Handler) OnDemandMasterPlaylistDuration(w http.ResponseWriter, r *http.
 	duration := vars["duration"]
 	prefix := routePrefix(r.URL.Path)
 	mode := "hls-" + duration
+
+	if rejectPinnedDurationLabel(w, content, duration) {
+		return
+	}
 
 	inputPath := filepath.Join(infiniteOutputDir, content, "master.m3u8")
 	if _, err := os.Stat(inputPath); os.IsNotExist(err) {
@@ -1449,7 +1631,7 @@ func (h *Handler) OnDemandMasterPlaylistDuration(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	w.Write(data)
 }
 
@@ -1460,9 +1642,11 @@ func (h *Handler) OnDemandVariantPlaylist(w http.ResponseWriter, r *http.Request
 	content := vars["content"]
 	variant := vars["variant"]
 
-	if strings.HasPrefix(variant, "master_2s") || strings.HasPrefix(variant, "master_6s") {
+	if strings.HasPrefix(variant, "master_1s") || strings.HasPrefix(variant, "master_2s") || strings.HasPrefix(variant, "master_6s") {
 		duration := "2s"
-		if strings.HasPrefix(variant, "master_6s") {
+		if strings.HasPrefix(variant, "master_1s") {
+			duration = "1s"
+		} else if strings.HasPrefix(variant, "master_6s") {
 			duration = "6s"
 		}
 		r = mux.SetURLVars(r, map[string]string{
@@ -1473,9 +1657,11 @@ func (h *Handler) OnDemandVariantPlaylist(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if strings.HasPrefix(variant, "playlist_2s_") || strings.HasPrefix(variant, "playlist_6s_") {
+	if strings.HasPrefix(variant, "playlist_1s_") || strings.HasPrefix(variant, "playlist_2s_") || strings.HasPrefix(variant, "playlist_6s_") {
 		duration := "2s"
-		if strings.HasPrefix(variant, "playlist_6s_") {
+		if strings.HasPrefix(variant, "playlist_1s_") {
+			duration = "1s"
+		} else if strings.HasPrefix(variant, "playlist_6s_") {
 			duration = "6s"
 		}
 		r = mux.SetURLVars(r, map[string]string{
@@ -1515,7 +1701,7 @@ func (h *Handler) OnDemandVariantPlaylist(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	w.Write(data)
 }
 
@@ -1527,6 +1713,11 @@ func (h *Handler) OnDemandVariantPlaylistDuration(w http.ResponseWriter, r *http
 	duration := vars["duration"]
 	variant := vars["variant"]
 	prefix := routePrefix(r.URL.Path)
+
+	if rejectPinnedDurationLabel(w, content, duration) {
+		return
+	}
+
 	inputPath := filepath.Join(infiniteOutputDir, content, "master.m3u8")
 	worker := ensureHLSWorker(h, content, inputPath, prefix)
 	if worker != nil {
@@ -1548,7 +1739,7 @@ func (h *Handler) OnDemandVariantPlaylistDuration(w http.ResponseWriter, r *http
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("X-Served-By", "go-live")
+	w.Header().Set("X-Served-By", servedBy())
 	w.Write(data)
 }
 
@@ -1659,6 +1850,8 @@ func runContinuousLLHLS(ctx context.Context, inputPath, outputPath, content stri
 				loopCount,
 				minDuration,
 				maxDuration,
+				0,
+				0,
 			)
 
 			if err != nil {
@@ -1694,6 +1887,8 @@ func runContinuousLLHLS(ctx context.Context, inputPath, outputPath, content stri
 				loopCount,
 				minDuration,
 				maxDuration,
+				0,
+				0,
 			)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "ERROR: Failed to generate audio %s: %v\n", audioURI, err)
@@ -2025,13 +2220,16 @@ func injectMasterStartTag(data []byte, offsetSeconds float64) []byte {
 	return []byte(tag + text)
 }
 
-// masterStartOffsetForDuration converts a "2s"/"6s" duration string into the
+// masterStartOffsetForDuration converts a "1s"/"2s"/"6s" duration string into the
 // recommended live-edge TIME-OFFSET. Must match the media playlists'
 // HOLD-BACK (3× TARGETDURATION), where TARGETDURATION is the integer
-// ceiling of actual segment duration — 2s segments round to 2 (→6s offset),
+// ceiling of actual segment duration — 1s segments round to 1 (→3s offset),
+// 2s segments round to 2 (→6s offset),
 // 6s segments actually encode at 6.006s and round to 7 (→21s offset).
 func masterStartOffsetForDuration(duration string) float64 {
 	switch duration {
+	case "1s":
+		return 3.0
 	case "2s":
 		return 6.0
 	case "6s":

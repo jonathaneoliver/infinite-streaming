@@ -329,10 +329,30 @@ def generate_master_playlist(dash_info, output_dir, package_name):
 
         # Determine codec type
         codec_name = "HEVC" if codecs.startswith("hvc1") else "AVC"
-        res_name = get_resolution_name(width, height)
 
-        # Variant playlist goes in resolution subdirectory
-        variant_playlist = f"{res_name.lower()}/playlist.m3u8"
+        # The variant's playlist + segments live in the DASH segment directory,
+        # which is the rung's UNIQUE label (e.g. "540p" on the legacy ladder,
+        # "540p_2" for an apple multi-rung resolution — #868). Derive it from the
+        # representation's actual init/segment path rather than from resolution,
+        # so multiple same-resolution rungs don't collapse onto one directory.
+        variant_subdir = ""
+        init_seg = video_rep.get("init_segment")
+        if init_seg:
+            parent = Path(init_seg).parent.as_posix()
+            if parent and parent != ".":
+                variant_subdir = parent
+        if not variant_subdir:
+            segs = video_rep.get("segments") or []
+            first_url = segs[0].get("url") if segs else None
+            if first_url:
+                parent = Path(first_url).parent.as_posix()
+                if parent and parent != ".":
+                    variant_subdir = parent
+        if not variant_subdir:
+            variant_subdir = get_resolution_name(width, height).lower()
+
+        # Variant playlist goes in its segment subdirectory
+        variant_playlist = f"{variant_subdir}/playlist.m3u8"
 
         # Include default audio rendition bitrate in both peak and average values.
         bandwidth = video_bandwidth + audio_peak_bandwidth
@@ -363,8 +383,8 @@ def generate_master_playlist(dash_info, output_dir, package_name):
         lines.append(stream_info)
         lines.append(variant_playlist)
 
-        # Generate variant media playlist in resolution folder
-        variant_dir = output_dir / res_name.lower()
+        # Generate variant media playlist in its segment folder
+        variant_dir = output_dir / variant_subdir
         variant_dir.mkdir(exist_ok=True)
         variant_path = variant_dir / "playlist.m3u8"
         generate_media_playlist(video_rep, variant_path, output_dir)

@@ -86,11 +86,24 @@ export function canonicalUUID(s: string | null | undefined): string {
  * shape consistent and gives us one chokepoint to lengthen / shorten
  * the format later.
  */
+/** One member of an archive compare set (#736). `tag` is the short
+ *  session number used for the legend (`S<tag>`); kept in the URL so the
+ *  viewer doesn't need a live player lookup to label historical overlays. */
+export interface CompareMember {
+  playerId: string;
+  playId: string;
+  tag?: string;
+}
+
 export function sessionViewerURL(opts: {
   playerId: string;
   playId?: string | null;
   fromMs?: number | null;
   toMs?: number | null;
+  /** #736: the whole grouped set (including the active play) to overlay in
+   *  compare mode. Serialised as `compare=<player>~<play>~<tag>,…` — `~`
+   *  needs no percent-encoding, keeping the URL clean. */
+  compare?: CompareMember[];
 }): string {
   if (!opts.playerId) return '#';
   const p = new URLSearchParams();
@@ -102,8 +115,29 @@ export function sessionViewerURL(opts: {
   if (opts.toMs != null && Number.isFinite(opts.toMs)) {
     p.set('to', formatTimeCompact(opts.toMs));
   }
+  if (opts.compare && opts.compare.length > 1) {
+    const enc = opts.compare
+      .filter((m) => m.playerId && m.playId)
+      .map((m) => `${canonicalUUID(m.playerId)}~${canonicalUUID(m.playId)}~${m.tag ?? ''}`)
+      .join(',');
+    if (enc) p.set('compare', enc);
+  }
   // URLSearchParams encodes the `:` we'd otherwise smuggle through;
   // because the compact form has no `:` at all, the resulting URL is
   // free of `%3A` clutter.
   return `/dashboard/session-viewer.html?${p.toString()}`;
+}
+
+/** parseCompareParam — inverse of sessionViewerURL's `compare=` encoding.
+ *  Returns [] for a missing/empty/garbled param so the viewer simply skips
+ *  compare mode. */
+export function parseCompareParam(raw: string | null | undefined): CompareMember[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((seg) => {
+      const [playerId, playId, tag] = seg.split('~');
+      return { playerId: canonicalUUID(playerId), playId: canonicalUUID(playId), tag: tag || undefined };
+    })
+    .filter((m) => m.playerId && m.playId);
 }

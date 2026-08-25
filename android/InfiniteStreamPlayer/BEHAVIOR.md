@@ -66,7 +66,11 @@ Behavioural rules below are additions.
 Six toggles, all persisted alongside developer mode:
 
 - **4K** — allow renditions above 1080p (off → cap at 1080p, default off).
-- **Local Proxy** — route through per-session go-proxy port (default on).
+- **Local Proxy** — toggles the on-device proxy hop (iOS `LocalHTTPProxy`).
+  Android has no on-device proxy, so this flag is currently inert for routing —
+  main playback ALWAYS routes through the per-session go-proxy port regardless
+  (#862). Retained for harness/iOS parity and reported as `local_proxy` in
+  metrics. Default on.
 - **Auto-Recovery** — single retry on non-codec player errors (default off).
 - **Go Live** — `seekToDefaultPosition` on every load (default off).
 - **Skip Home on launch** — auto-resume to Playback when a saved server and
@@ -129,7 +133,11 @@ so YouTube (or whatever else takes foreground) gets a clean codec budget.
 http://{server.host}:{port}/go-live/{selectedContent}/{manifest}?player_id={playerId}
 ```
 
-- `port` = `server.port` when Local Proxy on, `server.apiPort` when off.
+- `port` = `server.port` (the per-session go-proxy port) **always** — main
+  playback is always shaped/fault-injectable. The Local Proxy flag does NOT
+  switch this to the API port (that bypassed go-proxy entirely, silently
+  unshaping `local_proxy=false` runs and leaving `manifest_variants` empty —
+  #862). Matches iOS, which hardcodes `localProxy:true` in `playbackURL`.
 - `manifest` = `master{segment.suffix}.m3u8` (HLS) or `manifest{segment.suffix}.mpd` (DASH).
 
 **Live preview tile** (always direct to API port, no player_id):

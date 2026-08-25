@@ -57,6 +57,13 @@ export interface Stream<T> {
   rangeBounds: Ref<{ min: number; max: number } | null>;
   loading: Ref<boolean>;
   error: Ref<string | null>;
+  /** Bumped whenever the cache is RESET (a re-subscribe to a new
+   *  player/play/time window cleared all rows). Forward-only consumers
+   *  (chart/timeline watermark drains) watch this to reset their
+   *  watermark + clear their datasets and re-drain from scratch — needed
+   *  for refetch-on-pan (#587), where re-subscribing to an OLDER window
+   *  would otherwise be missed by a watermark sitting at the live edge. */
+  epoch: Ref<number>;
 }
 
 export interface UseSessionTimeSeriesOpts {
@@ -159,6 +166,12 @@ export function useSessionTimeSeries(
   const controlVersion = ref(0);
   const avmetricsVersion = ref(0);
 
+  // Bumped on every cache RESET (re-subscribe). Shared across all four
+  // streams so forward-only consumers can detect "the cache was wiped
+  // and reloaded with a different window" and re-drain from scratch
+  // (#587 refetch-on-pan).
+  const cacheEpoch = ref(0);
+
   const eventsBounds = ref<{ min: number; max: number } | null>(null);
   const networkBounds = ref<{ min: number; max: number } | null>(null);
   const controlBounds = ref<{ min: number; max: number } | null>(null);
@@ -231,6 +244,9 @@ export function useSessionTimeSeries(
     controlError.value = null;
     avmetricsError.value = null;
     lastEventId = '';
+    // Signal consumers that the cache was wiped (#587) so watermark
+    // drains reset rather than missing the freshly-loaded window.
+    cacheEpoch.value++;
   }
 
   /** Build the SSE URL from current opts + identity refs. */
@@ -360,10 +376,28 @@ export function useSessionTimeSeries(
   }
 
   /** Append one parsed row to the named pending queue. Cheap: no
-   *  reactive writes happen here. */
+   *  reactive writes happen here.
+   *
+   *  Play-scope guard: when the subscription is pinned to a specific
+   *  play_id, drop any row belonging to a different play of the same
+   *  player. The server already filters, but events + network flow
+   *  through the player-keyed ring (unlike control/avmetrics, which
+   *  re-query per play), so a stale/rotated live subscription could
+   *  otherwise leak a neighbouring play's rows into the events-derived
+   *  lanes (the PLAY ID / VIDEO RES / bitrate swim-lanes). Enforcing the
+   *  invariant here keeps the cache play-scoped regardless of how a row
+   *  arrived. When the viewer's "this play only" filter is off the
+   *  subscription's playId is null, so this is a no-op and neighbouring
+   *  plays are intentionally kept. Case-insensitive:
+   *  iOS emits uppercase UUIDs; CH stores canonical lowercase. */
   function enqueueRow(data: string, queue: Record<string, unknown>[]) {
     let row: Record<string, unknown>;
     try { row = JSON.parse(data); } catch { return; }
+    const scope = playId.value;
+    if (scope) {
+      const rid = row.play_id;
+      if (typeof rid === 'string' && rid && rid.toLowerCase() !== scope.toLowerCase()) return;
+    }
     queue.push(row);
   }
 
@@ -506,44 +540,58 @@ export function useSessionTimeSeries(
       rangeBounds: boundsRef,
       loading: loadingRef,
       error: errorRef,
+      epoch: cacheEpoch,
     };
   }
 
-  // Periodic eviction guard: if any stream balloons past its soft
-  // cap, drop entries outside the current viewport guardband. The
-  // viewport hint is (samples ∪ network ∪ events) bounds so we
-  // never throw away data the brush is actively showing. Renderers
-  // that pan past the cache trigger a fresh fetch — handled at
-  // the upper layer (TS6).
-  const SOFT_CAP_SAMPLES = 50000;
-  const SOFT_CAP_NETWORK = 5000;
-  const SOFT_CAP_EVENTS = 50000;
+  // Recency cap (issue #582). The previous eviction called
+  // evictOutsideViewport with the streams' OWN merged data bounds —
+  // which keeps `[min − 2·span, max + 2·span]` of the entire cached
+  // range, i.e. it never actually drops anything as the range grows.
+  // So the caches grew unbounded for the life of the tab (a primary
+  // contributor to the 12 GB renderer). Replace with a hard recency
+  // cap: keep only the most recent N rows per stream. Arrays are sorted
+  // ascending by ts (insertSortedDedup), so the oldest are at the front.
+  // Panning past the retained window triggers a fresh range fetch at the
+  // upper layer.
+  // Doubled from the original #582 values to retain a longer focus-window
+  // history (~5.4h at 1 Hz) for 3h+ sessions while #587 (on-demand
+  // refetch of evicted windows) is blocked on server support. Still a
+  // hard memory bound — ~2× the footprint, far below the old unbounded leak.
+  const SOFT_CAP_SAMPLES = 20000;
+  const SOFT_CAP_NETWORK = 4000;
+  const SOFT_CAP_EVENTS = 20000;
+  // Trim the oldest rows past `cap` AND advance the stream's
+  // rangeBounds.min to the new oldest ts. The bounds update is
+  // essential for refetch-on-pan (#587): the brush rail's left edge and
+  // the "is this window already cached?" check both read rangeBounds.min,
+  // so leaving it at the pre-trim value made the UI think evicted rows
+  // were still in the cache (panning there showed blank, no refetch).
+  function trimToCap(
+    arr: Record<string, unknown>[],
+    cap: number,
+    boundsRef: Ref<{ min: number; max: number } | null>,
+  ): boolean {
+    if (arr.length > cap) {
+      arr.splice(0, arr.length - cap);
+      const cur = boundsRef.value;
+      if (cur) {
+        const newMin = tsOf(arr[0]);
+        if (Number.isFinite(newMin) && newMin !== cur.min) {
+          boundsRef.value = { min: newMin, max: cur.max };
+        }
+      }
+      return true;
+    }
+    return false;
+  }
   watch(
     [eventsVersion, networkVersion, controlVersion, avmetricsVersion],
     () => {
-      const bounds = mergedBounds(
-        eventsBounds.value,
-        networkBounds.value,
-        controlBounds.value,
-        avmetricsBounds.value,
-      );
-      if (!bounds) return;
-      if (eventsArr.value.length > SOFT_CAP_SAMPLES) {
-        evictOutsideViewport(eventsArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(eventsArr);
-      }
-      if (networkArr.value.length > SOFT_CAP_NETWORK) {
-        evictOutsideViewport(networkArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(networkArr);
-      }
-      if (controlArr.value.length > SOFT_CAP_EVENTS) {
-        evictOutsideViewport(controlArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(controlArr);
-      }
-      if (avmetricsArr.value.length > SOFT_CAP_EVENTS) {
-        evictOutsideViewport(avmetricsArr.value, bounds.min, bounds.max, tsOf);
-        triggerRef(avmetricsArr);
-      }
+      if (trimToCap(eventsArr.value, SOFT_CAP_SAMPLES, eventsBounds)) triggerRef(eventsArr);
+      if (trimToCap(networkArr.value, SOFT_CAP_NETWORK, networkBounds)) triggerRef(networkArr);
+      if (trimToCap(controlArr.value, SOFT_CAP_EVENTS, controlBounds)) triggerRef(controlArr);
+      if (trimToCap(avmetricsArr.value, SOFT_CAP_EVENTS, avmetricsBounds)) triggerRef(avmetricsArr);
     },
   );
 

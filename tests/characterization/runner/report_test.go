@@ -18,9 +18,9 @@ func TestReportFinalizeAndWrite(t *testing.T) {
 		PlayerID:  "00000000-0000-0000-0000-000000000001",
 		StartedAt: start,
 		Samples: []Sample{
-			{Ts: start, AppliedRateMbps: 5.0, BufferDepthS: 8.5, Stalls: 0, StallTimeS: 0, VideoBitrateMbps: 4.9, ProfileShiftCount: 0, DroppedFrames: 0},
-			{Ts: start.Add(10 * time.Second), AppliedRateMbps: 3.0, BufferDepthS: 6.0, Stalls: 0, StallTimeS: 0, VideoBitrateMbps: 2.4, ProfileShiftCount: 1, DroppedFrames: 0},
-			{Ts: start.Add(20 * time.Second), AppliedRateMbps: 1.5, BufferDepthS: 4.0, Stalls: 1, StallTimeS: 2.3, VideoBitrateMbps: 1.1, ProfileShiftCount: 2, DroppedFrames: 5},
+			{Ts: start, AppliedRateMbps: 5.0, BufferDepthS: 8.5, Stalls: 0, StallTimeS: 0, VideoBitrateMbps: 4.9, ProfileShiftCount: 0, FramesDropped: 0},
+			{Ts: start.Add(10 * time.Second), AppliedRateMbps: 3.0, BufferDepthS: 6.0, Stalls: 0, StallTimeS: 0, VideoBitrateMbps: 2.4, ProfileShiftCount: 1, FramesDropped: 0},
+			{Ts: start.Add(20 * time.Second), AppliedRateMbps: 1.5, BufferDepthS: 4.0, Stalls: 1, StallTimeS: 2.3, VideoBitrateMbps: 1.1, ProfileShiftCount: 2, FramesDropped: 5},
 		},
 		Steps: []Step{
 			{StartedAt: start, RateMbps: 5.0, Hold: 10 * time.Second},
@@ -85,6 +85,70 @@ func TestReportFinalizeAndWrite(t *testing.T) {
 	}
 	if round.Mode != r.Mode || round.Summary.TotalStalls != r.Summary.TotalStalls {
 		t.Errorf("round-trip mismatch: %+v vs %+v", round.Summary, r.Summary)
+	}
+}
+
+// TestReportSustainableCapOrderIndependent proves LowestSustainableCapMbps
+// (min over sustainable steps) and HighestStallingCapMbps (max over failing
+// steps) are computed independent of the sweep direction. The pre-#676 code
+// used last-writer-wins in iteration order, so an ascending (rampup) sweep
+// reported the ladder TOP as the sustainable floor.
+func TestReportSustainableCapOrderIndependent(t *testing.T) {
+	// A sustainable step clears the buffer threshold with zero stalls; a
+	// failing step stalls. Caps: 2.0 fails, 4.0/6.0 sustain. The expected
+	// answers are fixed regardless of the order we list the steps in.
+	sustain := func(rate float64) Step {
+		return Step{RateMbps: rate, StallsDelta: 0, MinBufferS: SustainableBufferS + 1.0, SampleCount: 10}
+	}
+	fail := func(rate float64) Step {
+		return Step{RateMbps: rate, StallsDelta: 1, MinBufferS: 0.2, SampleCount: 10}
+	}
+
+	cases := []struct {
+		name  string
+		steps []Step
+	}{
+		{"descending", []Step{sustain(6.0), sustain(4.0), fail(2.0)}},
+		{"ascending", []Step{fail(2.0), sustain(4.0), sustain(6.0)}},
+		{"pyramid", []Step{sustain(4.0), sustain(6.0), sustain(4.0), fail(2.0)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Now()
+			r := &Report{
+				StartedAt: start,
+				Samples:   []Sample{{Ts: start, BufferDepthS: 5.0, VideoBitrateMbps: 4.0}},
+				Steps:     tc.steps,
+			}
+			r.Finalize(start.Add(time.Second))
+			if r.Summary.LowestSustainableCapMbps != 4.0 {
+				t.Errorf("LowestSustainableCapMbps=%.2f want 4.0 (the floor, not the top)", r.Summary.LowestSustainableCapMbps)
+			}
+			if r.Summary.HighestStallingCapMbps != 2.0 {
+				t.Errorf("HighestStallingCapMbps=%.2f want 2.0", r.Summary.HighestStallingCapMbps)
+			}
+		})
+	}
+}
+
+// TestReportBottomVariantFloor confirms the variant-keyed floor block is
+// untouched by the #676 min/max refactor — it keys on resolution, not order.
+func TestReportBottomVariantFloor(t *testing.T) {
+	start := time.Now()
+	bottom := &VariantRate{Resolution: "320x180"}
+	r := &Report{
+		StartedAt: start,
+		Samples:   []Sample{{Ts: start, BufferDepthS: 5.0, VideoBitrateMbps: 1.0}},
+		Variants:  []VariantRate{{Resolution: "1920x1080"}, {Resolution: "320x180"}},
+		Steps: []Step{
+			// Two failing steps target the bottom rung; the higher cap wins.
+			{RateMbps: 1.5, StallsDelta: 1, MinBufferS: 0.1, SampleCount: 10, Variant: bottom},
+			{RateMbps: 0.8, StallsDelta: 1, MinBufferS: 0.1, SampleCount: 10, Variant: bottom},
+		},
+	}
+	r.Finalize(start.Add(time.Second))
+	if r.Summary.BottomVariantFloorMbps != 1.5 {
+		t.Errorf("BottomVariantFloorMbps=%.2f want 1.5", r.Summary.BottomVariantFloorMbps)
 	}
 }
 

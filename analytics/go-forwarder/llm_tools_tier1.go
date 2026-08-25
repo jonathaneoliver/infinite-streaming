@@ -161,18 +161,18 @@ func summarisePlays(rows []map[string]any) map[string]any {
 		}
 	}
 	return map[string]any{
-		"count":                  len(rows),
-		"mode":                   "summary",
-		"total_issues":           totalIssues,
-		"by_classification":      classCount,
-		"by_player":              playerCount,
-		"by_content":             contentCount,
-		"label_histogram":        labelCount,
-		"distinct_players":       len(playerCount),
-		"distinct_content":       len(contentCount),
-		"window_start":           earliest,
-		"window_end":             latest,
-		"_hint":                  "summary mode — call again with mode='rows' (optionally top_k=N, labels_has=[...]) to drill into specific plays.",
+		"count":             len(rows),
+		"mode":              "summary",
+		"total_issues":      totalIssues,
+		"by_classification": classCount,
+		"by_player":         playerCount,
+		"by_content":        contentCount,
+		"label_histogram":   labelCount,
+		"distinct_players":  len(playerCount),
+		"distinct_content":  len(contentCount),
+		"window_start":      earliest,
+		"window_end":        latest,
+		"_hint":             "summary mode — call again with mode='rows' (optionally top_k=N, labels_has=[...]) to drill into specific plays.",
 	}
 }
 
@@ -262,28 +262,31 @@ func getPlaySummaryTool(be plays.Backend) Tool {
 func getControlEventsTool(be plays.Backend) Tool {
 	return Tool{
 		Name: "get_control_events",
-		Description: "Get the operator / proxy / harness action log for a player. " +
-			"Rows include fault toggles, traffic-shape changes, pattern step advances, " +
-			"and any harness mutation. Crucial for forensics — was a fault injected " +
-			"at the time something broke?",
+		Description: "Get the operator / proxy / harness action log. Rows include fault " +
+			"toggles, traffic-shape changes, pattern step advances, any harness mutation, " +
+			"and server-lifecycle markers like server_start (proxy restart/boot). Crucial " +
+			"for forensics — was a fault injected, or the proxy restarted, when something " +
+			"broke? Scope with player_id for a player's log, or query a global/session-less " +
+			"event (e.g. server_start) by event name without a player_id.",
 		Tier: 1,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"player_id":  map[string]any{"type": "string", "description": "Player UUID (required)."},
+				"player_id":  map[string]any{"type": "string", "description": "Player UUID. One of player_id / play_id / event is required."},
 				"play_id":    map[string]any{"type": "string", "description": "Narrow to one play (optional)."},
+				"event":      map[string]any{"type": "string", "description": "Filter to one event name, e.g. 'server_start'. Use this (no player_id needed) to find global/session-less events."},
 				"from":       map[string]any{"type": "string", "description": "ISO timestamp lower bound (optional)."},
 				"to":         map[string]any{"type": "string", "description": "ISO timestamp upper bound (optional)."},
 				"labels_has": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				"labels_not": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 10000, "default": 1000},
 			},
-			"required": []string{"player_id"},
 		},
 		Execute: func(ctx context.Context, args json.RawMessage, _ ToolEmitter) (string, error) {
 			var a struct {
 				PlayerID  string   `json:"player_id"`
 				PlayID    string   `json:"play_id"`
+				Event     string   `json:"event"`
 				From      string   `json:"from"`
 				To        string   `json:"to"`
 				LabelsHas []string `json:"labels_has"`
@@ -293,9 +296,14 @@ func getControlEventsTool(be plays.Backend) Tool {
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("parse args: %w", err)
 			}
+			var events []string
+			if a.Event != "" {
+				events = []string{a.Event}
+			}
 			rows, err := plays.GetControlEvents(ctx, be, plays.ControlEventsFilter{
 				PlayerID: a.PlayerID,
 				PlayID:   a.PlayID,
+				Events:   events,
 				From:     a.From,
 				To:       a.To,
 				Labels:   plays.LabelFilter{Has: a.LabelsHas, Not: a.LabelsNot},

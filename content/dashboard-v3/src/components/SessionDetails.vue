@@ -84,9 +84,32 @@ const fields = computed(() => {
   const labels: Record<string, string> = (p as any).labels ?? {};
   const testLabel = typeof labels.test === 'string' ? labels.test : '';
   const runIDLabel = typeof labels.run_id === 'string' ? labels.run_id : '';
+  // #678 — platform completes the harness-identity trio (test / platform /
+  // run_id) so the viewer surfaces the same run-identity set as the Sessions
+  // list Scenario cell. Device/app/OS below already cover the typed half.
+  const platformLabel = typeof labels.platform === 'string' ? labels.platform : '';
   // Master URL is the manifest entry the player loaded; the legacy
   // page also showed the "Last Request URL" (the most-recent network
   // log entry's URL); we don't track that here yet so omit it.
+  // #550 Phase 2 + Phase 4 fields — pulled from player_metrics where
+  // available. iOS is the canonical source for both buckets; external
+  // (UA-parsed) players get partial device coverage and "in_progress"
+  // status by default until they emit a terminal play_end (issue #554;
+  // legacy rows carry session_end).
+  const pm: any = (p as any).player_metrics ?? {};
+  const playbackStatus = typeof pm.playback_status === 'string' ? pm.playback_status : '';
+  const playbackReason = typeof pm.playback_reason === 'string' ? pm.playback_reason : '';
+  const termCode = typeof pm.terminal_error_code === 'number' ? pm.terminal_error_code : 0;
+  const termDomain = typeof pm.terminal_error_domain === 'string' ? pm.terminal_error_domain : '';
+  const errCode = typeof pm.error_code === 'number' ? pm.error_code : 0;
+  const errDomain = typeof pm.error_domain === 'string' ? pm.error_domain : '';
+  const deviceClass = typeof pm.device_class === 'string' ? pm.device_class : '';
+  const deviceModel = typeof pm.device_model === 'string' ? pm.device_model : '';
+  const appVersion = typeof pm.app_version === 'string' ? pm.app_version : '';
+  const osMajor = typeof pm.os_version_major === 'number' ? pm.os_version_major : null;
+  const osMinor = typeof pm.os_version_minor === 'number' ? pm.os_version_minor : null;
+  const playerTech = typeof pm.player_tech === 'string' ? pm.player_tech : '';
+  const playerTechVersion = typeof pm.player_tech_version === 'string' ? pm.player_tech_version : '';
   const out: { label: string; value: string }[] = [
     { label: 'Player ID', value: p.id ?? '—' },
     { label: 'Display ID', value: String(p.display_id ?? '—') },
@@ -102,9 +125,35 @@ const fields = computed(() => {
     // fall back to server_received_at_ms (the "last snapshot" signal)
     // so the operator sees actual freshness, not a misleading "—".
     { label: 'Last Request', value: fmtDate(effectiveLastSeenAt(p)) },
+    // Play start — the CLIENT-supplied, play-scoped start_time (#587), which
+    // rotates with play_id so it's correct after a content switch. NO fallback
+    // to current_play.started_at: that's server/session-derived and goes stale
+    // on a play rotation, so silently substituting it would make this row
+    // ambiguous (you couldn't tell which value you're seeing). Shows "—" when
+    // the client didn't send one (web/Roku). Distinct from "First Request"
+    // (first_seen_at = first HTTP contact). Sits right before the duration.
+    { label: 'Start Time', value: fmtDate(cp?.start_time) },
     { label: 'Session Duration', value: fmtDuration(p.first_seen_at, effectiveLastSeenAt(p)) },
     { label: 'Loops (server)', value: String(p.loop_count_server ?? 0) },
     { label: 'Control Rev', value: p.control_revision ?? '—' },
+    // attempt_id is the per-play recovery counter (1 on initial play,
+    // +1 on every restart / auto-recovery). Live PlayerRecord puts it
+    // on current_play; chRowAdapter mirrors that for archived rows
+    // (passing max across the play via context so we show the play's
+    // final count, not the brush-cursor row's value).
+    { label: 'Attempt', value: String((cp as any)?.attempt_id ?? 1) },
+    // #550 Phase 2: outcome — visible immediately under lifecycle.
+    { label: 'Playback Status', value: playbackStatus || '—' },
+    { label: 'Playback Reason', value: playbackReason || '—' },
+    { label: 'Terminal Error', value: termCode ? `${termDomain || '?'} ${termCode}` : '—' },
+    { label: 'Last Error', value: errCode ? `${errDomain || '?'} ${errCode}` : '—' },
+    // #550 Phase 4: device — alongside identity since device IS identity.
+    { label: 'Device Class', value: deviceClass || '—' },
+    { label: 'Device Model', value: deviceModel || '—' },
+    { label: 'Player Tech', value: playerTech || '—' },
+    { label: 'Player Version', value: playerTechVersion || '—' },
+    { label: 'OS Version', value: (osMajor != null || osMinor != null) ? `${osMajor ?? 0}.${osMinor ?? 0}` : '—' },
+    { label: 'App Version', value: appVersion || '—' },
   ];
   // Shaper Avg removed from this identity grid — it's a runtime
   // metric, not identity, so it belongs in developerFields below
@@ -114,6 +163,7 @@ const fields = computed(() => {
   // identifiers off-screen on narrow viewports, but still surface
   // when present.
   if (testLabel) out.push({ label: 'Test', value: testLabel });
+  if (platformLabel) out.push({ label: 'Platform', value: platformLabel });
   if (runIDLabel) out.push({ label: 'Run ID', value: runIDLabel });
   return out;
 });

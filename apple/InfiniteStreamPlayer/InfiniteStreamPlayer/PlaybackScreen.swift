@@ -23,7 +23,8 @@ struct PlaybackScreen: View {
                 onReload: { vm.reload() },
                 onMark911: { vm.mark911() },
                 onOpenSettings: { vm.setSettingsOpen(true) },
-                onFirstFrame: { at in vm.markFirstFrameRendered(at: at) }
+                onFirstFrame: { at in vm.markFirstFrameRendered(at: at) },
+                onDisplaySize: { size in vm.diagnostics.updateDisplaySize(size) }
             )
             .id(vm.playerEpoch)
             .ignoresSafeArea()
@@ -39,11 +40,24 @@ struct PlaybackScreen: View {
 
             #if !os(tvOS)
             VStack {
+                // One trailing cluster, not a control at each end. Back used to
+                // sit alone top-LEFT, which put the most-used control furthest
+                // from the others and, on a phone held in landscape, furthest
+                // from either thumb. It leads the cluster so the remaining
+                // icons keep their existing order and settings stays on the
+                // outside edge where it already was.
+                //
+                // Everything that drives this button — playback_end_test, the
+                // close-via-UI path — finds it by accessibilityIdentifier, so
+                // moving it does not affect the harness.
                 HStack(spacing: Space.s3) {
-                    BackChevronButton { onBack() }
+                    Spacer()
+                    BackChevronButton {
+                        vm.endSessionForUserBack()
+                        onBack()
+                    }
                         .accessibilityIdentifier("playback-back-button")
                         .help("Back to content list")
-                    Spacer()
                     iconButton(systemName: "arrow.clockwise", help: "Retry: re-attempt the current playback from where it stopped (bumps attempt_id)") { vm.retry() }
                         .accessibilityIdentifier("playback-retry-button")
                     iconButton(systemName: "arrow.triangle.2.circlepath", help: "Reload: start a fresh play of the same content (new play_id)") { vm.reload() }
@@ -61,7 +75,10 @@ struct PlaybackScreen: View {
         .background(Color.black.ignoresSafeArea())
         #if os(tvOS)
         .onExitCommand {
-            if !vm.settingsOpen { onBack() }
+            if !vm.settingsOpen {
+                vm.endSessionForUserBack()
+                onBack()
+            }
         }
         #endif
     }

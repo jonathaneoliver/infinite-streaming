@@ -8,8 +8,8 @@ Two independent k3d clusters on the same host — separate kubeconfigs, separate
 
 | Stack | UI | Session ports | API | Image tag | Cluster | `make` target |
 |---|---|---|---|---|---|---|
-| Release | `$K3S_HOST:30000` | 30081 + 30181–30881 | `:6544` | `:latest` or pinned | `release` | `make deploy-release` |
-| Dev | `$K3S_HOST:40000` | 40081 + 40181–40881 | `:6543` | `:dev` | `dev` | `make deploy` |
+| Release | `$K3S_HOST:30000` | 30081 + 30181–30881 | `:6544` | `:latest` or pinned | `release` | `make deploy-k3d-release` |
+| Dev | `$K3S_HOST:40000` | 40081 + 40181–40881 | `:6543` | `:dev` | `dev` | `make deploy-k3d-dev` |
 
 Both clusters share the host's local Docker registry (`$K3S_REGISTRY`, HTTP-only — wired via `--registry-config`), and mount the host's `$K3S_MEDIA_DIR` and `$K3S_CERTS_DIR` paths via `--volume`. Per-cluster kubeconfigs are written to `~/.config/k3d/smashing-{dev,release}-kubeconfig.yaml` on the remote host.
 
@@ -35,13 +35,13 @@ This installs k3d into `~/.local/bin` on `$K3S_SSH_HOST` (no sudo), writes `~/.c
 
 ```bash
 # dev cluster: builds + pushes :dev, applies main app + analytics tier
-make deploy
+make deploy-k3d-dev
 
 # release cluster: builds + pushes the release tag, applies main app + analytics tier
-make deploy-release
+make deploy-k3d-release
 ```
 
-Each `make deploy[-release]` invocation also builds and pushes the analytics forwarder image, applies `k8s-analytics.yaml` (ClickHouse + forwarder + Grafana with inlined schema and Grafana provisioning), and waits for rollout. The single `k8s-infinite-streaming.yaml.tmpl` template renders identically into both clusters; per-stack identity comes from envsubst placeholders (`SERVER_ID`, `ANNOUNCE_URL`, `EXTERNAL_PORT_BASE`) bound by the `make` target.
+Each `make deploy-k3d-dev` / `deploy-k3d-release` invocation also builds and pushes the analytics forwarder image, applies `k8s-analytics.yaml` (ClickHouse + forwarder + Grafana with inlined schema and Grafana provisioning), and waits for rollout. The single `k8s-infinite-streaming.yaml.tmpl` template renders identically into both clusters; per-stack identity comes from envsubst placeholders (`SERVER_ID`, `ANNOUNCE_URL`, `EXTERNAL_PORT_BASE`) bound by the `make` target.
 
 ### Tear down a single cluster
 
@@ -50,7 +50,7 @@ make teardown-dev       # k3d cluster delete dev
 make teardown-release   # k3d cluster delete release
 ```
 
-Wipes the cluster entirely (analytics + main app + PVC + node containers) so a subsequent `make deploy[-release]` starts clean. The other cluster is untouched.
+Wipes the cluster entirely (analytics + main app + PVC + node containers) so a subsequent `make deploy-k3d-dev` / `deploy-k3d-release` starts clean. The other cluster is untouched.
 
 ## Release tagging
 
@@ -67,7 +67,7 @@ Suggested flow:
    - `ghcr.io/<owner>/infinite-streaming-forwarder:v1.2.3`
 3. Deploy the release cluster pinned to that tag:
    ```bash
-   make deploy-release K3S_SERVER_IMAGE=$K3S_REGISTRY/infinite-streaming:v1.2.3
+   make deploy-k3d-release K3S_SERVER_IMAGE=$K3S_REGISTRY/infinite-streaming:v1.2.3
    ```
 
 `:latest` continues to point at the most recent `main` build; `:v1.2.3` is immutable.

@@ -30,19 +30,48 @@ Mirrors the equivalent discipline in `fault` — both mutation skills follow the
 ## Single static shape
 
 ```sh
-harness --insecure shape <target> [--rate Mbps] [--delay ms] [--loss pct]
+harness --insecure shape <target> [--rate Mbps] [--delay ms] [--loss pct] \
+    [--jitter ms] [--loss-corr pct] [--jitter-corr pct] [--profile NAME]
 ```
 
-All three axes default to "don't change". Pass at least one. The CLI sends a merge-patch — fields you omit stay at their current value.
+All axes default to "don't change". Pass at least one. The CLI sends a merge-patch — fields you omit stay at their current value.
 
 | User says | Command |
 |---|---|
 | "throttle to 1.5 Mbps" | `harness shape ipad --rate 1.5` |
 | "add 100 ms delay" | `harness shape ipad --delay 100` |
 | "5 percent packet loss" | `harness shape ipad --loss 5` |
+| "add 20 ms jitter" | `harness shape ipad --jitter 20` |
+| "make the loss bursty (50% correlation)" | `harness shape ipad --loss 3 --loss-corr 50` |
 | "1 Mbps with 50 ms delay and 1% loss" | `harness shape ipad --rate 1 --delay 50 --loss 1` |
 | "show me what's shaped" | `harness shape ipad --show` |
 | "clear shaping" | `harness shape ipad --clear` |
+
+### Link impairment (#826) — delay / loss / jitter conventions
+
+- `--delay` is **one-way**: only the proxy's egress is shaped, so observed RTT ≈ `--delay` ms.
+- `--jitter` is the delay stddev (normal distribution). `--jitter-corr` (~25 ≈ real link) keeps successive delays correlated so netem doesn't reorder packets. Omit `--jitter` and the proxy auto-derives a tight 5%-of-delay jitter.
+- `--loss-corr` makes loss **bursty** (netem `loss PCT CORR%`) instead of independent-uniform. Real loss clusters; uniform loss at the same % over-punishes TCP. 0 = uniform (legacy).
+- Throughput under loss falls ~`1/(RTT·√loss)` (Mathis) — an impairment arm caps effective bandwidth below `--rate`. Expected, not a bug.
+
+### Named link profiles (`--profile`)
+
+One-shot apply of a realistic recipe; individual `--delay`/`--loss`/… flags override it.
+
+| Profile | What it is | delay / loss / jitter |
+|---|---|---|
+| `clean` | baseline (clears impairment) | 0 / 0 / 0 |
+| `home` | real home network | 20ms / 0.2% / 5ms |
+| `mobile-good` | healthy LTE/5G | 40ms / 0.5% / 20ms |
+| `mobile-poor` | degraded mobile | 150ms / 3% / 80ms |
+| `nlc-wifi`, `nlc-wifi-ac`, `nlc-lte`, `nlc-dsl`, `nlc-3g`, `nlc-edge`, `nlc-very-bad`, `nlc-100-loss` | Apple Network Link Conditioner presets (set rate too; no jitter) | per Apple |
+
+```sh
+harness shape ipad --profile mobile-poor          # full recipe
+harness shape ipad --profile home --delay 35      # profile, then override delay
+```
+
+A profile always sets all five **impairment** axes (omitted ones → 0, so no stale jitter/loss leaks between selections). **Throughput is the overlay axis**: `clean`/`home`/`mobile-good`/`mobile-poor` carry no rate and **leave the throughput cap untouched** — so you can stamp an impairment recipe on top of an existing bandwidth test; the `nlc-*` presets pin the downlink rate because NLC models full link bandwidth. Explicit `--rate`/`--delay`/… flags still override on top. (`nlc-high-latency-dns` is intentionally absent — DNS-resolution delay, not netem-expressible.)
 
 ## Unit normalisation
 

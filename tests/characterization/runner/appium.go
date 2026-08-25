@@ -11,9 +11,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/charplan"
 )
 
 // AppiumLauncher drives an Appium server (default http://localhost:4723)
@@ -41,10 +44,35 @@ type AppiumLauncher struct {
 	// BundleIDs maps Platform → app bundle id. Same defaults as
 	// CLILauncher; override for TestFlight / local-dev builds.
 	BundleIDs map[Platform]string
+	// closeBeat — pause after each close tap / back press so the app
+	// can navigate and fire its terminal metrics POST before the next
+	// probe (and before session teardown). 800ms in production; tests
+	// shrink it. #627/#660.
+	closeBeat time.Duration
+
+	// launchArgs — process arguments passed to the app on launch
+	// (XCUITest `appium:processArguments`). iOS maps `-key value` args
+	// into UserDefaults' NSArgumentDomain (highest precedence), so the
+	// segment axis forces e.g. `-is.segment s2` for a single, deterministic
+	// cold launch on that segment — no UI pre-set, no second session.
+	// Set via SetLaunchArgs before the launch. #segments.
+	launchArgs []string
 
 	mu       sync.Mutex
 	sessions map[string]string // device UDID → Appium session id
-	hc       *http.Client
+	// allocatedUDID is the UDID Device Farm assigned to this launcher's
+	// session, read back from the create-session response. Under DF the caller
+	// requests a device by capability (no UDID up front), so downstream methods
+	// that receive a UDID-less Device resolve the session through this. Empty in
+	// the non-DF path (the caller's Device already carries its UDID).
+	allocatedUDID string
+	// farmLockUDID/Host: a real iOS device on the hybrid path is driven OFF the
+	// farm, so nothing serializes the one physical phone across parallel runs. We
+	// /block it in the farm as a cross-run mutex and release on Close/discardSession.
+	// Empty when no lock is held. See farmlock.go.
+	farmLockUDID string
+	farmLockHost string
+	hc           *http.Client
 }
 
 // NewAppiumLauncher returns a launcher pointing at the configured server.
@@ -56,15 +84,18 @@ func NewAppiumLauncher() *AppiumLauncher {
 	return &AppiumLauncher{
 		URL:              url,
 		HeartbeatTimeout: 90 * time.Second,
-		BundleIDs: map[Platform]string{
-			PlatformIPhone:    "com.jeoliver.InfiniteStreamPlayer",
-			PlatformIPad:      "com.jeoliver.InfiniteStreamPlayer",
-			PlatformIPadSim:   "com.jeoliver.InfiniteStreamPlayer",
-			PlatformAppleTV:   "com.jeoliver.InfiniteStreamPlayerTV",
-			PlatformAndroidTV: "com.infinitestream.player",
-		},
-		sessions: map[string]string{},
-		hc:       &http.Client{Timeout: 60 * time.Second},
+		closeBeat:        800 * time.Millisecond,
+		BundleIDs:        cloneBundleIDs(),
+		sessions:         map[string]string{},
+		// 300s, not 60s: a session-create cold-builds WDA, and an N-sim fleet
+		// queues N of those on one Appium server — the later ones blow past 60s.
+		// A REAL iOS device cold-builds WDA via xcodebuild (~190s observed) then
+		// polls /status up to wdaLaunchTimeout (240s), so the ceiling must exceed
+		// that or the create is killed client-side mid-build (the real-iphone
+		// hybrid path hit exactly this at 180s). doRequest passes the caller's ctx
+		// (NewRequestWithContext) so per-call deadlines still apply; this is just
+		// the backstop ceiling.
+		hc: &http.Client{Timeout: 300 * time.Second},
 	}
 }
 
@@ -104,10 +135,16 @@ func (a *AppiumLauncher) Launch(ctx context.Context, d Device) (*Session, error)
 	if err != nil {
 		return nil, err
 	}
+	// A step that fails AFTER the session is open must tear it down, or the
+	// session lingers until newCommandTimeout (2 h) holding the device busy —
+	// under Device Farm that blocks every later allocation. sess.Device carries
+	// the (DF-allocated) UDID so discardSession finds it.
 	if err := a.ResumePlayback(ctx, d); err != nil {
+		a.discardSession(sess.Device)
 		return nil, err
 	}
 	if err := a.waitForHeartbeat(ctx, sess); err != nil {
+		a.discardSession(sess.Device)
 		return nil, err
 	}
 	return sess, nil
@@ -123,22 +160,238 @@ func (a *AppiumLauncher) Launch(ctx context.Context, d Device) (*Session, error)
 // Use case: rampup / pyramid where the test wants to ApplyRate(floor)
 // BEFORE the first segment fetch, so playback starts cold under the
 // constraint instead of cliff-diving from "no cap" to a low cap.
+// SetLaunchArgs sets process arguments applied to every subsequent app
+// launch (see the launchArgs field). Pass nil to clear. #segments uses
+// this to force the segment via `-is.segment <rawValue>` on cold launch.
+func (a *AppiumLauncher) SetLaunchArgs(args []string) {
+	a.mu.Lock()
+	a.launchArgs = args
+	a.mu.Unlock()
+}
+
+// baselineTestFlags are config-on-startup flags EVERY characterization launch
+// forces to a known value, so a sim's stale persisted setting can't silently
+// leak into a run. These launch args land in NSArgumentDomain, which outranks
+// the app's persistent UserDefaults — so `-is.flag.4k true` overrides a sim
+// whose "4K" toggle was left off (it would otherwise cap itself at 1080p), and
+// `-is.flag.peak_bitrate_mbps 0` clears a leftover startup peak-bitrate clamp
+// from a prior capped run (e.g. pyramid's floor clamp). A mode that sets one of
+// these explicitly wins — withBaselineTestFlags only fills the ones it omitted.
+var baselineTestFlags = [][2]string{
+	{"-is.flag.4k", "true"},
+	{"-is.flag.peak_bitrate_mbps", "0"},
+	// Previews off: `0` decode slots so the home-screen preview-video tiles stay
+	// static thumbnails. Auto-playing previews add real GPU/decode load on the
+	// sims during launch + the fleet HOME barrier (every arm sits on the home
+	// screen before playback), which competes with the run. A mode that sets it
+	// explicitly wins. (App-side: PlayerViewModel reads this string-coerced.)
+	{"-is.flag.preview_video_slots", "0"},
+}
+
+func withBaselineTestFlags(args []string) []string {
+	present := map[string]bool{}
+	for i := 0; i+1 < len(args); i += 2 {
+		present[args[i]] = true
+	}
+	out := append([]string{}, args...)
+	for _, kv := range baselineTestFlags {
+		if !present[kv[0]] {
+			out = append(out, kv[0], kv[1])
+		}
+	}
+	// Pin auto-recovery to a deterministic value every launch (the app defaults
+	// it ON) so a sim's stale persisted toggle can't leak in. CHAR_AUTO_RECOVERY=0
+	// (false/off) turns it OFF for modes that want the player's RAW, unmasked stall
+	// behavior — otherwise the recovery ladder (live-resync seek → rebuild) self-
+	// heals stalls a mode may be trying to measure. A mode that set it explicitly wins.
+	if !present["-is.flag.auto_recovery"] {
+		out = append(out, "-is.flag.auto_recovery", charAutoRecovery())
+	}
+	// Pin the played clip (is.lastPlayed) unless the mode already set one, so
+	// every test streams identical content by default. The clip name is config,
+	// not source: CHAR_CONTENT (shell) overrides, else it's read from .env. No
+	// hardcoded clip — if neither is set, leave the app's own lastPlayed alone.
+	if !present["-is.lastPlayed"] {
+		if clip := defaultContentClip(); clip != "" {
+			out = append(out, "-is.lastPlayed", clip)
+		}
+	}
+	return out
+}
+
+// charAutoRecovery resolves CHAR_AUTO_RECOVERY to the value withBaselineTestFlags
+// forces onto -is.flag.auto_recovery for any mode that didn't set it explicitly.
+// Default "true" (matches the app's own default); "0" / "false" / "off" / "no"
+// force it OFF — for modes observing the player's raw, unmasked stall behavior.
+// Delegates to the single charplan.ParseBool so there is ONE auto_recovery parser
+// across the CLI, the probe, and this baseline fill (the matrix runner used to
+// parse it a second, divergent way — see #charplan).
+func charAutoRecovery() string {
+	return strconv.FormatBool(charplan.Bool(charplan.ParseBool(os.Getenv("CHAR_AUTO_RECOVERY")), true))
+}
+
+// defaultContentClip resolves the clip every appium test plays: CHAR_CONTENT
+// from the shell environment, else the CHAR_CONTENT key from the nearest .env.
+func defaultContentClip() string {
+	if v := os.Getenv("CHAR_CONTENT"); v != "" {
+		return v
+	}
+	return dotenvValue("CHAR_CONTENT")
+}
+
+// dotenvValue reads a single KEY=value from the nearest .env file found by
+// walking up from the working directory. Returns "" if not found — lets config
+// (the default content clip) live in .env rather than the source.
+func dotenvValue(key string) string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		if data, err := os.ReadFile(filepath.Join(dir, ".env")); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				if eq := strings.IndexByte(line, '='); eq >= 0 && strings.TrimSpace(line[:eq]) == key {
+					return strings.Trim(strings.TrimSpace(line[eq+1:]), `"'`)
+				}
+			}
+			return "" // found .env, no key
+		}
+		if parent := filepath.Dir(dir); parent != dir {
+			dir = parent
+		} else {
+			return "" // reached fs root
+		}
+	}
+}
+
+// intentExtrasFromLaunchArgs converts `-is.X Y` launch-arg pairs into the
+// `--es is.X Y` form Android's appium:optionalIntentArguments expects (String
+// intent extras appended to the start intent). Values in the #714 vocab
+// (UUIDs, "s2", "0") are space-free, so no quoting is needed.
+func intentExtrasFromLaunchArgs(args []string) string {
+	var b strings.Builder
+	for i := 0; i+1 < len(args); i += 2 {
+		key := strings.TrimPrefix(args[i], "-")
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "--es %s %s", key, args[i+1])
+	}
+	return b.String()
+}
+
 func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, error) {
 	bundleID := a.BundleIDs[d.Platform]
 	if bundleID == "" {
 		return nil, fmt.Errorf("appium launcher: no bundle id for platform %s", d.Platform)
 	}
+	// Hybrid real-iOS routing. The device-farm plugin can't bring WDA up on a
+	// real iOS 17+/26 device — its preinstalled-WDA launch needs a go-ios /
+	// RemoteXPC tunnel the farm never provisions (the runwda arm passes a dynamic
+	// --tunnel-info-port it doesn't serve). So drive real hardware through a PLAIN
+	// Appium (no device-farm plugin) on the xcodebuild WDA path instead, even
+	// while the farm stays on for the sims in the same fleet. The arm still binds
+	// to the same proxy group/master — grouping is by player_id/group_id AT THE
+	// PROXY, independent of which Appium server puppeteers the app — so a mixed
+	// isim-master + real-iphone-slave run shares one pattern. Set the URL before
+	// healthCheck so we probe the server we'll actually drive.
+	realIOS := isRealIOSHardware(d.Platform)
+	if realIOS {
+		if u := directIOSAppiumURL(a.URL); u != a.URL {
+			a.URL = u
+		}
+		// Cross-run mutex on the physical phone: it's driven off-farm, so two
+		// parallel runs would otherwise grab it at once. Borrow the farm's block
+		// flag — wait until it's free, then /block it (released on teardown). Only
+		// when the farm is up (the lock server); acquireFarmLock no-ops if the farm
+		// is unreachable or doesn't list the device, so a lone run never wedges.
+		if DeviceFarmEnabled() {
+			host, lerr := acquireFarmLock(ctx, d.UDID)
+			if lerr != nil {
+				return nil, fmt.Errorf("acquire %s via device farm: %w", d.UDID, lerr)
+			}
+			a.mu.Lock()
+			a.farmLockUDID, a.farmLockHost = d.UDID, host
+			a.mu.Unlock()
+		}
+	}
+	// Release the farm lock if we bail out before returning a live Session — the
+	// happy path keeps it (Close releases it at test end). Post-launch failures go
+	// through discardSession, which also releases. Idempotent either way.
+	launched := false
+	defer func() {
+		if !launched {
+			a.releaseFarmLockIfHeld()
+		}
+	}()
 	if err := a.healthCheck(ctx); err != nil {
 		return nil, fmt.Errorf("appium server not reachable at %s: %w (start with `appium`, or unset LAUNCH_MODE=appium)", a.URL, err)
 	}
-	caps := appiumCapabilities(d, bundleID)
-	sessID, err := a.createSession(ctx, caps)
+	df := DeviceFarmEnabled() && !realIOS
+	var platformVersion string
+	if df {
+		platformVersion = dfPlatformVersion(ctx, d.Platform)
+	}
+	caps := appiumCapabilities(d, bundleID, df, platformVersion)
+	// Always fold in the baseline test flags (4K on, peak clamp off unless the
+	// mode set it) so a sim's stale persisted UserDefaults can't leak in.
+	effectiveArgs := withBaselineTestFlags(a.launchArgs)
+	if len(effectiveArgs) > 0 {
+		if d.Platform == PlatformAndroidTV {
+			// UiAutomator2 ignores processArguments. Deliver the launch args
+			// as intent extras appended to the start intent: `-is.X Y` →
+			// `--es is.X Y`. The Android app reads `is.player_id` off the
+			// launch intent (config-on-connect, #714), mirroring how iOS reads
+			// it from NSArgumentDomain.
+			caps["appium:optionalIntentArguments"] = intentExtrasFromLaunchArgs(effectiveArgs)
+		} else {
+			// XCUITest passes these to the app on launch; iOS folds `-key value`
+			// pairs into UserDefaults (NSArgumentDomain). #segments forces the
+			// segment this way so a single cold launch lands on it.
+			caps["appium:processArguments"] = map[string]any{"args": effectiveArgs}
+		}
+	}
+	sessID, allocatedUDID, err := a.createSession(ctx, caps)
 	if err != nil {
 		return nil, fmt.Errorf("appium create session: %w", err)
 	}
+	// Under Device Farm the device wasn't pinned — the plugin chose it. Adopt
+	// the allocated UDID so the session map, screenshots, logs, and
+	// ReleaseDevice key off the real device. The returned Session carries the
+	// updated Device so the caller's cleanup (CloseViaUI / ReleaseDevice) sees
+	// it too.
+	if df && allocatedUDID != "" {
+		d.UDID = allocatedUDID
+		// Announce the DF-allocated UDID so the pool records the device the probe
+		// ACTUALLY ran on, not its nominal pick (in DF mode the farm arbitrates —
+		// the udid cap is dropped — so they routinely differ). Parsed by the pool's
+		// runSweep/runCharModeCapture; harmless noise for non-pool runs.
+		fmt.Fprintf(os.Stderr, "PROBE_DEVICE udid=%s\n", allocatedUDID)
+	}
 	a.mu.Lock()
 	a.sessions[d.UDID] = sessID
+	a.allocatedUDID = d.UDID
 	a.mu.Unlock()
+	// Track this launcher so the interrupt backstop / TestMain frees its
+	// device-farm slot even if the run is killed before Close() runs. Warm
+	// relaunches reuse this same launcher, so registering here covers them too.
+	registerLauncher(a)
+
+	// A freshly-installed/erased sim can come up on the blocking
+	// ServerPickerScreen (no saved server) instead of playback/home. Drive
+	// past it by adding the harness's server URL. No-op when a server is
+	// already saved (the seeded common path). iOS only.
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+		if err := a.navigateServerPickerIfPresent(ctx, sessID, bootstrapBaseURL()); err != nil {
+			a.discardSession(d) // don't leak the just-opened session on this error path
+			return nil, fmt.Errorf("server picker navigation: %w", err)
+		}
+	}
 
 	// Drive the UI back to home. Best-effort — if we're already on
 	// home (skipHomeOnLaunch=false, or some other path) the back button
@@ -148,7 +401,97 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 		_ = a.tapByAccessibilityID(ctx, sessID, "playback-back-button")
 		time.Sleep(800 * time.Millisecond)
 	}
-	return &Session{Device: d, Launcher: a}, nil
+	launched = true // keep the farm lock; Close releases it at test end
+	sess := &Session{Device: d, Launcher: a}
+	// Track the proxy session too, so the backstop / TestMain frees the
+	// config-on-connect slot on a killed run. PlayerID is set by the caller
+	// after this returns; Release reads it via the pointer, so a later kill
+	// still releases the right session (no-op if PlayerID is never set).
+	registerSession(sess)
+	return sess, nil
+}
+
+// RelaunchApp relaunches the app on the device's EXISTING appium session with a
+// fresh set of launch args — the warm-session path (#946, config #2). It reuses
+// the session + WDA (the ~expensive, ~20s part) and only cold-launches the app,
+// so a warm-session pool worker can bind a NEW experiment's player_id/config
+// without paying for a fresh session each time (and without the back-to-back
+// session-create race). The APP still cold-starts (fresh AVPlayer) — this is the
+// plumbing optimization, orthogonal to start_mode; a genuine warm START (resume
+// in the running app) is a separate primitive.
+//
+// Requires LaunchToHome to have opened a session for d first. iOS/XCUITest only:
+// terminate + relaunch with the new NSArgumentDomain args, then the same server-
+// picker + drive-to-home LaunchToHome does. Returns an error on other platforms
+// (the caller falls back to a cold LaunchToHome).
+func (a *AppiumLauncher) RelaunchApp(ctx context.Context, d Device, args []string) error {
+	if err := a.TerminateApp(ctx, d); err != nil {
+		return err
+	}
+	return a.LaunchAppWarmToHome(ctx, d, args)
+}
+
+// TerminateApp kills the app on the device's existing appium session (the STOP
+// half of a warm relaunch, #946) — split out so a caller can time teardown
+// separately from startup. iOS/XCUITest `mobile: terminateApp`.
+func (a *AppiumLauncher) TerminateApp(ctx context.Context, d Device) error {
+	sessID := a.sessionID(d)
+	if sessID == "" {
+		return errors.New("TerminateApp: no active appium session for device")
+	}
+	bundleID := a.BundleIDs[d.Platform]
+	if bundleID == "" {
+		return fmt.Errorf("TerminateApp: no bundle id for platform %s", d.Platform)
+	}
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+		return a.execScript(ctx, sessID, "mobile: terminateApp", map[string]any{"bundleId": bundleID})
+	default:
+		return fmt.Errorf("TerminateApp: unsupported on %s", d.Platform)
+	}
+}
+
+// LaunchAppWarmToHome cold-launches the app on the EXISTING session with fresh
+// args, then drives past the server picker to home (the START half of a warm
+// relaunch, #946). Assumes the app is already terminated (call TerminateApp
+// first, or use RelaunchApp which does both). Timing THIS alone measures pure
+// startup, excluding the teardown of the previous play/app.
+func (a *AppiumLauncher) LaunchAppWarmToHome(ctx context.Context, d Device, args []string) error {
+	sessID := a.sessionID(d)
+	if sessID == "" {
+		return errors.New("LaunchAppWarmToHome: no active appium session for device")
+	}
+	bundleID := a.BundleIDs[d.Platform]
+	if bundleID == "" {
+		return fmt.Errorf("LaunchAppWarmToHome: no bundle id for platform %s", d.Platform)
+	}
+	// Fold in the baseline test flags exactly as LaunchToHome does, so a warm
+	// launch lands with the same known-good defaults (4K on, peak clamp off…).
+	effectiveArgs := withBaselineTestFlags(args)
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+		launch := map[string]any{"bundleId": bundleID}
+		if len(effectiveArgs) > 0 {
+			// XCUITest folds `arguments` into NSArgumentDomain on launch, exactly
+			// like processArguments at session-create — so -is.player_id /
+			// -is.server_url bind the new session on this warm launch.
+			launch["arguments"] = effectiveArgs
+		}
+		if err := a.execScript(ctx, sessID, "mobile: launchApp", launch); err != nil {
+			return fmt.Errorf("LaunchAppWarmToHome launch: %w", err)
+		}
+	default:
+		return fmt.Errorf("LaunchAppWarmToHome: unsupported on %s — use a cold LaunchToHome", d.Platform)
+	}
+	// Clear the server picker with a SHORT probe: a warm relaunch already has the
+	// server set (-is.server_url), so the picker won't appear — a long poll here
+	// is pure wasted startup time. 1s is ample to detect a stray picker.
+	if err := a.navigateServerPickerIfPresentT(ctx, sessID, bootstrapBaseURL(), time.Second); err != nil {
+		return fmt.Errorf("LaunchAppWarmToHome server picker: %w", err)
+	}
+	_ = a.tapByAccessibilityID(ctx, sessID, "playback-back-button")
+	time.Sleep(800 * time.Millisecond)
+	return nil
 }
 
 // ResumePlayback taps the home-continue-watching tile to start
@@ -158,16 +501,57 @@ func (a *AppiumLauncher) LaunchToHome(ctx context.Context, d Device) (*Session, 
 // that drive the phases separately call Session.WaitForHeartbeat
 // themselves afterward.
 func (a *AppiumLauncher) ResumePlayback(ctx context.Context, d Device) error {
-	a.mu.Lock()
-	sessID := a.sessions[d.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(d)
 	if sessID == "" {
 		return errors.New("ResumePlayback: no active appium session for device")
 	}
 	switch d.Platform {
-	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
-		if err := a.tapByAccessibilityID(ctx, sessID, "home-continue-watching"); err != nil {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim, PlatformAndroidTV:
+		// Wait for the continue-watching control to render before tapping —
+		// the catalogue fetch is async, so a just-forced-to-Home screen
+		// can show an empty content row for a few seconds (observed after
+		// a fresh launch / segment-forced launch); tapping immediately
+		// 404s on the not-yet-rendered tile. On Android the id is the
+		// content-desc on the hero's Resume button — same "accessibility
+		// id" locator (UiAutomator2 maps it to content-desc).
+		elID, err := a.waitForAccessibilityID(ctx, sessID, "home-continue-watching", 30*time.Second)
+		if err != nil {
+			return fmt.Errorf("wait for home-continue-watching: %w", err)
+		}
+		if err := a.clickElement(ctx, sessID, elID); err != nil {
 			return fmt.Errorf("tap home-continue-watching: %w", err)
+		}
+	}
+	return nil
+}
+
+// ResumePlaybackClip starts playback of a SPECIFIC clip by tapping its
+// home-tile-<clipID> tile (waiting for that tile to render first), instead of
+// the continue-watching hero. The hero resolves to lastPlayed only AFTER the
+// catalogue loads; until then it falls back to the featured clip, so a pinned
+// run (CHAR_CONTENT) racing the hero can land on the wrong content. Tapping the
+// clip-specific tile is deterministic about WHICH content plays. Empty clipID,
+// or the tile never rendering, falls back to ResumePlayback so the run isn't
+// dead in the water.
+func (a *AppiumLauncher) ResumePlaybackClip(ctx context.Context, d Device, clipID string) error {
+	if clipID == "" {
+		return a.ResumePlayback(ctx, d)
+	}
+	sessID := a.sessionID(d)
+	if sessID == "" {
+		return errors.New("ResumePlaybackClip: no active appium session for device")
+	}
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim, PlatformAndroidTV:
+		id := "home-tile-" + clipID
+		elID, err := a.waitForAccessibilityID(ctx, sessID, id, 30*time.Second)
+		if err != nil {
+			// Tile never rendered (clip absent from the LIVE row / catalogue not
+			// loaded) — fall back to the continue-watching hero.
+			return a.ResumePlayback(ctx, d)
+		}
+		if err := a.clickElement(ctx, sessID, elID); err != nil {
+			return fmt.Errorf("tap %s: %w", id, err)
 		}
 	}
 	return nil
@@ -209,9 +593,7 @@ func (a *AppiumLauncher) waitForHeartbeat(ctx context.Context, sess *Session) er
 // session entirely if terminate isn't supported on this driver.
 func (a *AppiumLauncher) Kill(ctx context.Context, d Device) error {
 	bundleID := a.BundleIDs[d.Platform]
-	a.mu.Lock()
-	sessID := a.sessions[d.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(d)
 	if sessID == "" {
 		return nil // never launched; nothing to kill
 	}
@@ -222,13 +604,144 @@ func (a *AppiumLauncher) Kill(ctx context.Context, d Device) error {
 	return err
 }
 
+// SetSegmentLength switches the app's Segment Length via the settings UI
+// (#630) so a sweep can run e.g. 6s then 2s back-to-back on one device.
+// value is "2s" / "6s" / "ll" — matching the segment-<value> accessibility
+// ids the app exposes (added in #630). Drives the real UI: settings button
+// → Segment-length row → the value → back out of the drawer. Changing the
+// segment rebuilds the manifest and rotates play_id, so the caller should
+// re-bind (WaitForBind) and treat what follows as a fresh play.
+//
+// iOS only. Returns an error if a tap target is missing — typically an app
+// that predates #630 (rebuild + redeploy so the AX ids are present).
+func (a *AppiumLauncher) SetSegmentLength(ctx context.Context, d Device, value string) error {
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+	default:
+		return fmt.Errorf("SetSegmentLength: unsupported platform %s", d.Platform)
+	}
+	sessID := a.sessionID(d)
+	if sessID == "" {
+		return errors.New("SetSegmentLength: no active appium session for device")
+	}
+	steps := []struct{ what, id string }{
+		{"open settings", "playback-settings-button"},
+		{"open segment picker", "settings-row-segment"},
+		{"select " + value, "segment-" + value},
+		{"close settings", "settings-back-button"},
+	}
+	for _, s := range steps {
+		if err := a.tapByAccessibilityID(ctx, sessID, s.id); err != nil {
+			return fmt.Errorf("SetSegmentLength %q: %s (%s): %w", value, s.what, s.id, err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return nil
+}
+
+// ClosePlaybackViaUI closes the playback screen the way a user does —
+// tapping the back chevron on iOS, or pressing system Back on Android —
+// so the app runs its normal exit path (endSessionForUserBack) and emits
+// a real client play_end (#627). The app then sits on the home picker and
+// rotates its play_id on the next ResumePlayback, so the just-ended play
+// is bounded and cleanly terminal in the sessions view instead of
+// dangling in_progress after a hard terminate_app.
+//
+// Best-effort and idempotent: if no session exists, or the back
+// affordance isn't present (already on home / play already ended), it's a
+// no-op rather than an error where possible. Satisfies runner.UICloser.
+func (a *AppiumLauncher) ClosePlaybackViaUI(ctx context.Context, d Device) error {
+	sessID := a.sessionID(d)
+	if sessID == "" {
+		return nil // never launched; nothing to close
+	}
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad, PlatformIPadSim:
+		// The iOS playback overlay's back chevron — the same element
+		// LaunchToHome taps — invokes vm.endSessionForUserBack() before
+		// navigating home, which is what emits play_end.
+		//
+		// #660 — tap-verify-retry: the chevron stays FINDABLE in the AX
+		// tree while the controls overlay is auto-hidden, so a click can
+		// "succeed" yet only reveal the overlay instead of activating
+		// the button (observed at the end of a 36-min pyramid run; the
+		// play kept streaming and dangled in_progress). The chevron does
+		// NOT exist on the home screen, so find-fails is the reliable
+		// "screen closed" probe — the same property LaunchToHome's
+		// best-effort tap relies on. Tap, give the app a beat, re-probe;
+		// still findable means the previous tap only woke the overlay,
+		// so tap again (now hittable). Surface an error if the screen
+		// never closes so the cleanup logs instead of silently no-opping.
+		const maxCloseAttempts = 3
+		for attempt := 1; attempt <= maxCloseAttempts; attempt++ {
+			elementID, ferr := a.findByAccessibilityID(ctx, sessID, "playback-back-button")
+			if ferr != nil {
+				// Chevron not in the tree: already on home (first probe)
+				// or the previous tap closed the screen. Either way the
+				// post-tap beat below has already let the terminal
+				// metrics POST fire.
+				return nil
+			}
+			if cerr := a.clickElement(ctx, sessID, elementID); cerr != nil {
+				return fmt.Errorf("close playback: click attempt %d: %w", attempt, cerr)
+			}
+			// Give the app a beat to navigate + fire its terminal metrics
+			// POST before the re-probe (and before the caller tears the
+			// Appium session and the app's network path down).
+			time.Sleep(a.closeBeat)
+		}
+		return fmt.Errorf("close playback: screen still open after %d back taps (hidden-controls overlay?)", maxCloseAttempts)
+	case PlatformAndroidTV:
+		// Android has no visible back button; the playback screen's
+		// Compose BackHandler calls endSessionForUserBack() on system
+		// Back, so drive the W3C/UiAutomator2 back press.
+		err := a.pressBack(ctx, sessID)
+		// Same post-close beat as iOS — terminal POST before teardown.
+		time.Sleep(a.closeBeat)
+		return err
+	default:
+		return nil // tvOS (onExitCommand) / web not driven here yet
+	}
+}
+
+// pressBack issues the W3C "back" navigation (Android system Back) on the
+// given Appium session.
+func (a *AppiumLauncher) pressBack(ctx context.Context, sessID string) error {
+	_, err := a.doRequest(ctx, "POST", "/session/"+sessID+"/back", map[string]any{})
+	return err
+}
+
+// wdaRunnerExecutableMatch is a substring of the WebDriverAgent runner's
+// executable URL on a real device. The runner ships as
+// WebDriverAgentRunner-Runner.app, so its on-device executable name shares
+// this prefix — unlike its bundle-id leaf ("xctrunner"), which is why the
+// bundle-leaf lookup in devicectlTerminate can't find it.
+const wdaRunnerExecutableMatch = "WebDriverAgent"
+
+// ReleaseDevice fully releases a real iOS device after a run by
+// terminating the WebDriverAgent runner, so iOS's system "Automation
+// Running" overlay clears. Appium leaves WDA resident between sessions
+// (useNewWDA=false) for fast reuse, so ending the WebDriver session does
+// NOT stop WDA — we shell to devicectl, the same tool the CLI launcher
+// uses for real devices. No-op for simulators (no overlay, and devicectl
+// can't target them) and non-iOS platforms; best-effort, since
+// terminating a WDA that isn't running is itself a no-op. Satisfies
+// runner.DeviceReleaser. Gated opt-in by the caller (Session.ReleaseDevice
+// reads CHAR_RELEASE_DEVICE) so it never kills WDA mid-suite.
+func (a *AppiumLauncher) ReleaseDevice(ctx context.Context, d Device) error {
+	switch d.Platform {
+	case PlatformIPhone, PlatformIPad:
+		return devicectlTerminateMatching(ctx, d.UDID, wdaRunnerExecutableMatch)
+	default:
+		return nil
+	}
+}
+
 // Screenshot saves a PNG of the device's current screen to path.
 // Returns the path on success. Intended to be called from a sweep
 // runner to attach visual context to interesting steps.
 func (a *AppiumLauncher) Screenshot(ctx context.Context, d Device, path string) (string, error) {
-	a.mu.Lock()
-	sessID := a.sessions[d.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(d)
 	if sessID == "" {
 		return "", errors.New("screenshot: no active session for device")
 	}
@@ -255,8 +768,20 @@ func (a *AppiumLauncher) Screenshot(ctx context.Context, d Device, path string) 
 	return path, nil
 }
 
+// releaseFarmLockIfHeld clears the farm block this launcher set for a real iOS
+// device (no-op when none is held). Idempotent — every teardown path (Close,
+// discardSession, the launch-failure defer) can call it safely.
+func (a *AppiumLauncher) releaseFarmLockIfHeld() {
+	a.mu.Lock()
+	udid, host := a.farmLockUDID, a.farmLockHost
+	a.farmLockUDID, a.farmLockHost = "", ""
+	a.mu.Unlock()
+	releaseFarmLock(udid, host)
+}
+
 // Close tears down every Appium session this launcher opened.
 func (a *AppiumLauncher) Close() error {
+	a.releaseFarmLockIfHeld()
 	a.mu.Lock()
 	sessions := make(map[string]string, len(a.sessions))
 	for k, v := range a.sessions {
@@ -272,6 +797,7 @@ func (a *AppiumLauncher) Close() error {
 			firstErr = err
 		}
 	}
+	unregisterLauncher(a) // slot freed; drop from the interrupt backstop set
 	return firstErr
 }
 
@@ -279,7 +805,7 @@ func (a *AppiumLauncher) Close() error {
 // returns its `value` attribute. Used to read out the persistent
 // player_id from the iOS app's home screen BEFORE tapping into
 // playback — see ReadPlayerID below.
-func (a *AppiumLauncher) readAccessibilityValue(ctx context.Context, sessID, id string) (string, error) {
+func (a *AppiumLauncher) readAccessibilityValue(ctx context.Context, sessID, id, attr string) (string, error) {
 	findBody := map[string]any{"using": "accessibility id", "value": id}
 	raw, err := a.doRequest(ctx, "POST", "/session/"+sessID+"/element", findBody)
 	if err != nil {
@@ -299,8 +825,11 @@ func (a *AppiumLauncher) readAccessibilityValue(ctx context.Context, sessID, id 
 	if elementID == "" {
 		return "", fmt.Errorf("find element %q returned no id", id)
 	}
+	// Which attribute carries the value differs by driver: XCUITest exposes
+	// the iOS accessibilityValue under "value"; UiAutomator2 exposes the
+	// Compose node's text under "text".
 	raw, err = a.doRequest(ctx, "GET",
-		fmt.Sprintf("/session/%s/element/%s/attribute/value", sessID, elementID), nil)
+		fmt.Sprintf("/session/%s/element/%s/attribute/%s", sessID, elementID, attr), nil)
 	if err != nil {
 		return "", fmt.Errorf("read value %q: %w", id, err)
 	}
@@ -322,6 +851,27 @@ func (a *AppiumLauncher) readAccessibilityValue(ctx context.Context, sessID, id 
 // Requires the iOS app to surface `home-tile-<clip_id>` accessibility
 // identifiers on each LivePreviewTile (see
 // .claude/standards/startup-characterization-test.md).
+// TapByAccessibilityID is the public wrapper around tapByAccessibilityID
+// for tests that need to drive arbitrary AX-tagged UI (Retry / Reload /
+// 911 / settings buttons) outside the home-tile flow.
+//
+// Returns an error if no element with the given identifier is visible
+// — useful for tests that conditionally tap (e.g. "tap retry only when
+// state went to paused").
+func (a *AppiumLauncher) TapByAccessibilityID(ctx context.Context, sess *Session, id string) error {
+	if sess == nil {
+		return errors.New("TapByAccessibilityID: nil session")
+	}
+	if id == "" {
+		return errors.New("TapByAccessibilityID: empty id")
+	}
+	sessID := a.sessionID(sess.Device)
+	if sessID == "" {
+		return errors.New("TapByAccessibilityID: no active appium session for device")
+	}
+	return a.tapByAccessibilityID(ctx, sessID, id)
+}
+
 func (a *AppiumLauncher) TapTileByClipID(ctx context.Context, sess *Session, clipID string) error {
 	if sess == nil {
 		return errors.New("TapTileByClipID: nil session")
@@ -329,9 +879,7 @@ func (a *AppiumLauncher) TapTileByClipID(ctx context.Context, sess *Session, cli
 	if clipID == "" {
 		return errors.New("TapTileByClipID: empty clip_id")
 	}
-	a.mu.Lock()
-	sessID := a.sessions[sess.Device.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(sess.Device)
 	if sessID == "" {
 		return errors.New("TapTileByClipID: no active appium session for device")
 	}
@@ -352,13 +900,17 @@ func (a *AppiumLauncher) ReadPlayerID(ctx context.Context, sess *Session) (strin
 	if sess == nil {
 		return "", errors.New("ReadPlayerID: nil session")
 	}
-	a.mu.Lock()
-	sessID := a.sessions[sess.Device.UDID]
-	a.mu.Unlock()
+	sessID := a.sessionID(sess.Device)
 	if sessID == "" {
 		return "", errors.New("ReadPlayerID: no active appium session for device")
 	}
-	pid, err := a.readAccessibilityValue(ctx, sessID, "home-player-id")
+	// XCUITest carries the value under "value"; UiAutomator2 (Android)
+	// exposes the Compose node's text under "text".
+	attr := "value"
+	if sess.Device.Platform == PlatformAndroidTV {
+		attr = "text"
+	}
+	pid, err := a.readAccessibilityValue(ctx, sessID, "home-player-id", attr)
 	if err != nil {
 		return "", err
 	}
@@ -373,6 +925,20 @@ func (a *AppiumLauncher) ReadPlayerID(ctx context.Context, sess *Session) (strin
 // caller decides whether that's fatal). Used by Launch to drive the
 // app's UI from playback → home → playback for a clean per-test state.
 func (a *AppiumLauncher) tapByAccessibilityID(ctx context.Context, sessID, id string) error {
+	elementID, err := a.findByAccessibilityID(ctx, sessID, id)
+	if err != nil {
+		return err
+	}
+	if err := a.clickElement(ctx, sessID, elementID); err != nil {
+		return fmt.Errorf("click element %q: %w", id, err)
+	}
+	return nil
+}
+
+// findByAccessibilityID resolves an accessibility id to a W3C element id.
+// Errors when the element is not in the AX tree — which doubles as the
+// "screen not showing this element" probe (#660).
+func (a *AppiumLauncher) findByAccessibilityID(ctx context.Context, sessID, id string) (string, error) {
 	// POST /session/{id}/element — find the element
 	findBody := map[string]any{
 		"using": "accessibility id",
@@ -380,13 +946,13 @@ func (a *AppiumLauncher) tapByAccessibilityID(ctx context.Context, sessID, id st
 	}
 	raw, err := a.doRequest(ctx, "POST", "/session/"+sessID+"/element", findBody)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var findResp struct {
 		Value map[string]string `json:"value"`
 	}
 	if err := json.Unmarshal(raw, &findResp); err != nil {
-		return fmt.Errorf("decode find element %q: %w", id, err)
+		return "", fmt.Errorf("decode find element %q: %w", id, err)
 	}
 	// W3C WebDriver returns the element under key "element-6066-11e4-a52e-4f735466cecf".
 	var elementID string
@@ -395,15 +961,128 @@ func (a *AppiumLauncher) tapByAccessibilityID(ctx context.Context, sessID, id st
 		break
 	}
 	if elementID == "" {
-		return fmt.Errorf("find element %q returned no id", id)
+		return "", fmt.Errorf("find element %q returned no id", id)
 	}
-	// POST /session/{id}/element/{el}/click
-	_, err = a.doRequest(ctx, "POST",
-		fmt.Sprintf("/session/%s/element/%s/click", sessID, elementID), map[string]any{})
+	return elementID, nil
+}
+
+// PageSource returns the driver's view of the current screen (XCUITest serves
+// XML). Exposed so callers can discover which accessibility identifiers are
+// actually on screen rather than guessing one and interpreting a miss.
+//
+// The motivating case: ResumePlaybackClip falls back to the continue-watching
+// hero when its home-tile-<clip> never renders, so asking for the wrong id
+// plays the WRONG CONTENT and reports success. Dumping the ids turns that
+// silent substitution into something you can look at.
+func (a *AppiumLauncher) PageSource(ctx context.Context, d Device) (string, error) {
+	sessID := a.sessionID(d)
+	if sessID == "" {
+		return "", errors.New("PageSource: no active appium session for device")
+	}
+	raw, err := a.doRequest(ctx, "GET", "/session/"+sessID+"/source", nil)
 	if err != nil {
-		return fmt.Errorf("click element %q: %w", id, err)
+		return "", err
 	}
+	var resp struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return "", fmt.Errorf("decode page source: %w", err)
+	}
+	return resp.Value, nil
+}
+
+// clickElement issues the W3C click on a previously-found element.
+func (a *AppiumLauncher) clickElement(ctx context.Context, sessID, elementID string) error {
+	_, err := a.doRequest(ctx, "POST",
+		fmt.Sprintf("/session/%s/element/%s/click", sessID, elementID), map[string]any{})
+	return err
+}
+
+// execScript runs an Appium `mobile:` extension command on the session (W3C
+// execute/sync). arg is the single command-argument object (e.g. {"bundleId":…,
+// "arguments":[…]} for mobile: launchApp).
+func (a *AppiumLauncher) execScript(ctx context.Context, sessID, script string, arg map[string]any) error {
+	body := map[string]any{"script": script, "args": []any{arg}}
+	_, err := a.doRequest(ctx, "POST", "/session/"+sessID+"/execute/sync", body)
+	return err
+}
+
+// sendKeysToElement types text into a previously-found element (W3C
+// element/value). Clicks it first to focus the field.
+func (a *AppiumLauncher) sendKeysToElement(ctx context.Context, sessID, elementID, text string) error {
+	if err := a.clickElement(ctx, sessID, elementID); err != nil {
+		return fmt.Errorf("focus field: %w", err)
+	}
+	_, err := a.doRequest(ctx, "POST",
+		fmt.Sprintf("/session/%s/element/%s/value", sessID, elementID),
+		map[string]any{"text": text})
+	return err
+}
+
+// navigateServerPickerIfPresent drives the iOS ServerPickerScreen (#fleet)
+// when a freshly-installed/erased sim comes up on it instead of Home: tap
+// "Add by URL", type the harness base URL, tap "Add". No-op (returns nil) when
+// the picker isn't showing — the normal case where a server is already saved
+// (e.g. seeded via SeedServerProfile). Best-effort UI fallback to the
+// UserDefaults seed; requires the app to carry the server-* accessibility ids.
+func (a *AppiumLauncher) navigateServerPickerIfPresent(ctx context.Context, sessID, baseURL string) error {
+	return a.navigateServerPickerIfPresentT(ctx, sessID, baseURL, 4*time.Second)
+}
+
+// navigateServerPickerIfPresentT is the same with a caller-chosen probe timeout.
+// The first launch (fresh sim) genuinely may show the picker → 4s. A WARM
+// relaunch already has a server set (-is.server_url), so the picker never
+// appears — a long poll there is pure wasted startup time (it inflated the cold
+// rep bring-up by ~4s, #946), so LaunchAppWarmToHome passes a short probe.
+func (a *AppiumLauncher) navigateServerPickerIfPresentT(ctx context.Context, sessID, baseURL string, probe time.Duration) error {
+	// Short probe — if the picker root isn't in the AX tree we're already past
+	// it (on Home), so this is a cheap no-op on the common path.
+	if _, err := a.waitForAccessibilityID(ctx, sessID, "server-picker-screen", probe); err != nil {
+		return nil
+	}
+	if err := a.tapByAccessibilityID(ctx, sessID, "server-add-by-url"); err != nil {
+		return fmt.Errorf("tap add-by-url: %w", err)
+	}
+	fieldID, err := a.waitForAccessibilityID(ctx, sessID, "server-url-field", 8*time.Second)
+	if err != nil {
+		return fmt.Errorf("wait url field: %w", err)
+	}
+	if err := a.sendKeysToElement(ctx, sessID, fieldID, baseURL); err != nil {
+		return fmt.Errorf("type server url: %w", err)
+	}
+	if err := a.tapByAccessibilityID(ctx, sessID, "server-url-add"); err != nil {
+		return fmt.Errorf("tap add: %w", err)
+	}
+	// Let the sheet dismiss and Home render before the caller's back-chevron tap.
+	time.Sleep(time.Second)
 	return nil
+}
+
+// waitForAccessibilityID polls for an element by accessibility id until
+// it appears or the deadline passes, then returns its element id. Rides
+// out async UI population — e.g. the Home content row renders its
+// continue-watching tile only after the catalogue fetch completes, so a
+// freshly-launched Home can be empty for a few seconds; tapping into it
+// immediately 404s. Poll instead of racing.
+func (a *AppiumLauncher) waitForAccessibilityID(ctx context.Context, sessID, id string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		elID, err := a.findByAccessibilityID(ctx, sessID, id)
+		if err == nil {
+			return elID, nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("element %q not present after %s: %w", id, timeout, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 // --- WebDriver protocol plumbing -------------------------------------------
@@ -427,29 +1106,104 @@ func (a *AppiumLauncher) healthCheck(ctx context.Context) error {
 	return nil
 }
 
-func (a *AppiumLauncher) createSession(ctx context.Context, caps map[string]any) (string, error) {
+// createSession opens a WebDriver session and returns its id plus the UDID of
+// the device Appium actually bound to (read back from the response's negotiated
+// capabilities). Under Device Farm the request carries no UDID, so this is how
+// we learn which device the plugin allocated; in the non-DF path it echoes back
+// the UDID we pinned. Empty allocatedUDID means the driver didn't surface one.
+func (a *AppiumLauncher) createSession(ctx context.Context, caps map[string]any) (sessID, allocatedUDID string, err error) {
 	body := map[string]any{
 		"capabilities": map[string]any{
 			"alwaysMatch": caps,
 			"firstMatch":  []any{map[string]any{}},
 		},
 	}
-	raw, err := a.doRequest(ctx, "POST", "/session", body)
+	// The session-create POST must NOT be abandoned mid-flight. If the caller's
+	// ctx is interrupted here (timeout/pkill/Ctrl-C during setup), appium may
+	// still create the session server-side — the sim goes busy — but a cancelled
+	// POST means we never learn its id, so nothing can ever DELETE it: an orphaned
+	// device-farm slot the backstop can't see (it registers only AFTER the id is
+	// stored). WithoutCancel lets the POST finish so we capture the id; the
+	// interrupt then unwinds through the normal cleanup (discardSession /
+	// registerLauncher → backstop), which frees the slot. Keeps a 120s cap so a
+	// genuinely wedged create still fails instead of hanging.
+	createCtx, cancelCreate := context.WithTimeout(context.WithoutCancel(ctx), 120*time.Second)
+	defer cancelCreate()
+	raw, err := a.doRequest(createCtx, "POST", "/session", body)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	var resp struct {
 		Value struct {
-			SessionID string `json:"sessionId"`
+			SessionID    string         `json:"sessionId"`
+			Capabilities map[string]any `json:"capabilities"`
 		} `json:"value"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if resp.Value.SessionID == "" {
-		return "", fmt.Errorf("appium returned empty sessionId; body: %s", string(raw))
+		return "", "", fmt.Errorf("appium returned empty sessionId; body: %s", string(raw))
 	}
-	return resp.Value.SessionID, nil
+	udid := capString(resp.Value.Capabilities, "udid")
+	if udid == "" {
+		udid = capString(resp.Value.Capabilities, "appium:udid")
+	}
+	return resp.Value.SessionID, udid, nil
+}
+
+// capString reads a string-valued capability from a negotiated-capabilities map,
+// returning "" if absent or non-string.
+func capString(caps map[string]any, key string) string {
+	if caps == nil {
+		return ""
+	}
+	if v, ok := caps[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// sessionID resolves the Appium session id for a device. Normally it's keyed by
+// the device's UDID; under Device Farm the caller may hold a capability-
+// requested Device with no UDID, but this launcher owns exactly one allocated
+// session — so we fall back to the UDID Device Farm assigned (allocatedUDID).
+func (a *AppiumLauncher) sessionID(d Device) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if s, ok := a.sessions[d.UDID]; ok {
+		return s
+	}
+	if a.allocatedUDID != "" {
+		return a.sessions[a.allocatedUDID]
+	}
+	return ""
+}
+
+// discardSession deletes the Appium session bound to d (best-effort) and drops
+// it from the launcher's map, so a launch that fails AFTER createSession doesn't
+// leak a session — which would hold the device busy until newCommandTimeout
+// (2 h) and, under Device Farm, block every later allocation. Uses its OWN short
+// context: the common trigger is a heartbeat timeout, where the caller's ctx is
+// already expired and would make the DELETE fail instantly.
+func (a *AppiumLauncher) discardSession(d Device) {
+	a.releaseFarmLockIfHeld()
+	a.mu.Lock()
+	sessID := a.sessions[d.UDID]
+	if sessID == "" && a.allocatedUDID != "" {
+		sessID = a.sessions[a.allocatedUDID]
+	}
+	delete(a.sessions, d.UDID)
+	if a.allocatedUDID != "" {
+		delete(a.sessions, a.allocatedUDID)
+	}
+	a.mu.Unlock()
+	if sessID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, _ = a.doRequest(ctx, "DELETE", "/session/"+sessID, nil)
 }
 
 func (a *AppiumLauncher) doRequest(ctx context.Context, method, path string, body any) ([]byte, error) {
@@ -495,11 +1249,17 @@ func truncate(s string, n int) string {
 // capabilities object Appium expects in session creation. noReset=true
 // keeps the app's state (so skipHomeOnLaunch + lastPlayed survive across
 // sessions); fullReset=false avoids wiping settings between runs.
-func appiumCapabilities(d Device, bundleID string) map[string]any {
+//
+// When df is true (CHAR_DEVICE_FARM=1) the device-allocation caps are dropped so
+// the appium-device-farm plugin arbitrates instead of us: no appium:udid (DF
+// picks the device), no deviceName (don't over-constrain the match), no
+// hand-offset WDA/MJPEG ports or derivedDataPath (DF auto-assigns ports). For
+// sims we pin appium:platformVersion (passed in by the caller) so DF never
+// allocates an old-OS sim; real hardware is left unconstrained.
+func appiumCapabilities(d Device, bundleID string, df bool, platformVersion string) map[string]any {
 	caps := map[string]any{
 		"appium:noReset":   true,
 		"appium:fullReset": false,
-		"appium:udid":      d.UDID,
 		"appium:bundleId":  bundleID,
 		// newCommandTimeout default is 60 s — Appium auto-terminates the
 		// session (and the app with it) if no WebDriver command lands
@@ -515,14 +1275,68 @@ func appiumCapabilities(d Device, bundleID string) map[string]any {
 		// starting state per run. App data (settings, lastPlayed) is
 		// preserved because noReset=true.
 		"appium:forceAppLaunch": true,
+		// shouldTerminateApp terminates the app when the WebDriver session ends.
+		// Both drivers honour it (XCUITest defaults it OFF, which is why the app
+		// otherwise lingers — streaming + heartbeating a player — after a run;
+		// UiAutomator2 recognises it too). We delete the session in Close()
+		// (test end) and discardSession() (failed launch), so this auto-quiets
+		// the app on every teardown path, cross-platform, with no simctl/adb —
+		// the device is left WDA-warm but app-off when no test is using it.
+		"appium:shouldTerminateApp": true,
 	}
-	if d.Label != "" {
-		caps["appium:deviceName"] = d.Label
+	if !df {
+		// Non-DF: we pin the exact device (and surface its name). Under DF the
+		// plugin chooses the device by capability, so omitting these lets it
+		// allocate freely from the pool.
+		caps["appium:udid"] = d.UDID
+		if d.Label != "" {
+			caps["appium:deviceName"] = d.Label
+		}
+	}
+	if df && platformVersion != "" {
+		caps["appium:platformVersion"] = platformVersion
 	}
 	switch d.Platform {
 	case PlatformIPhone, PlatformIPad:
 		caps["platformName"] = "iOS"
 		caps["appium:automationName"] = "XCUITest"
+		if !df {
+			setXCUITestFleetPorts(caps, d.FleetIndex)
+			// Real-device WDA bring-up is the slow part: by default Appium runs
+			// xcodebuild + deploys WebDriverAgent into a throwaway DerivedData dir
+			// every session. Pin a STABLE derivedDataPath so the build persists
+			// across runs — xcodebuild goes incremental and the WDA app stays
+			// installed, cutting per-session bring-up. Always safe (still builds on
+			// first run). Per fleet index so parallel real devices don't share one
+			// build dir. (Sims are fast enough not to need this.) Under DF the
+			// plugin owns port + session allocation, so we don't hand-pin these.
+			caps["appium:derivedDataPath"] = iosWDADerivedDataPath(d.FleetIndex)
+			// CHAR_IOS_PREBUILT_WDA=1 skips the xcodebuild step entirely and reuses
+			// the WDA already built at derivedDataPath — the big speedup. Off by
+			// default because Appium ERRORS when usePrebuiltWDA is set but nothing
+			// has been built there yet: run once WITHOUT it to populate the path,
+			// then flip it on. (See the run-prebuilt-wda guide.)
+			if os.Getenv("CHAR_IOS_PREBUILT_WDA") == "1" {
+				caps["appium:usePrebuiltWDA"] = true
+			}
+			// Sign WDA for a team that provisions THIS device. Appium's default
+			// WDA (com.facebook.*) + automatic signing has no team and fails to
+			// install/run on a real device; supplying the team + a WDA bundle id
+			// in our own namespace lets xcodebuild auto-provision (mint/refresh the
+			// dev cert, register the device) and run WDA as a TEST so its HTTP
+			// server comes up — the hybrid path that's proven to work on iOS 26.
+			// Gated on CHAR_IOS_XCODE_ORG_ID: unset ⇒ Appium's defaults (prior
+			// behavior). Values from the env or the nearest .env.
+			applyIOSSigningCaps(caps)
+			// Real-device WDA cold-builds via xcodebuild on a first/changed run;
+			// Appium's default 60s /status poll times out before a fresh build +
+			// launch finishes (~50-150s observed). Give it headroom so the cold
+			// path doesn't fail the launch. Overridable via
+			// CHAR_IOS_WDA_LAUNCH_TIMEOUT_MS; default 240000 (4 min).
+			to := iosWDALaunchTimeoutMs()
+			caps["appium:wdaLaunchTimeout"] = to
+			caps["appium:wdaConnectionTimeout"] = to
+		}
 	case PlatformIPadSim:
 		caps["platformName"] = "iOS"
 		caps["appium:automationName"] = "XCUITest"
@@ -530,16 +1344,156 @@ func appiumCapabilities(d Device, bundleID string) map[string]any {
 		// step Appium does by default — WDA only needs (re)deploy on
 		// real devices.
 		caps["appium:useNewWDA"] = false
+		// Shared prebuilt WDA (CHAR_IOS_PREBUILT_WDA=1): every sim in the booted
+		// pool reuses ONE WDA build at a shared derivedDataPath instead of appium's
+		// per-UDID rebuild (which otherwise rebuilds WDA once per sim — the 4x-build
+		// pain on a 4-sim pool). Requires the shared path to be pre-populated by a
+		// one-time prebuild (boot-pool / `xcodebuild build-for-testing` into the
+		// path); appium ERRORS if usePrebuiltWDA is set with nothing built there, so
+		// it stays OFF by default (per-UDID build, always safe). Gating BOTH caps on
+		// the env means a non-prebuilt run never points concurrent first-builds at
+		// one path (which would race). Safe under DF: derivedDataPath is the build
+		// location, not a port (DF still owns port/session allocation).
+		if os.Getenv("CHAR_IOS_PREBUILT_WDA") == "1" {
+			caps["appium:derivedDataPath"] = sharedSimWDADerivedDataPath()
+			caps["appium:usePrebuiltWDA"] = true
+		}
+		if !df {
+			setXCUITestFleetPorts(caps, d.FleetIndex)
+		}
 	case PlatformAppleTV:
 		caps["platformName"] = "tvOS"
 		caps["appium:automationName"] = "XCUITest"
+		if !df {
+			setXCUITestFleetPorts(caps, d.FleetIndex)
+		}
 	case PlatformAndroidTV:
 		caps["platformName"] = "Android"
 		caps["appium:automationName"] = "UiAutomator2"
 		caps["appium:appPackage"] = bundleID
-		// Android's session needs an activity too; LAUNCHER is the
-		// portable choice that matches our CLI launcher's `monkey -c LAUNCHER`.
-		caps["appium:appActivity"] = "android.intent.category.LAUNCHER"
+		// The real launcher activity (matches the deploy's
+		// `am start -n <pkg>/.MainActivity`). An intent CATEGORY is not a
+		// valid appActivity — UiAutomator2 fails to start the app with it.
+		caps["appium:appActivity"] = ".MainActivity"
+		// Don't block session creation on a specific post-launch activity
+		// (splash → home transitions vary); any activity in our package is fine.
+		caps["appium:appWaitActivity"] = "*"
 	}
 	return caps
+}
+
+// setXCUITestFleetPorts pins this session's WebDriverAgent and MJPEG
+// screenshot-stream ports off the device's fleet index. Concurrent
+// XCUITest sessions otherwise default to wdaLocalPort 8100 /
+// mjpegServerPort 9100 and collide — the 2nd+ sim never binds. Index 0
+// → 8100/9100, unchanged for single-device runs.
+func setXCUITestFleetPorts(caps map[string]any, fleetIndex int) {
+	caps["appium:wdaLocalPort"] = 8100 + fleetIndex
+	caps["appium:mjpegServerPort"] = 9100 + fleetIndex
+}
+
+// iosWDADerivedDataPath returns a STABLE DerivedData dir for the real-device
+// WebDriverAgent build so it persists across runs (incremental builds, and
+// prebuilt reuse under CHAR_IOS_PREBUILT_WDA=1) instead of Appium's default
+// throwaway temp dir. Base overridable via CHAR_IOS_WDA_DERIVED_DATA; default
+// ~/.appium-wda-deriveddata. Suffixed by fleet index so parallel real devices
+// each build into their own dir (no concurrent-xcodebuild conflict).
+func iosWDADerivedDataPath(fleetIndex int) string {
+	base := strings.TrimSpace(os.Getenv("CHAR_IOS_WDA_DERIVED_DATA"))
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			home = os.TempDir()
+		}
+		base = filepath.Join(home, ".appium-wda-deriveddata")
+	}
+	return filepath.Join(base, fmt.Sprintf("wda-%d", fleetIndex))
+}
+
+// sharedSimWDADerivedDataPath is the ONE derivedDataPath every iOS simulator
+// session shares when CHAR_IOS_PREBUILT_WDA=1 — so WDA is built once (a prebuild
+// step / boot-pool) and reused across the whole booted pool instead of appium's
+// per-UDID rebuild (the "rebuild WDA N times" pain). Reuse is read-only, so
+// concurrent fleet sessions don't race on it. Distinct from the per-fleet-index
+// real-device path so a sim run never collides with a wired-device build.
+func sharedSimWDADerivedDataPath() string {
+	base := strings.TrimSpace(os.Getenv("CHAR_IOS_WDA_DERIVED_DATA"))
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			home = os.TempDir()
+		}
+		base = filepath.Join(home, ".appium-wda-deriveddata")
+	}
+	return filepath.Join(base, "wda-sim-shared")
+}
+
+// isRealIOSHardware reports whether p is a wired/real iOS device (iPhone/iPad)
+// rather than a simulator. Real hardware takes the hybrid direct-Appium +
+// xcodebuild-WDA path; sims go through the device farm. PlatformIPadSim is the
+// simulator platform and is deliberately excluded.
+func isRealIOSHardware(p Platform) bool {
+	return p == PlatformIPhone || p == PlatformIPad
+}
+
+// directIOSAppiumURL returns the Appium base URL to drive a REAL iOS device on
+// the hybrid path. Resolution: CHAR_IOS_DIRECT_APPIUM_URL wins; else, when the
+// device farm is on (so the default :4723 is the farm-plugin server, which can't
+// drive a real device), fall back to the conventional plain-Appium port :4799;
+// else (farm off) keep the launcher's current URL — the operator has already
+// pointed APPIUM_URL at a plain Appium.
+func directIOSAppiumURL(current string) string {
+	if u := strings.TrimSpace(os.Getenv("CHAR_IOS_DIRECT_APPIUM_URL")); u != "" {
+		return u
+	}
+	if DeviceFarmEnabled() {
+		return "http://localhost:4799"
+	}
+	return current
+}
+
+// applyIOSSigningCaps adds the real-device WDA signing capabilities to caps when
+// CHAR_IOS_XCODE_ORG_ID is set (process env or nearest .env). xcodeOrgId +
+// xcodeSigningId drive xcodebuild's automatic signing (auto-provisioning the dev
+// cert + registering the device); updatedWDABundleId puts WDA in a bundle-id
+// namespace the team's wildcard profile covers; allowProvisioningDeviceRegistration
+// lets a not-yet-registered device be added. Unset org ⇒ no-op (Appium defaults).
+func applyIOSSigningCaps(caps map[string]any) {
+	org := envOrDotenv("CHAR_IOS_XCODE_ORG_ID")
+	if org == "" {
+		return
+	}
+	caps["appium:xcodeOrgId"] = org
+	signing := envOrDotenv("CHAR_IOS_XCODE_SIGNING_ID")
+	if signing == "" {
+		signing = "Apple Development"
+	}
+	caps["appium:xcodeSigningId"] = signing
+	if wb := envOrDotenv("CHAR_IOS_WDA_BUNDLE_ID"); wb != "" {
+		caps["appium:updatedWDABundleId"] = wb
+	}
+	caps["appium:allowProvisioningDeviceRegistration"] = true
+}
+
+// envOrDotenv reads KEY from the process environment, falling back to the
+// nearest .env file — the same resolution defaultContentClip uses for config
+// that lives in .env rather than the source.
+func envOrDotenv(key string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return strings.TrimSpace(dotenvValue(key))
+}
+
+// iosWDALaunchTimeoutMs is the wdaLaunchTimeout/wdaConnectionTimeout (ms) for a
+// real iOS device. Default 240000 (4 min) — a cold xcodebuild WDA build + launch
+// overruns Appium's 60s default. Overridable via CHAR_IOS_WDA_LAUNCH_TIMEOUT_MS;
+// a non-numeric/empty/non-positive value falls back to the default.
+func iosWDALaunchTimeoutMs() int {
+	if v := strings.TrimSpace(os.Getenv("CHAR_IOS_WDA_LAUNCH_TIMEOUT_MS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 240000
 }

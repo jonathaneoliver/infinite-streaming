@@ -1430,6 +1430,13 @@ export interface components {
              */
             shape?: components["schemas"]["Shape"];
             /**
+             * @description Client-side config the player applies at its next play boundary
+             *     (#800). Stored server-side; the player reads it from
+             *     `GET /api/sessions` and overlays it on the next play.
+             *     *Broadcasts to group on PATCH.*
+             */
+            app_config?: components["schemas"]["AppConfig"];
+            /**
              * @description Per-device fault hit counters.
              *     *Per-device runtime state — does not broadcast to group.*
              */
@@ -1525,6 +1532,7 @@ export interface components {
             shape?: components["schemas"]["Shape"];
             transfer_timeouts?: components["schemas"]["TransferTimeouts"];
             content?: components["schemas"]["ContentManipulation"];
+            app_config?: components["schemas"]["AppConfig"];
         };
         /**
          * @description Live play state. The same `PlayRecord` schema is also used in the
@@ -1542,15 +1550,23 @@ export interface components {
              */
             id: string;
             /**
-             * Format: uuid
-             * @description Player-supplied UUID identifying one recovery attempt
-             *     within this play. The player rotates it on every `restart`
-             *     event (user-reload OR auto-recovery), but keeps it stable
-             *     outside restart boundaries. Null when the player has not
-             *     yet supplied one. Use to count or filter recovery attempts
-             *     within a single play (`count(distinct restart_id)`).
+             * @description Player-supplied **monotonically-incrementing counter**, 1
+             *     on the initial play of any content, +1 on every `restart`
+             *     event (user-restart OR auto-recovery). Resets to 1 at
+             *     every new play boundary (new content, reload, content-
+             *     filter swap). Stable outside restart boundaries.
+             *
+             *     Use to count or order recovery attempts within a single
+             *     play: `max(attempt_id) GROUP BY play_id` gives the total
+             *     attempt count; filter by `attempt_id = N` to isolate the
+             *     Nth attempt's activity. Null when the player has not yet
+             *     supplied one.
+             *
+             *     Integer rather than UUID because the operator-facing
+             *     question is "which try is this" — 1, 2, 3 answers that
+             *     directly.
              */
-            restart_id?: string | null;
+            attempt_id?: number | null;
             /** Format: uuid */
             player_id: string;
             control_revision: string;
@@ -1561,6 +1577,19 @@ export interface components {
             labels?: components["schemas"]["Labels"];
             /** Format: date-time */
             started_at: string;
+            /**
+             * Format: date-time
+             * @description **Client-supplied** play start (ISO-8601 UTC), minted by the
+             *     player at the same boundary as `id` (play_id) and re-sent as a
+             *     `?start_time=` query param on every request. Unlike
+             *     `started_at` — which the proxy derives from the SESSION's first
+             *     request and therefore does NOT move when the play_id rotates —
+             *     this is play-scoped: a content switch yields a new play_id AND
+             *     a new start_time. Prefer this for "when did THIS play begin";
+             *     `started_at` is the connection/session start. Null for
+             *     non-instrumented clients (web, Roku) that don't send it.
+             */
+            start_time?: string | null;
             /** Format: date-time */
             ended_at?: string | null;
             manifest?: components["schemas"]["Manifest"];
@@ -1778,6 +1807,28 @@ export interface components {
          *     `loss_pct` for steady background loss, `transport_fault` for
          *     one-shot or cadence-driven transport faults. See
          *     `DESIGN.md § shape.transport_fault × shape.loss_pct interaction`.
+         *
+         *     **Link-impairment knobs (#826).** `delay_ms` / `jitter_ms` /
+         *     `loss_pct` and their correlation terms model a realistic
+         *     (latency + loss + jitter dominated) link rather than a clean one.
+         *     Conventions:
+         *       - `delay_ms` is **one-way**: netem applies it on the single
+         *         egress qdisc the proxy controls, so the observed RTT increase
+         *         ≈ `delay_ms` (the return direction is unshaped). Named link
+         *         profiles state delays as one-way to match.
+         *       - `jitter_ms` is the delay standard deviation, applied as
+         *         `delay <delay_ms>ms <jitter_ms>ms <jitter_correlation_pct>%
+         *         distribution normal`. `jitter_correlation_pct` (~25% ≈ real
+         *         link) keeps successive delays correlated so netem does not
+         *         reorder packets into nonsense. When `jitter_ms` is 0 the
+         *         server falls back to a tight auto-jitter (5% of delay).
+         *       - `loss_correlation_pct` turns netem's independent-uniform loss
+         *         into correlated/bursty loss via `loss <loss_pct>%
+         *         <loss_correlation_pct>%`. Real loss is bursty; uniform loss at
+         *         the same percentage over-punishes TCP. 0 = uniform (legacy).
+         *       - Throughput under loss falls ~ `1/(RTT·√loss)` (Mathis), so an
+         *         impairment arm caps effective bandwidth below `rate_mbps` —
+         *         that coupling is the measurement target, not a bug.
          */
         Shape: {
             /** Format: float */
@@ -1786,8 +1837,29 @@ export interface components {
             delay_ms?: number;
             /** Format: float */
             loss_pct?: number;
+            /**
+             * Format: float
+             * @description Delay standard deviation (ms). Applied with `distribution normal` + `jitter_correlation_pct`. 0 ⇒ server auto-jitter (5% of `delay_ms`).
+             */
+            jitter_ms?: number;
+            /**
+             * Format: float
+             * @description Burst correlation for `loss_pct` → netem `loss <pct>% <corr>%`. 0 ⇒ independent-uniform loss (legacy). Higher = burstier.
+             */
+            loss_correlation_pct?: number;
+            /**
+             * Format: float
+             * @description Correlation for the delay distribution (~25% ≈ real link). Only meaningful with `jitter_ms` > 0.
+             */
+            jitter_correlation_pct?: number;
             pattern?: components["schemas"]["Pattern"];
             transport_fault?: components["schemas"]["TransportFault"];
+            /**
+             * @description Per-session degraded shaping mode (#910). `http_only` forces this ONE session onto the HTTP-only path: kernel rate / delay / loss / netem AND transport faults are gated OFF, while HTTP faults still fire. `kernel` (default) = inherit the host's shaping capability (full kernel shaping when the box has NET_ADMIN + tc + nftables). A session can only be MORE degraded than the host, never less — on a NET_ADMIN-less host every session is effectively `http_only` regardless of this field. Maps to v1 `shaping_forced_mode` (`http_only`↔`"http-only"`, `kernel`↔`""`). The server-wide boot override is `SHAPING_FORCE_DEGRADED` (env), independent of this per-session control. *Broadcasts to group on PATCH.*
+             * @default kernel
+             * @enum {string}
+             */
+            mode: "kernel" | "http_only";
             /** @description 1-based index of the currently active step in `pattern.steps`. 0 when pattern is disabled or in an inter-step idle gap. */
             readonly pattern_step?: number | null;
             /** @description Same as `pattern_step` but reset whenever the pattern definition changes (the runtime cursor, separate from any cached UI step). */
@@ -1797,27 +1869,34 @@ export interface components {
              * @description Effective rate the kernel is enforcing right now from the active step. Distinct from `rate_mbps` (the static fallback when pattern is off).
              */
             readonly pattern_rate_runtime_mbps?: number | null;
+            /** @description Single-owner group shaping: when non-empty, this session has NO pattern of its own — its kernel cap is fanned per-tick from the group master named here (display label / short player_id). The slave UI shows a "driven by master" badge + a disabled rate slider; `pattern_rate_runtime_mbps` carries the live cap. */
+            readonly group_driven_by?: string | null;
+            /** @description The pattern template (e.g. `pyramid`) the group master is running, surfaced on a driven slave for its "driven by master — <template>" label. Empty unless `group_driven_by` is set. */
+            readonly group_driven_template?: string | null;
         };
         Pattern: {
             /**
              * @description Template that drove step-list generation. Stored verbatim
              *     so the dashboard can repaint the template radios. The kernel
              *     cycles through `steps` regardless of template; this field is
-             *     metadata, not a recompute trigger.
+             *     metadata, not a recompute trigger. `transient_shock` is the
+             *     deepening-drop staircase (hold top, dip to each lower rung in
+             *     turn, recover to top between dips) mirroring the transient_shock
+             *     characterization mode.
              * @enum {string}
              */
-            template?: "sliders" | "square" | "square_wave" | "ramp_up" | "ramp_down" | "pyramid";
+            template?: "sliders" | "square" | "square_wave" | "ramp_up" | "ramp_down" | "pyramid" | "valley" | "transient_shock";
             steps: components["schemas"]["PatternStep"][];
             /**
-             * @description Default per-step duration the dashboard chose when generating the step list.
+             * @description Default per-step duration the dashboard chose when generating the step list. 60 / 120 give buffer-draining holds for transient_shock-style probes.
              * @enum {integer}
              */
-            default_step_seconds?: 6 | 12 | 18 | 24;
+            default_step_seconds?: 6 | 12 | 18 | 24 | 60 | 120;
             /**
-             * @description Headroom percent above the top variant used when sizing template steps (0 = exact).
+             * @description Headroom percent above the variant rate used when sizing template steps. 0 = exact (deliberate-stall footgun). 5 = default — covers TCP/IP + TLS 1.3 + HTTP/2 framing overhead on a LAN. 10 = real WiFi with retransmits. 25 / 50 = stress-test over-headroom.
              * @enum {integer}
              */
-            margin_pct?: 0 | 10 | 25 | 50;
+            margin_pct?: 0 | 5 | 10 | 25 | 50;
         };
         PatternStep: {
             /** Format: float */
@@ -1867,7 +1946,7 @@ export interface components {
              */
             strip_average_bandwidth: boolean;
             /**
-             * @description Remove RESOLUTION attribute from EXT-X-STREAM-INF lines (issue #486).
+             * @description Remove RESOLUTION attribute from EXT-X-STREAM-INF lines. Apple HLS validator rejects this; AVPlayer plays but variant.video.size becomes empty (issue #486).
              * @default false
              */
             strip_resolution: boolean;
@@ -1879,11 +1958,53 @@ export interface components {
             /** @description When non-empty, only the listed variant URIs are kept in the master playlist. */
             allowed_variants?: string[];
             /**
-             * @description Live edge offset window in seconds. 0 = no offset.
+             * @description Re-sort the video EXT-X-STREAM-INF entries by BANDWIDTH to probe whether master-playlist order biases AVPlayer's initial-variant pick (#682). ascending = lowest first (our authoring); descending = highest first; first_4mbps = promote the variant nearest 4 Mbps to first-listed, rest ascending (initial-variant probe); default = passthrough. EXT-X-MEDIA audio/subtitle renditions are left untouched.
+             * @default default
+             * @enum {string}
+             */
+            variant_order: "default" | "ascending" | "descending" | "first_4mbps";
+            /**
+             * @description Live edge offset window in seconds. 0 = no offset. Values 2/4/12/30/36/42 added (#793) for the segment×live-offset matrix.
              * @default 0
              * @enum {integer}
              */
-            live_offset: 0 | 6 | 18 | 24;
+            live_offset: 0 | 2 | 4 | 6 | 12 | 18 | 24 | 30 | 36 | 42;
+        };
+        /**
+         * @description Client-side ("app behaviour") config the player applies at its next
+         *     play boundary — the per-play, no-restart counterpart to the cold-start
+         *     launch args (`is.segment` etc., #797). The proxy stores these per
+         *     session and surfaces them on `GET /api/sessions`; the player overlays
+         *     any non-null field onto its own state when it opens the next play
+         *     (segment/protocol drive the manifest URL; live_offset_s and
+         *     peak_bitrate_mbps drive the ExoPlayer/AVPlayer track selector). A
+         *     null/omitted field leaves the player's own value untouched.
+         *
+         *     Server-side (`proxy.*` / ContentManipulation) config already
+         *     reconfigures per-play with no restart; this brings the client-side
+         *     half in line. Settable via `PATCH /api/session/{id}` or the
+         *     `app.<field>` config-on-connect URL args. Issue #800.
+         */
+        AppConfig: {
+            /**
+             * @description Segment ladder for the next play (maps to the client `is.segment` lever). ll / s2 / s6.
+             * @enum {string|null}
+             */
+            segment?: "ll" | "s2" | "s6" | null;
+            /**
+             * @description Streaming protocol for the next play (maps to `is.protocol`).
+             * @enum {string|null}
+             */
+            protocol?: "hls" | "dash" | null;
+            /**
+             * Format: float
+             * @description Live-edge offset in seconds for the next play (maps to `is.flag.live_offset_s`). 0 = let the manifest HOLD-BACK / Go Live decide.
+             */
+            live_offset_s?: number | null;
+            /** @description ABR peak-bitrate ceiling in Mbps for the next play (maps to `is.flag.peak_bitrate_mbps`). 0 = no cap. */
+            peak_bitrate_mbps?: number | null;
+            /** @description Mute audio for the next play (maps to `is.flag.muted`). Defaults muted; false = audible. Issue #838. */
+            muted?: boolean | null;
         };
         Manifest: {
             /** Format: uri */
@@ -1892,8 +2013,10 @@ export interface components {
         };
         ManifestVariant: {
             url: string;
-            /** @description bits per second */
+            /** @description Peak segment bit rate of this variant in bits per second (HLS EXT-X-STREAM-INF BANDWIDTH attribute). Always present. */
             bandwidth: number;
+            /** @description Average bit rate across the variant in bits per second (HLS AVERAGE-BANDWIDTH attribute). Optional — present when the source master playlist includes the attribute. Pattern-step generators should prefer this over BANDWIDTH where available, since it represents the long-term sustainable rate (BANDWIDTH is the peak). */
+            average_bandwidth?: number;
             /** @description WIDTHxHEIGHT */
             resolution: string;
         };
@@ -1908,13 +2031,25 @@ export interface components {
             video_resolution?: string | null;
             /** @description Player-reported window/display resolution (separate from the active video resolution). */
             display_resolution?: string | null;
+            /** @description WxH of the variant the player is about to fetch — derived iOS-side from indicatedBitrate vs the variant ladder. Empty before the first access-log event. */
+            fetching_resolution?: string | null;
             /** Format: float */
             video_bitrate_mbps?: number | null;
             /**
              * Format: float
-             * @description video_bitrate_mbps as a percentage of the top variant in the active manifest
+             * @description video_bitrate_mbps as a percentage of the top variant in the active manifest (snapshot)
              */
             video_quality_pct?: number | null;
+            /**
+             * Format: float
+             * @description Log-bitrate (Weber-Fechner) quality over the last 60s of watched playback. Formula: log(kbps/min) / log(max/min) per event, clamped to a 0.20 floor, time-weighted by durationWatched. Matches dashboard PlayLog computeQualityPct.
+             */
+            video_quality_60s_pct?: number | null;
+            /**
+             * Format: float
+             * @description Same log-bitrate formula as video_quality_60s_pct but over the lifetime of the play. Computed by iOS from AVPlayerItem.accessLog().
+             */
+            video_quality_avg_pct?: number | null;
             /**
              * Format: float
              * @description Player-computed avgNetworkBitrate.
@@ -1949,6 +2084,16 @@ export interface components {
             live_offset_s?: number | null;
             /**
              * Format: float
+             * @description Manifest-recommended target offset from live (iOS recommendedTimeOffsetFromLive / ExoPlayer liveConfiguration.targetOffsetMs). Gates the qoe_live_offset_* labels.
+             */
+            recommended_offset_s?: number | null;
+            /**
+             * Format: float
+             * @description Configured target offset from live (iOS configuredTimeOffsetFromLive; on Android equals recommended_offset_s).
+             */
+            configured_offset_s?: number | null;
+            /**
+             * Format: float
              * @description Wall-clock offset between player position and real time (seconds).
              */
             true_offset_s?: number | null;
@@ -1978,21 +2123,16 @@ export interface components {
              * @description Cumulative stall time (seconds).
              */
             stall_time_s?: number | null;
-            /**
-             * Format: float
-             * @description Duration of the most recent stall (seconds).
-             */
-            last_stall_time_s?: number | null;
             /** @description Player-reported displayed frames count. */
             frames_displayed?: number | null;
             /** @description Player-reported dropped frames count. */
-            dropped_frames?: number | null;
+            frames_dropped?: number | null;
             /** @description Number of player restarts (auto-recovery + manual). */
             player_restarts?: number | null;
             /** @description How many times the player has reported looping the content. Player-reported, may be 0 on platforms that do not count. */
             loop_count_player?: number | null;
             /** @description Server-derived increment from the previous report. */
-            loop_count_increment?: number | null;
+            loop_count_delta?: number | null;
             /** @description Number of ABR rendition shifts the player has reported. */
             profile_shift_count?: number | null;
             /** @description Most recent player-reported lifecycle event (playing, buffering_start, stall_start, etc.). */
@@ -2001,8 +2141,21 @@ export interface components {
             trigger_type?: string | null;
             /** @description Player state machine label (idle, playing, paused, buffering, ended, error). */
             state?: string | null;
+            /** @description On state_change events: the player_state before the transition. Empty / null on heartbeat rows. */
+            state_from?: string | null;
+            /** @description On state_change events: the player_state after the transition. Empty / null on heartbeat rows. */
+            state_to?: string | null;
             /** @description AVFoundation reasonForWaitingToPlay (or platform equivalent) — split labels within `state` like `toMinimizeStalls` vs `evaluatingBufferingRate`. */
             waiting_reason?: string | null;
+            /** @description Content title bound at metrics-start. Stamped on every payload so dashboards see "which content was playing" without joining against the upload catalogue. */
+            content_name?: string | null;
+            /** @description On user_marked (911) events: wall-clock ISO-8601 instant the operator pressed the button. Empty on other rows. */
+            user_marked_at?: string | null;
+            /**
+             * Format: float
+             * @description Active variant's nominal frame rate (Hz). Sticky after first observation in the format-change event.
+             */
+            frames_rate?: number | null;
             /** @description Player-encoded PDT (milliseconds since Unix epoch) for the current playhead. Used by the chart engine to compute live offset against the server clock. */
             playhead_wallclock_ms?: number | null;
             /** @description Web-player browser family (e.g. `safari`, `chrome`). Drives native-rendition inference for HLS-on-Safari where bitrate is not directly reported. */
@@ -2018,6 +2171,80 @@ export interface components {
              * @description Player-supplied wallclock for the most recent metrics tick.
              */
             event_time?: string | null;
+            /** @description #550 Phase 1: cumulative time in `playing` state (ms), since play start. */
+            playing_time_ms?: number | null;
+            /** @description #550 Phase 1: entries into `playing` state since play start. */
+            playing_count?: number | null;
+            /** @description #550 Phase 1: cumulative time in `paused` state (ms). */
+            pausing_time_ms?: number | null;
+            /** @description #550 Phase 1: entries into `paused` state. */
+            pausing_count?: number | null;
+            /** @description #550 Phase 1: cumulative buffering time (ms). */
+            buffering_time_ms?: number | null;
+            /** @description #550 Phase 1: entries into `buffering` state. */
+            buffering_count?: number | null;
+            /** @description #550 Phase 1: cumulative stalling time (ms). Single canonical pair replacing legacy stall_count/stall_time_s during soft cutover. */
+            stalling_time_ms?: number | null;
+            /** @description #550 Phase 1: entries into `stalled` state. */
+            stalling_count?: number | null;
+            /** @description #550 Phase 1: cumulative idle time (ms). */
+            idling_time_ms?: number | null;
+            /** @description #550 Phase 1: entries into `idle` state. */
+            idling_count?: number | null;
+            /** @description #550 Phase 1: cumulative time spent in seek-induced refill (TimeJumped → next .playing). Conviva CIRR/CIRT pattern: `connection_buffering = buffering_time_ms - seeking_time_ms`. */
+            seeking_time_ms?: number | null;
+            /** @description #550 Phase 1: AVPlayerItemTimeJumped events since play start. */
+            seeking_count?: number | null;
+            /** @description #550 Phase 1: cumulative time at non-1× playback rate (FF / RW). */
+            trickplaying_time_ms?: number | null;
+            /** @description JSON-string-encoded map of variant-label → cumulative seconds spent at that variant (e.g. `{"2160p@29857kbps":65.28}`). Preserved across retry()-style restarts. */
+            time_per_variant_s?: string | null;
+            /** @description #550 Phase 1: entries into trickplay (rate ∉ {0, ~1}). */
+            trickplaying_count?: number | null;
+            /** @description #550 Phase 1: duration of the MOST RECENT stall event (sticky on subsequent heartbeats). */
+            stall_duration_ms?: number | null;
+            /** @description #550 Phase 1: duration of the MOST RECENT buffer event (sticky). */
+            buffering_duration_ms?: number | null;
+            /** @description #550 Phase 1 ext: orthogonal "this stall won't auto-recover" flag. True from the moment AVPlayer transitions stalled → .paused (give-up) until next .playing transition. State stays "stalled" for residency continuity; dashboards key on this flag to surface operator-actionable stalls. */
+            stall_stuck?: boolean | null;
+            /** @description #550 Phase 1: TTFF in ms. Conviva/Mux/Bitmovin canonical units. Replaces legacy video_first_frame_time_s. */
+            video_first_frame_time_ms?: number | null;
+            /** @description #550 Phase 1: alternate startup-time measurement in ms. */
+            video_start_time_ms?: number | null;
+            /** @description #550 Phase 2: terminal outcome enum: `in_progress` / `completed` / `user_stopped` / `start_failure` (VSF) / `abandoned_start` (EBVS) / `mid_stream_failure` (MSF). Mid-session rows = `in_progress`. */
+            playback_status?: string | null;
+            /** @description #550 Phase 2: controlled vocab per status. During in_progress, mirrors `player_state`; on terminal rows, forwarder classifier derives from error_code+domain+kind. */
+            playback_reason?: string | null;
+            /** @description #550 Phase 2: NSError.code / HTTP status / system errno. Populated on `error` events AND terminal failure rows. 0 = no error. */
+            error_code?: number | null;
+            /** @description #550 Phase 2: NSError.domain — `CoreMediaErrorDomain` / `NSURLErrorDomain` / `AVFoundationErrorDomain` / `http` etc. */
+            error_domain?: string | null;
+            /** @description #550 Phase 2: JSON blob with URL, underlying error chain, native message. */
+            error_details?: string | null;
+            /** @description #550 Phase 2: error code populated ONLY on terminal failure rows. Querying `WHERE terminal_error_code != 0` is SQL-safe — never returns transient codes. */
+            terminal_error_code?: number | null;
+            /** @description #550 Phase 2: error domain on terminal failure rows. */
+            terminal_error_domain?: string | null;
+            /** @description #550 Phase 2: error details JSON on terminal failure rows. */
+            terminal_error_details?: string | null;
+            /** @description #550 Phase 2: cumulative observation counter. Ticks on every `error` event (transient or terminal). Forwarder computes per-row delta server-side. */
+            error_count?: number | null;
+            /** @description #550 Phase 4: OS major version (e.g. 26 for iOS 26.0.1). */
+            os_version_major?: number | null;
+            /** @description #550 Phase 4: OS minor version. */
+            os_version_minor?: number | null;
+            /** @description #550 Phase 4: app marketing version from Bundle CFBundleShortVersionString. */
+            app_version?: string | null;
+            /** @description #550 Phase 4: form-factor enum: `phone` / `tablet` / `tv` / `desktop` / `unknown`. */
+            device_class?: string | null;
+            /** @description #550 Phase 4: hardware model identifier (e.g. iPhone15,3) via sysctl hw.machine. */
+            device_model?: string | null;
+            /** @description #550 Phase 4: playback engine: `AVPlayer` / `hls.js` / `shaka` / `native-roku` / `vlc` / `ffmpeg`. */
+            player_tech?: string | null;
+            /** @description Playback engine version, paired with player_tech. Android: Media3/ExoPlayer library version (app-bundled, independent of the OS). iOS: OS version (AVPlayer is part of the OS). */
+            player_tech_version?: string | null;
+            /** @description Physical-pixel resolution of the device's current orientation, formatted `"WxH"` to match video_resolution / display_resolution. Swaps integers on iPad rotation; static on Apple TV / orientation-locked clients. Supersedes screen_width_px / screen_height_px / screen_density (dropped 2026-05-30). */
+            device_resolution?: string | null;
         };
         /**
          * @description Read-only server-observed transport telemetry. Sourced from
@@ -2069,7 +2296,7 @@ export interface components {
             path_ping_rtt_ms?: number | null;
             /**
              * Format: float
-             * @description Client-side RTT proxy from iOS 18 AVMetrics TTFB (issue #486).
+             * @description Median TTFB (responseStart - requestEnd) from iOS 18 AVMetrics MediaResourceRequest events. Stream-level latency from URLSession pipeline; not a wire RTT on HTTP/2 keep-alive. Issue #486.
              */
             rtt_avmetrics_ms?: number | null;
             /** @description true when no fresh TCP_INFO sample is available (e.g. session idle). */
@@ -2187,6 +2414,13 @@ export interface components {
              * @description Server-perceived wait between request received and first response byte sent.
              */
             client_wait_ms?: number;
+            /**
+             * Format: float
+             * @description Kernel-measured shaped delivery rate (tcpi_delivery_rate, Mbps) sampled at end of transfer. Honest cross-check for bytes_out/transfer_ms, which over-reports on sub-buffer transfers (#850). Connection-level; 0/absent when not sampled (non-Linux build).
+             */
+            delivery_rate_mbps?: number;
+            /** @description Kernel tcpi_delivery_rate_app_limited flag for the delivery_rate_mbps sample. true = the sender was starved (app-limited), so the rate reflects the app not the link and reads noisily (starved low or burst high); trust delivery_rate_mbps only when false (network-limited). Only meaningful when delivery_rate_mbps is non-zero. Linux only. */
+            delivery_rate_app_limited?: boolean;
             faulted?: boolean;
             fault_type?: string;
             fault_action?: string;

@@ -190,6 +190,11 @@ private struct MutedLoopingTile: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UIView {
         let view = TileLayerView(frame: .zero)
+        // Decorative preview surface — no taps of its own. Disable UIKit touch
+        // (default true) so it can't swallow taps meant for an overlay above it
+        // (the Settings drawer's back chevron over the LIVE row on Home); AppRoot's
+        // `.disabled(settingsOpen)` doesn't reach into this UIViewRepresentable.
+        view.isUserInteractionEnabled = false
         guard let url = StreamURLBuilder.tilePreviewURL(server: server, contentName: content.name) else {
             return view
         }

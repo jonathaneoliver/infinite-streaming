@@ -13,6 +13,7 @@
  */
 import { computed, type Ref } from 'vue';
 import { usePlayer } from './usePlayer';
+import type { Stream } from './useSessionTimeSeries';
 import type { components } from '@/types/v2';
 
 type ManifestVariant = components['schemas']['ManifestVariant'];
@@ -26,16 +27,169 @@ export function useManifestVariants(playerId: Ref<string> | string) {
   const variants = computed<ManifestVariant[]>(() => {
     const p = player.value;
     const typed = p?.current_play?.manifest?.variants;
-    if (Array.isArray(typed) && typed.length) return typed;
-    let flat = (p as any)?.raw_session?.manifest_variants;
-    if (typeof flat === 'string') {
-      // raw_session may serialize the variant list as a JSON string
-      // when coming through the CH long-tail column. Parse if so.
-      try { flat = JSON.parse(flat); } catch { flat = undefined; }
-    }
-    if (Array.isArray(flat) && flat.length) return flat as ManifestVariant[];
+    if (Array.isArray(typed) && typed.length) return dedupSortVariants(typed);
+    const flat = parseManifestVariants((p as any)?.raw_session?.manifest_variants);
+    if (flat.length) return dedupSortVariants(flat as ManifestVariant[]);
     return [];
   });
 
-  return { variants };
+  // The FULL content ladder — every published rung, independent of the session's
+  // allowed_variants thinning. Config/control panels (fault injection, the
+  // content-manipulation variant picker, the shaping pattern) read this so a
+  // DESELECTED variant stays listed and can be re-selected — whereas `variants`
+  // above is the thinned what-the-player-sees set the bandwidth chart wants
+  // (#815/#820). The proxy publishes the full set on
+  // raw_session.manifest_variants_all (go-proxy main.go); fall back to the thinned
+  // `variants` for older proxies or all-allowed sessions, where the two match.
+  const variantsAll = computed<ManifestVariant[]>(() => {
+    const p = player.value;
+    const all = parseManifestVariants((p as any)?.raw_session?.manifest_variants_all);
+    if (all.length) return dedupSortVariants(all as ManifestVariant[]);
+    return variants.value;
+  });
+
+  return { variants, variantsAll };
+}
+
+/**
+ * Collapse a raw variant ladder to one entry per DISTINCT rung, sorted by
+ * descending peak bandwidth (highest rung first). Two sources can carry
+ * duplicate rungs the scope/config pickers must not repeat:
+ *   - HLS masters legitimately list a video rendition once PER audio group
+ *     (stereo + surround) — same media-playlist URI, N EXT-X-STREAM-INF lines.
+ *   - Looping DASH MPDs accumulate <Period>s over the live window, each
+ *     carrying the same Representation ladder (fixed at the source in
+ *     parseDASHManifest, deduped here too for defence in depth).
+ * Keyed on `url` (the media-playlist URI for HLS, the segment dir for DASH),
+ * falling back to `resolution@bandwidth` when a source omits it. The nearest-
+ * match helpers below are order- and duplicate-insensitive, so only the
+ * enumerated pickers (fault scope, content manipulation, shaping pattern)
+ * need this normalisation.
+ */
+function dedupSortVariants<T extends { url?: string; resolution?: string; bandwidth?: number }>(
+  list: readonly T[],
+): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const v of list) {
+    const key = v?.url ?? `${v?.resolution ?? ''}@${v?.bandwidth ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(v);
+  }
+  out.sort((a, b) => (b?.bandwidth ?? 0) - (a?.bandwidth ?? 0));
+  return out;
+}
+
+/** Minimal manifest-variant shape the snap helper needs. */
+export interface VariantLite {
+  bandwidth?: number;
+  resolution?: string;
+}
+
+/**
+ * Snap a player-reported bitrate (Mbps) to the manifest rung whose published
+ * peak BANDWIDTH is closest, returning that rung's resolution + peak Mbps.
+ *
+ * The player's `video_bitrate` is AVPlayer's `indicatedBitrate` — a jittery
+ * EWMA estimate that wobbles around the true rung (e.g. 29.6/29.9 for a
+ * 29.86 Mbps 4K variant). Anywhere a reported bitrate must identify a
+ * DISCRETE variant (the bandwidth chart's Fetching line, the timeline
+ * VARIANT lane) we snap it here so one rung doesn't fragment into phantom
+ * near-duplicates and jitter doesn't fire spurious up/down shifts. The raw
+ * value is left intact at the source — this is a display-time derivation.
+ *
+ * Returns null when there are no usable variants (e.g. pre-manifest
+ * heartbeats), so callers fall back to the raw value or skip. Issue #619.
+ */
+export function nearestVariantByBitrate(
+  variants: ReadonlyArray<VariantLite> | null | undefined,
+  reportedMbps: number,
+): { resolution: string; peakMbps: number } | null {
+  if (!variants || variants.length === 0 || !Number.isFinite(reportedMbps)) return null;
+  let best: { resolution: string; peakMbps: number } | null = null;
+  let bestDelta = Infinity;
+  for (const v of variants) {
+    const bw = Number(v?.bandwidth ?? 0);
+    if (!Number.isFinite(bw) || bw <= 0) continue;
+    const peakMbps = bw / 1_000_000;
+    const delta = Math.abs(peakMbps - reportedMbps);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      best = { resolution: String(v?.resolution ?? '').trim(), peakMbps };
+    }
+  }
+  return best;
+}
+
+/** Coerce a raw `manifest_variants` value into `VariantLite[]`. The live
+ *  PlayerRecord carries it as an array; the CH long-tail column serialises it
+ *  as a JSON string. Returns `[]` for anything unusable. */
+export function parseManifestVariants(value: unknown): VariantLite[] {
+  let v = value;
+  if (typeof v === 'string') {
+    try { v = JSON.parse(v); } catch { return []; }
+  }
+  return Array.isArray(v) ? (v as VariantLite[]) : [];
+}
+
+/**
+ * Most-recent non-empty `manifest_variants` value from a charts_minimal
+ * events stream, scanning newest row first. The per-row `manifest_variants`
+ * column is part of the charts_minimal projection both the live/active
+ * stream and each compare-mode sibling stream carry, so reading it here
+ * lets a chart build a per-session variant ladder from whichever stream it
+ * holds — the active session's own (single-session / self) or a sibling's
+ * (compare-mode overlay, issue #812).
+ *
+ * Reads `stream.version.value` so a caller invoking this inside a `computed`
+ * re-derives when the stream ingests new rows. Returns `[]` for a null
+ * stream or one with no usable manifest yet (e.g. pre-manifest heartbeats).
+ */
+export function latestManifestVariants(
+  stream: Stream<Record<string, unknown>> | null | undefined,
+): VariantLite[] {
+  if (!stream) return [];
+  void stream.version.value;
+  const rows = stream.inRange(0, Number.MAX_SAFE_INTEGER);
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const parsed = parseManifestVariants((rows[i] as Record<string, unknown>).manifest_variants);
+    if (parsed.length) return parsed;
+  }
+  return [];
+}
+
+/**
+ * Map a player's DECODED frame size (`player_metrics.video_resolution`, e.g.
+ * "640x360") to the published peak BANDWIDTH (Mbps) of the ladder rung it
+ * corresponds to — the "Displayed Variant" line on the bandwidth chart.
+ *
+ * Matched by nearest frame HEIGHT, not exact "WxH" and not by bitrate: the
+ * decoded size legitimately differs from the manifest RESOLUTION attribute
+ * (coded vs display, mod-16 padding, PAR / clean aperture, packager quirks),
+ * and `video_bitrate` is indicatedBitrate — the FETCHED rung, which leads the
+ * displayed one by the buffer during switches. This project's ladders have one
+ * rung per height. Returns null when there's no usable ladder or resolution.
+ */
+export function displayedVariantPeakMbps(
+  variants: ReadonlyArray<VariantLite> | null | undefined,
+  videoResolution: string | null | undefined,
+): number | null {
+  const heightOf = (res?: string | null): number | null => {
+    if (!res) return null;
+    const m = /(\d+)\s*[x×]\s*(\d+)/i.exec(res);
+    return m ? Number(m[2]) : null;
+  };
+  const h = heightOf(videoResolution);
+  if (h == null || !variants || variants.length === 0) return null;
+  let best: number | null = null;
+  let bestDelta = Infinity;
+  for (const v of variants) {
+    const rh = heightOf(v?.resolution);
+    const peak = Number(v?.bandwidth ?? 0) / 1_000_000;
+    if (rh == null || !Number.isFinite(peak) || peak <= 0) continue;
+    const delta = Math.abs(rh - h);
+    if (delta < bestDelta) { bestDelta = delta; best = peak; }
+  }
+  return best;
 }

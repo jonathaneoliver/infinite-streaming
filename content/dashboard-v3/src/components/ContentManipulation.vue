@@ -14,14 +14,27 @@ const props = defineProps<{ playerId: string }>();
 const { player, setContent } = usePlayer(toRef(props, 'playerId'));
 
 const content = computed(() => player.value?.content);
-const { variants: rawVariants } = useManifestVariants(toRef(props, 'playerId'));
+// Full ladder (every published rung), not the allowed_variants-thinned set, so a
+// DESELECTED variant stays in the picker and can be re-checked (#815/#820 thinned
+// manifest_variants for the bandwidth chart; this picker needs the whole ladder).
+const { variantsAll: rawVariants } = useManifestVariants(toRef(props, 'playerId'));
 // Highest-bitrate-first, matching legacy `sortedPlaylists`.
 const variants = computed(() => {
   return rawVariants.value.slice().sort((a, b) => (b.bandwidth ?? 0) - (a.bandwidth ?? 0));
 });
 
-const LIVE_OFFSET_CHOICES = [0, 6, 18, 24] as const;
+const LIVE_OFFSET_CHOICES = [0, 2, 4, 6, 12, 18, 24, 30, 36, 42] as const;
 type LiveOffset = (typeof LIVE_OFFSET_CHOICES)[number];
+
+const VARIANT_ORDER_CHOICES = [
+  { value: 'default', label: 'Default' },
+  { value: 'ascending', label: 'Ascending' },
+  { value: 'descending', label: 'Descending' },
+  { value: 'first_4mbps', label: '4 Mbps first' },
+] as const;
+type VariantOrder = (typeof VARIANT_ORDER_CHOICES)[number]['value'];
+
+const variantOrder = computed<VariantOrder>(() => content.value?.variant_order ?? 'default');
 
 function onBoolChange(field: 'strip_codecs' | 'strip_average_bandwidth' | 'strip_resolution' | 'overstate_bandwidth', e: Event) {
   const v = (e.target as HTMLInputElement).checked;
@@ -32,15 +45,36 @@ function onLiveOffsetChange(value: LiveOffset) {
   setContent({ live_offset: value } as Partial<Content>);
 }
 
+function onVariantOrderChange(value: VariantOrder) {
+  setContent({ variant_order: value } as Partial<Content>);
+}
+
 /** Empty allowed_variants list means "all allowed" — `allChecked = true`
  *  in that case (matches legacy renderContentVariantOptions). Otherwise
  *  every entry in `allowed_variants` is the explicit allow-list. */
 const allowed = computed(() => new Set(content.value?.allowed_variants ?? []));
 const isAllAllowed = computed(() => allowed.value.size === 0);
 
-function isVariantChecked(url: string): boolean {
+/** A variant is whitelisted if allowed_variants contains its served URI
+ *  (`playlist_6s_360p.m3u8`) OR its resolution: full "640x360", bare height
+ *  "360", or "360p". Mirrors the proxy's variantAllowed (go-proxy main.go) so a
+ *  resolution-form keep-set — e.g. set by the characterization harness or the
+ *  "Alternating" → resolution path — is reflected here, not shown as
+ *  "none selected". */
+function variantMatches(v: { url?: string; resolution?: string }): boolean {
+  if (v.url && allowed.value.has(v.url)) return true;
+  const res = v.resolution;
+  if (res) {
+    if (allowed.value.has(res)) return true;
+    const h = /x(\d+)/.exec(res)?.[1];
+    if (h && (allowed.value.has(h) || allowed.value.has(`${h}p`))) return true;
+  }
+  return false;
+}
+
+function isVariantChecked(v: { url?: string; resolution?: string }): boolean {
   if (isAllAllowed.value) return true;
-  return allowed.value.has(url);
+  return variantMatches(v);
 }
 
 function onAllToggle(on: boolean) {
@@ -60,11 +94,11 @@ function onAllToggle(on: boolean) {
 }
 
 function onVariantToggle(url: string, checked: boolean) {
-  // Starting state: if we're in "all allowed" mode, seed from every
-  // variant so toggling one off narrows from there.
-  const baseline = isAllAllowed.value
-    ? new Set(variants.value.map((v) => v.url))
-    : new Set(allowed.value);
+  // Seed from the variants currently shown as checked (matched by url OR
+  // resolution, via isVariantChecked) as URLs — so a resolution-form whitelist
+  // (e.g. set by the harness) migrates cleanly to URL form on the first manual
+  // toggle instead of producing a mixed url/resolution set.
+  const baseline = new Set(variants.value.filter((v) => isVariantChecked(v)).map((v) => v.url));
   if (checked) baseline.add(url);
   else baseline.delete(url);
   // If every variant is checked again, collapse to the "all allowed"
@@ -73,6 +107,37 @@ function onVariantToggle(url: string, checked: boolean) {
   const isAll = allUrls.length > 0 && allUrls.every((u) => baseline.has(u));
   const next = isAll ? [] : Array.from(baseline);
   setContent({ allowed_variants: next } as Partial<Content>);
+}
+
+/** Adjacent BANDWIDTH ratios (ascending). A dense geometric ladder sits at
+ *  ~1.41× (√2); the legacy 2× ladder is ~2.0×. Used to gate "Alternating"
+ *  so it only offers on this ladder or an equivalent (#762) — halving a 2×
+ *  ladder would create ~4× gaps. */
+const isGeometricLadder = computed(() => {
+  const asc = variants.value
+    .map((v) => v.bandwidth ?? 0)
+    .filter((b) => b > 0)
+    .sort((a, b) => a - b);
+  if (asc.length < 5) return false;
+  for (let i = 1; i < asc.length; i++) {
+    if (asc[i] / asc[i - 1] > 1.7) return false; // a ~2× gap ⇒ not geometric
+  }
+  return true;
+});
+
+/** Alternating (2×) thinning: on the bandwidth-sorted ladder keep indices
+ *  0,2,4,… plus the last, so floor AND ceiling are retained. On this geometric
+ *  ladder that yields exactly the original 2× rungs. Matches the harness
+ *  `allowed_variants: alternating_variants` spec. Sets the existing
+ *  allowed_variants whitelist — the proxy already filters the master to it, so
+ *  no backend change (#762). */
+function alternatingVariants() {
+  const asc = variants.value
+    .slice()
+    .sort((a, b) => (a.bandwidth ?? 0) - (b.bandwidth ?? 0));
+  const n = asc.length;
+  const keep = asc.filter((_, i) => i % 2 === 0 || i === n - 1).map((v) => v.url);
+  setContent({ allowed_variants: keep } as Partial<Content>);
 }
 
 function heightOf(res?: string | null): string {
@@ -150,13 +215,56 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
       </label>
     </div>
     <p class="note">
-      HLS-only. Forces the player to fall back further from the live edge by
-      stripping the most-recent N seconds of segments from the manifest.
-      Pairs well with `delay_ms` to surface live-offset-driven stalls.
+      HLS-only. Rewrites the manifest's <code>EXT-X-START:TIME-OFFSET</code>
+      (join point) and <code>EXT-X-SERVER-CONTROL:HOLD-BACK</code> (target
+      offset) to N seconds, on both the master <em>and</em> the variant
+      playlists. Players honour the variant <code>HOLD-BACK</code> for their
+      join offset (iOS / Android / web). Note the HLS spec requires
+      <code>HOLD-BACK ≥ 3× the max segment duration</code> — below that AVPlayer
+      rejects the playlist (<code>-12646</code>). It does NOT strip segments.
+    </p>
+
+    <div class="order-row" data-testid="content-variant-order">
+      <span class="label">Variant order</span>
+      <div class="segmented" role="radiogroup" aria-label="Master playlist variant order">
+        <button
+          v-for="opt in VARIANT_ORDER_CHOICES"
+          :key="opt.value"
+          type="button"
+          role="radio"
+          class="seg"
+          :class="{ active: variantOrder === opt.value }"
+          :aria-checked="variantOrder === opt.value"
+          :data-testid="`content-variant-order-${opt.value}`"
+          @click="onVariantOrderChange(opt.value)"
+        >
+          {{ opt.label }}
+        </button>
+      </div>
+    </div>
+    <p class="note">
+      Re-sorts the master playlist's video variants by BANDWIDTH to probe how
+      AVPlayer picks its initial variant (#682). <strong>4 Mbps first</strong>
+      promotes the variant nearest 4 Mbps to first-listed. Audio/subtitle
+      renditions are untouched. Takes effect on the next master fetch.
     </p>
 
     <div class="variants">
-      <span class="label">Allowed variants <span class="muted">(All checked = allow every variant)</span></span>
+      <div class="variants-head">
+        <span class="label">Allowed variants <span class="muted">(All checked = allow every variant)</span></span>
+        <button
+          type="button"
+          class="thin-btn"
+          data-testid="content-alternating"
+          :disabled="!isGeometricLadder"
+          :title="isGeometricLadder
+            ? 'Drop the ~1.41× fill rungs → keep the alternating 2× subset (floor + ceiling retained)'
+            : 'Only on a dense ~1.41× geometric ladder — this content isn’t one'"
+          @click="alternatingVariants"
+        >
+          Alternating (2×)
+        </button>
+      </div>
       <div v-if="!variants.length" class="muted">Play content once to populate variant list.</div>
       <div v-else class="variant-list">
         <label class="all">
@@ -170,7 +278,7 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
         <label v-for="v in variants" :key="v.url">
           <input
             type="checkbox"
-            :checked="isVariantChecked(v.url)"
+            :checked="isVariantChecked(v)"
             @change="onVariantToggle(v.url, ($event.target as HTMLInputElement).checked)"
           />
           {{ variantLabel(v) }}
@@ -225,13 +333,37 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
   line-height: 1.4;
 }
 
-.offset-row {
+.offset-row,
+.order-row {
   display: flex;
   flex-wrap: wrap;
   gap: 16px;
   align-items: center;
   font-size: 13px;
   color: #374151;
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.seg {
+  border: none;
+  border-left: 1px solid #d1d5db;
+  background: #fff;
+  color: #374151;
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.seg:first-child {
+  border-left: none;
+}
+.seg.active {
+  background: #2563eb;
+  color: #fff;
 }
 
 .label {
@@ -260,6 +392,25 @@ function variantLabel(v: { url: string; resolution?: string; bandwidth?: number 
   display: grid;
   gap: 6px;
 }
+
+.variants-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.thin-btn {
+  border: 1px solid #d1d5db;
+  background: #fff;
+  color: #374151;
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.thin-btn:hover:not(:disabled) { background: #f3f4f6; }
+.thin-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .variant-list {
   display: grid;

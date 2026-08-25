@@ -12,6 +12,7 @@ go 1.25.0
 use (
 	./analytics/go-forwarder
 	./go-proxy
+	./tests/aberration_crawl
 	./tests/characterization
 	./tests/server_behavior
 	./tools/harness-cli

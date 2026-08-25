@@ -18,6 +18,12 @@ type rangeSegment struct {
 	Offset   int
 	Length   int
 	Duration float64
+	// Fragments holds the underlying ~200ms fragment byteranges that make up
+	// this 1s segment, in order. Populated only on the byterange path (the
+	// only path that has fragment-level data). Consumed by the LL-HLS variant
+	// to emit one EXT-X-PART tag per fragment; the non-partials 2s/6s/1s path
+	// ignores it, so this field is purely additive.
+	Fragments []parser.ByteRange
 }
 
 // RangeHLSGenerator generates virtual 2s/6s playlists without partials.
@@ -72,6 +78,62 @@ func (g *RangeHLSGenerator) GenerateVariantPlaylist(
 	if err != nil {
 		return "", err
 	}
+
+	return generateVariantPlaylistCore(segments, totalDuration, segmentMap, relPath, timeNow, loopCount, minDuration, syncTotalDuration, syncTimeOffset, variantPlaylistOptions{
+		emitPartials: false,
+		useByterange: useByterange,
+		renderURI: func(uri string) string {
+			return absoluteSegmentURI(prefix, content, joinRelPath(relPath, uri))
+		},
+		loopMarker: "RANGE",
+	})
+}
+
+// variantPlaylistOptions captures the per-variant differences between the
+// non-partials range playlists (2s/6s/1s) and the LL-HLS playlist. Everything
+// else — the flat-segment list, the MEDIA-SEQUENCE / DISCONTINUITY-SEQUENCE /
+// sliding-window / loop-wrap math, and the PDT — is shared in
+// generateVariantPlaylistCore so the LL playlist is structurally identical to
+// the 1s range playlist (same `len(segments)`-derived sequence) PLUS partials.
+type variantPlaylistOptions struct {
+	// emitPartials turns on the LL-HLS behaviour: an EXT-X-PART tag per
+	// underlying fragment before each segment's EXTINF, the LL-only header
+	// tags (EXT-X-PART-INF, PART-HOLD-BACK), and the live-edge tail of bare
+	// EXT-X-PART lines for the still-incomplete current segment.
+	emitPartials bool
+	// useByterange controls whether the closed segments carry an
+	// EXT-X-BYTERANGE line (only the byterange path — targetSeconds < 6 — has
+	// per-segment offsets).
+	useByterange bool
+	// renderURI maps a parsed segment/init URI to the form the playlist emits
+	// (absolute prefix/content path for range, bare filename for LL).
+	renderURI func(string) string
+	// partTarget / partHoldBack are only consulted when emitPartials is true.
+	partTarget   float64
+	partHoldBack float64
+	// loopMarker tags the once-per-second loop-boundary log line (RANGE / LL).
+	loopMarker string
+}
+
+// generateVariantPlaylistCore builds a media playlist from a flat list of 1s
+// segments. The MEDIA-SEQUENCE / DISCONTINUITY-SEQUENCE / window / wrap math is
+// derived from len(segments) — the flat sub-segment count — so a given segment
+// keeps a stable, monotonic sequence number across reloads (the drift bug that
+// the old underlying-segment counting LL path suffered from is impossible here
+// by construction). opts.emitPartials adds the EXT-X-PART tags + LL header on
+// top of the otherwise-identical structure.
+func generateVariantPlaylistCore(
+	segments []rangeSegment,
+	totalDuration float64,
+	segmentMap string,
+	relPath string,
+	timeNow float64,
+	loopCount int,
+	minDuration float64,
+	syncTotalDuration float64,
+	syncTimeOffset float64,
+	opts variantPlaylistOptions,
+) (string, error) {
 	if totalDuration <= 0 && minDuration > 0 {
 		totalDuration = minDuration
 	}
@@ -178,10 +240,14 @@ func (g *RangeHLSGenerator) GenerateVariantPlaylist(
 
 	var sb strings.Builder
 	sb.WriteString("#EXTM3U\n")
-	// Version 9 is required because the playlist emits EXT-X-SERVER-CONTROL
-	// (below). AVPlayer rejects v7 playlists that carry v9-era tags with
-	// -12646 "playlist parse error".
-	sb.WriteString("#EXT-X-VERSION:9\n")
+	if opts.emitPartials {
+		sb.WriteString("#EXT-X-VERSION:10\n") // Version 10 for LL-HLS
+	} else {
+		// Version 9 is required because the playlist emits EXT-X-SERVER-CONTROL
+		// (below). AVPlayer rejects v7 playlists that carry v9-era tags with
+		// -12646 "playlist parse error".
+		sb.WriteString("#EXT-X-VERSION:9\n")
+	}
 	sb.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(math.Ceil(maxSegDuration))))
 	sb.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", firstSeq))
 	// EXT-X-DISCONTINUITY-SEQUENCE is REQUIRED by RFC 8216 §4.3.3.3 whenever
@@ -195,58 +261,103 @@ func (g *RangeHLSGenerator) GenerateVariantPlaylist(
 	sb.WriteString(fmt.Sprintf("#EXT-X-DISCONTINUITY-SEQUENCE:%d\n", startLoop))
 	// EXT-X-SERVER-CONTROL HOLD-BACK is a media-playlist-only tag (RFC 8216
 	// §4.3.3.8). HLS spec requires HOLD-BACK >= 3× TARGETDURATION — note
-	// TARGETDURATION is the integer ceiling (7 for 6.006s segments), not the
-	// exact segment duration, so using 3× maxSegDuration would fall below
-	// the minimum (18.018 < 21) and AVPlayer rejects with -12646 "playlist
-	// parse error". Explicit declaration is preferred over relying on
-	// player defaults; other players (hls.js, ExoPlayer, Shaka) may default
-	// differently.
+	// TARGETDURATION is the integer ceiling (2 for 1.001s sub-segments), not
+	// the exact segment duration, so using 3× maxSegDuration would fall below
+	// the minimum and AVPlayer rejects with -12646 "playlist parse error".
+	// Explicit declaration is preferred over relying on player defaults; other
+	// players (hls.js, ExoPlayer, Shaka) may default differently.
 	targetDurationSecs := int(math.Ceil(maxSegDuration))
 	liveHoldBack := 3.0 * float64(targetDurationSecs)
-	sb.WriteString(fmt.Sprintf("#EXT-X-SERVER-CONTROL:HOLD-BACK=%.3f\n", liveHoldBack))
+	if opts.emitPartials {
+		// LL-HLS header: PART-INF advertises the partial target, and the
+		// SERVER-CONTROL line carries PART-HOLD-BACK in addition to HOLD-BACK.
+		sb.WriteString(fmt.Sprintf("#EXT-X-PART-INF:PART-TARGET=%.3f\n", opts.partTarget))
+		sb.WriteString(fmt.Sprintf("#EXT-X-SERVER-CONTROL:HOLD-BACK=%.3f,PART-HOLD-BACK=%.1f\n", liveHoldBack, opts.partHoldBack))
+	} else {
+		sb.WriteString(fmt.Sprintf("#EXT-X-SERVER-CONTROL:HOLD-BACK=%.3f\n", liveHoldBack))
+	}
 	// EXT-X-START in the variant matters because hls.js (and some other
 	// players) only honor TIME-OFFSET in the *media* playlist; the master
 	// inheritance is widely under-implemented. Without this, hls.js parks at
 	// the oldest segment in the sliding window and never seeks to live —
 	// the player ends up ~MAX_LIVE_WINDOW_DURATION seconds behind real time.
-	// Match HOLD-BACK so the seek target and steady-state target agree.
+	// Match HOLD-BACK so the seek target and steady-state target agree — for BOTH
+	// the range rungs and LL. We previously joined LL at PART-HOLD-BACK (closer to
+	// live), but without CAN-BLOCK-RELOAD AVPlayer cannot sustain its buffer riding
+	// the parts that close and rebuffers; joining at HOLD-BACK (the complete-segment
+	// edge, same as the partial-less 1s rung) keeps the parts available without
+	// yanking the player into the zone it stalls in.
 	sb.WriteString(fmt.Sprintf("#EXT-X-START:TIME-OFFSET=-%.3f,PRECISE=YES\n", liveHoldBack))
 	sb.WriteString(fmt.Sprintf("#EXT-X-PROGRAM-DATE-TIME:%s\n", pdt.Format("2006-01-02T15:04:05.000Z")))
 
 	if segmentMap != "" {
-		sb.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", absoluteSegmentURI(prefix, content, joinRelPath(relPath, segmentMap))))
+		sb.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", opts.renderURI(joinRelPath(relPath, segmentMap))))
 	}
 
-	writeSegmentRange := func(seg rangeSegment) {
+	// writeSegment emits one CLOSED segment: when emitPartials is on, the
+	// segment's EXT-X-PART fragment tags precede its EXT-X-BYTERANGE / EXTINF /
+	// URI; otherwise it is exactly the non-partials range output.
+	writeSegment := func(seg rangeSegment) {
+		if opts.emitPartials {
+			uri := opts.renderURI(joinRelPath(relPath, seg.URI))
+			for _, frag := range seg.Fragments {
+				partTag := fmt.Sprintf("#EXT-X-PART:DURATION=%.3f,URI=\"%s\",BYTERANGE=\"%d@%d\"",
+					opts.partTarget, uri, frag.Length, frag.Offset)
+				if frag.Independent {
+					partTag += ",INDEPENDENT=YES"
+				}
+				sb.WriteString(partTag + "\n")
+			}
+		}
 		sb.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", seg.Duration))
-		if useByterange && seg.Length > 0 {
+		if opts.useByterange && seg.Length > 0 {
 			sb.WriteString(fmt.Sprintf("#EXT-X-BYTERANGE:%d@%d\n", seg.Length, seg.Offset))
 		}
-		sb.WriteString(absoluteSegmentURI(prefix, content, joinRelPath(relPath, seg.URI)) + "\n")
+		sb.WriteString(opts.renderURI(joinRelPath(relPath, seg.URI)) + "\n")
 	}
 
 	if wrap {
 		tailDuration := 0.0
 		for i := windowStartIdx; i < len(segments); i++ {
-			writeSegmentRange(segments[i])
+			writeSegment(segments[i])
 			tailDuration += segments[i].Duration
 		}
 		boundaryAt := pdt.Add(time.Duration(tailDuration * float64(time.Second)))
-		writeRangeLoopDateRange(&sb, loopCount, boundaryAt, "wrap")
+		writeRangeLoopDateRange(&sb, loopCount, boundaryAt, opts.loopMarker)
 		sb.WriteString("#EXT-X-DISCONTINUITY\n")
 		if segmentMap != "" {
-			sb.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", absoluteSegmentURI(prefix, content, joinRelPath(relPath, segmentMap))))
+			sb.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", opts.renderURI(joinRelPath(relPath, segmentMap))))
 		}
 		remainingDuration := MAX_LIVE_WINDOW_DURATION - tailDuration
 		for i := 0; i <= availableIdx && remainingDuration > 0; i++ {
-			writeSegmentRange(segments[i])
+			writeSegment(segments[i])
 			remainingDuration -= segments[i].Duration
 		}
 	} else {
 		windowDuration := 0.0
 		for i := windowStartIdx; i <= availableIdx && windowDuration < MAX_LIVE_WINDOW_DURATION; i++ {
-			writeSegmentRange(segments[i])
+			writeSegment(segments[i])
 			windowDuration += segments[i].Duration
+		}
+	}
+
+	// LL live-edge tail: the current still-incomplete segment is emitted as
+	// bare EXT-X-PART lines with NO #EXTINF, exactly as the old LL path did at
+	// the live edge. availableIdx is the last CLOSED segment that was written
+	// above; currentIdx is the live one. Emitting it only when
+	// currentIdx == availableIdx+1 guarantees it was NOT already written as a
+	// closed segment (no duplication) — and this holds in both the wrap and
+	// non-wrap branches, since in both the closed loops stop at availableIdx.
+	if opts.emitPartials && currentIdx == availableIdx+1 && currentIdx >= 0 && currentIdx < len(segments) {
+		live := segments[currentIdx]
+		uri := opts.renderURI(joinRelPath(relPath, live.URI))
+		for _, frag := range live.Fragments {
+			partTag := fmt.Sprintf("#EXT-X-PART:DURATION=%.3f,URI=\"%s\",BYTERANGE=\"%d@%d\"",
+				opts.partTarget, uri, frag.Length, frag.Offset)
+			if frag.Independent {
+				partTag += ",INDEPENDENT=YES"
+			}
+			sb.WriteString(partTag + "\n")
 		}
 	}
 
@@ -313,10 +424,11 @@ func buildRangeSegments(pl *playlist.Media, byteranges map[string][]parser.ByteR
 			}
 			duration := fragmentDuration * float64(len(group))
 			segments = append(segments, rangeSegment{
-				URI:      seg.URI,
-				Offset:   group[0].Offset,
-				Length:   length,
-				Duration: duration,
+				URI:       seg.URI,
+				Offset:    group[0].Offset,
+				Length:    length,
+				Duration:  duration,
+				Fragments: group,
 			})
 			totalDuration += duration
 		}

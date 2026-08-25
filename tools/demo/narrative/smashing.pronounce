@@ -1,0 +1,46 @@
+# Project vocabulary for the Smashing / Infinite Stream demo.
+#
+#   pattern<TAB>replacement      (regex; blank lines and # comments ignored)
+#
+# These splice in AFTER pronounce.py's BASE_SPEECH and BEFORE the de-pluralising
+# tail, which is the detail that decides how the rung rules below are written.
+# BASE already contains  \b(\d+)p\b -> "\1 p", so by the time these run "2160p"
+# has ALREADY become "2160 p". Matching "2160p" here would never fire. Match the
+# spaced form.
+#
+# Why spell the rungs out at all: left as digits the engine reads "2160 p" as
+# "two thousand one hundred and sixty p", which is not how anyone says a video
+# resolution out loud. Every rung the ladder can produce is listed, because a
+# missing one is silently read the long way and you find out in playback.
+\b234 p\b	two thirty four p
+\b360 p\b	three sixty p
+\b396 p\b	three ninety six p
+\b432 p\b	four thirty two p
+\b540 p\b	five forty p
+\b594 p\b	five ninety four p
+\b720 p\b	seven twenty p
+\b954 p\b	nine fifty four p
+\b1080 p\b	ten eighty p
+\b1440 p\b	fourteen forty p
+\b1800 p\b	eighteen hundred p
+\b2160 p\b	twenty one sixty p
+
+# Player and protocol vocabulary.
+\bAVPlayer\b	A V player
+\bABR\b	A B R
+\bLL-DASH\b	L L DASH
+\bDASH\b	dash
+\bTTFF\b	time to first frame
+\bRTT\b	R T T
+
+# Device identifiers arrive from the wire as Apple's internal model string.
+# "iPhone15,4" reads as "iPhone fifteen comma four" untouched. Deliberately
+# mapped to the family rather than a marketing name — the record only tells us
+# the family, and inventing "Plus" or "Pro" would be narration asserting
+# something the data does not say.
+iPhone(\d+),(\d+)	iPhone \1
+
+# Infrastructure names that appear when narrating where a number came from.
+\bnftables\b	N F tables
+\bgo-proxy\b	go proxy
+\bgo-live\b	go live

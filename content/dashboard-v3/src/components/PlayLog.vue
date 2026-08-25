@@ -24,10 +24,17 @@
 import { computed, nextTick, onBeforeUnmount, ref, toRef, watch } from 'vue';
 import { usePlayer } from '@/composables/usePlayer';
 import { useChartCoordination } from '@/composables/useChartCoordination';
+import { collapseNetFailureLabels, humanizeNetFailure, labelTooltip } from '@/lib/labelGlossary';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 
 const props = defineProps<{
   playerId: string;
+  /** Shared chart-coordination key (SessionDisplay's `view:<player>`) so the
+   *  Play Log's focus window matches every other panel. Falls back to playerId,
+   *  but SessionDisplay MUST pass it — otherwise the log reads an unpinned coord
+   *  bucket and shows nothing in archive views (#828 wired every other panel but
+   *  missed PlayLog). Data still keys off playerId. Mirrors NetworkLog. */
+  coordId?: string;
   /** play_id from the URL, used as the fallback `play_id` value for
    *  event rows — the events SSE doesn't yet project play_id (the
    *  derivation in events_query.go doesn't carry it through the
@@ -46,7 +53,7 @@ const props = defineProps<{
 
 const playerIdRef = toRef(props, 'playerId');
 usePlayer(playerIdRef); // keep the SSE subscription warm
-const coord = useChartCoordination(playerIdRef);
+const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
 
 /** Real player UUID for display purposes. The `playerId` prop is the
  *  shared cache key used by useChartCoordination + the streams cache;
@@ -250,7 +257,13 @@ function buildNetworkRow(raw: Record<string, unknown>): Row | null {
   const durMs = totalMs > 0 ? totalMs : summed;
   const enriched: Record<string, unknown> = { ...raw };
   if (bytesOut > 0) enriched.KB = (bytesOut / 1024);
-  if (transferMs > 0 && bytesOut > 0) {
+  // Prefer the kernel-measured delivery rate (#850 — honest under tc
+  // shaping); the implied bytes/transfer figure is the fallback for rows
+  // that predate the field.
+  const kernelMbps = numOrZero(raw.delivery_rate_mbps);
+  if (kernelMbps > 0) {
+    enriched.Mbps = kernelMbps;
+  } else if (transferMs > 0 && bytesOut > 0) {
     enriched.Mbps = (bytesOut * 8) / (transferMs * 1000);
   }
   if (durMs > 0) enriched.duration = fmtMs(durMs);
@@ -347,67 +360,6 @@ function kbpsFromVariantKey(key: string): number {
   return m ? Number(m[1]) : 0;
 }
 
-/** Parse the `manifest_variants` raw field (JSON-string or array) into
- *  a clean list of `{kbps, height}` for the ladder. Heights aren't
- *  used today but kept for the resolution-weighted alternative when
- *  we want it. Returns [] when the row hasn't seen the manifest yet. */
-function parseManifestLadder(rawMV: unknown): { kbps: number; height: number }[] {
-  let arr: unknown = rawMV;
-  if (typeof rawMV === 'string' && rawMV.length > 0 && rawMV !== 'null') {
-    try { arr = JSON.parse(rawMV); } catch { return []; }
-  }
-  if (!Array.isArray(arr)) return [];
-  const out: { kbps: number; height: number }[] = [];
-  for (const v of arr) {
-    const bw = Number((v as Record<string, unknown>)?.bandwidth ?? 0);
-    if (!Number.isFinite(bw) || bw <= 0) continue;
-    const resStr = String((v as Record<string, unknown>)?.resolution ?? '');
-    const h = Number(resStr.match(/x(\d+)/i)?.[1] ?? 0);
-    out.push({ kbps: Math.round(bw / 1000), height: Number.isFinite(h) ? h : 0 });
-  }
-  return out;
-}
-
-/** Log-bitrate-weighted quality % with a baseline floor (issue #486).
- *
- * Perceived video quality is roughly logarithmic in bitrate (the
- * Weber-Fechner curve that also governs perceived loudness): doubling
- * the bitrate barely registers near the top of the ladder. Linear
- * bitrate weighting penalises 1080p too harshly when the ceiling is
- * 4K. This computes `quality = log(kbps/min) / log(max/min)` per
- * variant, clamps to `BASELINE_FLOOR` so the bottom variant isn't
- * scored zero, and time-weights across the variants the player has
- * actually watched. Returns null when inputs are insufficient (no
- * ladder, no per-variant time, single-variant ladder where the log
- * ratio is undefined). */
-const QUALITY_BASELINE_FLOOR = 0.20;
-function computeQualityPct(
-  perVariant: Record<string, number>,
-  ladder: { kbps: number; height: number }[],
-): number | null {
-  if (!ladder.length) return null;
-  const kbpsList = ladder.map((v) => v.kbps).filter((k) => k > 0);
-  if (kbpsList.length < 2) return null;
-  const minKbps = Math.min(...kbpsList);
-  const maxKbps = Math.max(...kbpsList);
-  if (maxKbps <= minKbps) return null;
-  const denom = Math.log(maxKbps / minKbps);
-  let weightedSum = 0;
-  let totalSec = 0;
-  for (const [key, seconds] of Object.entries(perVariant)) {
-    if (!Number.isFinite(seconds) || seconds <= 0) continue;
-    const kbps = kbpsFromVariantKey(key);
-    if (kbps <= 0) continue;
-    const ratio = kbps / minKbps;
-    const raw = ratio > 0 ? Math.log(ratio) / denom : 0;
-    const q = Math.max(QUALITY_BASELINE_FLOOR, raw);
-    weightedSum += q * seconds;
-    totalSec += seconds;
-  }
-  if (totalSec <= 0) return null;
-  return (weightedSum / totalSec) * 100;
-}
-
 function formatValue(v: unknown): string {
   if (v == null) return '';
   if (typeof v === 'string') return v;
@@ -476,18 +428,24 @@ function fieldsFromRaw(raw: Record<string, unknown>, extraSkip?: Set<string>): D
           if (parts.length) {
             out.push({ name: 'time_per_variant', value: parts.join(' · ') });
           }
-          // Cumulative-since-start quality chip. The 60-second
-          // sliding-window companion is appended later in
-          // rowsWithFields (which has access to the prior row
-          // needed for the diff). Issue #486.
-          const perVariantMap: Record<string, number> = {};
-          for (const [ik, seconds] of entries) perVariantMap[ik] = seconds;
-          const ladder = parseManifestLadder(raw.manifest_variants);
-          const quality = computeQualityPct(perVariantMap, ladder);
-          if (quality != null) {
+          // Cumulative + 60s quality chips — read straight off the row.
+          // iOS computes both (log-bitrate, 0.20 floor) and the
+          // forwarder persists them as `video_quality_avg_pct` /
+          // `video_quality_60s_pct`. Single source of truth: same
+          // numbers in PlayerMetrics tile, PlayLog chips, and CH
+          // forever. 0 means "no iOS payload yet" (Float32 default).
+          const avgQ = Number(raw.video_quality_avg_pct);
+          if (Number.isFinite(avgQ) && avgQ > 0) {
             out.push({
               name: 'quality_pct',
-              value: `${quality.toFixed(1)}% (log-bitrate, cumulative)`,
+              value: `${avgQ.toFixed(1)}% (log-bitrate, cumulative)`,
+            });
+          }
+          const q60 = Number(raw.video_quality_60s_pct);
+          if (Number.isFinite(q60) && q60 > 0) {
+            out.push({
+              name: 'quality_pct_60s',
+              value: `${q60.toFixed(1)}% (log-bitrate, 60s window)`,
             });
           }
           continue;
@@ -555,6 +513,38 @@ function rowLabels(r: Row): string[] {
   // control_events rows carry their own labels[] (see
   // computeControlLabels in labels.go) so no synthesis is needed.
   return [];
+}
+
+/** Chip list for display: collapse a failed network row's facet labels under
+ *  its derived `net_failure:` signature (#892) so the line reads as one
+ *  failure. rowLabels() (the query/tint surface) is left untouched — the
+ *  signature carries the worst facet severity, so the row tint is unchanged. */
+function displayLabels(r: Row): string[] {
+  return collapseNetFailureLabels(rowLabels(r));
+}
+/** Chip text: humanise the net_failure signature; every other label keeps its
+ *  existing form (event name with the `*` synth mark). */
+function labelChipText(l: string): string {
+  const tail = l.slice(l.indexOf('=') + 1);
+  const ev = tail.replace(/^\*/, '');
+  return ev.startsWith('net_failure:') ? humanizeNetFailure(ev) : tail;
+}
+/** Chip hover: composed tooltip for the signature, raw label otherwise. */
+function labelChipTitle(l: string): string {
+  return l.includes('net_failure:') ? (labelTooltip(l) || l) : l;
+}
+
+/** #506 batch-derived per-row token, LEFT-JOINed by the forwarder
+ *  (analytics/tools/derive_tokens.py + the read-path merge in
+ *  v2_handlers.go / timeseries.go). Network rows carry segment/playlist
+ *  tokens (V_SEG/A_SEG/V_PL/…, FAULT); session_events rows carry
+ *  lifecycle tokens (STALL_*, RATE_*, BUF_*, FIRST_FRAME). Control and
+ *  avmetric rows return '' by design — the token model has no vocabulary
+ *  for them (the one control signal that matters, fault injection, is
+ *  already a FAULT token on the network request it breaks). */
+function rowToken(r: Row): string {
+  const t = r.raw?.token;
+  return typeof t === 'string' ? t : '';
 }
 
 /** Pull the severity prefix from a label like 'critical=stall_frozen'.
@@ -713,6 +703,18 @@ function sortValue(r: Row, c: SortCol): number | string {
   }
 }
 
+/** Flatten a row's fields to a single `k=v, k=v` string (#586). Rendered
+ *  as one text node instead of one chip element per field — the dominant
+ *  per-row DOM cost. */
+function fieldsToString(fields: DisplayedField[]): string {
+  let s = '';
+  for (let i = 0; i < fields.length; i++) {
+    if (i) s += ', ';
+    s += fields[i].name + '=' + fields[i].value;
+  }
+  return s;
+}
+
 /** Row + the field list to render. Computed in chronological order
  *  so the "Changed fields" diff against the previous same-source row
  *  is well-defined regardless of the display sort. */
@@ -812,11 +814,68 @@ function sortFields(fields: DisplayedField[], source: Source): DisplayedField[] 
   });
 }
 
+/** Rows within the coordinated focus window (issue #586). The logs now
+ *  "follow the focus bar": effectiveRange is the live tail when live, or
+ *  the pinned window when the operator pans back — so the Play Log lines
+ *  up with the charts and the Player State timeline instead of always
+ *  showing the entire cache. */
+const windowedFull = computed<Row[]>(() => {
+  const r = coord.effectiveRange.value;
+  if (!r) return allRows.value;
+  return allRows.value.filter((row) => row.ts >= r.min && row.ts <= r.max);
+});
+
+// Render every row in the focus window — no cap. The focus window already
+// bounds the row count, each row collapses to ~8 DOM nodes, and this matches
+// NetworkLog (uncapped), so a selected event never gets clipped. If a very
+// wide window ever janks, virtualize the list rather than re-introduce a cap.
+const windowedRows = computed<Row[]>(() => windowedFull.value);
+
+/** Highlight the row matching the synchronized "selected event" cursor
+ *  (coord.state.cursorMs) — same coordination NetworkLog uses, so picking
+ *  an event lights up the corresponding Play Log line too. Rows are point
+ *  events, so we light the containing/predecessor row: the latest row at or
+ *  before the cursor (successor if the cursor precedes the first row).
+ *  Rows sharing that ts all highlight. */
+const cursorRowTs = computed<number | null>(() => {
+  const ms = coord.state.cursorMs;
+  if (ms == null || !Number.isFinite(ms)) return null;
+  let pred = -Infinity, succ = Infinity;
+  for (const r of windowedFull.value) {
+    if (r.ts <= ms) { if (r.ts > pred) pred = r.ts; }
+    else if (r.ts < succ) succ = r.ts;
+  }
+  if (pred !== -Infinity) return pred;
+  if (succ !== Infinity) return succ;
+  return null;
+});
+
+// Scroll the highlighted row into view inside the inner container only (no
+// outer page scroll), mirroring NetworkLog's cursor follow.
+watch(
+  () => coord.state.cursorMs,
+  () => {
+    if (cursorRowTs.value == null) return;
+    nextTick(() => {
+      const el = rowsScrollRef.value;
+      if (!el) return;
+      const target = el.querySelector('.row.cursor-current') as HTMLElement | null;
+      if (!target) return;
+      const top = el.scrollTop;
+      const bottom = top + el.clientHeight;
+      const rTop = target.offsetTop;
+      const rBottom = rTop + target.offsetHeight;
+      if (rTop < top) el.scrollTop = rTop;
+      else if (rBottom > bottom) el.scrollTop = rBottom - el.clientHeight;
+    });
+  },
+);
+
 const rowsWithFields = computed<RowWithFields[]>(() => {
   // Build chronological copy so the diff against the previous
   // snapshot is well-defined regardless of the display sort
   // direction the operator picks below.
-  const chrono = allRows.value.slice().sort((a, b) => a.ts - b.ts);
+  const chrono = windowedRows.value.slice().sort((a, b) => a.ts - b.ts);
   const mode = displayMode.value;
   // Only snapshots participate in the diff — every network /
   // event row is unique by construction so a per-row diff is
@@ -854,81 +913,14 @@ const rowsWithFields = computed<RowWithFields[]>(() => {
       fields = fieldsFromRaw(r.raw, EVENT_SKIP);
     }
     fields = sortFields(fields, r.source);
-    // Sliding-window quality (issue #486). For every heartbeat row,
-    // walk back through the chronological event rows to find one
-    // that's at least `QUALITY_WINDOW_MS` older and also carries
-    // `time_per_variant_s`. Diff the two cumulative dicts to get the
-    // per-variant *seconds inside the window*, then run the
-    // log-bitrate quality formula on that delta. The chip reads as
-    // "how good did the last N seconds look" instead of "how good
-    // has the whole play been so far".
-    if (r.source === 'event') {
-      const tpvNowRaw = (r.raw.time_per_variant_s ?? r.raw.player_metrics_time_per_variant_s);
-      if (typeof tpvNowRaw === 'string' && tpvNowRaw.charAt(0) === '{') {
-        const cutoff = r.ts - QUALITY_WINDOW_MS;
-        let priorRaw: Record<string, unknown> | null = null;
-        for (let j = i - 1; j >= 0; j--) {
-          const pr = chrono[j];
-          if (pr.source !== 'event') continue;
-          if (pr.ts > cutoff) continue;
-          const pTpv = pr.raw.time_per_variant_s ?? pr.raw.player_metrics_time_per_variant_s;
-          if (typeof pTpv === 'string' && pTpv.charAt(0) === '{') {
-            priorRaw = pr.raw;
-            break;
-          }
-        }
-        const windowField = computeWindowQualityField(r.raw, priorRaw);
-        if (windowField) fields = [...fields, windowField];
-      }
-    }
+    // 60s window quality chip is now appended inline above from
+    // `raw.video_quality_60s_pct` (iOS-canonical). No client-side
+    // walk-back / diff needed.
     out[i] = { ...r, fields };
     if (r.source === 'event') prevSnapshot = r.raw;
   }
   return out;
 });
-
-/** Window size for the sliding-quality chip. 60 seconds is the
- *  standard analytics-dashboard window — long enough to be stable
- *  across a couple of segment fetches, short enough that a real
- *  ABR shift shows up within ~1 chip cycle. */
-const QUALITY_WINDOW_MS = 60_000;
-
-/** Build the sliding-window quality chip for one heartbeat row.
- *  Returns null when we can't compute (no prior row in window, no
- *  ladder yet, or the diff produced no positive deltas). Issue #486. */
-function computeWindowQualityField(
-  currentRaw: Record<string, unknown>,
-  priorRaw: Record<string, unknown> | null,
-): DisplayedField | null {
-  if (!priorRaw) return null;
-  let cur: Record<string, unknown>;
-  let prv: Record<string, unknown>;
-  try {
-    cur = JSON.parse(String(
-      currentRaw.time_per_variant_s ?? currentRaw.player_metrics_time_per_variant_s ?? '{}',
-    ));
-    prv = JSON.parse(String(
-      priorRaw.time_per_variant_s ?? priorRaw.player_metrics_time_per_variant_s ?? '{}',
-    ));
-  } catch { return null; }
-  if (!cur || typeof cur !== 'object' || Array.isArray(cur)) return null;
-  if (!prv || typeof prv !== 'object' || Array.isArray(prv)) return null;
-  const delta: Record<string, number> = {};
-  for (const k of Object.keys(cur)) {
-    const c = Number((cur as Record<string, unknown>)[k] ?? 0);
-    const p = Number((prv as Record<string, unknown>)[k] ?? 0);
-    const d = c - p;
-    if (Number.isFinite(d) && d > 0) delta[k] = d;
-  }
-  if (Object.keys(delta).length === 0) return null;
-  const ladder = parseManifestLadder(currentRaw.manifest_variants);
-  const q = computeQualityPct(delta, ladder);
-  if (q == null) return null;
-  return {
-    name: 'quality_pct_60s',
-    value: `${q.toFixed(1)}% (log-bitrate, 60s window)`,
-  };
-}
 
 const sortedRows = computed<RowWithFields[]>(() => {
   const list = rowsWithFields.value.slice();
@@ -947,14 +939,16 @@ const sortedRows = computed<RowWithFields[]>(() => {
 });
 
 const counts = computed(() => {
+  // Counts reflect the full focus window (issue #586), not the capped
+  // render set, so the toolbar tallies match what's in the window.
   let evt = 0, net = 0, ctl = 0, avm = 0;
-  for (const r of allRows.value) {
+  for (const r of windowedFull.value) {
     if (r.source === 'event') evt++;
     else if (r.source === 'network') net++;
     else if (r.source === 'avmetrics') avm++;
     else ctl++;
   }
-  return { evt, net, ctl, avm, total: allRows.value.length };
+  return { evt, net, ctl, avm, total: windowedFull.value.length };
 });
 
 /** True when the active player has any AVMetrics rows in the cached
@@ -1121,6 +1115,7 @@ function onRowsWheel(e: WheelEvent) {
         <div class="cell c-play">play_id</div>
         <div class="cell c-attempt">attempt_id</div>
         <div class="cell c-eventname">event_name</div>
+        <div class="cell c-token" title="#506 batch-derived per-row token (V_SEG(ΔP,ΔS), V_PROBE, …). Network rows only; LEFT-JOINed from derived_tokens by the forwarder.">token</div>
         <div class="cell c-fields">fields</div>
         <div v-if="showRaw" class="cell c-raw">raw</div>
       </div>
@@ -1130,7 +1125,7 @@ function onRowsWheel(e: WheelEvent) {
           v-for="(r, i) in sortedRows"
           :key="i"
           class="row"
-          :class="[`src-${r.source}`, rowSeverityClass(r)]"
+          :class="[`src-${r.source}`, rowSeverityClass(r), { 'cursor-current': cursorRowTs !== null && r.ts === cursorRowTs }]"
           :title="rowTooltip(r)"
         >
           <div class="cell c-time">{{ fmtTime(r.ts) }}</div>
@@ -1140,12 +1135,12 @@ function onRowsWheel(e: WheelEvent) {
           <div class="cell c-flags" :style="{ color: rowFlags(r).color }">{{ rowFlags(r).text }}</div>
           <div class="cell c-labels">
             <span
-              v-for="l in rowLabels(r)"
+              v-for="l in displayLabels(r)"
               :key="l"
               class="label-chip"
               :class="`label-${labelSeverity(l)}`"
-              :title="l"
-            >{{ l.slice(l.indexOf('=') + 1) }}</span>
+              :title="labelChipTitle(l)"
+            >{{ labelChipText(l) }}</span>
           </div>
           <div class="cell c-player" :title="r.playerId">{{ shortId(r.playerId) }}</div>
           <div class="cell c-play" :title="r.playId">{{ shortId(r.playId) }}</div>
@@ -1159,14 +1154,19 @@ function onRowsWheel(e: WheelEvent) {
             >{{ r.eventName }}</span>
             <span v-else class="event-name-empty">—</span>
           </div>
+          <div class="cell c-token" :title="rowToken(r)">
+            <span v-if="rowToken(r)" class="pl-token">{{ rowToken(r) }}</span>
+            <span v-else class="event-name-empty">—</span>
+          </div>
           <div class="cell c-fields">
             <span v-if="r.fields.length === 0" class="kv-empty">—</span>
-            <span
-              v-for="f in r.fields"
-              :key="f.name"
-              class="kv"
-              :title="f.name + '=' + f.value"
-            ><span class="kv-name">{{ f.name }}</span>=<span class="kv-value">{{ f.value }}</span></span>
+            <!-- Fields rendered as one compact `k=v, k=v` string instead
+                 of one chip element per field (#586). Each chip was 3 DOM
+                 nodes; a dense row had ~30+ fields → ~100 nodes/row. The
+                 single text node keeps PlayLog light enough to render the
+                 whole window. Full per-field detail stays in the Raw
+                 column. -->
+            <span v-else class="kv-compact" :title="fieldsToString(r.fields)">{{ fieldsToString(r.fields) }}</span>
           </div>
           <div v-if="showRaw" class="cell c-raw" :title="rawValueFor(r)">
             <pre class="raw-pre">{{ rawValueFor(r) }}</pre>
@@ -1273,6 +1273,7 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-play, 90px)
     var(--c-attempt, 90px)
     var(--c-eventname, minmax(140px, 280px))
+    var(--c-token, minmax(120px, 0.9fr))
     var(--c-fields, minmax(280px, 4fr));
   gap: 8px;
   padding: 4px 8px;
@@ -1282,6 +1283,22 @@ function onRowsWheel(e: WheelEvent) {
   border-top: 1px solid #f3f4f6;
 }
 .c-flags { text-align: center; font-weight: 700; }
+.c-token { overflow: hidden; }
+.pl-token {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 10px;
+  color: #3730a3;
+  background: #eef2ff;
+  border: 1px solid #e0e7ff;
+  border-radius: 3px;
+  padding: 0 4px;
+}
 
 /* When the Raw column is toggled on, the row grid grows by one slot
  * and the fields column tightens so the raw cell has room. */
@@ -1295,6 +1312,7 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-play, 90px)
     var(--c-attempt, 90px)
     var(--c-eventname, minmax(140px, 280px))
+    var(--c-token, minmax(120px, 0.9fr))
     var(--c-fields, minmax(200px, 2fr))
     var(--c-raw, minmax(280px, 3fr));
 }
@@ -1315,11 +1333,24 @@ function onRowsWheel(e: WheelEvent) {
 }
 
 .rows {
-  max-height: 480px;
+  /* position:relative makes this the offsetParent so the cursor
+     auto-scroll's target.offsetTop is measured against THIS container. */
+  position: relative;
+  max-height: 960px;
   overflow-y: auto;
 }
 
 .row:hover { background: #f9fafb; }
+/* Synchronized "selected event" cursor — mirrors NetworkLog so picking an
+   event highlights the matching Play Log line. The .rows ancestor lifts
+   specificity above the .row.src-* tints defined below. */
+.rows .row.cursor-current {
+  background: rgba(29, 78, 216, 0.14);
+  border-top: 2px dashed #1d4ed8;
+  border-bottom: 2px dashed #1d4ed8;
+  box-shadow: inset 4px 0 0 #1d4ed8;
+}
+.rows .row.cursor-current:hover { background: rgba(29, 78, 216, 0.20); }
 
 .row.src-event { background: #fafafa; }
 .row.src-event:hover { background: #f3f4f6; }
@@ -1379,6 +1410,7 @@ function onRowsWheel(e: WheelEvent) {
 .label-critical { background: #fecaca; color: #7f1d1d; border-color: #fca5a5; }
 .label-warning  { background: #fde68a; color: #854d0e; border-color: #fcd34d; }
 .label-info     { background: #d1fae5; color: #14532d; border-color: #a7f3d0; }
+.label-testing  { background: #e2e8f0; color: #475569; border-color: #cbd5e1; }
 
 .cell {
   white-space: nowrap;
@@ -1444,6 +1476,17 @@ function onRowsWheel(e: WheelEvent) {
 .kv-empty {
   color: #9ca3af;
   font-size: 10px;
+}
+/* Compact single-string field rendering (#586) — one text node instead
+ * of N chip elements. Wraps within the column; full value also in title. */
+.kv-compact {
+  font-size: 10px;
+  line-height: 1.5;
+  color: #374151;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* event_name column — dedicated cell after attempt_id. Lifted out

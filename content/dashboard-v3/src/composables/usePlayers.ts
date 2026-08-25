@@ -109,6 +109,12 @@ export function usePlayers() {
   // open. The picker page mounts usePlayers() exactly once today, but
   // making it pool-safe means future callers can't accidentally
   // multiply sockets.
+  // Resync on reconnect: SSE carries created/updated/deleted deltas, but any
+  // event that fires while the stream is down — especially `deleted` — is lost,
+  // so the list would stay stale after an outage (#944). On every return to
+  // 'open' AFTER the first connect, re-pull the authoritative list. The first
+  // 'open' is skipped because the query already fetches on mount.
+  let hasConnected = false;
   const sub = subscribeAllPlayers({
     onCreated: (d) => ingest('created', d),
     onUpdated: (d) => ingest('updated', d),
@@ -117,7 +123,13 @@ export function usePlayers() {
       const id = d?.player_id || d?.id;
       if (id) removeFromList(id);
     },
-    onStateChange: (s) => { sseState.value = s; },
+    onStateChange: (s) => {
+      sseState.value = s;
+      if (s === 'open') {
+        if (hasConnected) query.refetch();
+        hasConnected = true;
+      }
+    },
   });
 
   onScopeDispose(() => sub.release());

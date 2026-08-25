@@ -82,6 +82,7 @@ var bundleRegistry = map[string]bundleDef{
 		Columns: []string{
 			"ts",
 			"session_id", "play_id", "player_id",
+			"start_time", // client play start (#587) → rail left edge
 			"event_time",
 			// Bandwidth chart series (server + player side)
 			"video_bitrate_mbps",
@@ -107,10 +108,15 @@ var bundleRegistry = map[string]bundleDef{
 			"buffer_depth_s",
 			"buffer_end_s",
 			"live_offset_s",
+			// #786 — the live-offset trio so events read-API consumers can compute
+			// excess = live_offset_s - recommended_offset_s without a raw CH query
+			// (the columns are ingested for iOS + Android #782 but were panel_v1-only).
+			"recommended_offset_s",
+			"configured_offset_s",
 			"true_offset_s",
 			// FPS-derived counters
 			"frames_displayed",
-			"dropped_frames",
+			"frames_dropped",
 			"stall_count",
 			"stall_time_s",
 			// Player + manifest identity (used by hover tooltips +
@@ -172,8 +178,15 @@ var bundleRegistry = map[string]bundleDef{
 			"live_edge_s",
 			"metrics_source",
 			"loop_count_player",
-			"last_stall_time_s",
+			"loop_count_delta",
+			"state_from",
+			"state_to",
+			"content_name",
+			"user_marked_at",
+			"frames_rate",
 			"video_quality_pct",
+			"video_quality_60s_pct",
+			"video_quality_avg_pct",
 			"playhead_wallclock_ms",
 			"trigger_type",
 			"player_restarts",
@@ -185,7 +198,28 @@ var bundleRegistry = map[string]bundleDef{
 			// live_offset_s + recommended_offset_s.
 			"recommended_offset_s",
 			"configured_offset_s",
-			"nominal_fps_current",
+			"frames_rate",
+			// #550 Phase 1: residency accumulators + sticky durations
+			// + ms-renamed video startup. PlayerMetrics panel reads
+			// these via chRowAdapter; without them the per-state
+			// tiles render as "—" in the session viewer.
+			"playing_time_ms", "playing_count",
+			"pausing_time_ms", "pausing_count",
+			"buffering_time_ms", "buffering_count",
+			"stalling_time_ms", "stalling_count",
+			"idling_time_ms", "idling_count",
+			"seeking_time_ms", "seeking_count",
+			"trickplaying_time_ms", "trickplaying_count",
+			"stall_duration_ms",
+			"buffering_duration_ms",
+			"video_first_frame_time_ms",
+			"video_start_time_ms",
+			// #550 Phase 2: outcome + error fields (per-snapshot;
+			// SessionDetails + PlayerMetrics both consume).
+			"playback_status", "playback_reason",
+			"error_code", "error_domain",
+			"terminal_error_code", "terminal_error_domain",
+			"error_count",
 		},
 	},
 
@@ -204,10 +238,25 @@ var bundleRegistry = map[string]bundleDef{
 			"video_resolution",
 			"video_bitrate_mbps",
 			"display_resolution",
+			"fetching_resolution",
 			"stall_count",
-			"dropped_frames",
+			"frames_dropped",
 			"player_error",
+			// #703a — error_code/_domain so the IMPAIRMENT ERROR marker can show
+			// the actual NSError code/domain (e.g. -1008 / NSURLErrorDomain), not
+			// just the message string.
+			"error_code",
+			"error_domain",
 			"last_event",
+			// #703a — player_restarts revives the PLAYBACK-lane RESTART marker
+			// (counter-diff; the column IS persisted — it's in panel_v1 too),
+			// and last_event above carries the new `live_resync` nudge event.
+			"player_restarts",
+			// #703a — playback_rate drives the PLAYBACK-lane RATE→0 / RATE→1
+			// markers (rate 0 == AVPlayer paused/stuck; distinguishes a stuck
+			// stall from a transient one, which `player_state` masks). In
+			// panel_v1 too; added here so EventsTimeline gets it per-tick.
+			"playback_rate",
 			"manifest_variants",
 			"master_manifest_consecutive_failures",
 			"manifest_consecutive_failures",
@@ -234,12 +283,33 @@ var bundleRegistry = map[string]bundleDef{
 			"content_id",
 			"user_agent",
 			"manifest_url",
+			// master_manifest_url is the player-loaded MASTER playlist;
+			// manifest_url above is the most-recently-fetched VARIANT.
+			// SessionDetails' "Master Manifest URL" tile reads the
+			// master — was missing here so it showed a variant URL.
+			"master_manifest_url",
 			"last_request_url",
 			"player_state",
 			"player_error",
 			"last_event",
 			"classification",
 			"control_revision",
+			// Identity fields SessionDetails reads at top level —
+			// were missing from the projection so the panel showed
+			// "—" for User Agent / Player IP / Port even though the
+			// CH row had them. (Fix: projection-gap parity with the
+			// Testing dashboard's PlayerRecord shape.)
+			"player_ip", "origination_ip",
+			"session_number",
+			"attempt_id",
+			"x_forwarded_port", "x_forwarded_port_external",
+			"server_received_at_ms",
+			// #550 Phase 4: device taxonomy — per-session stable
+			// fields. SessionDetails.vue renders them alongside
+			// identity tiles. Costs are minimal: LowCardinality
+			// columns compress repeats to near-nothing.
+			"device_class", "device_model", "player_tech", "player_tech_version",
+			"app_version", "os_version_major", "os_version_minor",
 		},
 	},
 
@@ -258,6 +328,7 @@ var bundleRegistry = map[string]bundleDef{
 			"request_range", "response_content_range",
 			"dns_ms", "connect_ms", "tls_ms",
 			"ttfb_ms", "transfer_ms", "total_ms", "client_wait_ms",
+			"delivery_rate_mbps",
 			"faulted", "fault_type", "fault_action", "fault_category",
 			"entry_fingerprint",
 		},

@@ -17,7 +17,7 @@
  *     - Player Variant             — active video bitrate
  *
  *   Server-side rendition (from server_metrics):
- *     - Server Variant — rendition_mbps the server thinks the client picked
+ *     - Serving Variant — rendition_mbps the server thinks the client picked
  *
  * Y-max is controlled by the panel-level BitrateChartPanelToolbar via
  * the shared chart-coordination state.
@@ -25,22 +25,40 @@
 import { computed, ref, toRef } from 'vue';
 import MetricsLineChart, { type SeriesSpec } from './MetricsLineChart.vue';
 import { useChartCoordination } from '@/composables/useChartCoordination';
-import { useManifestVariants } from '@/composables/useManifestVariants';
+import { useManifestVariants, nearestVariantByBitrate, displayedVariantPeakMbps, latestManifestVariants, type VariantLite } from '@/composables/useManifestVariants';
+import { usePlayer } from '@/composables/usePlayer';
+import { useCompareOverlays, useCompareSelf, useCompareSiblings, sessionMarkerColor, SELF_MARKER_COLOR } from '@/composables/useCompareContext';
+import { compareBandwidthSeries } from '@/composables/compareSeries';
 import type { Stream } from '@/composables/useSessionTimeSeries';
+import type { LifecycleMarker, EventMarker } from '@/composables/useLifecycleMarkers';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
 const props = defineProps<{
   playerId: string;
+  /** Coordination scope key (per-player, stable across plays). Drives
+   *  useChartCoordination only; data still keys off playerId. Falls back to
+   *  playerId when absent. */
+  coordId?: string;
+  /** Shared player-lifecycle vertical lines, passed straight to MetricsLineChart. */
+  lifecycleMarkers?: LifecycleMarker[];
+  /** Focus-window event bars (severity-filtered), forwarded to MetricsLineChart. */
+  eventMarkers?: EventMarker[];
   eventsStream: Stream<Record<string, unknown>>;
   /** AVMetrics stream — used to overlay per-segment throughput dots
    *  on the bandwidth chart (issue #486). Optional so existing
    *  callers without the avmetrics scope (live testing.html
    *  pre-spike) can still mount the chart. */
   avmetricsStream?: Stream<Record<string, unknown>>;
+  /** Network-requests stream — used to overlay kernel-measured
+   *  delivery-rate dots (tcpi_delivery_rate, #850) per segment
+   *  request. Optional for callers without the network scope. */
+  networkStream?: Stream<Record<string, unknown>>;
 }>();
-const coord = useChartCoordination(toRef(props, 'playerId'));
+const coordId = computed(() => props.coordId ?? props.playerId);
+const coord = useChartCoordination(coordId);
 const yMax = computed(() => coord.state.bandwidthYMax);
 const { variants: usePlayerVariants } = useManifestVariants(toRef(props, 'playerId'));
+const { player } = usePlayer(toRef(props, 'playerId'));
 
 /** Per-segment markers — OFF by default. Operator opts in via the
  *  synthetic legend chip in MetricsLineChart (issue #486). The chip
@@ -54,6 +72,77 @@ interface ManifestVariantLite {
   resolution?: string;
 }
 
+/** Append one horizontal reference line per ladder rung at its published PEAK
+ *  bandwidth (EXT-X-STREAM-INF BANDWIDTH), all collapsed under a single
+ *  "Variant peak bandwidth" legend chip. `opts.hidden` starts the whole group
+ *  off by default (toggle on for the rung rate the ABR keys on).
+ *
+ *  When `opts.tag` is set (compare mode) the chip and each rung label carry
+ *  the session's `(Sx)` so each session gets its OWN ladder built from its OWN
+ *  manifest, and `sessionTag` wires the rungs to the S1/S2 session legend so a
+ *  session's lines hide/highlight in lockstep (issue #812). `opts.dash` styles
+ *  the rungs by the per-session dash convention ([] solid = active session).
+ *  Without a tag the single-session ladder reads exactly as before. */
+function appendPeakLadder(
+  out: SeriesSpec[],
+  ladder: ReadonlyArray<VariantLite>,
+  opts: { hidden: boolean; tag?: string; dash?: number[] },
+): void {
+  const PEAK_COLOR = '#cbd5e1';
+  const groupLegend = opts.tag ? `Variant peak bandwidth (${opts.tag})` : 'Variant peak bandwidth';
+  const borderDash = opts.dash ?? [6, 4];
+  for (const v of ladder) {
+    const peakBw = Number(v.bandwidth);
+    if (!Number.isFinite(peakBw) || peakBw <= 0) continue;
+    const mbps = peakBw / 1_000_000;
+    const label = `Variant peak ${v.resolution ?? '?'} (${mbps.toFixed(2)} Mbps)`;
+    out.push({
+      label: opts.tag ? `${label} (${opts.tag})` : label,
+      color: PEAK_COLOR,
+      accessor: () => mbps,
+      stepped: false,
+      borderDash,
+      groupLegend,
+      ...(opts.tag ? { sessionTag: opts.tag } : {}),
+      hidden: opts.hidden,
+      excludeFromAutoScale: true, // reference ladder — don't let it drive the auto y-axis
+    });
+  }
+}
+
+/** Append the per-variant avg↔peak BAND series for a ladder — a light filled
+ *  region (fillToValue=avg) per variant, drawn behind the rung lines. Mirrors
+ *  appendPeakLadder; tagged in compare mode so the S1/S2 legend toggles each
+ *  session's bands in lockstep. Always excludeFromAutoScale (reference overlay).
+ *  Skips a variant lacking a usable avg < peak. */
+function appendBands(
+  out: SeriesSpec[],
+  ladder: ReadonlyArray<VariantLite>,
+  opts: { hidden: boolean; tag?: string },
+): void {
+  const groupLegend = opts.tag ? `Variant Bands (${opts.tag})` : 'Variant Bands';
+  for (const v of ladder) {
+    const peakBw = Number(v.bandwidth);
+    const avgBw = Number((v as { average_bandwidth?: number }).average_bandwidth);
+    if (!Number.isFinite(peakBw) || peakBw <= 0) continue;
+    if (!Number.isFinite(avgBw) || avgBw <= 0 || avgBw >= peakBw) continue;
+    const peakMbps = peakBw / 1_000_000;
+    const avgMbps = avgBw / 1_000_000;
+    const label = `Variant band ${v.resolution ?? '?'} (${avgMbps.toFixed(2)}–${peakMbps.toFixed(2)} Mbps)`;
+    out.push({
+      label: opts.tag ? `${label} (${opts.tag})` : label,
+      color: '#38bdf8',
+      accessor: () => peakMbps,
+      fillToValue: avgMbps,
+      stepped: false,
+      groupLegend,
+      ...(opts.tag ? { sessionTag: opts.tag } : {}),
+      hidden: opts.hidden,
+      excludeFromAutoScale: true,
+    });
+  }
+}
+
 /** Most-recent non-empty `manifest_variants` value from the events
  *  stream. SessionDisplay passes `archivePlayerId` to BandwidthChart;
  *  for live testing.html that synthesises a separate scope from the
@@ -61,21 +150,9 @@ interface ManifestVariantLite {
  *  the manifest because the archive record is built without it. The
  *  events stream rows DO carry `manifest_variants` (it's part of the
  *  charts_minimal projection), so read from there. Issue #486. */
-const eventsStreamVariants = computed<ManifestVariantLite[]>(() => {
-  void props.eventsStream.version.value;
-  const rows = props.eventsStream.inRange(0, Number.MAX_SAFE_INTEGER);
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const mv = (rows[i] as Record<string, unknown>).manifest_variants;
-    if (Array.isArray(mv) && mv.length) return mv as ManifestVariantLite[];
-    if (typeof mv === 'string' && mv.length > 0 && mv !== 'null') {
-      try {
-        const parsed = JSON.parse(mv);
-        if (Array.isArray(parsed) && parsed.length) return parsed as ManifestVariantLite[];
-      } catch { /* ignore */ }
-    }
-  }
-  return [];
-});
+const eventsStreamVariants = computed<ManifestVariantLite[]>(
+  () => latestManifestVariants(props.eventsStream) as ManifestVariantLite[],
+);
 
 const variants = computed<ManifestVariantLite[]>(() => {
   const fromPlayer = usePlayerVariants.value;
@@ -90,12 +167,29 @@ const variants = computed<ManifestVariantLite[]>(() => {
  *  request throughput overlaid on the heartbeat-averaged line. Colors
  *  by event type — segment dots are slate, playlist dots blue, key
  *  fetches orange — so the role of each request is visible at a glance. */
-const segmentMarkers = computed(() => {
-  const stream = props.avmetricsStream;
+// AVMetrics is iOS-AVPlayer-only. Gate both the data AND the legend
+// label so non-iOS players don't see the "Video segment fetch" chip at
+// all — MetricsLineChart renders the legend entry whenever the label
+// prop is non-empty, regardless of whether there's data.
+const isAVPlayerForMarkers = computed(() => player.value?.player_metrics?.player_tech === 'AVPlayer');
+const compareSelf = useCompareSelf();
+const compareSiblings = useCompareSiblings();
+
+/** Extract per-segment throughput dots from one session's AVMetrics stream.
+ *  `colorOverride` (compare mode) paints every dot the session's hue so
+ *  devices read apart; when null (single-session) the dot keeps its
+ *  request-type colour. `tag` (e.g. `S2`) is stamped on each marker (for
+ *  per-session legend grouping + session-legend hiding) and prefixed to the
+ *  tooltip so the operator knows which device a dot belongs to. Issue #486. */
+function extractSegmentMarkers(
+  stream: Stream<Record<string, unknown>> | undefined,
+  colorOverride: string | null,
+  tag: string,
+): Array<{ x: number; y: number; color?: string; label?: string; tag?: string }> {
   if (!stream) return [];
   void stream.version.value;
   const rows = stream.inRange(0, Number.MAX_SAFE_INTEGER);
-  const out: Array<{ x: number; y: number; color?: string; label?: string }> = [];
+  const out: Array<{ x: number; y: number; color?: string; label?: string; tag?: string }> = [];
   for (const row of rows) {
     const type = String(row.event_type ?? '');
     // Video segments only (issue #486). Skip playlists, DRM keys,
@@ -122,6 +216,13 @@ const segmentMarkers = computed(() => {
         if (Number.isFinite(v)) mbps = v;
         const cached = String(parsed.derived_from_cache ?? '0');
         if (cached === '1') continue; // skip cache-served requests
+        // Skip the EXT-X-MAP init segment: AVPlayer reports it as a video
+        // HLSMediaSegmentRequestEvent too, but it's a ~900-byte init/codec header
+        // (no media frames) that transfers in sub-ms — so its derived_mbps is a
+        // meaningless spike at every variant switch. A real media segment (even a
+        // low-bitrate partial) is far larger than this floor. #811.
+        const segBytes = Number(parsed.derived_bytes);
+        if (Number.isFinite(segBytes) && segBytes > 0 && segBytes < 4096) continue;
         // Tooltip body — short event-type label, the path
         // (filename only — full URL is too long for the floating
         // tooltip), and the derived bandwidth / transfer details.
@@ -137,7 +238,7 @@ const segmentMarkers = computed(() => {
         const d = new Date(ts);
         const hms = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
         const lines = [
-          `${shortType} · ${hms}`,
+          `${tag ? tag + ' · ' : ''}${shortType} · ${hms}`,
           filename ? filename : '',
           mbps != null ? `${mbps.toFixed(2)} Mbps` : '',
           Number.isFinite(bytes) && bytes > 0 ? `${bytes.toLocaleString()} bytes` : '',
@@ -148,9 +249,144 @@ const segmentMarkers = computed(() => {
       } catch { /* fall through */ }
     }
     if (mbps == null) continue;
-    out.push({ x: ts, y: mbps, color: colorForRequestType(type), label });
+    out.push({ x: ts, y: mbps, color: colorOverride ?? colorForRequestType(type), label, tag: tag || undefined });
   }
   return out;
+}
+
+/** Per-session marker sets. Compare mode: the active session AND every
+ *  sibling that provides AVMetrics, each coloured + tagged distinctly, so
+ *  the iOS dots show regardless of which device is selected (a non-iOS
+ *  session's avmetrics stream is empty → no set). Single-session: just the
+ *  active player's dots, and only when it's iOS. Issue #486. */
+const sessionMarkerSets = computed<Array<{ tag: string; color: string | null; dots: Array<{ x: number; y: number; color?: string; label?: string; tag?: string }> }>>(() => {
+  if (compareSelf.value) {
+    const sets = [{
+      tag: compareSelf.value.tag,
+      color: SELF_MARKER_COLOR,
+      dots: extractSegmentMarkers(props.avmetricsStream, SELF_MARKER_COLOR, compareSelf.value.tag),
+    }];
+    for (const sib of compareSiblings.value) {
+      const color = sessionMarkerColor(sib.index);
+      sets.push({ tag: sib.tag, color, dots: extractSegmentMarkers(sib.avmetricsStream, color, sib.tag) });
+    }
+    return sets;
+  }
+  if (!isAVPlayerForMarkers.value) return [];
+  return [{ tag: '', color: null, dots: extractSegmentMarkers(props.avmetricsStream, null, '') }];
+});
+
+const segmentMarkers = computed(() => sessionMarkerSets.value.flatMap((s) => s.dots).concat(deliveryMarkers.value));
+
+/** Per-session legend chips, one per session that actually contributed dots
+ *  — `Video segment fetch (Sx)`, coloured to match its dots. Issue #486.
+ *  Single-session mode also switches to group chips when BOTH marker
+ *  families are present (iOS segment dots + kernel delivery dots), so each
+ *  family gets its own named chip; a lone family keeps the flat
+ *  `segmentMarkersLabel` chip. Each chip toggles independently (per-tag
+ *  visibility in MetricsLineChart) — Video and Delivery are not lockstep. */
+const segmentMarkerGroups = computed<Array<{ tag: string; label: string; color: string }>>(() => {
+  if (compareSelf.value) {
+    return sessionMarkerSets.value
+      .filter((s) => s.dots.length > 0)
+      .map((s) => ({ tag: s.tag, label: `Video segment fetch (${s.tag})`, color: s.color ?? SELF_MARKER_COLOR }));
+  }
+  const hasVideoDots = sessionMarkerSets.value.some((s) => s.dots.length > 0);
+  if (!hasVideoDots || deliveryMarkers.value.length === 0) return [];
+  return [
+    { tag: '', label: 'Video segment fetch', color: '#475569' },
+    { tag: 'delivery', label: 'Delivery rate (kernel)', color: DELIVERY_COLOR },
+  ];
+});
+
+const segmentMarkersLabel = computed(() => {
+  // Single-session, single-family only — group chips take over when both
+  // families (or compare-mode sessions) contribute.
+  if (compareSelf.value || segmentMarkerGroups.value.length) return '';
+  if (deliveryMarkers.value.length) return 'Delivery rate (kernel)';
+  return isAVPlayerForMarkers.value ? 'Video segment fetch' : '';
+});
+
+/** Kernel-measured delivery-rate dots (#850): one dot per SEGMENT request
+ *  whose wire delivery the kernel actually metered. Server-side sibling
+ *  of the iOS avmetrics dots above — honest under tc shaping, where the
+ *  implied bytes_out/transfer_ms figure over-reads up to ~5000× on
+ *  sub-buffer transfers. Active session only — compare siblings don't
+ *  ship a network stream.
+ *
+ *  Reliability gate — delivery_rate is only trustworthy when the kernel
+ *  observed the link at full tilt. We drop a dot only when:
+ *    - NOT app-limited (`delivery_rate_app_limited` falsy). This is the
+ *      kernel's own reliability signal (tcpi_delivery_rate_app_limited):
+ *      when the sender ran out of data to push, the sample reflects the
+ *      app's pace, not the link, and reads noisily — starved LOW or,
+ *      caught mid token-bucket burst, HIGH. Replaces the old ≥5 ms
+ *      transfer_ms heuristic, which couldn't tell a throttled small
+ *      segment from a buffer-absorbed one.
+ *    - bytes ≥ 256 KB — a burst backstop. `app_limited` guards the
+ *      false-LOW (starved) case but not every false-HIGH: a tiny
+ *      segment can be network-limited yet delivered entirely inside the
+ *      HTB burst allowance, over-reading the average cap. This modest
+ *      floor (was 1 MB) excludes the burst-prone tiddlers while showing
+ *      far more of the low-throttle valley than before. Tunable — see
+ *      §1.14 calibration. */
+const DELIVERY_COLOR = '#10b981'; // emerald — distinct from the slate/sky avmetrics dots
+const DELIVERY_MIN_BYTES = 1024 * 256;
+function extractDeliveryMarkers(
+  stream: Stream<Record<string, unknown>> | undefined,
+): Array<{ x: number; y: number; color?: string; label?: string; tag?: string }> {
+  if (!stream) return [];
+  void stream.version.value;
+  const rows = stream.inRange(0, Number.MAX_SAFE_INTEGER);
+  const out: Array<{ x: number; y: number; color?: string; label?: string; tag?: string }> = [];
+  for (const row of rows) {
+    if (String(row.request_kind ?? '') !== 'segment') continue;
+    const mbps = Number(row.delivery_rate_mbps);
+    if (!Number.isFinite(mbps) || mbps <= 0) continue;
+    // Kernel says the sample was app-limited → unreliable, skip. The flag
+    // arrives as a JSON bool (live proxy SSE) or 0/1 number (ClickHouse
+    // UInt8 read path), so accept both.
+    const appLimited = row.delivery_rate_app_limited;
+    if (appLimited === true || appLimited === 1 || appLimited === '1') continue;
+    const bytes = Number(row.bytes_out);
+    if (!Number.isFinite(bytes) || bytes < DELIVERY_MIN_BYTES) continue;
+    const tsRaw = row.ts ?? row.timestamp;
+    let ts = NaN;
+    if (typeof tsRaw === 'number') {
+      ts = tsRaw;
+    } else if (typeof tsRaw === 'string') {
+      // ClickHouse "YYYY-MM-DD HH:MM:SS.fff" → RFC3339; RFC3339 passes through.
+      const normalised = tsRaw.length > 10 && tsRaw.charAt(10) === ' '
+        ? tsRaw.replace(' ', 'T') + 'Z'
+        : tsRaw;
+      ts = Date.parse(normalised);
+    }
+    if (!Number.isFinite(ts) || ts <= 0) continue;
+    const url = String(row.url ?? row.path ?? '');
+    const filename = url ? (url.split('?')[0].split('/').pop() ?? '') : '';
+    // transfer_ms no longer gates the dot (app_limited does), but the
+    // implied bytes/transfer figure is still handy in the tooltip as the
+    // (over-reading) contrast to the honest kernel rate.
+    const transferMs = Number(row.transfer_ms);
+    const implied = Number.isFinite(transferMs) && transferMs > 0
+      ? (bytes * 8) / (transferMs * 1000)
+      : NaN;
+    const lines = [
+      `Delivery rate (kernel) · ${mbps.toFixed(2)} Mbps`,
+      filename,
+      `${bytes.toLocaleString()} bytes`,
+      Number.isFinite(implied) ? `implied ${implied.toFixed(2)} Mbps (bytes/transfer)` : '',
+    ].filter(Boolean);
+    out.push({ x: ts, y: mbps, color: DELIVERY_COLOR, label: lines.join('\n'), tag: 'delivery' });
+  }
+  return out;
+}
+
+const deliveryMarkers = computed(() => {
+  // Compare mode keeps the marker tag namespace for S1/S2 session
+  // grouping — delivery dots would collide, so they're single-session only.
+  if (compareSelf.value) return [];
+  return extractDeliveryMarkers(props.networkStream);
 });
 
 function colorForRequestType(type: string): string {
@@ -164,6 +400,7 @@ const baseSeries: SeriesSpec[] = [
   {
     label: 'mbps_shaper_rate',
     color: '#0f766e',
+    hidden: true,
     accessor: (p: PlayerRecord) => p.server_metrics?.mbps_shaper_rate ?? null,
     stepped: true,
   },
@@ -175,11 +412,13 @@ const baseSeries: SeriesSpec[] = [
   {
     label: 'mbps_transfer_rate',
     color: '#f97316',
+    hidden: true,
     accessor: (p: PlayerRecord) => p.server_metrics?.mbps_transfer_rate ?? null,
   },
   {
     label: 'mbps_transfer_complete',
     color: '#dc2626',
+    hidden: true,
     accessor: (p: PlayerRecord) => p.server_metrics?.mbps_transfer_complete ?? null,
     stepped: true,
   },
@@ -213,7 +452,13 @@ const baseSeries: SeriesSpec[] = [
       const sh = p.shape;
       if (!sh) return 0;
       const runtime = sh.pattern_rate_runtime_mbps;
-      if (sh.pattern && Number.isFinite(runtime as number) && (runtime as number) >= 0) {
+      // Use the kernel's enforced runtime rate whenever it's set — not only when
+      // THIS session owns a pattern. A group-driven slave (single-owner shaping)
+      // has no local pattern but its port is fanned the master's per-tick rate via
+      // `nftables_pattern_rate_runtime_mbps`, so this lets the slave's Limit line
+      // track the master's pyramid. Safe for normal no-pattern sessions: the proxy
+      // defaults runtime to `bandwidth_mbps` (== rate_mbps), so the line is unchanged.
+      if (Number.isFinite(runtime as number) && (runtime as number) >= 0) {
         return runtime as number;
       }
       const stepIdx = Number(sh.pattern_step_runtime ?? sh.pattern_step ?? 0);
@@ -264,17 +509,13 @@ const baseSeries: SeriesSpec[] = [
   {
     label: 'Player network_bitrate',
     color: '#059669',
+    hidden: true,
     accessor: (p: PlayerRecord) => p.player_metrics?.network_bitrate_mbps ?? null,
   },
   {
-    label: 'Player Variant',
-    color: '#ef4444',
-    accessor: (p: PlayerRecord) => p.player_metrics?.video_bitrate_mbps ?? null,
-    stepped: true,
-  },
-  {
-    label: 'Server Variant',
+    label: 'Serving Variant',
     color: '#b45309',
+    hidden: true,
     accessor: (p: PlayerRecord) => p.server_metrics?.rendition_mbps ?? null,
     stepped: true,
   },
@@ -289,16 +530,82 @@ const baseSeries: SeriesSpec[] = [
  *  whole X range; sharing a `groupLegend` collapses them all to a
  *  single legend chip that toggles every line at once.
  *
- *  Defaults: avg ON (the operator's natural mental ABR reference),
- *  peak OFF (clutters the chart for advanced inspection only). */
+ *  Defaults: bands ON (the avg↔peak shaded region — see appendBands), peak OFF
+ *  and avg OFF (toggle either on for the rung / typical-body-bitrate reference).
+ *  All three families are hoisted to the front of the dataset list by
+ *  MetricsLineChart so they lead the legend and draw behind the live traces. */
 const series = computed<SeriesSpec[]>(() => {
+  // Compare mode: the active session shows the SAME canonical tagged set
+  // (solid, `S<id>`) the siblings overlay — not its full single-session
+  // series — so every session reads identically (issue #579).
+  if (compareSelf.value) {
+    const self = compareSelf.value;
+    const compareOut = compareBandwidthSeries(self);
+    // Active session's own variant bands (ON by default) + peak ladder (OFF),
+    // tagged `(Sx)` and styled with the session dash so they read as this
+    // session's rungs. Each sibling builds its OWN ladder from its OWN manifest
+    // in the useCompareOverlays closure below, so manifests that differ across
+    // the compared sessions show distinct rung sets (issue #812).
+    appendBands(compareOut, variants.value, { hidden: false, tag: self.tag });
+    appendPeakLadder(compareOut, variants.value, { hidden: true, tag: self.tag, dash: self.dash });
+    return compareOut;
+  }
   const out = [...baseSeries];
   const ladder = variants.value;
   if (!ladder.length) return out;
+  // "Fetching Variant": video_bitrate_mbps == AVPlayer indicatedBitrate ==
+  // the rung it SELECTED to fetch (leads the screen by the buffer). It's a
+  // jittery EWMA, so plot the nearest published peak instead of the raw
+  // value — a clean stepped rung line, not a 29.6/29.9 wobble (#619).
+  out.push({
+    label: 'Fetching Variant',
+    color: '#ef4444',
+    accessor: (p: PlayerRecord) => {
+      const vb = p.player_metrics?.video_bitrate_mbps;
+      if (vb == null || vb <= 0) return null;
+      return nearestVariantByBitrate(ladder, vb)?.peakMbps ?? vb;
+    },
+    stepped: true,
+    // Drawn BEFORE (under) "Displayed Variant"; the two coincide whenever ABR is
+    // steady. The wider under-line peeks out as a red halo around the purple
+    // Displayed line so the operator sees both. See SeriesSpec.borderWidth.
+    borderWidth: 4,
+  });
+  // "Displayed Variant": the same value that drives the player-state
+  // "Video Res" line (player_metrics.video_resolution = the DECODED frame
+  // size, presentationSize on iOS / videoWidth×videoHeight on web), plotted
+  // as that variant's published peak BANDWIDTH per sample.
+  //
+  // Matched by NEAREST frame HEIGHT, not exact "WxH": the decoded size
+  // legitimately differs from the manifest RESOLUTION attribute (coded vs
+  // display, e.g. 1080 encoded as 1088 for mod-16; PAR / clean aperture;
+  // packager quirks), so an exact string match would blank the line.
+  // (We deliberately do NOT disambiguate with video_bitrate_mbps — that's
+  // indicatedBitrate, i.e. the variant being FETCHED/selected, which leads
+  // the displayed rung by the buffer; using it here would mislabel during
+  // switches. Same-height variants therefore can't be told apart for the
+  // displayed rung — this project's ladders have one rung per height.)
+  out.push({
+    label: 'Displayed Variant',
+    color: '#a855f7',
+    accessor: (p: PlayerRecord) =>
+      displayedVariantPeakMbps(ladder, p.player_metrics?.video_resolution),
+    stepped: true,
+  });
+  // Variant Bands — a light shaded region between each variant's
+  // AVERAGE-BANDWIDTH and BANDWIDTH. Default ON; one "Variant Bands" legend chip
+  // (sitting beside the avg / peak chips) toggles the whole set. It shows, at a
+  // glance, where adjacent variants' [avg,peak] bands OVERLAP — the
+  // over-selection trap, a rung's avg sitting at/below the rung-below's peak
+  // (#811) — or leave GAPS. Fill is semi-transparent, so overlapping bands
+  // compound into a darker tint. Built BEFORE the avg/peak ladder lines so the
+  // bands draw BEHIND those rung lines; MetricsLineChart hoists the whole
+  // variant family to the front of the dataset list so it also draws behind the
+  // live traces and leads the legend.
+  appendBands(out, ladder, { hidden: false });
   // Mute the variant-line color so it doesn't out-shout the live
   // traces. Slate-400 reads at a glance but stays in the background.
   const AVG_COLOR = '#94a3b8';
-  const PEAK_COLOR = '#cbd5e1';
   for (const v of ladder) {
     const avgBw = Number((v as any).average_bandwidth ?? v.bandwidth);
     if (Number.isFinite(avgBw) && avgBw > 0) {
@@ -309,38 +616,56 @@ const series = computed<SeriesSpec[]>(() => {
         color: AVG_COLOR,
         accessor: () => mbps,
         stepped: false,
-        borderDash: [6, 4],
-        groupLegend: 'Variant avg bandwidth',
-      });
-    }
-    const peakBw = Number(v.bandwidth);
-    if (Number.isFinite(peakBw) && peakBw > 0) {
-      const mbps = peakBw / 1_000_000;
-      const resLabel = v.resolution ?? '?';
-      out.push({
-        label: `Variant peak ${resLabel} (${mbps.toFixed(2)} Mbps)`,
-        color: PEAK_COLOR,
-        accessor: () => mbps,
-        stepped: false,
         borderDash: [2, 4],
-        groupLegend: 'Variant peak bandwidth',
+        groupLegend: 'Variant avg bandwidth',
         hidden: true,
+        excludeFromAutoScale: true, // reference ladder — don't let it drive the auto y-axis
       });
     }
   }
+  // Variant peak ladder — default OFF (toggle on for the rung rate ABR keys
+  // on). Same builder feeds the compare-mode ladders above.
+  appendPeakLadder(out, ladder, { hidden: true });
   return out;
+});
+
+/** Grouped-sibling overlays (issue #579 compare mode). Empty unless the
+ *  active session is in a group AND the operator enabled Compare Charts;
+ *  resolved from the CompareContext SessionDisplay provides. Each sibling
+ *  overlays its tagged rate series (Player Network Rate + Player Variant
+ *  visible; Player Est / Server Variant / Shaper Avg legend-toggleable).
+ *  On the shared 'y' axis so the rate axis sizes across every overlaid
+ *  session (the #165 union-sizing fix). */
+const compareOverlays = useCompareOverlays((sib) => {
+  const specs = compareBandwidthSeries(sib);
+  // Each sibling's own variant bands (ON by default) + peak ladder (OFF), read
+  // from its OWN manifest via its events stream — so comparing two sessions
+  // whose manifests differ shows each one's distinct rung set. Tagged + dashed
+  // per session so the S1/S2 legend toggles it in lockstep (issue #812).
+  appendBands(specs, latestManifestVariants(sib.stream), { hidden: false, tag: sib.tag });
+  appendPeakLadder(specs, latestManifestVariants(sib.stream), {
+    hidden: true,
+    tag: sib.tag,
+    dash: sib.dash,
+  });
+  return specs;
 });
 </script>
 
 <template>
   <MetricsLineChart
     :player-id="playerId"
+    :coord-id="coordId"
+    :lifecycle-markers="lifecycleMarkers"
+    :event-markers="eventMarkers"
     title="Bandwidth"
     unit="Mbps"
     :series="series"
     :events-stream="eventsStream"
+    :overlays="compareOverlays"
     :markers="segmentMarkers"
-    markers-label="Per-segment throughput (AVMetrics)"
+    :markers-label="segmentMarkersLabel"
+    :marker-groups="segmentMarkerGroups"
     v-model:markers-visible="segmentMarkersVisible"
     :y-min="0"
     :y-max="yMax"

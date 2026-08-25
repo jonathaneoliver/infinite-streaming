@@ -109,6 +109,12 @@ func snapshotV1FieldsForPaths(sess map[string]any, paths []string) map[string]an
 			record("nftables_delay_ms")
 		case p == "shape.loss_pct":
 			record("nftables_packet_loss")
+		case p == "shape.jitter_ms":
+			record("nftables_jitter_ms")
+		case p == "shape.loss_correlation_pct":
+			record("nftables_loss_correlation_pct")
+		case p == "shape.jitter_correlation_pct":
+			record("nftables_jitter_correlation_pct")
 		case p == "shape.transport_fault", strings.HasPrefix(p, "shape.transport_fault."):
 			for _, k := range []string{
 				"transport_failure_type", "transport_fault_type",
@@ -123,6 +129,7 @@ func snapshotV1FieldsForPaths(sess map[string]any, paths []string) map[string]an
 			for _, k := range []string{
 				"_v2_shape_pattern",
 				"nftables_bandwidth_mbps", "nftables_delay_ms", "nftables_packet_loss",
+				"nftables_jitter_ms", "nftables_loss_correlation_pct", "nftables_jitter_correlation_pct",
 				"transport_failure_type", "transport_fault_type",
 				"transport_failure_frequency", "transport_consecutive_failures",
 				"transport_failure_mode",
@@ -130,14 +137,8 @@ func snapshotV1FieldsForPaths(sess map[string]any, paths []string) map[string]an
 				record(k)
 			}
 		case p == "fault_rules", strings.HasPrefix(p, "fault_rules."):
-			for _, surface := range faultSurfaces {
-				for _, suffix := range []string{
-					"_failure_type", "_failure_frequency", "_consecutive_failures",
-					"_failure_mode", "_failure_units", "_consecutive_units", "_frequency_units",
-				} {
-					record(surface + suffix)
-				}
-			}
+			// Faults live solely on _v2_fault_rules since #925 (the native
+			// engine reads it directly); no v1 surface fields to snapshot.
 			record("_v2_fault_rules")
 		}
 	}
@@ -334,6 +335,9 @@ func (s *Server) PatchApiV2PlaysPlayId(w http.ResponseWriter, r *http.Request, p
 		applyPatternFromSession(s, post, playerID)
 	} else if shapeFieldsTouched(paths) {
 		_ = s.v1.ApplyShapeToPlayer(playerID)
+	}
+	if shapingModeTouched(paths) {
+		_ = s.v1.ApplyShapingModeToPlayer(playerID)
 	}
 	if transportFaultTouched(paths) {
 		applyTransportFaultFromSession(s, post, playerID)

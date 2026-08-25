@@ -211,7 +211,8 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 	// is empty when the player isn't in any group — broadcast becomes
 	// a no-op.
 	var groupID string
-	srv := s // capture the Server receiver before the closure shadows it
+	groupBroadcast := true // default; a display-only group sets group_broadcast=false at connect
+	srv := s               // capture the Server receiver before the closure shadows it
 	post, found, mErr := s.v1.MutatePlayer(pidStr, func(s map[string]any) error {
 		// Re-check under sessionsMu. Another v2 PATCH that won the
 		// outer race would have updated FieldRevisions before
@@ -228,6 +229,9 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		s["control_revision"] = rev
 		fr.TouchWith(paths, rev)
 		groupID = getString(s, "group_id")
+		if v, ok := s["group_broadcast"].(bool); ok {
+			groupBroadcast = v
+		}
 		return nil
 	})
 	if mErr != nil {
@@ -256,14 +260,27 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Per-mutation broadcast override (?broadcast=true|false). Wins over the
+	// group's default (resolved above from the session's group_broadcast) for
+	// THIS PATCH only, so an A/B can drive shared shaping (broadcast=true) and
+	// per-member treatment such as a per-member fault (broadcast=false) in any
+	// order, independent of the group-mode flag set at connect. Absent ⇒ group
+	// default. content/labels are not broadcast-eligible regardless, so this
+	// only changes behaviour for shape / fault_rules — exactly where it's needed.
+	if ov := r.URL.Query().Get("broadcast"); ov != "" {
+		groupBroadcast = ov == "true" || ov == "1"
+	}
+
 	// Auto-broadcast to other group members (DESIGN.md § Player groups
 	// — auto-broadcast preserved from v1). Each member gets the same
 	// new control_revision and the same patch applied; their per-
 	// player FieldRevisions tracker is bumped to the same `rev` so a
 	// concurrent PATCHer reading from any member sees the latest
-	// revision uniformly.
+	// revision uniformly. Skipped when the group is display-only
+	// (group_broadcast=false at connect) — members share group_id for
+	// charting but are shaped/labelled independently (startup fleet).
 	var broadcastTouched []string
-	if groupID != "" {
+	if groupID != "" && groupBroadcast {
 		touched, bErr := s.v1.BroadcastPatch(groupID, pidStr, rev, func(member map[string]any) error {
 			return applyPatchToSession(srv, member, patch)
 		})
@@ -317,6 +334,16 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 			_ = s.v1.ApplyShapeToPlayer(p)
 		}
 	}
+	// #910 degrade reconcile runs AFTER the rate/delay/loss push so a combined
+	// {rate, mode:http_only} patch ends degraded (gate closed tears the rate
+	// back down); a {mode:kernel} clear re-opens the gate and re-applies the
+	// stored shape inside ApplyShapingModeToPlayer.
+	if shapingModeTouched(paths) {
+		_ = s.v1.ApplyShapingModeToPlayer(pidStr)
+		for _, p := range broadcastTouched {
+			_ = s.v1.ApplyShapingModeToPlayer(p)
+		}
+	}
 	if transportFaultTouched(paths) {
 		applyTransportFaultFromSession(s, post, pidStr)
 		for _, p := range broadcastTouched {
@@ -344,8 +371,17 @@ func (s *Server) PatchApiV2PlayersPlayerId(w http.ResponseWriter, r *http.Reques
 // Phase D: labels.* only.
 // Phase H: + shape.{rate_mbps,delay_ms,loss_pct,transport_fault.*}
 // Phase I: + fault_rules (whole-array PATCH; the per-rule sub-resource
-//          endpoints have their own paths and don't run through here).
+//
+//	endpoints have their own paths and don't run through here).
+//
 // Phase K: + shape.pattern (drives v1's pattern step-engine).
+// #826: + shape.{jitter_ms,loss_correlation_pct,jitter_correlation_pct}
+//
+//	(link-impairment knobs — netem jitter + bursty-loss correlations).
+//
+// #800: + app_config (client-side per-play config; applyAppConfigPatch stores
+//
+//	it nested on the session for the player to read back — no kernel side).
 func unsupportedPaths(paths []string) []string {
 	var bad []string
 	for _, p := range paths {
@@ -354,12 +390,17 @@ func unsupportedPaths(paths []string) []string {
 		case p == "shape.rate_mbps":
 		case p == "shape.delay_ms":
 		case p == "shape.loss_pct":
+		case p == "shape.jitter_ms": // #826
+		case p == "shape.loss_correlation_pct": // #826
+		case p == "shape.jitter_correlation_pct": // #826
 		case p == "shape.transport_fault", strings.HasPrefix(p, "shape.transport_fault."):
 		case p == "shape.pattern", strings.HasPrefix(p, "shape.pattern."):
+		case p == "shape.mode": // #910 per-session degraded mode
 		case p == "shape":
 		case p == "fault_rules":
 		case p == "transfer_timeouts", strings.HasPrefix(p, "transfer_timeouts."):
 		case p == "content", strings.HasPrefix(p, "content."):
+		case p == "app_config", strings.HasPrefix(p, "app_config."):
 		default:
 			bad = append(bad, p)
 		}
@@ -373,7 +414,22 @@ func unsupportedPaths(paths []string) []string {
 func shapeFieldsTouched(paths []string) bool {
 	for _, p := range paths {
 		switch p {
-		case "shape", "shape.rate_mbps", "shape.delay_ms", "shape.loss_pct":
+		case "shape", "shape.rate_mbps", "shape.delay_ms", "shape.loss_pct",
+			"shape.jitter_ms", "shape.loss_correlation_pct", "shape.jitter_correlation_pct": // #826
+			return true
+		}
+	}
+	return false
+}
+
+// shapingModeTouched reports whether the patch touches the #910 per-session
+// degraded mode (`shape.mode`). Used to decide whether to invoke
+// ApplyShapingModeToPlayer after a successful PATCH — the mode change has to
+// reconcile the kernel gate (tear down / re-apply shaping) separately from the
+// rate/delay/loss push that ApplyShapeToPlayer does.
+func shapingModeTouched(paths []string) bool {
+	for _, p := range paths {
+		if p == "shape" || p == "shape.mode" {
 			return true
 		}
 	}
@@ -445,6 +501,9 @@ func applyPatchToSession(srv *Server, s map[string]any, patch map[string]any) er
 	if c, hasC := patch["content"]; hasC {
 		applyContentPatch(s, c)
 	}
+	if ac, hasAC := patch["app_config"]; hasAC {
+		applyAppConfigPatch(s, ac)
+	}
 	return nil
 }
 
@@ -493,6 +552,7 @@ func applyContentPatch(s map[string]any, c any) {
 		s["content_overstate_bandwidth"] = false
 		s["content_live_offset"] = 0
 		s["content_allowed_variants"] = []any{}
+		s["content_variant_order"] = "default"
 		return
 	}
 	m, ok := c.(map[string]any)
@@ -521,6 +581,105 @@ func applyContentPatch(s map[string]any, c any) {
 			s["content_allowed_variants"] = arr
 		}
 	}
+	if v, present := m["variant_order"]; present {
+		if v == nil {
+			s["content_variant_order"] = "default"
+		} else if str, ok := v.(string); ok {
+			s["content_variant_order"] = str
+		}
+	}
+}
+
+// applyAppConfigPatch — projects the v2 app_config patch (#800: client-side
+// behaviour the player applies at its NEXT play boundary) onto the session map
+// as a nested "app_config" object. Unlike the flat content_*/shape_* fields,
+// app_config is stored nested because it is read back verbatim by the player
+// off GET /api/sessions (the proxy never acts on it server-side — it's a
+// pass-through the client overlays onto its own segment/protocol/offset/peak
+// state). JSON Merge Patch semantics: app_config:null clears the whole object;
+// a field set to null drops just that field; an omitted field is untouched, so
+// a partial patch (e.g. only segment) preserves the rest. Enum fields keep only
+// valid values so a malformed arg can't poison the object the client trusts.
+func applyAppConfigPatch(s map[string]any, c any) {
+	if c == nil {
+		delete(s, "app_config")
+		return
+	}
+	m, ok := c.(map[string]any)
+	if !ok {
+		return
+	}
+	out, _ := s["app_config"].(map[string]any)
+	if out == nil {
+		out = map[string]any{}
+	}
+	setEnum := func(key string, v any, allowed ...string) {
+		if v == nil {
+			delete(out, key)
+			return
+		}
+		str, ok := v.(string)
+		if !ok {
+			return
+		}
+		for _, a := range allowed {
+			if str == a {
+				out[key] = str
+				return
+			}
+		}
+	}
+	if v, present := m["segment"]; present {
+		setEnum("segment", v, "ll", "s1", "s2", "s6")
+	}
+	if v, present := m["protocol"]; present {
+		setEnum("protocol", v, "hls", "dash")
+	}
+	if v, present := m["live_offset_s"]; present {
+		if v == nil {
+			delete(out, "live_offset_s")
+		} else {
+			out["live_offset_s"] = toFloatZero(v)
+		}
+	}
+	if v, present := m["peak_bitrate_mbps"]; present {
+		if v == nil {
+			delete(out, "peak_bitrate_mbps")
+		} else {
+			out["peak_bitrate_mbps"] = toIntZero(v)
+		}
+	}
+	// #838 mute. Stored as a real bool so the player reads it back as a JSON
+	// boolean (iOS `as? Bool`, Android `optBoolean`). Config-on-connect already
+	// coerces "true"/"false" → bool (coerceURLValue), same as the strip_* fields.
+	if v, present := m["muted"]; present {
+		if v == nil {
+			delete(out, "muted")
+		} else {
+			out["muted"] = toBool(v)
+		}
+	}
+	if len(out) == 0 {
+		delete(s, "app_config")
+		return
+	}
+	s["app_config"] = out
+}
+
+// toFloatZero coerces a JSON-decoded numeric (float64 from encoding/json, or an
+// int form) to float64, defaulting to 0 for anything else.
+func toFloatZero(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	}
+	return 0
 }
 
 func toIntZero(v any) int {
@@ -587,11 +746,17 @@ func applyShapePatch(srv *Server, s map[string]any, shape any) {
 		s["nftables_bandwidth_mbps"] = float64(0)
 		s["nftables_delay_ms"] = 0
 		s["nftables_packet_loss"] = float64(0)
+		s["nftables_jitter_ms"] = 0
+		s["nftables_loss_correlation_pct"] = float64(0)
+		s["nftables_jitter_correlation_pct"] = float64(0)
 		s["transport_failure_type"] = "none"
 		s["transport_fault_type"] = "none"
 		s["transport_failure_frequency"] = 0
 		s["transport_consecutive_failures"] = 1
 		s["transport_failure_mode"] = "failures_per_seconds"
+		// Wholesale wipe also clears the #910 degrade back to kernel (inherit
+		// host caps) — `shape: null` is "operator cleared all shaping intent."
+		s["shaping_forced_mode"] = ""
 		return
 	}
 	shapeMap, ok := shape.(map[string]any)
@@ -619,12 +784,53 @@ func applyShapePatch(srv *Server, s map[string]any, shape any) {
 			s["nftables_packet_loss"] = f
 		}
 	}
+	// #826 link-impairment knobs. jitter_ms is int (ms); the two
+	// correlation percents are floats. nil clears to zero (no impairment).
+	if v, present := shapeMap["jitter_ms"]; present {
+		if v == nil {
+			s["nftables_jitter_ms"] = 0
+		} else if f, ok := numericFloat(v); ok {
+			s["nftables_jitter_ms"] = int(f)
+		}
+	}
+	if v, present := shapeMap["loss_correlation_pct"]; present {
+		if v == nil {
+			s["nftables_loss_correlation_pct"] = float64(0)
+		} else if f, ok := numericFloat(v); ok {
+			s["nftables_loss_correlation_pct"] = f
+		}
+	}
+	if v, present := shapeMap["jitter_correlation_pct"]; present {
+		if v == nil {
+			s["nftables_jitter_correlation_pct"] = float64(0)
+		} else if f, ok := numericFloat(v); ok {
+			s["nftables_jitter_correlation_pct"] = f
+		}
+	}
+	if v, present := shapeMap["mode"]; present {
+		// #910 per-session degraded mode. v2 `http_only` → v1
+		// `shaping_forced_mode="http-only"`; anything else (incl. "kernel"
+		// or null) clears to "" = inherit host caps. The kernel/gate
+		// reconcile runs post-PATCH via ApplyShapingModeToPlayer.
+		s["shaping_forced_mode"] = v1ShapingForcedMode(v)
+	}
 	if tf, present := shapeMap["transport_fault"]; present {
 		applyTransportFaultPatch(s, tf)
 	}
 	if pat, present := shapeMap["pattern"]; present {
 		applyPatternPatch(s, pat)
 	}
+}
+
+// v1ShapingForcedMode maps a v2 `shape.mode` value to the v1
+// `shaping_forced_mode` storage string. Only `http_only` names a degraded
+// mode; "kernel", null, and anything unrecognised clear to "" (inherit host
+// caps). Mirrors normalizeShapingMode in package main. Issue #910.
+func v1ShapingForcedMode(v any) string {
+	if s, ok := v.(string); ok && s == "http_only" {
+		return "http-only"
+	}
+	return ""
 }
 
 // applyPatternPatch stashes the v2 pattern shape on `_v2_shape_pattern`
@@ -635,6 +841,9 @@ func applyShapePatch(srv *Server, s map[string]any, shape any) {
 func applyPatternPatch(s map[string]any, pat any) {
 	if pat == nil {
 		delete(s, "_v2_shape_pattern")
+		// Clear the template name too so a later custom/unnamed pattern isn't
+		// mislabeled with a stale template.
+		delete(s, "nftables_pattern_template_mode")
 		// Setting nftables_pattern_enabled=false here is harmless;
 		// applyShapePattern with empty steps will write the same
 		// keys via updateSessionsByPortWithControl. Keeping the
@@ -647,6 +856,16 @@ func applyPatternPatch(s map[string]any, pat any) {
 		return
 	}
 	s["_v2_shape_pattern"] = m
+	// Mirror the template NAME onto the session field the pattern_enabled control
+	// event reads (nftables_pattern_template_mode), so a named template
+	// (valley / ramp_up / …) is labeled `pattern_enabled_<name>` instead of
+	// falling back to a step-profile signature. Absent/empty template leaves it
+	// unset → the proxy's signature fallback names it `custom_<hash>`.
+	if t, ok := m["template"].(string); ok && t != "" && t != "sliders" {
+		s["nftables_pattern_template_mode"] = t
+	} else {
+		delete(s, "nftables_pattern_template_mode")
+	}
 }
 
 // extractPatternSteps reads the v2 pattern stash from the session map
@@ -741,15 +960,7 @@ func applyPatternFromSession(srv *Server, sess map[string]any, playerID string) 
 		return
 	}
 	steps := extractPatternSteps(sess)
-	delayMs := 0
-	if f, ok := numericFloat(sess["nftables_delay_ms"]); ok {
-		delayMs = int(f)
-	}
-	lossPct := 0.0
-	if f, ok := numericFloat(sess["nftables_packet_loss"]); ok {
-		lossPct = f
-	}
-	_ = srv.v1.ApplyPatternToPlayer(playerID, steps, delayMs, lossPct)
+	_ = srv.v1.ApplyPatternToPlayer(playerID, steps, LinkImpairmentFromSession(sess))
 }
 
 // applyTransportFaultFromSession reads the transport-fault state out
@@ -817,4 +1028,3 @@ func writePreconditionFailed(w http.ResponseWriter, currentRevision string, conf
 		},
 	)
 }
-

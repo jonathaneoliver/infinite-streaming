@@ -2,6 +2,21 @@
 
 Cross-test rules that apply to every characterization driver under `tests/characterization/modes/*`. **Read this before writing or modifying any characterization test.** Per-test docs (`abort-characterization-test.md`, `startup-characterization-test.md`, `retry-backoff-characterization-test.md`, …) inherit these rules; they only need to document their own variables.
 
+## The test contract — state this first
+
+Before writing or modifying any test — a `matrix/*.yaml` arm spec, a `modes/*_test.go` driver, or a `tests/server_behavior` case — state the contract below and get an explicit ✓ from the operator. **Quiz on any blank; do not fill it with an assumption.** The config surface (20+ matrix arms, per-arm knobs like `firstvar-cap` / `noavg` / `2sim`, server-behavior params) changes often enough that one wrong assumption silently produces a test that measures the wrong thing — or passes for the wrong reason.
+
+State it in one short block:
+- **Behavior under test** — the single thing this run measures (e.g. "startup variant selection under a 2 Mbps cap").
+- **Platform / device** — iPhone (real), iPad (sim), Android, or server-only. Real vs sim changes the launch path (`-launch-mode=appium`) and what's trustworthy.
+- **Boundary + reps** — `app_cold` / `channel_change`, and `CHAR_<TEST>_REPS` (≥3 before generalizing — §2).
+- **What VARIES vs what's HELD CONSTANT** — the knob being swept (the point of the run) and everything pinned across arms/cycles (clip, endpoint, caps — §1). If you can't name what's held constant, the run is unanalysable.
+- **Pass/fail signal** — the DATA that confirms the behavior (a player_metric, a label, a settled-variant histogram) and its threshold — NOT a screenshot or a green test process.
+
+Then **echo back the resolved config** — the literal arms / `-is.flag.*` launch args / `CHAR_*` env you produced (the actual YAML), so the operator confirms what was set *before* any run. "Pyramid shape, s2 segments, 3 reps, firstvar-cap on, holding clip=X" — spelled out, never summarized as "the usual pyramid test".
+
+This gate is the test-authoring sibling of the data-contract gate; the numbered sections below are the correctness rules a confirmed contract must then satisfy.
+
 ## 1. The constant-target rule
 
 **Every cycle in a characterization run measures the SAME target — same clip, same starting state, same network endpoint.** The boundary / fault / variant / cap / cycle index is the ONLY thing that varies between cycles.

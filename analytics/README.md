@@ -46,7 +46,7 @@ Then:
 
 ## k3d
 
-`make deploy` and `make deploy-release` apply `k8s-analytics.yaml`
+`make deploy-k3d-dev` and `make deploy-k3d-release` apply `k8s-analytics.yaml`
 into the matching k3d cluster automatically — one analytics tier per
 cluster (each cluster has its own ClickHouse PVC, forwarder, and
 Grafana). The forwarder's SSE source is the same in-cluster URL in

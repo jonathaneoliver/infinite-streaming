@@ -13,6 +13,8 @@ IOS_APP_BUNDLE_ID ?= com.jeoliver.InfiniteStreamPlayer
 IOS_API_BASE ?= http://$(K3S_HOST):40000
 IOS_METRICS_DURATION ?= 900
 IOS_SCORE_MIN ?= 60
+REPORT_DAYS ?= 7
+REPORT_OUT ?= /tmp/report-conditions.md
 
 run:
 	docker compose up -d
@@ -105,6 +107,12 @@ harness-cli:
 	@case ":$$PATH:" in *":$(patsubst %/,%,$(dir $(HARNESS_CLI_BIN))):"*) ;; \
 	  *) echo "warn: $(dir $(HARNESS_CLI_BIN)) is not on \$$PATH — add it or set HARNESS_CLI_BIN" ;; \
 	esac
+
+# #508 streaming report — what the player does around faults / stalls / play-ends.
+# Read-only; needs the harness CLI on $PATH (make harness-cli), pointed at test-dev.
+# Override: make report REPORT_DAYS=14 REPORT_OUT=/tmp/r.md
+report:
+	python3 analytics/tools/report.py --kind conditions --days $(REPORT_DAYS) --out $(REPORT_OUT)
 
 # Regenerate the typed Go clients under tools/harness-cli/internal/v2gen/
 # from api/openapi/v2/{proxy,forwarder}.yaml. Idempotent; safe to run
@@ -220,7 +228,7 @@ K3D_RELEASE_KUBECONFIG ?= ~/.config/k3d/smashing-release-kubeconfig.yaml
 # ~/.local/bin to PATH so the install location doesn't have to be
 # in the noninteractive shell's default PATH.
 # Writes per-cluster kubeconfigs to ~/.kube/smashing-{dev,release}.yaml
-# so subsequent `make deploy` / `make deploy-release` targets can pick
+# so subsequent `make deploy-k3d-dev` / `make deploy-k3d-release` targets can pick
 # the right context with KUBECONFIG=… without depending on whichever
 # kubeconfig happens to be active in the user's shell.
 
@@ -276,14 +284,14 @@ k3d-bootstrap:
 		--kubeconfig-update-default=false \
 		--kubeconfig-switch-context=false'
 	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); mkdir -p ~/.config/k3d && k3d kubeconfig get release > $(K3D_RELEASE_KUBECONFIG)'
-	@echo "Both clusters ready. Run \`make deploy\` for dev / \`make deploy-release\` for release."
+	@echo "Both clusters ready. Run \`make deploy-k3d-dev\` for dev / \`make deploy-k3d-release\` for release."
 
 status-k3s:
 	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); k3d cluster list; \
 		echo; echo "--- dev ---"; export KUBECONFIG=$(K3D_DEV_KUBECONFIG); kubectl get pods -A; \
 		echo; echo "--- release ---"; export KUBECONFIG=$(K3D_RELEASE_KUBECONFIG); kubectl get pods -A'
 
-# `make deploy` and `make deploy-release` are end-to-end — they build +
+# `make deploy-k3d-dev` and `make deploy-k3d-release` are end-to-end — they build +
 # push the main image, apply the consolidated `k8s-infinite-streaming.yaml.tmpl`
 # AND the analytics tier (ClickHouse + forwarder + Grafana) into the
 # stack's k3d cluster. Each cluster has exactly one set of resources —
@@ -291,12 +299,12 @@ status-k3s:
 
 # Each target binds its KUBECONFIG_FILE, SERVER_ID, ANNOUNCE_URL/LABEL,
 # and EXTERNAL_PORT_BASE so the same template renders cleanly per stack.
-deploy: KUBECONFIG_FILE=$(K3D_DEV_KUBECONFIG)
-deploy: SERVER_ID=infinite-streaming-dev
-deploy: ANNOUNCE_URL=$(INFINITE_STREAM_ANNOUNCE_URL_K3S_DEV)
-deploy: ANNOUNCE_LABEL=$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_DEV)
-deploy: EXTERNAL_PORT_BASE=40081
-deploy: analytics-deploy-k3s
+deploy-k3d-dev: KUBECONFIG_FILE=$(K3D_DEV_KUBECONFIG)
+deploy-k3d-dev: SERVER_ID=infinite-streaming-dev
+deploy-k3d-dev: ANNOUNCE_URL=$(INFINITE_STREAM_ANNOUNCE_URL_K3S_DEV)
+deploy-k3d-dev: ANNOUNCE_LABEL=$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_DEV)
+deploy-k3d-dev: EXTERNAL_PORT_BASE=40081
+deploy-k3d-dev: analytics-deploy-k3s
 	docker buildx build --platform linux/amd64 --build-arg VERSION=$(shell cat VERSION) -t $(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev --push .
 	$(MAKE) deploy-k3d K3S_SERVER_IMAGE=$(K3S_REGISTRY)/$(K3S_SERVER_REPO):dev \
 		KUBECONFIG_FILE=$(KUBECONFIG_FILE) \
@@ -305,12 +313,12 @@ deploy: analytics-deploy-k3s
 		ANNOUNCE_LABEL=$(ANNOUNCE_LABEL) \
 		EXTERNAL_PORT_BASE=$(EXTERNAL_PORT_BASE)
 
-deploy-release: KUBECONFIG_FILE=$(K3D_RELEASE_KUBECONFIG)
-deploy-release: SERVER_ID=infinite-streaming-release
-deploy-release: ANNOUNCE_URL=$(INFINITE_STREAM_ANNOUNCE_URL_K3S_RELEASE)
-deploy-release: ANNOUNCE_LABEL=$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_RELEASE)
-deploy-release: EXTERNAL_PORT_BASE=30081
-deploy-release: analytics-deploy-k3s
+deploy-k3d-release: KUBECONFIG_FILE=$(K3D_RELEASE_KUBECONFIG)
+deploy-k3d-release: SERVER_ID=infinite-streaming-release
+deploy-k3d-release: ANNOUNCE_URL=$(INFINITE_STREAM_ANNOUNCE_URL_K3S_RELEASE)
+deploy-k3d-release: ANNOUNCE_LABEL=$(INFINITE_STREAM_ANNOUNCE_LABEL_K3S_RELEASE)
+deploy-k3d-release: EXTERNAL_PORT_BASE=30081
+deploy-k3d-release: analytics-deploy-k3s
 	docker buildx build --platform linux/amd64 \
 		--build-arg VERSION=$(shell cat VERSION) \
 		-t $(K3S_SERVER_IMAGE) \
@@ -325,7 +333,7 @@ deploy-release: analytics-deploy-k3s
 
 # Inner worker — applies the consolidated main-app template against
 # whichever k3d cluster's kubeconfig was passed in. Used by both
-# `deploy` and `deploy-release`.
+# `deploy-k3d-dev` and `deploy-k3d-release`.
 deploy-k3d:
 	@if [ -z "$(KUBECONFIG_FILE)" ]; then echo "KUBECONFIG_FILE required"; exit 1; fi
 	@echo "=== Applying main app to k3d cluster ($(KUBECONFIG_FILE)) ==="
@@ -388,11 +396,11 @@ analytics-deploy-k3s: analytics-build-forwarder-k3s
 # so each can be exercised in isolation.
 teardown-dev:
 	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); k3d cluster delete dev'
-	@echo "Cluster `dev` deleted. Re-run \`make k3d-bootstrap\` then \`make deploy\` to bring it back."
+	@echo "Cluster `dev` deleted. Re-run \`make k3d-bootstrap\` then \`make deploy-k3d-dev\` to bring it back."
 
 teardown-release:
 	ssh $(K3S_SSH_HOST) '$(K3D_REMOTE_SHELL); k3d cluster delete release'
-	@echo "Cluster `release` deleted. Re-run \`make k3d-bootstrap\` then \`make deploy-release\` to bring it back."
+	@echo "Cluster `release` deleted. Re-run \`make k3d-bootstrap\` then \`make deploy-k3d-release\` to bring it back."
 
 # ── Remote deployment testing ──────────────────────────────────────────
 # Deploy all 4 installation methods to a remote Docker host for parallel testing.
@@ -412,6 +420,21 @@ test-go:
 	@echo "=== go-upload ==="
 	cd go-upload && go vet ./... && go test -race ./...
 
+# Install the repo's git hooks into the active hooks dir. The post-checkout
+# hook seeds content/dashboard-v3/node_modules (gitignored) on every
+# `git worktree add` so the Vue dashboard always builds — see #740. Honours
+# core.hooksPath when set, else the shared common hooks dir (which all
+# worktrees share). Re-run after pulling a hook change.
+.PHONY: install-hooks
+install-hooks:
+	@dest="$$(git config --get core.hooksPath || echo "$$(git rev-parse --git-common-dir)/hooks")"; \
+	mkdir -p "$$dest"; \
+	for h in .githooks/*; do \
+		[ -f "$$h" ] || continue; \
+		cp "$$h" "$$dest/$$(basename "$$h")" && chmod +x "$$dest/$$(basename "$$h")"; \
+	done; \
+	echo "Installed hooks from .githooks/ → $$dest"
+
 test-deploy-all: test-deploy-compose test-deploy-ghcr test-deploy-registry
 
 # Frontend-only hot deploy — rebuild the Vue dashboard locally, push
@@ -428,10 +451,54 @@ test-deploy-all: test-deploy-compose test-deploy-ghcr test-deploy-registry
 # appears INSTANTLY inside the container — nginx serves the new
 # bundle on the next request, no docker cp / docker exec / reload
 # needed.
-test-deploy-frontend:
+# _ff-guard: before any deploy that ships the LOCAL working tree to the shared
+# test-dev box, ensure (1) we're on the deploy branch and (2) it's at its
+# origin HEAD. Clean + behind → fast-forward and proceed; dirty/diverged →
+# abort, so a stale tree never ships (the way #652's chart swap shipped
+# pre-merge on 2026-06-07). No upstream → no-op.
+#
+# (1) is the branch check: the old guard only verified the CURRENT branch was
+# current with ITS OWN upstream, so a feature branch that's up to date with
+# its own origin sailed through and shipped code stale-vs-dev. That reverted
+# the forwarder + dashboard + harness on test-dev on 2026-06-08 (a deploy from
+# the feat/scenario-typed-api-678 branch served pre-#697/#699 code). Now a
+# non-DEPLOY_BRANCH deploy aborts unless you opt in with ALLOW_BRANCH_DEPLOY=1.
+#
+# DEPLOY_BRANCH — the branch a shared-box deploy is expected to ship (dev).
+DEPLOY_BRANCH ?= dev
+.PHONY: _ff-guard
+_ff-guard:
+	@cur=$$(git symbolic-ref --short -q HEAD || echo DETACHED); \
+	if [ "$$cur" != "$(DEPLOY_BRANCH)" ] && [ -z "$(ALLOW_BRANCH_DEPLOY)" ]; then \
+		echo "⚠ deploying branch '$$cur' (not '$(DEPLOY_BRANCH)') — test-dev will serve THIS working tree, not $(DEPLOY_BRANCH)."; \
+		echo "  Deliberate? Fine, carrying on. (A SILENT stale-branch deploy reverted test-dev on 2026-06-08 — hence this loud notice.)"; \
+		echo "  Set ALLOW_BRANCH_DEPLOY=1 to silence, or 'git switch $(DEPLOY_BRANCH)' to ship $(DEPLOY_BRANCH)."; \
+	fi
+	@git fetch origin --quiet
+	@behind=$$(git rev-list --count HEAD..@{u} 2>/dev/null || echo 0); \
+	if [ "$$behind" -gt 0 ]; then \
+		if git diff --quiet && git diff --cached --quiet && git merge --ff-only @{u}; then \
+			echo "↑ fast-forwarded $$behind commit(s) from origin before deploy"; \
+		else \
+			echo "✗ branch is $$behind behind origin and can't auto fast-forward (uncommitted changes or diverged) — resolve, then re-run"; \
+			exit 1; \
+		fi; \
+	else \
+		echo "✓ up to date with origin"; \
+	fi
+
+# Short alias: rebuild + hot-deploy only the dashboard bundle to test-dev
+# (:21000), no container recreate. Sibling to deploy.
+deploy-frontend: test-deploy-frontend
+
+test-deploy-frontend: _ff-guard
 	@echo "=== Frontend-only hot deploy (no container recreate) ==="
 	@if [ ! -f content/dashboard-v3/package.json ]; then \
 		echo "dashboard-v3 not present — nothing to deploy"; exit 1; \
+	fi
+	@if [ ! -d content/dashboard-v3/node_modules/.bin ]; then \
+		echo "dashboard-v3/node_modules missing — npm ci..."; \
+		(cd content/dashboard-v3 && npm ci); \
 	fi
 	@echo "Building dashboard-v3 (Vue)..."
 	@cd content/dashboard-v3 && npm run --silent build
@@ -440,8 +507,31 @@ test-deploy-frontend:
 	rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev/content/dashboard/v3/
 	@echo "✓ test-dev frontend updated; sessions untouched."
 
-test-deploy-dev:
+# Everyday deploy: build + push the local working tree to test-dev (:21000).
+# This is the common case, so it gets the bare `deploy` name. The k3d
+# cluster deploys live under deploy-k3d-dev / deploy-k3d-release.
+deploy: test-deploy-dev
+
+test-deploy-dev: _ff-guard
 	@echo "=== Dev: local working tree (port 21000) ==="
+	@# Build the Vue dashboard FIRST, before any rsync --delete touches the
+	@# remote. A missing node_modules (the usual fresh-worktree state — it's
+	@# gitignored) or a failed build now aborts with test-dev UNTOUCHED.
+	@# Previously the working-tree rsync --delete ran first, so a build
+	@# failure half-wiped the box (lost the :21000 override + v3 bundle, no
+	@# container rebuild) — #740, 2026-06-11. `make install-hooks` adds a
+	@# post-checkout hook that seeds node_modules on worktree add; this
+	@# npm-ci fallback covers the case where the hook isn't installed.
+	@if [ -f content/dashboard-v3/package.json ]; then \
+		if [ ! -d content/dashboard-v3/node_modules/.bin ]; then \
+			echo "dashboard-v3/node_modules missing — npm ci..."; \
+			(cd content/dashboard-v3 && npm ci); \
+		fi; \
+		echo "Building dashboard-v3 (Vue)..."; \
+		(cd content/dashboard-v3 && npm run --silent build); \
+	else \
+		echo "dashboard-v3 not present, skipping Vue build"; \
+	fi
 	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev'
 	@echo "Syncing local working tree (excluding .git and .gitignore matches)..."
 	rsync -az --delete \
@@ -454,16 +544,13 @@ test-deploy-dev:
 	@# which is gitignored, so the --filter ':- .gitignore' rule above
 	@# hides it from rsync's source view and --delete then wipes it on
 	@# the remote (this bit you for the testing.html-→-dashboard.html
-	@# redirect on 2026-05-12). Build + push it as an extra rsync
-	@# whose source it can actually see. Skipped silently if
-	@# dashboard-v3 isn't set up yet.
+	@# redirect on 2026-05-12). Push the already-built bundle now (after the
+	@# tree sync, so --delete can't wipe it). Skipped when dashboard-v3 isn't
+	@# set up yet.
 	@if [ -f content/dashboard-v3/package.json ]; then \
-		echo "Building & pushing dashboard-v3 (Vue)..."; \
-		(cd content/dashboard-v3 && npm run --silent build) && \
+		echo "Pushing dashboard-v3 bundle..."; \
 		ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev/content/dashboard/v3' && \
 		rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev/content/dashboard/v3/; \
-	else \
-		echo "dashboard-v3 not present, skipping Vue build"; \
 	fi
 	ssh -n $(TEST_SSH) 'printf "CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=%s\nINFINITE_STREAM_ANNOUNCE_LABEL=%s\nINFINITE_STREAM_TLS=%s\nINFINITE_STREAM_TLS_SAN=%s\n" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(INFINITE_STREAM_ANNOUNCE_URL)" "$(INFINITE_STREAM_ANNOUNCE_LABEL)" "$(INFINITE_STREAM_TLS)" "$(INFINITE_STREAM_TLS_SAN)" > ~/test-dev/.env'
 	scp tests/deploy/override-dev.yml $(TEST_SSH):~/test-dev/docker-compose.override.yml
@@ -501,6 +588,50 @@ test-deploy-dev-http:
 	scp tests/deploy/override-dev-http.yml $(TEST_SSH):~/test-dev-http/docker-compose.override.yml
 	ssh $(TEST_SSH) 'cd ~/test-dev-http && VERSION=$$(cat VERSION) docker compose build && docker compose up -d'
 
+# test-deploy-dev-degraded (#910) — a SECOND full stack on the 28xxx band that
+# emulates a host with NO NET_ADMIN: the go-proxy boot probe is forced to
+# http-only (SHAPING_FORCE_DEGRADED in override-dev-degraded.yml), so
+# rate/delay/loss + transport faults report unavailable and the dashboard shows
+# the degraded UX. Runs alongside the real test-dev (:21000, kernel) so you can
+# A/B kernel vs no-TC. TLS off + shared content library, same as the HTTP mirror.
+TEST_DEGRADED_MEDIA_DIR ?= /home/$(shell echo $(TEST_SSH) | cut -d@ -f1)/test-dev-degraded-media
+# Advertise on the SAME public hostname as test-dev (dev.jeoliver.com — the only
+# SAN on the mounted cert), just a different port, so devices trust the cert and
+# fetch the catalogue (a .local host would cert-mismatch → empty catalogue).
+INFINITE_STREAM_ANNOUNCE_URL_DEGRADED ?= https://dev.jeoliver.com:28000
+test-deploy-dev-degraded:
+	@echo "=== Dev (DEGRADED / no-TC): local working tree (port 28000) ==="
+	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev-degraded'
+	@echo "Syncing local working tree (excluding .git and .gitignore matches)..."
+	rsync -az --delete \
+		--filter=':- .gitignore' \
+		--exclude='.git/' \
+		--exclude='.env' \
+		--exclude='certs/' \
+		./ $(TEST_SSH):~/test-dev-degraded/
+	@if [ -f content/dashboard-v3/package.json ]; then \
+		echo "Building & pushing dashboard-v3 (Vue)..."; \
+		(cd content/dashboard-v3 && npm run --silent build) && \
+		ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev-degraded/content/dashboard/v3' && \
+		rsync -az --delete content/dashboard/v3/ $(TEST_SSH):~/test-dev-degraded/content/dashboard/v3/; \
+	else \
+		echo "dashboard-v3 not present, skipping Vue build"; \
+	fi
+	ssh -n $(TEST_SSH) 'printf "COMPOSE_PROJECT_NAME=test-dev-degraded\nCONTENT_DIR=%s\nSHARED_CONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=%s\nINFINITE_STREAM_ANNOUNCE_LABEL=test-dev-degraded\nINFINITE_STREAM_BASE_URL=%s\nINFINITE_STREAM_TLS=\nINFINITE_STREAM_TLS_SAN=\n" "$(TEST_DEGRADED_MEDIA_DIR)" "$(TEST_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(INFINITE_STREAM_ANNOUNCE_URL_DEGRADED)" "$(INFINITE_STREAM_ANNOUNCE_URL_DEGRADED)" > ~/test-dev-degraded/.env'
+	@# TLS on (HTTPS, same as test-dev). rsync excludes certs/, so seed this
+	@# stack's mkcert certs from test-dev's (per-hostname, valid on :28000).
+	ssh -n $(TEST_SSH) 'mkdir -p ~/test-dev-degraded/certs && cp ~/test-dev/certs/localhost.pem ~/test-dev/certs/localhost-key.pem ~/test-dev-degraded/certs/'
+	scp tests/deploy/override-dev-degraded.yml $(TEST_SSH):~/test-dev-degraded/docker-compose.override.yml
+	@# Only the core services — the LLM/label sidecars (token-deriver,
+	@# label-{deriver,scorer,trainer}) use FIXED container names shared across
+	@# stacks, so a second copy conflicts with test-dev's. This stack doesn't
+	@# need them (it's for exercising the degraded shaping UX).
+	ssh $(TEST_SSH) 'cd ~/test-dev-degraded && VERSION=$$(cat VERSION) docker compose build go-server forwarder clickhouse grafana && docker compose up -d go-server forwarder clickhouse grafana'
+	@# NOTE: no schema step here — the ClickHouse container self-heals its
+	@# analytics schema on every boot (see analytics/clickhouse/self-heal.sh +
+	@# the clickhouse entrypoint in docker-compose.yml), so it create-or-upgrades
+	@# in place whether this stack's volume is empty or from an earlier version.
+
 # Iterate on Grafana provisioning (dashboards / datasources) without
 # touching go-server. Sessions keep flowing live; Grafana auto-reloads
 # the dashboard JSON within 30s, but we --force-recreate to pick it up
@@ -516,7 +647,7 @@ analytics-update:
 # keep flowing live (go-server is untouched); archival pauses for ~1s
 # while the forwarder restarts. --no-deps prevents docker compose from
 # pulling go-server into the recreate.
-analytics-rebuild-forwarder:
+analytics-rebuild-forwarder: _ff-guard
 	@echo "=== Rebuilding forwarder on test-dev (no go-server restart) ==="
 	ssh $(TEST_SSH) 'mkdir -p ~/test-dev/analytics/go-forwarder ~/test-dev/go-proxy'
 	rsync -az --delete \
@@ -573,6 +704,12 @@ analytics-migrate:
 	  done < /tmp/.analytics-migrate.sql; \
 	  rm -f /tmp/.analytics-migrate.sql; \
 	  exit $$rc'
+	@echo ""
+	@echo "⚠  This ALTER ran ONLY on the live primary. Fresh installs and the"
+	@echo "   ClickHouse self-heal both build from analytics/clickhouse/init.d/01-schema.sql —"
+	@echo "   add the SAME change there (idempotent: CREATE/ADD COLUMN ... IF [NOT] EXISTS)"
+	@echo "   or it silently won't reach new/rebuilt stacks. Un-backported migrations are"
+	@echo "   exactly what blanked the dashboard before."
 
 test-clean-dev:
 	ssh $(TEST_SSH) 'docker rm -f test-dev-server 2>/dev/null'
@@ -649,6 +786,15 @@ test-deploy-oobe:
 		"$(TEST_OOBE_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(TEST_HOST)" "$(TEST_HOST)" > ~/test-oobe/.env'
 	scp tests/deploy/override-oobe.yml $(TEST_SSH):~/test-oobe/docker-compose.override.yml
 	ssh $(TEST_SSH) 'cd ~/test-oobe && VERSION=$$(cat VERSION) docker compose -p test-oobe build && docker compose -p test-oobe up -d'
+	@# Smoke test: a fresh install boots green even with a broken analytics
+	@# schema — the failure only shows when the dashboard queries the events/
+	@# network timeseries (a missing session_events column errors the backfill,
+	@# blanking the Network Log + PlayLog). Exercise that exact query with a
+	@# dummy player (needs no data — CH validates columns at analysis time) so a
+	@# broken clean install FAILS this deploy instead of shipping a dead dashboard.
+	@echo "=== OOBE smoke: dashboard timeseries schema-drift guard ==="
+	scp tests/deploy/oobe-smoke.sh $(TEST_SSH):~/test-oobe/oobe-smoke.sh
+	ssh $(TEST_SSH) 'bash ~/test-oobe/oobe-smoke.sh https://localhost:26000'
 
 test-clean-oobe:
 	@case "$(TEST_OOBE_MEDIA_DIR)" in \
@@ -768,6 +914,11 @@ deploy-androidtv:
 uninstall-androidtv:
 	$(ANDROID_SDK_HOME)/platform-tools/adb uninstall com.infinitestream.player 2>/dev/null || true
 
+# Google TV runs Android TV OS — same APK, same gradle install path.
+# Alias so muscle memory works either way.
+deploy-googletv: deploy-androidtv
+uninstall-googletv: uninstall-androidtv
+
 # ── Synthetic test pattern ─────────────────────────────────────────────
 # Generate a 4K mezzanine file from FFmpeg's `testsrc` source (colour
 # chart + scrolling gradient + built-in timestamp) with a solid-colour
@@ -841,12 +992,16 @@ characterize-web:
 	./tests/characterization/overnight.sh web
 
 # Server control-surface checks (rate/delay/loss/pattern/fault/transfer/
-# socket/scope/content). Runs against test-dev and posts results to the
-# Automated Testing page as platform=server (the server_* tiles).
+# socket/scope/content/config-on-connect/transport/isolation/reported-rate).
+# Runs against test-dev and posts results to the Automated Testing page as
+# platform=server (the server_* tiles). No -run filter: every suite test
+# joins automatically; opt-in tests must self-skip (TestRestartPersistence
+# skips unless RESTART_CMD is set). The old 'TestServer' filter silently
+# excluded TestTransportFaults and TestConfigOnConnect_*.
 # Override the target with THROUGHPUT_HOST / THROUGHPUT_API_PORT.
 characterize-server:
 	cd tests/server_behavior && THROUGHPUT_HOST=$(TEST_HOST) THROUGHPUT_API_PORT=21000 \
-		go test -run 'TestServer' -timeout 40m -v ./...
+		go test -timeout 40m -v ./...
 
 # One-shot Automated Testing run: server checks first, then the iPad
 # simulator player characterization — populates the whole Automated Testing

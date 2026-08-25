@@ -6,6 +6,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Before making UI or product-behavior changes, read `PRD.md` and align implementation to it.
 
+## Knowledge layout
+
+Operational knowledge is split across stores — read and route by kind:
+
+| Store | What lives here | Tracked |
+|---|---|---|
+| `CLAUDE.md` (this file) | Durable architecture, build/run, repo-wide rules true for all contributors | public |
+| `.claude/standards/` | Platform/protocol cheat sheets that bit us once (AVPlayer quirks, ABR model, codec strings, data-field semantics). Read mid-investigation; the `forensics` subagent reads them before hypothesising. | public |
+| `.claude/findings/` | Per-investigation narratives — one observed behaviour: timeline, evidence, tagged hypothesis. | public |
+| `.claude/skills/CONVENTIONS.md` | Cross-skill operating rules (Bash discipline, no-guessing, local-vs-UTC). Read at skill invocation. | public |
+| `.claude/memory/` (symlink → private repo) | Cross-session prefs, working-style corrections, how this maintainer works. Greppable by skills/forensics; `MEMORY.md` is its always-loaded index. | private |
+
+**Routing a new learning:**
+- Durable product/architecture truth for all contributors → `CLAUDE.md`
+- Platform/protocol fact that cost >10 min to confirm → `.claude/standards/`
+- One investigation's cause + evidence → `.claude/findings/`
+- A cross-skill operating rule → `CONVENTIONS.md`
+- How the maintainer works/prefers, or an always-on rule that must survive into every session → `.claude/memory/`
+
+**One fact, one source of truth.** If a rule must also be always-on in memory, keep the memory copy terse and link the canonical store above — don't duplicate the detail.
+
 ## Build & Run Commands
 
 ```bash
@@ -23,11 +44,14 @@ make shell
 # `dev` and `release` clusters with their host port mappings.
 make k3d-bootstrap
 
+# Everyday deploy: local working tree → test-dev (Docker Compose, :21000)
+make deploy            # alias for test-deploy-dev; frontend-only: make deploy-frontend
+
 # Deploy to k3d (dev cluster — host ports 40000/40081/40181-40881)
-make deploy
+make deploy-k3d-dev
 
 # Deploy to k3d (release cluster — host ports 30000/30081/30181-30881)
-make deploy-release
+make deploy-k3d-release
 
 # Wipe a single cluster (k3d cluster delete) for clean reinstall
 make teardown-dev
@@ -40,7 +64,7 @@ UI is available at `http://localhost:30000/` (Docker Compose) or `http://$K3S_HO
 
 All tests are now Go-based and require a running server.
 
-- **Server-behavior tests** under `tests/server_behavior/` cover control-surface contracts: rate (throughput_calibration) + delay + loss + fault + pattern + scope + socket + transport + transfer + content + limit. Run via `go test ./tests/server_behavior -run TestRateSweep -timeout 10m` (or any other `TestServer*` / `TestTransportFaults`). See [`.claude/standards/server-behavior.md`](.claude/standards/server-behavior.md) for the catalogue and calibration baselines.
+- **Server-behavior tests** under `tests/server_behavior/` cover control-surface contracts: rate (throughput_calibration) + delay + loss + fault + pattern + scope + socket + transport + transfer + content + limit + config-on-connect + cross-session isolation + reported-rate honesty. Run the whole suite via `make characterize-server`, or one test via `go test ./tests/server_behavior -run TestServerLimit -timeout 10m` (any `TestServer*` / `TestTransportFaults` / `TestConfigOnConnect*`). See [`.claude/standards/server-behavior.md`](.claude/standards/server-behavior.md) for the catalogue and calibration baselines.
 - **Player ABR characterization** lives under `tests/characterization/` (issue #482) — modes: steps / rampup / rampdown / pyramid / hysteresis_gap / downshift_severity / transient_shock / emergency_downshift / startup / startup_caps / abort. Multi-platform via the launch-mode picker (manual / cli / appium). See `tests/characterization/README.md`.
 
 Default server target is the test-dev deploy at `https://$TEST_HOST:21000`; override via `THROUGHPUT_HOST` / `THROUGHPUT_API_PORT` env vars in `tests/server_behavior/`, or harness flags in `tests/characterization/`. The legacy `tests/integration/` pytest suite was retired in favour of the Go coverage above.
@@ -122,7 +146,7 @@ Shared modules (`content/shared/`):
 
 ### Analytics sidecar (`analytics/`)
 
-Three ClickHouse tables after issue #474, each carrying a `labels Array(LowCardinality(String))` column with the same `<severity>=<event>` vocab (synthesized entries prefixed `*`, severities `error|critical|warning|info`):
+Three ClickHouse tables after issue #474, each carrying a `labels Array(LowCardinality(String))` column with the same `<severity>=<event>` vocab (synthesized entries prefixed `*`, severities `error|critical|warning|info`, plus the unranked `testing` tier for operator/test-harness KV metadata — #571):
 
 - `session_events` — one row per player metrics POST (was `session_snapshots` pre-#472).
 - `network_requests` — one row per HTTP request the proxy handled.
@@ -144,12 +168,66 @@ Make targets: `make analytics-rebuild-forwarder` (rebuild + recreate forwarder o
 - `create_hls_manifests.py` — HLS manifest generation helper
 - `convert_to_segmentlist.py` — DASH SegmentTemplate → SegmentList conversion
 
-Defaults: 6s segment, 200ms partial, 1s GOP.
+Defaults: 6s segment, 200ms partial, 1s GOP, AAC-LC 96k stereo 48kHz, two-pass
+software encode, `--ladder apple-uniq-live-xs`.
+
+**This is the fallback encoder, not the primary one — it is largely superseded.**
+Production content is produced by the separate **Encoder** project
+(`infinite-streaming-encoder`, `~/Projects/Encoder`) and copied onto the
+infinite-streaming server:
+
+```
+Encoder project  →  $ENCODE_STAGING_DIR  →  rsync  →  server  →  /media/dynamic_content/
+```
+
+The Encoder writes finished packages to `$ENCODE_STAGING_DIR` (e.g.
+`/Volumes/4TB/media/encode-staging`); they are rsynced to the server's content
+volume (`CONTENT_DIR`, bind-mounted to `/media` in the container), landing under
+`/media/dynamic_content/<content>/`. Discovery is a plain directory scan gated on
+a manifest being present, so a package joins the catalogue as soon as it is in
+place — no registration step, no restart.
+
+Do not add features to `generate_abr/` that belong in the Encoder project. **Do**
+keep the two aligned: content from either must be the same shape, or a clip
+encoded here cannot be compared against one encoded there — which is the whole
+reason the fallback still exists. `generate_abr/README.md` carries the detail,
+including what the Encoder produces that this script does not (self-describing
+manifests with per-fragment `@mediaRange`, distributed encoding, VMAF audit).
+
+Concretely, "same shape" means identical rungs (12 per codec — h264 climbs to 4K,
+hevc/av1 to 2160p), the same VBV, and the same `_xs` directory tag.
+`generate_abr/ladder_audit.py` and `analytics/tools/` compare across both.
+
+The ladder is a *delivery profile*, not just a bitrate table. Its VBV is what
+makes ONE encode safe for go-live to re-chop into LL/2s/6s:
+
+```
+peak/avg = MAXRATE_PERCENT/100 + BUFSIZE_MULT/T     # 100% + 0.25x
+         = 1.04x (6s) / 1.13x (2s) / 1.25x (1s)
+```
+
+The 1s case lands exactly on Apple's live/linear 1.25x bound and longer variants
+sit below it. Two-pass is not optional at this buffer size: single-pass x265
+undershoots `-b:v` by ~17%, so the published bitrates are only truthful with it.
+
+Output directories are `<stem>_p200_<codec>[_<tag>]`; the tag is `xs` on this
+ladder and absent on `legacy`/`apple`/`apple-uniq`, so pre-existing content keeps
+its current names. Anything parsing content names must tolerate the optional tag
+after the codec — `go-upload/internal/util/content.go`'s `_p200_(codec)(_|$)`
+already does, and `findOutputDirectories` globs rather than reconstructing.
 
 ### Client Apps
 
 - `apple/InfiniteStreamPlayer/` — SwiftUI iOS/tvOS app
 - `roku/InfiniteStreamPlayer/` — BrightScript Roku channel
+
+## Git Workflow
+
+- **Origin, not local, for status questions.** When answering ahead/behind or merge-status questions, `git fetch` first and compare against the `origin/*` refs — never reason from stale local refs. State explicitly which refs you compared.
+- **Never push or fast-forward `dev`/`main` directly.** All changes land via a PR. Do not move, fast-forward, or push these branches even if asked to "push to local dev" — open a PR instead.
+- **Verify the base branch off origin before creating any branch or PR.** Branch from the correct, freshly-fetched origin base; don't assume the current checkout is the right base.
+- **Scope edits to exactly what was requested.** Don't broaden into refactors (framework migrations, MVC restructures, etc.) without confirming first.
+- **"Open a new Claude session/instance in a separate terminal"** means set up the branch/worktree and hand back a paste-ready recap — do NOT spawn a subagent unless explicitly asked. Working directory can't change mid-session, so the recap is how work carries into the new terminal.
 
 ## GitHub Workflow
 

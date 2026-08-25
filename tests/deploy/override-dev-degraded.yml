@@ -1,0 +1,74 @@
+services:
+  go-server:
+    container_name: test-dev-degraded-server
+    # #910 degraded-mode stack — IDENTICAL to test-dev (:21000): same image +
+    # code, same TLS (HTTPS), same mounted mkcert certs. The ONLY difference is
+    # SHAPING_FORCE_DEGRADED=http-only below, which overrides the boot-time
+    # shaping probe so the proxy behaves as if the host had NO NET_ADMIN
+    # (no tc/netem/nftables): rate/delay/loss + transport faults report
+    # unavailable and the dashboard shows the degraded UX; HTTP faults still
+    # work. Runs on the 28xxx band so you can A/B kernel (:21000) vs no-TC.
+    #
+    # Genuine no-NET_ADMIN deploy: drop the base compose's `cap_add: [NET_ADMIN]`
+    # and `privileged: true` (via compose's !reset) so this container runs exactly
+    # like a locked-down managed service (Cloud Run / Fargate / PaaS) that forbids
+    # them. Safe because SHAPING_FORCE_DEGRADED=http-only short-circuits the boot
+    # capability probe and the runtime shaping is gated off (kernelRateOn/
+    # kernelNetemOn == false), so the proxy never shells out to tc/nft at all.
+    cap_add: !reset []
+    privileged: false
+    # Build a distinct, leaner image WITHOUT the NET_ADMIN binaries (iproute2/
+    # nftables) — see Dockerfile KERNEL_SHAPING. Own tag so it doesn't clobber
+    # the kernel `infinite-streaming` image the primary (:21000) runs. Nothing
+    # calls tc/nft in http-only mode, so the image ships without them.
+    image: infinite-streaming-degraded
+    build:
+      args:
+        KERNEL_SHAPING: "0"
+    volumes:
+      # Same mkcert certs as test-dev — TLS certs are per-hostname, not per-port,
+      # so the localhost.pem for jonathanoliver-ubuntu.local is valid on :28000.
+      # The deploy target copies ~/test-dev/certs into this stack's dir.
+      - ./certs:/media/certs:ro
+      # Share the encoded content library from the primary test-dev (no
+      # re-upload/re-encode); this stack keeps its OWN state under CONTENT_DIR.
+      - ${SHARED_CONTENT_DIR}/dynamic_content:/media/dynamic_content
+      - ${SHARED_CONTENT_DIR}/originals:/media/originals
+      - ${SHARED_CONTENT_DIR}/uploads:/media/uploads
+    environment:
+      # TLS-only external listen on 30000; in-container go-proxy → nginx uses the
+      # cleartext loopback listener on 30005 (same as test-dev).
+      - INFINITE_STREAM_UPSTREAM_PORT=30005
+      - INFINITE_STREAM_DEFAULT_RATE_MBPS=100
+      # The whole point of this stack: force the degraded probe result.
+      - SHAPING_FORCE_DEGRADED=http-only
+    ports:
+      !override
+      - "28000:30000"
+      - "28081:30081"
+      - "28181:30181"
+      - "28281:30281"
+      - "28381:30381"
+      - "28481:30481"
+      - "28581:30581"
+      - "28681:30681"
+      - "28781:30781"
+      - "28881:30881"
+  clickhouse:
+    container_name: test-dev-degraded-clickhouse
+    ports:
+      !override
+      - "127.0.0.1:28123:8123"
+  grafana:
+    container_name: test-dev-degraded-grafana
+    ports: !override []
+    environment:
+      - GF_SERVER_ROOT_URL=https://dev.jeoliver.com:28000/grafana/
+  forwarder:
+    container_name: test-dev-degraded-forwarder
+    environment:
+      # HTTPS to the proxy SSE — this stack runs TLS on, same as test-dev.
+      - FORWARDER_SSE_URL=https://go-server:30081/api/sessions/stream
+      - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
+      - FORWARDER_CLICKHOUSE_DB=infinite_streaming
+      - FORWARDER_CLICKHOUSE_TABLE=session_events

@@ -80,9 +80,24 @@ timeout 8 harness --insecure raw GET \
   | grep '^data: ' | sed 's/^data: //' \
   | jq -c 'select(.ts >= "<FROM>" and .ts <= "<TO>")' \
   > /tmp/forensics-sam-<t>.jsonl
+
+# AVMetrics for the window — the highest-resolution failure-timing feed
+# (CoreMedia error codes, VariantSwitchStart-without-complete). The
+# heartbeat/sample feed is BLIND to these, so on a "stalled, cause
+# unknown" wedge this is the evidence that decides it (e.g. -12880 =
+# wedges permanently vs -16839 = ugly-but-recovers). Bounded query —
+# closes on its own, no SSE --max-time hack. iOS-only. #693.
+harness --insecure --json query avmetrics <PLAY> --from <FROM_ISO> --to <TO_ISO> --limit 2000 2>/dev/null \
+  | jq -c 'select(.ts >= "<FROM>" and .ts <= "<TO>")' \
+  > /tmp/forensics-avm-<t>.jsonl
+# (No play scoped? Pull error-bearing events across the window instead:
+#  harness --insecure --json query avmetrics --event-type AVMetricErrorEvent --from <FROM_ISO> --to <TO_ISO>)
 ```
 
-(Same SSE-bleed-through guard as `investigate` — always filter ts in jq.)
+(Same SSE-bleed-through guard as `investigate` — always filter ts in jq.
+The AVMetrics query is bounded NDJSON, so it needs no `timeout` wrapper.)
+See `.claude/standards/avmetrics-forensics.md` for which event types carry
+which signal and how to read the CoreMedia codes.
 
 ### 4. Identify applicable standards
 
@@ -92,6 +107,7 @@ Based on the user's question, name the standards docs the subagent should read:
 - ABR / variant choice / downshift / upshift → `.claude/standards/abr-decision-model.md`
 - m3u8 / manifest behaviour → `.claude/standards/hls-taxonomy.md`
 - codec rejection / playback init failure → `.claude/standards/codec-strings.md`
+- iOS wedge / "stalled, cause unknown" / CoreMedia error reading → `.claude/standards/avmetrics-forensics.md` (pairs with the `/tmp/forensics-avm-<t>.jsonl` evidence)
 
 ### 5. Dispatch to the subagent
 
@@ -111,6 +127,7 @@ Pre-gathered evidence (already filtered to the window — DON'T re-query):
 - /tmp/forensics-events-<t>.jsonl ({N} events)
 - /tmp/forensics-net-<t>.jsonl ({M} network rows)
 - /tmp/forensics-sam-<t>.jsonl ({K} samples at 1Hz)
+- /tmp/forensics-avm-<t>.jsonl ({A} AVMetrics events — iOS only; CoreMedia errors + variant-switch events)
 
 Findings library hits (already grepped):
 - <file1.md>: <one-line summary>

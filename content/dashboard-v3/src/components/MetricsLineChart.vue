@@ -16,11 +16,18 @@
  * to `windowMs * 2` ms on the older side so a zoom-out / pan-back still
  * has data to show. The chart never holds more than ~2× window worth.
  */
-import { computed, onBeforeUnmount, ref, toRef, watch, type PropType } from 'vue';
+import { computed, inject, onBeforeUnmount, ref, watch, type PropType } from 'vue';
 import { ensureChartJs } from '@/composables/useChartJs';
+import { CompareContextKey } from '@/composables/useCompareContext';
 import { useChartCoordination, fmtTickHMSms, DEFAULT_FOCUS_MS, type ChartViewport } from '@/composables/useChartCoordination';
+import { useLegendVisibility } from '@/composables/useLegendVisibility';
 import type { Stream } from '@/composables/useSessionTimeSeries';
 import { tsOfRow, chRowToPlayerRecord } from '@/composables/chRowAdapter';
+import {
+  useLifecycleLineVisibility,
+  type LifecycleMarker,
+  type EventMarker,
+} from '@/composables/useLifecycleMarkers';
 import type { PlayerRecord } from '@/repo/v2-repo';
 
 export type SeriesAccessor = (p: PlayerRecord) => number | null | undefined;
@@ -41,6 +48,13 @@ export interface SeriesSpec {
   hidden?: boolean;
   /** Chart.js `borderDash` — e.g. `[4, 4]` for a dashed line. */
   borderDash?: number[];
+  /** Line thickness in px (default 2). Set wider on a series that tends to be
+   *  COVERED by another line drawn on top of it (e.g. Fetching Variant sitting
+   *  exactly under Displayed Variant when ABR is steady): the wider under-line
+   *  peeks out as a coloured halo on both sides of the narrower top line, so the
+   *  operator can see both are present. Ignored for band (`fillToValue`) series,
+   *  which are borderless fills. */
+  borderWidth?: number;
   /** Collapse this series into a group-shared legend entry. All series
    *  sharing the same `groupLegend` string appear under a single
    *  legend item whose label is the group name; clicking it toggles
@@ -48,10 +62,52 @@ export interface SeriesSpec {
    *  any other set of N lines the operator thinks of as one
    *  conceptual overlay. Issue #486. */
   groupLegend?: string;
+  /** Compare mode (issue #579): the session this series belongs to (its
+   *  `Sx` tag). Lets the session-legend highlight / show / hide every line
+   *  for one session at once across all charts. */
+  sessionTag?: string;
+  /** Render this series as a filled BAND instead of a line: shade the area
+   *  between the series' own value and this absolute y-axis value (Chart.js
+   *  `fill: { value }`). The border is dropped (fill only) and the fill uses a
+   *  semi-transparent tint of `color`, so overlapping bands compound to a
+   *  darker shade. Used for the bandwidth chart's per-variant avg↔peak bands. */
+  fillToValue?: number;
+  /** Exclude this series from y-axis AUTO-scaling (when no explicit yMax is set):
+   *  the auto range is computed from the OTHER series only. For static reference
+   *  lines — the variant peak/avg ladder + the avg↔peak bands — which otherwise
+   *  blow the auto-axis up to the top (4K) rung and squash the live traces. */
+  excludeFromAutoScale?: boolean;
+}
+
+/**
+ * ChartOverlaySource — one grouped-sibling's series overlaid onto this
+ * chart (issue #579 compare mode). Each source carries its OWN events
+ * stream (a separate per-player SSE) and its OWN tagged SeriesSpec[];
+ * the chart drains each source independently and renders its datasets
+ * alongside the primary `series`, on the same axes (so they share — and
+ * size — the y axis with the active session's lines, the #165 fix).
+ *
+ * Overlay datasets are drawn with `spanGaps: false` and explicit null
+ * points for missing samples, so a sibling lacking a wire metric shows
+ * a clean gap instead of an interpolated bridge.
+ */
+export interface ChartOverlaySource {
+  /** Stable identity (the sibling's player UUID) — drives dataset reuse
+   *  across reconciles so a sibling's accumulated history survives a
+   *  membership change elsewhere in the group. */
+  key: string;
+  /** The sibling's events stream (charts_minimal projection). */
+  eventsStream: Stream<Record<string, unknown>>;
+  /** Tagged, per-member-coloured series to overlay for this sibling. */
+  series: SeriesSpec[];
 }
 
 const props = defineProps({
   playerId: { type: String, required: true },
+  /** Coordination scope key (per-player, stable across plays). Drives
+   *  useChartCoordination only; data still keys off playerId. Falls back to
+   *  playerId when absent. */
+  coordId: { type: String, default: undefined },
   title: { type: String, default: '' },
   unit: { type: String, default: '' },
   series: { type: Array as PropType<SeriesSpec[]>, required: true },
@@ -72,14 +128,49 @@ const props = defineProps({
    *  BandwidthChart for per-AVMetric-segment throughput points; any
    *  chart can pass any stream of {x, y, color, label} the same way. */
   markers: {
-    type: Array as PropType<Array<{ x: number; y: number; color?: string; label?: string }>>,
+    type: Array as PropType<Array<{ x: number; y: number; color?: string; label?: string; tag?: string }>>,
     default: () => [],
   },
-  /** Synthetic legend entry text. When set, a clickable chip appears at
-   *  the end of the legend that toggles all markers on/off. */
+  /** Synthetic legend entry text. When set (and no markerGroups), a single
+   *  clickable chip appears at the end of the legend that toggles all
+   *  markers on/off. */
   markersLabel: { type: String, default: '' },
+  /** Per-session marker legend groups (issue #486 compare-mode). When
+   *  non-empty, ONE chip per group is rendered (e.g. `Per segment (S1)`,
+   *  `Per segment (S2)`) in the group's colour instead of the single
+   *  markersLabel chip — so the operator sees which sessions contributed
+   *  per-segment dots. Each chip toggles its own tag independently (tracked
+   *  in `visibleMarkerTags`); `markersVisible` stays = "any tag on" as the
+   *  master gate for the overlay draw + tooltip. */
+  markerGroups: {
+    type: Array as PropType<Array<{ tag: string; label: string; color: string }>>,
+    default: () => [],
+  },
   /** Marker visibility (v-model). Default true. */
   markersVisible: { type: Boolean, default: true },
+  /** Player-lifecycle vertical lines (restart / play_start / play_end),
+   *  computed once in SessionDisplay and shared across every chart so the
+   *  lines align. Each kind's visibility is governed by the shared
+   *  per-type toggle (useLifecycleLineVisibility), not a prop. */
+  lifecycleMarkers: {
+    type: Array as PropType<LifecycleMarker[]>,
+    default: () => [],
+  },
+  /** Severity-coloured vertical event bars — the focus-window events mirrored
+   *  from SessionDisplay's event filter (so the severity selector drives them).
+   *  Drawn thin + translucent so the line series stays readable. */
+  eventMarkers: {
+    type: Array as PropType<EventMarker[]>,
+    default: () => [],
+  },
+  /** Grouped-sibling overlays (issue #579 compare mode). Each entry is
+   *  one sibling's stream + tagged series; drained independently and
+   *  rendered alongside the primary `series` on shared axes. Empty in
+   *  the normal single-session case — the primary path is untouched. */
+  overlays: {
+    type: Array as PropType<ChartOverlaySource[]>,
+    default: () => [],
+  },
 });
 
 const emit = defineEmits<{
@@ -89,14 +180,80 @@ const emit = defineEmits<{
 const canvas = ref<HTMLCanvasElement | null>(null);
 const wrap = ref<HTMLDivElement | null>(null);
 const canvasWrap = ref<HTMLDivElement | null>(null);
-const coord = useChartCoordination(toRef(props, 'playerId'));
+const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
+// Persist this chart's legend show/hide toggles so a new play_id doesn't reset
+// them (scoped per player+chart; see useLegendVisibility). Applied at dataset
+// build time, recorded on each legend click.
+const legendVis = useLegendVisibility(`${props.coordId ?? props.playerId}::${props.title}`);
+const { lineVisibility } = useLifecycleLineVisibility();
+
+/** Lifecycle markers whose kind is currently toggled visible. Reads the
+ *  shared reactive `lineVisibility` so the draw plugin + hover hit-test
+ *  both react to a toggle without prop churn. */
+function visibleLifecycleMarkers(): LifecycleMarker[] {
+  const list = props.lifecycleMarkers;
+  if (!Array.isArray(list) || list.length === 0) return [];
+  return list.filter((m) => lineVisibility[m.kind]);
+}
+
+// Compare-mode session legend (issue #579). When mounted inside a
+// SessionDisplay that's in compare mode, the S1/S2 chips drive this
+// shared view; we highlight / show / hide this chart's datasets by their
+// `_sessionTag` in lockstep with every other chart. Null outside compare.
+const compareCtx = inject(CompareContextKey, null);
 
 let chart: any = null;
 let dataset: Array<Array<{ x: number; y: number }>> = [];
+
+/** Hard cap on points kept per series (issue #582). A pure memory
+ *  bound: the oldest points are dropped once a series exceeds this, so a
+ *  tab open for hours can't grow the renderer to multiple GB. Doubled to
+ *  16000 (~4.4 h at 1 Hz) to match the doubled cache cap so the charts
+ *  cover the same deep history while #587 (refetch) is blocked. It's the
+ *  cache's eviction window, not zoom, that bounds how far back data goes. */
+const MAX_POINTS_PER_SERIES = 16000;
+
+/** Listeners attached to `window` outlive this component's canvas (which
+ *  GCs when the chart is destroyed), so they must be removed on unmount
+ *  or they leak the closures — and the chart/dataset they capture —
+ *  every time a chart is torn down (e.g. switching the active session).
+ *  Issue #582. Canvas-bound listeners GC with the canvas, but routing
+ *  them here too is harmless and keeps teardown complete. */
+const teardownFns: Array<() => void> = [];
+function onGlobal(
+  target: EventTarget,
+  type: string,
+  handler: (e: any) => void,
+  opts?: AddEventListenerOptions | boolean,
+) {
+  target.addEventListener(type, handler as EventListener, opts);
+  teardownFns.push(() => target.removeEventListener(type, handler as EventListener, opts as EventListenerOptions));
+}
 // Watermark of the latest CH row already pushed through the chart.
 // Read by the markers-stream watcher to drain only NEW rows on each
 // version bump (the cache holds the full backfill + live tail).
 let lastIngestedMs = -Infinity;
+
+// Per-segment marker focus, so the dots highlight/fade in lockstep with the
+// line series (issue #486/#579). The hover handlers (session-legend + per-
+// series legend) set this and trigger a repaint; the overlayMarkers plugin
+// reads it at draw time:
+//   undefined → no focus, every dot full
+//   null      → something else is focused (a line / its session) → dim ALL dots
+//   'Sx'      → that session is focused → its dots pop, other sessions' dots dim
+let markerFocusTag: string | null | undefined = undefined;
+
+// Per-tag marker visibility so each marker legend chip toggles independently
+// (e.g. "Video segment fetch" vs "Delivery rate (kernel)" — they used to share
+// the single `markersVisible` boolean and flip in lockstep). Empty = all hidden,
+// matching the `markersVisible=false` default. A grouped marker's tag is shown
+// iff it's in this set; the ungrouped single-chip (`markersLabel`) path keeps
+// using the `markersVisible` boolean untouched.
+const visibleMarkerTags = new Set<string>();
+function markerTagShown(tag: string | null | undefined): boolean {
+  if (!props.markerGroups || props.markerGroups.length === 0) return true;
+  return visibleMarkerTags.has(tag ?? '');
+}
 
 /** Tolerance for "right edge is at the live sample" — matches the
  *  brush-drop-at-live heuristic in SessionDisplay. */
@@ -175,7 +332,15 @@ function applyViewport(v: ChartViewport) {
 function applyYMax(v: number | undefined) {
   if (!chart || !chart.options?.scales?.y) return;
   chart.options.scales.y.max = v;
+  // #664: push the new scale to the rendered chart immediately ('none' =
+  // no animation), otherwise the Y-max buttons don't take effect until some
+  // other update fires.
+  try { chart.update('none'); } catch { /* ignore */ }
 }
+
+// #664: re-apply Y-max live when the prop changes (the buttons set
+// coord.bandwidthYMax → :y-max). Without this it's only read at chart init.
+watch(() => props.yMax, (v) => applyYMax(v));
 
 // Serialise init so concurrent watch callbacks don't each `new Chart()`
 // on the same canvas (Chart.js throws "Canvas is already in use" the
@@ -194,64 +359,276 @@ async function ensure(): Promise<any> {
   return ensurePromise;
 }
 
-/** Reconcile the live chart's dataset list against props.series
- *  (issue #486). The chart is built once at mount with whatever
- *  series existed then; series that come from a computed (e.g. the
- *  manifest variant overlay on BandwidthChart) may arrive late. This
- *  syncs the chart's `data.datasets` array + the backing `dataset`
- *  cache in place — no destroy/recreate, so accumulated history on
- *  the static series isn't lost. */
-function syncDatasetsFromSeriesProp() {
-  if (!chart || !chart.data?.datasets) return;
+/** Build one Chart.js dataset object from a SeriesSpec. `dsKey` is a
+ *  stable identity (`primary|<label>` for the active session's lines,
+ *  `<siblingPlayerId>|<label>` for a compare overlay) used to reuse the
+ *  same dataset object — and thus its accumulated `data` array — across
+ *  reconciles. `spanGaps` is true for the primary series (legacy
+ *  behaviour) and false for overlays so a sibling's missing samples
+ *  render as gaps, not interpolated bridges (issue #579). */
+function makeDsObj(
+  dsKey: string,
+  s: SeriesSpec,
+  data: Array<{ x: number; y: number | null }>,
+  spanGaps: boolean,
+): any {
+  // A `fillToValue` series renders as a filled band (no border) between its own
+  // value and that absolute y-value; otherwise it's a normal unfilled line.
+  const band = typeof s.fillToValue === 'number' && Number.isFinite(s.fillToValue);
+  return {
+    label: s.label,
+    borderColor: band ? 'transparent' : s.color,
+    backgroundColor: s.color + (band ? '33' : '22'),
+    data,
+    tension: 0,
+    stepped: !!s.stepped,
+    pointRadius: 0,
+    borderWidth: band ? 0 : (s.borderWidth ?? 2),
+    borderDash: s.borderDash ?? [],
+    fill: band ? { value: s.fillToValue } : false,
+    spanGaps,
+    yAxisID: s.axis === 'y2' ? 'y2' : 'y',
+    hidden: !!s.hidden,
+    // Chart.js draws + legends + tooltips in ASCENDING `order` (NOT raw array
+    // order — the legend reads `_getSortedDatasetMetas()`, which sorts by this).
+    // Grouped "variant ladder" series (Bands / avg / peak — the only grouped
+    // series in the app) get order 0 so they lead the legend AND draw BEHIND the
+    // live traces (order 1), regardless of which session contributed them. #486.
+    order: variantOrder(s),
+    // The series' OWN intended hidden state — overwritten by the resolve-aware
+    // build paths with the persisted-toggle-or-default value. applySessionVisibility
+    // reads it so a VISIBLE compare-mode session no longer force-shows a
+    // hidden-by-default tagged series (e.g. each session's Variant peak ladder). #579.
+    _ownHidden: !!s.hidden,
+    _groupLegend: s.groupLegend ?? null,
+    _sessionTag: s.sessionTag ?? null,
+    _excludeFromAutoScale: !!s.excludeFromAutoScale,
+    _dsKey: dsKey,
+  };
+}
+
+/** Per-overlay runtime state (issue #579). One entry per grouped
+ *  sibling: its current series spec, the backing {x,y} arrays Chart.js
+ *  reads from, an ingest watermark, and the last-seen stream epoch (so a
+ *  sibling's play rotation / refetch wipes and re-drains cleanly). */
+interface OverlayRuntime {
+  datasets: Array<Array<{ x: number; y: number | null }>>;
+  watermark: number;
+  epoch: number;
+}
+const overlayRuntime = new Map<string, OverlayRuntime>();
+
+/** Build the primary (active-session) dataset objects, reconciling
+ *  against whatever is already on the chart by `_dsKey` so a stable
+ *  series keeps its accumulated history when the series list changes
+ *  (e.g. manifest variants arriving late, issue #486). Also keeps the
+ *  backing `dataset` cache 1:1 with these objects for pushSample. */
+function buildPrimaryDatasetObjs(): any[] {
   const target = props.series;
-  // Adjust backing `dataset` length first so pushSample's loop and
-  // chart.data.datasets stay 1:1.
   while (dataset.length < target.length) dataset.push([]);
   while (dataset.length > target.length) dataset.pop();
-  // Reconcile chart datasets in place. Match by label so a stable
-  // series keeps its in-memory data even if a new series is inserted
-  // before it.
-  const existing = chart.data.datasets;
-  const byLabel = new Map<string, any>();
-  for (const d of existing) if (d.label) byLabel.set(d.label, d);
-  const next: any[] = [];
+  const existing = chart?.data?.datasets ?? [];
+  const byKey = new Map<string, any>();
+  for (const d of existing) if (d._dsKey) byKey.set(d._dsKey, d);
+  const out: any[] = [];
   for (let i = 0; i < target.length; i++) {
     const s = target[i];
-    const prev = byLabel.get(s.label);
+    const dsKey = 'primary|' + s.label;
+    const prev = byKey.get(dsKey);
     if (prev) {
-      // Update mutable bits and reuse the data array (preserves history).
-      prev.borderColor = s.color;
-      prev.backgroundColor = s.color + '22';
+      const band = typeof s.fillToValue === 'number' && Number.isFinite(s.fillToValue);
+      prev.borderColor = band ? 'transparent' : s.color;
+      prev.backgroundColor = s.color + (band ? '33' : '22');
+      prev.borderWidth = band ? 0 : (s.borderWidth ?? 2);
+      // The hover-highlight base is re-derived from this width on the next
+      // hover; drop the stale stash so a width change here takes effect.
+      prev._origBorderWidth = null;
+      prev.fill = band ? { value: s.fillToValue } : false;
       prev.stepped = !!s.stepped;
       prev.borderDash = s.borderDash ?? [];
       prev.yAxisID = s.axis === 'y2' ? 'y2' : 'y';
-      (prev as any)._groupLegend = s.groupLegend ?? null;
-      // Backing `dataset[i]` must point at the same array Chart.js
-      // is reading from. Reuse prev.data and reseat the cache slot.
+      prev.spanGaps = true;
+      prev.order = variantOrder(s); // variant ladder behind + first in legend
+      prev.hidden = legendVis.resolveHidden(s); // persisted toggle survives a new play_id
+      prev._ownHidden = prev.hidden;
+      prev._groupLegend = s.groupLegend ?? null;
+      prev._sessionTag = s.sessionTag ?? null;
+      prev._excludeFromAutoScale = !!s.excludeFromAutoScale;
       dataset[i] = prev.data;
-      next.push(prev);
+      out.push(prev);
     } else {
       const data: Array<{ x: number; y: number }> = [];
       dataset[i] = data;
-      next.push({
-        label: s.label,
-        borderColor: s.color,
-        backgroundColor: s.color + '22',
-        data,
-        tension: 0,
-        stepped: !!s.stepped,
-        pointRadius: 0,
-        borderWidth: 2,
-        borderDash: s.borderDash ?? [],
-        spanGaps: true,
-        yAxisID: s.axis === 'y2' ? 'y2' : 'y',
-        hidden: !!s.hidden,
-        _groupLegend: s.groupLegend ?? null,
-      });
+      const obj = makeDsObj(dsKey, s, data, true);
+      obj.hidden = legendVis.resolveHidden(s); // persisted toggle survives a new play_id
+      obj._ownHidden = obj.hidden;
+      out.push(obj);
     }
   }
-  chart.data.datasets = next;
+  return out;
+}
+
+/** Build the compare-overlay dataset objects from `props.overlays`,
+ *  reconciling by `<key>|<label>` so a sibling's lines (and history)
+ *  survive a membership change. Prunes runtime for siblings that have
+ *  left the group. Issue #579. */
+function buildOverlayDatasetObjs(): any[] {
+  const sources = props.overlays ?? [];
+  const wantKeys = new Set(sources.map((s) => s.key));
+  for (const key of [...overlayRuntime.keys()]) {
+    if (!wantKeys.has(key)) overlayRuntime.delete(key);
+  }
+  const existing = chart?.data?.datasets ?? [];
+  const byKey = new Map<string, any>();
+  for (const d of existing) if (d._dsKey) byKey.set(d._dsKey, d);
+  const out: any[] = [];
+  for (const src of sources) {
+    const rtExisted = overlayRuntime.has(src.key);
+    let rt = overlayRuntime.get(src.key);
+    if (!rt) {
+      rt = { datasets: [], watermark: -Infinity, epoch: src.eventsStream.epoch.value };
+      overlayRuntime.set(src.key, rt);
+    }
+    while (rt.datasets.length < src.series.length) rt.datasets.push([]);
+    while (rt.datasets.length > src.series.length) rt.datasets.pop();
+    let addedSeries = false;
+    for (let i = 0; i < src.series.length; i++) {
+      const s = src.series[i];
+      const dsKey = src.key + '|' + s.label;
+      const prev = byKey.get(dsKey);
+      if (prev) {
+        prev.borderColor = s.color;
+        prev.backgroundColor = s.color + '22';
+        prev.borderWidth = typeof s.fillToValue === 'number' ? 0 : (s.borderWidth ?? 2);
+        prev._origBorderWidth = null;
+        prev.stepped = !!s.stepped;
+        prev.borderDash = s.borderDash ?? [];
+        prev.yAxisID = s.axis === 'y2' ? 'y2' : 'y';
+        prev.order = variantOrder(s); // variant ladder behind + first in legend
+        prev.spanGaps = false;
+        // Sibling series respect their own hidden default (+ persisted toggle) so
+        // e.g. a sibling's Variant peak ladder starts OFF even though its session
+        // is visible. applySessionVisibility reads _ownHidden, not just the tag.
+        prev.hidden = legendVis.resolveHidden(s);
+        prev._ownHidden = prev.hidden;
+        prev._groupLegend = s.groupLegend ?? null;
+        prev._sessionTag = s.sessionTag ?? null;
+        prev._excludeFromAutoScale = !!s.excludeFromAutoScale;
+        rt.datasets[i] = prev.data;
+        out.push(prev);
+      } else {
+        const data = rt.datasets[i] ?? [];
+        rt.datasets[i] = data;
+        const obj = makeDsObj(dsKey, s, data, false);
+        obj.hidden = legendVis.resolveHidden(s);
+        obj._ownHidden = obj.hidden;
+        out.push(obj);
+        if (rtExisted) addedSeries = true;
+      }
+    }
+    // A series appearing on an ALREADY-draining overlay (e.g. a sibling's
+    // variant-peak ladder once its manifest_variants row is parsed, #812)
+    // lands after the ingest watermark, so a forward-only drain would never
+    // backfill it — the dataset stays empty on a static/archived view and
+    // only partially fills live. Reset the watermark + clear every array so
+    // the next drainOverlays re-seeds the whole set from the start. Mirrors
+    // the epoch-reset path in drainOverlays; safe because the callers update
+    // once while the arrays are empty before draining (see the structure
+    // watcher's empty-prime note, #579).
+    if (addedSeries) {
+      rt.watermark = -Infinity;
+      for (const arr of rt.datasets) arr.length = 0;
+    }
+  }
+  return out;
+}
+
+/** Chart.js draw / legend / tooltip order: grouped "variant ladder" series
+ *  (Bands / avg / peak — the only grouped series in the app) sort to order 0 so
+ *  they lead the legend and draw BEHIND the live traces (order 1), no matter
+ *  which session contributed them. The legend's stock `generateLabels` reads
+ *  `_getSortedDatasetMetas()` (sorted by `order`), so the raw datasets[] array
+ *  order is irrelevant — this property is the only reliable lever. */
+function variantOrder(s: SeriesSpec): number {
+  return s.groupLegend ? 0 : 1;
+}
+
+/** Recompose `chart.data.datasets` = [primary…, overlay…] from the current
+ *  `series` + `overlays` props. The single owner of the dataset list; both the
+ *  series-prop watcher and the overlays watcher route through here so the two
+ *  halves never clobber each other. Draw/legend order is driven by each
+ *  dataset's `order` (variantOrder), not array position. */
+function rebuildAllDatasets() {
+  if (!chart || !chart.data) return;
+  const primary = buildPrimaryDatasetObjs();
+  const overlay = buildOverlayDatasetObjs();
+  chart.data.datasets = [...primary, ...overlay];
+  // Re-apply the session-legend hidden state so freshly (re)built
+  // datasets for a hidden session start hidden. No render here — the
+  // safeChartUpdate below paints it. Issue #579.
+  applySessionVisibility(false);
   safeChartUpdate();
+}
+
+/** Show/hide every dataset by its session's legend state (#579). When a
+ *  session is toggled off in the S1/S2 chip row, all its lines hide on
+ *  every chart at once. `doUpdate` is false when called from a path that
+ *  renders anyway (rebuildAllDatasets). */
+function applySessionVisibility(doUpdate = true) {
+  if (!chart || !compareCtx) return;
+  const hidden = compareCtx.view.hidden.value;
+  let changed = false;
+  chart.data.datasets.forEach((ds: any, idx: number) => {
+    if (!ds._sessionTag) return;
+    // Visible iff the session is shown AND the series isn't hidden by its own
+    // default / persisted toggle — so a shown session no longer force-reveals a
+    // hidden-by-default tagged series (the per-session Variant peak ladder).
+    const shouldShow = !hidden.has(ds._sessionTag) && !ds._ownHidden;
+    if (chart.isDatasetVisible(idx) !== shouldShow) {
+      chart.setDatasetVisibility(idx, shouldShow);
+      changed = true;
+    }
+  });
+  if (changed && doUpdate) { try { chart.update(); } catch { /* ignore */ } }
+}
+
+/** Hovering a session chip pops that session's lines and dims the rest
+ *  (#579). Mirrors the per-series legend hover but keyed on _sessionTag
+ *  so the whole session lights up across every chart. */
+function applySessionHover() {
+  if (!chart || !compareCtx) return;
+  const hov = compareCtx.view.hovered.value;
+  // Markers follow the same focus: hovering session Sx pops its dots and
+  // fades the others; no hover → all dots full. Issue #486.
+  markerFocusTag = hov ? hov : undefined;
+  for (const ds of chart.data.datasets as any[]) {
+    if (ds._origBorderWidth == null) ds._origBorderWidth = ds.borderWidth ?? 2;
+    if (ds._origBorderColor == null) ds._origBorderColor = ds.borderColor;
+    if (!hov) {
+      ds.borderWidth = ds._origBorderWidth;
+      ds.borderColor = ds._origBorderColor;
+    } else if (ds._sessionTag === hov) {
+      ds.borderWidth = (ds._origBorderWidth ?? 2) + 2;
+      ds.borderColor = ds._origBorderColor;
+    } else {
+      ds.borderWidth = Math.max(1, (ds._origBorderWidth ?? 2) - 1);
+      const oc = ds._origBorderColor;
+      ds.borderColor = typeof oc === 'string' && oc.startsWith('#') && oc.length === 7 ? oc + '33' : oc;
+    }
+  }
+  try { chart.update('none'); } catch { /* ignore */ }
+}
+
+if (compareCtx) {
+  watch(() => compareCtx.view.hovered.value, () => applySessionHover());
+  watch(() => compareCtx.view.hidden.value, () => applySessionVisibility());
+}
+
+/** Reconcile the live chart's dataset list against props.series
+ *  (issue #486) — now delegates to rebuildAllDatasets so compare
+ *  overlays (#579) are preserved when the primary series list changes. */
+function syncDatasetsFromSeriesProp() {
+  rebuildAllDatasets();
 }
 
 function createChartInstance(Chart: any): any {
@@ -272,28 +649,18 @@ function createChartInstance(Chart: any): any {
   chart = new Chart(canvas.value, {
     type: 'line',
     data: {
-      datasets: props.series.map((s, i) => ({
-        label: s.label,
-        borderColor: s.color,
-        backgroundColor: s.color + '22',
-        data: dataset[i],
-        // Straight line segments between samples — no curve fitting.
-        // Stepped series (player state) keep tension 0 too. Smoothing
-        // implies measurements that weren't taken; for instrumentation
-        // data, straight-line is the truthful representation.
-        tension: 0,
-        stepped: !!s.stepped,
-        pointRadius: 0,
-        borderWidth: 2,
-        borderDash: s.borderDash ?? [],
-        spanGaps: true,
-        yAxisID: s.axis === 'y2' ? 'y2' : 'y',
-        hidden: !!s.hidden,
-        // Marker for the legend group-collapse logic (issue #486).
-        // Datasets that share a `_groupLegend` value collapse to a
-        // single legend entry; clicking it toggles all members.
-        _groupLegend: s.groupLegend ?? null,
-      })),
+      // Straight line segments between samples — no curve fitting.
+      // Stepped series keep tension 0 too. Smoothing implies
+      // measurements that weren't taken; for instrumentation data,
+      // straight-line is the truthful representation. makeDsObj stamps
+      // `_dsKey` (primary|<label>) so later reconciles reuse these
+      // objects — and their accumulated history — by identity, and
+      // `_groupLegend` for the legend group-collapse logic (issue #486).
+      datasets: props.series.map((s, i) => {
+        const o = makeDsObj('primary|' + s.label, s, dataset[i], true);
+        o.hidden = legendVis.resolveHidden(s); // persisted toggle survives a new play_id
+        return o;
+      }),
     },
     /**
      * Inline plugin: vertical "selected event" cursor.
@@ -317,12 +684,19 @@ function createChartInstance(Chart: any): any {
         ctx.save();
         for (const m of list) {
           if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) continue;
+          if (!markerTagShown(m.tag)) continue; // this family's chip is toggled off
           if (m.x < sx.min || m.x > sx.max) continue;
           if (m.y < sy.min || m.y > sy.max) continue;
+          // Highlight/fade in lockstep with the line series. focused = this
+          // dot's session is the focus (or nothing is focused); dimmed = a
+          // line / another session is focused, so fade this dot to ~0.2
+          // (matching the lines' `#rrggbb33` dim) and skip the pop.
+          const focused = markerFocusTag === undefined || markerFocusTag === m.tag;
           const px = sx.getPixelForValue(m.x);
           const py = sy.getPixelForValue(m.y);
+          ctx.globalAlpha = focused ? 1 : 0.2;
           ctx.beginPath();
-          ctx.arc(px, py, 3, 0, Math.PI * 2);
+          ctx.arc(px, py, focused && markerFocusTag !== undefined ? 4 : 3, 0, Math.PI * 2);
           ctx.fillStyle = m.color ?? '#1f2937';
           ctx.fill();
           // Hairline border so the dot stands out on a same-colored line.
@@ -330,6 +704,7 @@ function createChartInstance(Chart: any): any {
           ctx.lineWidth = 1;
           ctx.stroke();
         }
+        ctx.globalAlpha = 1;
         ctx.restore();
       },
     }, {
@@ -363,12 +738,86 @@ function createChartInstance(Chart: any): any {
         ctx.fill();
         ctx.restore();
       },
+    }, {
+      /*
+       * Inline plugin: player-lifecycle vertical lines.
+       * Draws one coloured vertical line per visible lifecycle marker
+       * (restart = amber, play_start = green, play_end = slate) so the
+       * operator can correlate restarts / play boundaries across every
+       * chart. Reason / play_id / status surface in the hover tooltip
+       * (installLifecycleHoverTooltip). Drawn below navCursorLine so the
+       * user-selected cursor still reads on top.
+       */
+      id: 'lifecycleLines',
+      afterDatasetsDraw(c: any) {
+        const list = visibleLifecycleMarkers();
+        if (list.length === 0) return;
+        const sx = c.scales?.x;
+        const sy = c.scales?.y;
+        if (!sx || !sy) return;
+        const ctx = c.ctx;
+        ctx.save();
+        for (const m of list) {
+          if (!Number.isFinite(m.ms) || m.ms < sx.min || m.ms > sx.max) continue;
+          const x = sx.getPixelForValue(m.ms);
+          ctx.beginPath();
+          ctx.moveTo(x, sy.top);
+          ctx.lineTo(x, sy.bottom);
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = m.color;
+          ctx.setLineDash(m.dash);
+          ctx.stroke();
+          // Solid cap at the top so the line is findable on a dense chart
+          // and its colour reads even where it overlaps a same-coloured
+          // series.
+          ctx.setLineDash([]);
+          ctx.fillStyle = m.color;
+          ctx.fillRect(x - 2, sy.top, 4, 4);
+        }
+        ctx.restore();
+      },
+    }, {
+      /** Focus-window event bars (severity-filtered), drawn thin + translucent
+       *  so they overlay without swamping the series or the lifecycle lines. */
+      id: 'eventLines',
+      afterDatasetsDraw(c: any) {
+        const list = props.eventMarkers;
+        if (!list || list.length === 0) return;
+        const sx = c.scales?.x;
+        const sy = c.scales?.y;
+        if (!sx || !sy) return;
+        const ctx = c.ctx;
+        ctx.save();
+        for (const m of list) {
+          if (!Number.isFinite(m.ms) || m.ms < sx.min || m.ms > sx.max) continue;
+          const x = sx.getPixelForValue(m.ms);
+          // Translucent dashed full-height line.
+          ctx.globalAlpha = 0.8;
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.moveTo(x, sy.top);
+          ctx.lineTo(x, sy.bottom);
+          ctx.strokeStyle = m.color;
+          ctx.stroke();
+          // Solid findable cap at the top — also the natural hover target.
+          ctx.globalAlpha = 1;
+          ctx.setLineDash([]);
+          ctx.fillStyle = m.color;
+          ctx.fillRect(x - 1.5, sy.top, 3, 5);
+        }
+        ctx.restore();
+      },
     }],
     options: {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
-      interaction: { mode: 'nearest', intersect: false },
+      // 'singleNearest' = crash-safe 'nearest' (registered in useChartJs): built
+      // on 'x' so it tolerates the band-fill/spanGaps overlay datasets that make
+      // raw 'nearest' throw, and returns only the ONE non-fill line nearest the
+      // cursor — single-line hover + highlight.
+      interaction: { mode: 'singleNearest', intersect: false },
       layout: {
         padding: {
           // Reserve room on the right edge for the y2 axis. When no y2
@@ -417,7 +866,24 @@ function createChartInstance(Chart: any): any {
               // #486). Rendered as a filled circle (no line) so it
               // reads as "dot overlay" not "line series". onClick
               // below toggles `props.markersVisible` via emit.
-              if (props.markersLabel) {
+              // Compare mode: one chip per session that contributed dots
+              // (`Per segment (Sx)`, in the session's marker hue). Falls back
+              // to the single markersLabel chip in single-session mode.
+              if (props.markerGroups && props.markerGroups.length) {
+                for (const g of props.markerGroups) {
+                  out.push({
+                    text: g.label,
+                    fillStyle: g.color,
+                    strokeStyle: g.color,
+                    lineWidth: 0,
+                    pointStyle: 'circle',
+                    hidden: !visibleMarkerTags.has(g.tag), // per-chip, independent toggles
+                    datasetIndex: -1,
+                    _isMarkerToggle: true,
+                    _markerTag: g.tag,
+                  });
+                }
+              } else if (props.markersLabel) {
                 out.push({
                   text: props.markersLabel,
                   fillStyle: '#475569',
@@ -441,6 +907,19 @@ function createChartInstance(Chart: any): any {
             // visibility on the parent's v-model state and force a
             // repaint. Issue #486.
             if (item?._isMarkerToggle) {
+              // Grouped chips (e.g. Video segment fetch / Delivery rate) each
+              // own a tag and toggle independently. The master `markersVisible`
+              // still gates the overlay draw + tooltip, so keep it = "any tag
+              // on". The ungrouped single-chip path keeps the plain flip.
+              if (props.markerGroups && props.markerGroups.length) {
+                const tag = item._markerTag ?? '';
+                if (visibleMarkerTags.has(tag)) visibleMarkerTags.delete(tag);
+                else visibleMarkerTags.add(tag);
+                const anyOn = visibleMarkerTags.size > 0;
+                if (anyOn !== props.markersVisible) emit('update:markersVisible', anyOn);
+                ci.update();
+                return;
+              }
               emit('update:markersVisible', !props.markersVisible);
               ci.update();
               return;
@@ -448,7 +927,11 @@ function createChartInstance(Chart: any): any {
             const ds = ci.data.datasets[item.datasetIndex];
             const grp = ds?._groupLegend;
             if (!grp) {
-              ci.setDatasetVisibility(item.datasetIndex, !ci.isDatasetVisible(item.datasetIndex));
+              const nowVisible = !ci.isDatasetVisible(item.datasetIndex);
+              ci.setDatasetVisibility(item.datasetIndex, nowVisible);
+              if (ds) ds._ownHidden = !nowVisible; // keep applySessionVisibility in sync
+              // Persist so a new play_id doesn't reset this toggle.
+              legendVis.setHidden({ label: ds?.label ?? '', groupLegend: null }, !nowVisible);
               ci.update();
               return;
             }
@@ -457,8 +940,13 @@ function createChartInstance(Chart: any): any {
                 d._groupLegend === grp && ci.isDatasetVisible(idx),
             );
             ci.data.datasets.forEach((d: any, idx: number) => {
-              if (d._groupLegend === grp) ci.setDatasetVisibility(idx, !anyVisible);
+              if (d._groupLegend === grp) {
+                ci.setDatasetVisibility(idx, !anyVisible);
+                d._ownHidden = anyVisible; // keep applySessionVisibility in sync
+              }
             });
+            // Persist the group's new hidden state (hidden when it was visible).
+            legendVis.setHidden({ groupLegend: grp, label: '' }, anyVisible);
             ci.update();
           },
           // Hover-highlight: when the cursor is over a legend label,
@@ -471,7 +959,40 @@ function createChartInstance(Chart: any): any {
           onHover(_evt: any, item: any, leg: any) {
             const c = leg?.chart;
             if (!c || typeof item?.datasetIndex !== 'number') return;
+            // The synthetic markers chip carries datasetIndex -1 and
+            // _isMarkerToggle, mapping to no real dataset. Treat hovering it
+            // as "focus the dots": fade every LINE, and focus this chip's
+            // session's dots (its `_markerTag`; absent = single-session chip,
+            // so all dots stay full). Issue #486/#579.
+            if (item.datasetIndex < 0 || item._isMarkerToggle) {
+              markerFocusTag = item._markerTag ?? undefined;
+              for (const ds of c.data.datasets as any[]) {
+                if (ds._origBorderWidth == null) ds._origBorderWidth = ds.borderWidth ?? 2;
+                if (ds._origBorderColor == null) ds._origBorderColor = ds.borderColor;
+                ds.borderWidth = Math.max(1, (ds._origBorderWidth ?? 2) - 1);
+                const oc = ds._origBorderColor;
+                ds.borderColor = typeof oc === 'string' && oc.startsWith('#') && oc.length === 7 ? oc + '33' : oc;
+              }
+              try { c.update('none'); } catch { /* ignore */ }
+              if (c.canvas) c.canvas.style.cursor = 'pointer';
+              return;
+            }
             const hovered = item.datasetIndex;
+            // Compare mode (#579): also give a medium highlight to the
+            // SAME metric on other sessions — hovering `Fetching Variant
+            // (S2)` lifts `Fetching Variant (S1)` too, just less. Metric
+            // identity is the label with its trailing ` (Sx)` stripped.
+            const stripTag = (l: string) => l.replace(/\s*\(S[^)]*\)\s*$/, '');
+            const hoveredDs0 = c.data.datasets[hovered];
+            const sameMetric = new Set<number>();
+            if (hoveredDs0?._sessionTag) {
+              const mk = stripTag(hoveredDs0.label ?? '');
+              c.data.datasets.forEach((ds: any, i: number) => {
+                if (i !== hovered && ds._sessionTag && stripTag(ds.label ?? '') === mk) {
+                  sameMetric.add(i);
+                }
+              });
+            }
             // If the hovered legend entry represents a group (issue
             // #486 — `Variant avg bandwidth` / `Variant peak bandwidth`
             // each stand in for N member series), build a Set of every
@@ -491,7 +1012,14 @@ function createChartInstance(Chart: any): any {
               if (ds._origBorderWidth == null) ds._origBorderWidth = ds.borderWidth ?? 2;
               if (ds._origBorderColor == null) ds._origBorderColor = ds.borderColor;
               if (highlighted.has(i)) {
+                // Strongest: the hovered line (or its group).
                 ds.borderWidth = (ds._origBorderWidth ?? 2) + 2;
+                ds.borderColor = ds._origBorderColor;
+              } else if (sameMetric.has(i)) {
+                // Medium: same metric on another session — keep full
+                // colour, a touch bolder than baseline so the eye pairs
+                // it with the hovered line (#579).
+                ds.borderWidth = (ds._origBorderWidth ?? 2) + 1;
                 ds.borderColor = ds._origBorderColor;
               } else {
                 ds.borderWidth = Math.max(1, (ds._origBorderWidth ?? 2) - 1);
@@ -503,6 +1031,12 @@ function createChartInstance(Chart: any): any {
                   typeof oc === 'string' && oc.startsWith('#') && oc.length === 7 ? oc + '33' : oc;
               }
             });
+            // A LINE is focused, not the dots — so fade ALL per-segment dots
+            // regardless of session. The dots pop only when their own session
+            // chip (applySessionHover) or the "Per segment (Sx)" marker chip
+            // is hovered; hovering any line isolates that line and fades the
+            // dots like every other non-hovered element. Issue #486.
+            markerFocusTag = null;
             try { c.update('none'); } catch { /* ignore */ }
             // Cursor cue so the user knows the label is interactive.
             if (c.canvas) c.canvas.style.cursor = 'pointer';
@@ -510,6 +1044,9 @@ function createChartInstance(Chart: any): any {
           onLeave(_evt: any, _item: any, leg: any) {
             const c = leg?.chart;
             if (!c) return;
+            // Clear marker focus too (unless a session-legend hover is still
+            // active — that path manages markerFocusTag itself).
+            if (!compareCtx || !compareCtx.view.hovered.value) markerFocusTag = undefined;
             c.data.datasets.forEach((ds: any) => {
               if (ds._origBorderWidth != null) ds.borderWidth = ds._origBorderWidth;
               if (ds._origBorderColor != null) ds.borderColor = ds._origBorderColor;
@@ -519,6 +1056,12 @@ function createChartInstance(Chart: any): any {
           },
         },
         tooltip: {
+          // Single hovered line only, via the crash-safe 'singleNearest' mode
+          // (same one the interaction uses) — reads out just the line under the
+          // cursor, not every visible series at that x, and without the
+          // 'nearest'-on-band-fill crash.
+          mode: 'singleNearest',
+          intersect: false,
           callbacks: {
             title: (items: any[]) => fmtTickHMSms(items[0]?.parsed?.x ?? 0),
             label: (ctx: any) => {
@@ -606,6 +1149,31 @@ function createChartInstance(Chart: any): any {
             ? { display: true, text: props.unit, font: { size: 10 } }
             : undefined,
           afterFit: pinYWidth,
+          // Auto-scale (no explicit yMax) ignores reference series flagged
+          // _excludeFromAutoScale — the variant peak/avg ladder + the avg↔peak
+          // bands — which otherwise pin the axis to the top (4K) rung and squash
+          // the live traces. Recompute max over the OTHER visible left-axis
+          // series within the current x-view. An explicit yMax (the Y-axis
+          // selector / persisted bandwidthYMax) is respected (early return).
+          afterDataLimits: (scale: any) => {
+            if (props.yMax != null) return;
+            const ch = scale.chart;
+            const xs = ch.scales?.x;
+            const xmin = xs?.min ?? -Infinity;
+            const xmax = xs?.max ?? Infinity;
+            let max = -Infinity;
+            (ch.data.datasets as any[]).forEach((ds: any, i: number) => {
+              if (ds._excludeFromAutoScale) return;
+              if ((ds.yAxisID ?? 'y') !== 'y') return;
+              if (!ch.isDatasetVisible(i)) return;
+              for (const pt of (ds.data as Array<{ x: number; y: number | null }>)) {
+                if (!pt || pt.y == null) continue;
+                if (pt.x < xmin || pt.x > xmax) continue;
+                if (pt.y > max) max = pt.y;
+              }
+            });
+            if (max > -Infinity && max > 0) scale.max = max * 1.1;
+          },
         },
         ...(usesY2 ? {
           y2: {
@@ -633,6 +1201,14 @@ function createChartInstance(Chart: any): any {
   installLeftClickLiveToggle();
   installCursorHoverTooltip();
   installMarkerHoverTooltip();
+  installLifecycleHoverTooltip();
+  // If compare overlays were already present at mount, compose + drain
+  // them now (the overlays watcher's immediate run may have fired before
+  // the chart existed). Issue #579.
+  if ((props.overlays ?? []).length) {
+    try { rebuildAllDatasets(); } catch { /* ignore */ }
+    void drainOverlays();
+  }
   return chart;
 }
 
@@ -691,6 +1267,7 @@ function installMarkerHoverTooltip() {
     let bestLabel = '';
     for (const m of list) {
       if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) continue;
+      if (!markerTagShown(m.tag)) continue; // hidden family — no tooltip
       if (m.x < sx.min || m.x > sx.max) continue;
       if (m.y < sy.min || m.y > sy.max) continue;
       const px = sx.getPixelForValue(m.x);
@@ -755,6 +1332,72 @@ function installCursorHoverTooltip() {
   });
 }
 
+/* Lifecycle-line hover tooltip.
+ *
+ * Mousemove hit-tests the horizontal distance to each visible lifecycle
+ * line (restart / play_start / play_end); within ~6 px of one, pop a
+ * multi-line tooltip with that marker's `detail` (reason / play_id /
+ * status). Mirrors the cursor tooltip, but hit-tests a SET of lines and
+ * picks the nearest. */
+const lcTooltipVisible = ref(false);
+const lcTooltipX = ref(0);
+const lcTooltipY = ref(0);
+const lcTooltipText = ref('');
+
+function installLifecycleHoverTooltip() {
+  const c = canvas.value;
+  if (!c) return;
+  c.addEventListener('mousemove', (e) => {
+    const list = visibleLifecycleMarkers();
+    if ((list.length === 0 && props.eventMarkers.length === 0) || !chart) {
+      if (lcTooltipVisible.value) lcTooltipVisible.value = false;
+      return;
+    }
+    const sx = chart.scales?.x;
+    const area = chart.chartArea;
+    if (!sx || !area) return;
+    const rect = c.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    if (my < area.top || my > area.bottom) {
+      if (lcTooltipVisible.value) lcTooltipVisible.value = false;
+      return;
+    }
+    let bestDist = 6; // px tolerance
+    let bestText = '';
+    for (const m of list) {
+      if (!Number.isFinite(m.ms) || m.ms < sx.min || m.ms > sx.max) continue;
+      const px = sx.getPixelForValue(m.ms);
+      const d = Math.abs(mx - px);
+      if (d < bestDist) {
+        bestDist = d;
+        bestText = m.detail;
+      }
+    }
+    // Event bars share the same tooltip + proximity search.
+    for (const m of props.eventMarkers) {
+      if (!Number.isFinite(m.ms) || m.ms < sx.min || m.ms > sx.max) continue;
+      const px = sx.getPixelForValue(m.ms);
+      const d = Math.abs(mx - px);
+      if (d < bestDist) {
+        bestDist = d;
+        bestText = m.detail;
+      }
+    }
+    if (!bestText) {
+      if (lcTooltipVisible.value) lcTooltipVisible.value = false;
+      return;
+    }
+    lcTooltipText.value = bestText;
+    lcTooltipX.value = Math.min(mx + 10, c.clientWidth - 220);
+    lcTooltipY.value = Math.max(4, my - 56);
+    lcTooltipVisible.value = true;
+  });
+  c.addEventListener('mouseleave', () => {
+    lcTooltipVisible.value = false;
+  });
+}
+
 /**
  * Left-click-on-plot-area = toggle live (issue #486).
  *
@@ -793,7 +1436,7 @@ function installLeftClickLiveToggle() {
     if (x < area.left || x > area.right || y < area.top || y > area.bottom) return;
     coord.toggleLive();
   });
-  window.addEventListener('blur', () => { downAt = null; });
+  onGlobal(window, 'blur', () => { downAt = null; });
 }
 
 function installContextMenuSuppress() {
@@ -817,7 +1460,7 @@ function installRightDragPan() {
     // user is dragging (setRange handles both range + paused mirror).
     coord.setRange({ min: sx.min, max: sx.max });
   });
-  window.addEventListener('mousemove', (e) => {
+  onGlobal(window, 'mousemove', (e: MouseEvent) => {
     if (!dragState || !chart) return;
     const area = chart.chartArea;
     if (!area) return;
@@ -827,10 +1470,10 @@ function installRightDragPan() {
     const dv = (dx / widthPx) * span;
     coord.setRange({ min: dragState.startMin - dv, max: dragState.startMax - dv });
   });
-  window.addEventListener('mouseup', (e) => {
+  onGlobal(window, 'mouseup', (e: MouseEvent) => {
     if (e.button === 2) dragState = null;
   });
-  window.addEventListener('blur', () => { dragState = null; });
+  onGlobal(window, 'blur', () => { dragState = null; });
 }
 
 /**
@@ -851,12 +1494,13 @@ function installLiveWheelAnchor() {
   c.addEventListener(
     'wheel',
     (e: WheelEvent) => {
-      // Horizontal scroll (trackpad two-finger swipe left/right or
-      // mouse horizontal scroll) → pan the chart by deltaX scaled
-      // against the chart's plot-area width. No Alt required; plain
-      // vertical scroll still falls through to page scroll. See
-      // gh#461.
-      if (!e.altKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      // Horizontal pan: trackpad two-finger swipe (deltaX dominant) OR
+      // Shift+wheel (the mouse way to scroll horizontally). Shift+wheel
+      // reports its magnitude on deltaX in some browsers and deltaY in
+      // others, so take whichever axis is larger. No Alt required; plain
+      // vertical scroll still falls through to page scroll. See gh#461.
+      const horizontalPan = !e.altKey && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY));
+      if (horizontalPan) {
         e.preventDefault();
         e.stopPropagation();
         const chartArea = chart?.chartArea;
@@ -864,7 +1508,8 @@ function installLiveWheelAnchor() {
         const widthPx = chartArea.right - chartArea.left;
         const current = coord.effectiveRange.value;
         const span = current.max - current.min;
-        const dms = (e.deltaX / widthPx) * span;
+        const delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+        const dms = (delta / widthPx) * span;
         coord.setRange({ min: current.min + dms, max: current.max + dms });
         return;
       }
@@ -920,7 +1565,10 @@ function installLiveWheelAnchor() {
  *  Duplicate x values overwrite — last write wins for that timestamp.
  *  O(log n) lookup + O(n) shift; chart pushSample is dominated by
  *  Chart.js update() cost anyway. */
-function insertByX(data: { x: number; y: number }[], point: { x: number; y: number }) {
+function insertByX(
+  data: { x: number; y: number | null }[],
+  point: { x: number; y: number | null },
+) {
   if (!data.length || point.x >= data[data.length - 1].x) {
     if (data.length && data[data.length - 1].x === point.x) {
       data[data.length - 1] = point;
@@ -956,15 +1604,30 @@ function pushSample(p: PlayerRecord, x: number) {
     insertByX(data, { x, y: Number(y) });
     mutated = true;
   }
-  // Retention is the time-series cache's job (SOFT_CAP_SAMPLES) —
-  // the chart used to trim at `x - windowMs * 2` to bound memory,
-  // but `windowMs` is the *visible* window, not retention. When the
-  // operator zooms in (focusSpan shrinks → setWindowMs shrinks) the
-  // trim was killing older points the PLAYERSTATE lane still had,
-  // producing a chart-vs-lane time-axis mismatch. Chart.js with
-  // `animation: false` handles tens of thousands of points fine.
+  // Bound per-series history (issue #582). The chart used to keep every
+  // point for the life of the tab ("retention is the cache's job"), but
+  // the cache evicts and the chart did not — so the dataset arrays grew
+  // unbounded, ballooning the renderer to multi-GB and pegging CPU as
+  // each redraw re-rasterized hundreds of thousands of points. Cap each
+  // series to MAX_POINTS_PER_SERIES and drop the oldest (front of the
+  // ascending-by-x array). The cap is a memory bound, independent of the
+  // visible window, so it does NOT reintroduce the zoom-in trimming bug
+  // that the old `x - windowMs*2` trim had (that one shrank with zoom).
   if (mutated) {
-    if (coord.state.range === null) {
+    for (const d of dataset) {
+      if (d.length > MAX_POINTS_PER_SERIES) {
+        d.splice(0, d.length - MAX_POINTS_PER_SERIES);
+      }
+    }
+    // Live-follow: advance the viewport ONLY for a genuine live-tail
+    // sample (one at/after the running max). `coord.noteSample(x)` above
+    // already raised `lastSampleMs` to max(prev, x), so a new tail row
+    // has `x === lastSampleMs` and an older backfill row has
+    // `x < lastSampleMs`. Guarding on that stops the recent-first
+    // backfill (older, off-screen rows) from dragging the window
+    // backward — the fix for both the live-edge blank AND the
+    // brush-crawl-across-the-whole-backfill regressions (#590).
+    if (coord.state.range === null && x >= coord.state.lastSampleMs) {
       applyViewport({ min: x - DEFAULT_FOCUS_MS, max: x });
     }
     safeChartUpdate();
@@ -1027,6 +1690,17 @@ function safeChartUpdate() {
     pendingUpdateTimer = null;
     lastUpdateAt = Date.now();
     if (!chart) return;
+    // Full update (default mode), NOT 'none'. In compare mode the overlaid
+    // sessions can carry different field sets (one device has per-segment
+    // AVMetrics / network_bitrate, another never does), so a sibling's
+    // series can be EMPTY while its peers are populated. Chart.js's 'none'
+    // fast-path reuses its incremental point-element cache and cannot
+    // reconcile a dataset whose point count flips 0↔N — it desyncs and
+    // crashes `_resyncElements` (`.skip` on an undefined element), blanking
+    // the chart until a full update runs. A full update rebuilds the element
+    // array every paint, which is exactly why clicking a session tab (which
+    // calls full chart.update() via the visibility path) un-blanks it. The
+    // throttle (pickThrottleMs) keeps the cost bounded. Issues #486 / #579.
     try { chart.update('none'); } catch (err) { console.warn('chart update skipped:', err); }
   }, delay);
 }
@@ -1045,6 +1719,35 @@ function safeChartUpdate() {
  */
 const pendingLive: { p: PlayerRecord; x: number }[] = [];
 let drainToken = 0;
+let backfillToken = 0;
+
+/**
+ * Background fill of the off-screen history that sits OLDER than the
+ * live window, walked newest→oldest so panning back populates the rows
+ * nearest the window first. These all have `x < lastSampleMs`, so
+ * pushSample's guard leaves the viewport parked at the live edge — no
+ * crawl, no blank. Snapshot is bounded to MAX_POINTS_PER_SERIES rows so
+ * we don't burn the main thread inserting points the per-series cap
+ * would immediately trim off the front anyway.
+ */
+async function backfillOlder(myToken: number, ceilMs: number) {
+  if (!chart) return;
+  const older = props.eventsStream.inRange(0, ceilMs - 1);
+  if (!older.length) return;
+  const from = Math.max(0, older.length - MAX_POINTS_PER_SERIES);
+  const CHUNK = 500;
+  for (let end = older.length; end > from; end -= CHUNK) {
+    if (myToken !== backfillToken) return;
+    const start = Math.max(from, end - CHUNK);
+    for (let i = end - 1; i >= start; i--) {
+      const row = older[i];
+      const x = tsOfRow(row);
+      if (!Number.isFinite(x)) continue;
+      pushSample(chRowToPlayerRecord(row), x);
+    }
+    await new Promise<void>((r) => setTimeout(r, 0));
+  }
+}
 
 async function drainNewRows() {
   if (!chart) {
@@ -1052,6 +1755,40 @@ async function drainNewRows() {
     catch (err) { console.warn('chart ensure failed:', err); return; }
   }
   if (!chart) return;
+
+  // INITIAL live-mode backfill — fill the visible window from the newest
+  // rows FIRST (synchronously, so it lands in one repaint with the
+  // viewport already at the live edge), then backfill the older
+  // off-screen rows behind it. Draining strictly oldest→newest instead
+  // (the generic path below) either left the live edge blank until the
+  // drain reached it, or crawled the brush across the whole backfill —
+  // both #590 regressions. Pinned/archive mode (range !== null) keeps
+  // the generic full-window fill, which never moves the viewport.
+  if (lastIngestedMs === -Infinity && coord.state.range === null) {
+    const all = props.eventsStream.inRange(0, Number.MAX_SAFE_INTEGER);
+    if (!all.length) return;
+    const cacheMax = tsOfRow(all[all.length - 1]);
+    if (Number.isFinite(cacheMax)) {
+      const span = coord.state.liveSpan || DEFAULT_FOCUS_MS;
+      const liveStart = cacheMax - span;
+      // Find the contiguous recent tail (ascending-by-x array).
+      let firstRecent = all.length;
+      for (let i = all.length - 1; i >= 0; i--) {
+        const x = tsOfRow(all[i]);
+        if (Number.isFinite(x) && x >= liveStart) firstRecent = i; else break;
+      }
+      for (let i = firstRecent; i < all.length; i++) {
+        const row = all[i];
+        const x = tsOfRow(row);
+        if (!Number.isFinite(x)) continue;
+        pushSample(chRowToPlayerRecord(row), x);
+      }
+      lastIngestedMs = cacheMax;
+      void backfillOlder(++backfillToken, liveStart);
+      return;
+    }
+  }
+
   const raw = props.eventsStream.inRange(
     lastIngestedMs === -Infinity ? 0 : lastIngestedMs + 1,
     Number.MAX_SAFE_INTEGER,
@@ -1086,17 +1823,127 @@ async function drainNewRows() {
       }
       if (x > highWater) highWater = x;
     }
+    // Advance the watermark PER CHUNK so a mid-drain interrupt (a 1 Hz
+    // cache flush bumps drainToken and aborts this loop) doesn't restart
+    // from the beginning. That restart-from-scratch was re-processing the
+    // whole backfill on every flush — ~12 s to catch up on a long
+    // session, during which the live edge stayed blank. Per-chunk
+    // progress makes the drain converge in a couple seconds.
+    lastIngestedMs = highWater;
     if (end < raw.length) {
       await new Promise<void>((r) => setTimeout(r, 0));
     }
   }
-  lastIngestedMs = highWater;
 }
 
 watch(
   () => props.eventsStream.version.value,
   () => { void drainNewRows(); },
   { immediate: true },
+);
+
+/* ─── Compare-overlay drain (issue #579) ───────────────────────────
+ *
+ * Each grouped sibling has its OWN events stream + tagged series. Drain
+ * them independently of the primary path: per overlay we keep an ingest
+ * watermark and append only NEW rows. Missing accessor values become an
+ * explicit `{x, y:null}` point so the `spanGaps:false` overlay datasets
+ * render a gap (not an interpolated bridge) where a sibling lacks a wire
+ * metric. Overlays never drive the viewport — the active session owns
+ * the brush; siblings just paint onto the shared x/y scales.
+ */
+function drainOverlays() {
+  if (!chart) return;
+  const sources = props.overlays ?? [];
+  let mutated = false;
+  for (const src of sources) {
+    const rt = overlayRuntime.get(src.key);
+    if (!rt) continue;
+    // A sibling re-subscribe (play rotation / refetch-on-pan) bumps its
+    // stream epoch — wipe and re-drain from scratch so we don't splice a
+    // new window's rows onto a stale watermark.
+    const ep = src.eventsStream.epoch.value;
+    if (ep !== rt.epoch) {
+      rt.epoch = ep;
+      rt.watermark = -Infinity;
+      for (const arr of rt.datasets) arr.length = 0;
+    }
+    const fromMs = rt.watermark === -Infinity ? 0 : rt.watermark + 1;
+    const rows = src.eventsStream.inRange(fromMs, Number.MAX_SAFE_INTEGER);
+    if (!rows.length) continue;
+    let hw = rt.watermark;
+    for (const row of rows) {
+      const x = tsOfRow(row);
+      if (!Number.isFinite(x)) continue;
+      if (rt.watermark !== -Infinity && x <= rt.watermark) continue;
+      const p = chRowToPlayerRecord(row);
+      for (let i = 0; i < src.series.length; i++) {
+        const arr = rt.datasets[i];
+        if (!arr) continue;
+        let y: number | null | undefined;
+        try { y = src.series[i].accessor(p); } catch { y = null; }
+        const yVal = (y == null || !Number.isFinite(y)) ? null : Number(y);
+        // Don't seed a dataset with LEADING nulls. A sibling on a device that
+        // never provides this field (e.g. Android/ExoPlayer has no per-segment
+        // AVMetrics throughput) must contribute an EMPTY dataset — an all-null
+        // one desyncs Chart.js's point-element cache and crashes the
+        // nearest-mode hover (`reading 'skip'` on an undefined element). Once
+        // the series has its first real value, nulls ARE pushed so spanGaps:false
+        // still renders gaps for an intermittently-missing metric. This matches
+        // the primary path, which simply skips null samples (pushSample).
+        if (yVal === null && arr.length === 0) continue;
+        insertByX(arr, { x, y: yVal });
+      }
+      if (x > hw) hw = x;
+      mutated = true;
+    }
+    rt.watermark = hw;
+    // Same hard per-series memory bound the primary path uses (#582).
+    for (const arr of rt.datasets) {
+      if (arr.length > MAX_POINTS_PER_SERIES) arr.splice(0, arr.length - MAX_POINTS_PER_SERIES);
+    }
+  }
+  if (mutated) safeChartUpdate();
+}
+
+// Structure changes (compare toggled, a sibling joined/left, or its
+// series set changed) → recompose datasets, then drain. Reading
+// props.overlays in the getter tracks the prop so a new membership array
+// re-fires this. immediate so an at-mount overlay set composes once the
+// chart exists.
+watch(
+  () => (props.overlays ?? [])
+    .map((o) => o.key + ':' + o.series.map((s) => s.label).join(',')).join('|'),
+  () => {
+    try { rebuildAllDatasets(); } catch (err) { console.warn('overlay rebuild skipped:', err); }
+    // Establish Chart.js's point-element tracking on the overlay data arrays
+    // while they're still EMPTY, before drainOverlays bulk-fills them. Chart.js
+    // patches a dataset's data array (push/splice) on its first update() and
+    // from then on adds/removes elements incrementally. If that first update
+    // sees an already-full array, it must BULK-insert every element in one
+    // _resyncElements pass — which desyncs (data populated, elements 0/partial)
+    // and crashes `.skip`-on-undefined, blanking every sibling line. Updating
+    // once while empty makes the subsequent backfill build elements one push at
+    // a time — exactly how the primary (self) path stays healthy. Issue #579.
+    try { chart?.update('none'); } catch (err) { console.warn('overlay prime skipped:', err); }
+    void drainOverlays();
+  },
+  { immediate: true },
+);
+
+// Data changes — any sibling stream version/epoch bump drains new rows.
+// Reading each stream's version/epoch inside the getter establishes the
+// reactive deps; reading props.overlays re-tracks them on a membership
+// swap. Kept separate from the structure watcher so a per-second tick
+// doesn't recompose the dataset list, only appends points.
+watch(
+  () => {
+    const ovs = props.overlays ?? [];
+    let v = 0;
+    for (const o of ovs) v += o.eventsStream.version.value + o.eventsStream.epoch.value;
+    return ovs.length + ':' + v;
+  },
+  () => { void drainOverlays(); },
 );
 
 // Resume drain — flush any samples that arrived while pinned in
@@ -1118,8 +1965,27 @@ watch(
   () => {
     pendingLive.length = 0;
     lastIngestedMs = -Infinity;
+    ++backfillToken; // abort any in-flight backfill for the old player
     for (const arr of dataset) arr.length = 0;
+    // Drop compare-overlay state too (#579) so a picker swap doesn't
+    // leave a previous group's sibling lines on the new session.
+    overlayRuntime.clear();
     safeChartUpdate();
+  },
+);
+
+// Cache reset (#587) — the events stream re-subscribed to a different
+// window (refetch-on-pan, or returning to live). Our forward-only
+// watermark would miss the freshly-loaded window (it may be OLDER than
+// what we last drained), so reset and re-drain from scratch.
+watch(
+  () => props.eventsStream.epoch.value,
+  () => {
+    pendingLive.length = 0;
+    lastIngestedMs = -Infinity;
+    ++backfillToken; // abort any in-flight backfill from the prior window
+    for (const arr of dataset) arr.length = 0;
+    void drainNewRows();
   },
 );
 
@@ -1138,13 +2004,19 @@ watch(
     } catch (err) {
       console.warn('chart viewport apply skipped:', err);
     }
-    // Viewport / pause changes are axis-only updates — render
-    // directly so brush drag feels as smooth as the vis-timeline
-    // events panel. safeChartUpdate's adaptive throttle exists for
-    // data-arrival churn (pushSample / drainNewRows insert many
-    // points per second); applying it here would delay pan response
-    // up to several seconds when a dataset has thousands of points.
-    try { chart.update('none'); } catch (err) { console.warn('chart pan render skipped:', err); }
+    // Interactive viewport changes (brush drag, pan, zoom — i.e. a
+    // pinned range) render directly so they feel as smooth as the
+    // vis-timeline events panel. But in LIVE mode (range === null) this
+    // watcher fires on EVERY sample, because effectiveRange tracks
+    // lastSampleMs — and a direct chart.update() per sample across N
+    // charts is the dominant CPU sink on a long-lived tab (#582). For
+    // the live-edge case, route through the adaptive throttle instead;
+    // the right edge still advances at the metrics emit cadence.
+    if (coord.state.range === null) {
+      safeChartUpdate();
+    } else {
+      try { chart.update('none'); } catch (err) { console.warn('chart pan render skipped:', err); }
+    }
   },
 );
 
@@ -1152,6 +2024,14 @@ watch(
 // state. Cheap: chart.update('none') skips animations.
 watch(
   () => props.markers,
+  () => { try { chart?.update('none'); } catch { /* ignore */ } },
+  { deep: false },
+);
+
+// Redraw when the event-bar set changes (severity filter, focus window, or the
+// "Event bars" toggle emptying it) so the eventLines plugin repaints.
+watch(
+  () => props.eventMarkers,
   () => { try { chart?.update('none'); } catch { /* ignore */ } },
   { deep: false },
 );
@@ -1231,6 +2111,11 @@ function onLiveToggleClick() {
 }
 
 onBeforeUnmount(() => {
+  // Remove window-level listeners so the destroyed chart's closures can
+  // be GC'd (issue #582 — otherwise switching sessions leaks charts).
+  for (const fn of teardownFns) { try { fn(); } catch { /* ignore */ } }
+  teardownFns.length = 0;
+  if (pendingUpdateTimer != null) { clearTimeout(pendingUpdateTimer); pendingUpdateTimer = null; }
   try { chart?.destroy(); } catch { /* ignore */ }
   chart = null;
 });
@@ -1260,8 +2145,8 @@ onBeforeUnmount(() => {
         >
           {{ liveChecked ? '●' : '○' }} Live
         </button>
-        <span class="hint" title="Hold Alt (Option on Mac) while scrolling or dragging to zoom; right-click-drag to pan">
-          Alt/⌥+scroll/drag · right-drag pan
+        <span class="hint" title="Alt/Option + scroll or drag = zoom; Shift + scroll (or two-finger horizontal) = pan; right-click-drag = pan">
+          Alt/⌥+scroll/drag zoom · Shift+scroll / right-drag pan
         </span>
       </div>
     </div>
@@ -1284,6 +2169,13 @@ onBeforeUnmount(() => {
         class="marker-tooltip"
         :style="{ left: markerTooltipX + 'px', top: markerTooltipY + 'px' }"
       >{{ markerTooltipText }}</div>
+      <!-- Lifecycle-line hover tooltip — restart reason / play_id /
+           terminal status, multi-line. -->
+      <div
+        v-if="lcTooltipVisible"
+        class="marker-tooltip"
+        :style="{ left: lcTooltipX + 'px', top: lcTooltipY + 'px' }"
+      >{{ lcTooltipText }}</div>
     </div>
   </div>
 </template>

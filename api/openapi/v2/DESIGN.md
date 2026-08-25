@@ -272,6 +272,66 @@ This is request-routing on the streaming path, not an API v2 endpoint.
 The control plane (everything under `/api/v2/...`) is on the base
 origin only.
 
+### 5b. Config-on-connect — URL-arg control vocabulary (#712)
+
+The bootstrap manifest request can carry the session's whole proxy config
+as `proxy.*` URL args. The base-port handler parses them, **materializes the
+session config atomically** (live before the first byte), then `302`s to the
+session-bound port URL **with the `proxy.*` args stripped**. AVPlayer follows
+the redirect and resolves every child request against the clean URL, so config
+is live from segment 0 with no separate PATCH round-trip. The control plane
+stays for *mid-play* mutation.
+
+**Encoding — bracket/dotted notation** (the de-facto `qs`/Rails/PHP convention,
+also what `go-playground/form` / `gorilla/schema` implement). Arg paths mirror
+the `PlayerPatch` merge-patch shape exactly, so the vocabulary **is** the API
+model — there is no second config grammar to drift:
+
+```
+proxy.shape.rate_mbps=2.5
+proxy.shape.delay_ms=120
+proxy.shape.pattern.template=pyramid
+proxy.fault_rules[0].type=corrupted
+proxy.fault_rules[0].filter.request_kind[0]=segment
+proxy.content.variant_order=ascending
+proxy.labels.test=steady_cap
+proxy.cfg=<base64url(JSON of a full PlayerPatch)>   # escape hatch / base tier
+```
+
+- **Tier precedence:** `proxy.cfg` is the base; individual `proxy.<path>` args
+  override it per-field. Bracket notation lives in the **key**, so values stay
+  clean — no `,`/`=` dodging.
+- **Value typing** is best-effort from the string: a finite number → JSON
+  number, `true`/`false` → bool, everything else → string. This matches every
+  field in the model (`rate_mbps`→number, `strip_resolution`→bool,
+  `type`→string, `resolutions[0]`=`1080p`→string).
+- **`labels.<k>`** takes everything after `labels.` as one key verbatim (v2
+  label keys may contain `.`/`/`/`-`); use `proxy.cfg` for anything exotic.
+- **Segment length is NOT an arg** — it is the manifest filename
+  (`master_6s.m3u8` / `master_2s.m3u8` / `master_ll.m3u8`). Requesting the URL
+  you want *is* selecting the segment cadence.
+
+**Same translator as PATCH.** Materialization runs the identical v2→v1
+translator the PATCH API uses (`applyPatchToSession`), so config-on-connect
+supports **exactly** what PATCH supports today — `shape` (rate/delay/loss/
+pattern/transport_fault), `fault_rules` (types `none`/`404`/`500`/`503`/
+`timeout`/`corrupted`, `filter.request_kind`, `filter.url_match`), `content`,
+`transfer_timeouts`, `labels`. Fields the v1 surface can't yet express
+(`fault_rules[].filter.variant` / `.codec`, the extended request-* fault types)
+are **rejected with 400** on the bootstrap request — the same boundary the
+PATCH endpoint enforces, not a config-on-connect-specific gap.
+
+**Idempotency / reattach.** Materialization happens **only** in the
+new-session branch. A loop or auto-recovery restart re-hitting the base port
+with the same `player_id` takes the existing-session branch → a plain 302 to
+the live port, **no re-apply**. `proxy.*` are stripped from both redirects so
+they never reach a session port or the child-request space.
+
+**Exposure.** Available on all deploys, no auth gate. Args are validated
+(parse/type/range via the translator) and fail-closed — a malformed config is a
+400 that consumes no session slot. Accepted risk: on a reachable deploy any URL
+can configure faults/shaping; acceptable for this test rig.
+
 ### 6. Consistent SSE envelope
 
 Every SSE frame is `{ type, data }`:

@@ -2,7 +2,7 @@
 # Vue 3 dashboard build stage. Outputs /out/v3 with the static bundle
 # that gets copied into the final image's /content/dashboard/v3/.
 # Cached by docker if package.json + lock haven't changed.
-FROM node:20-alpine AS dashboard-v3-builder
+FROM node:26-alpine AS dashboard-v3-builder
 WORKDIR /build
 COPY content/dashboard-v3/package.json content/dashboard-v3/package-lock.json* ./
 RUN npm install --no-audit --no-fund
@@ -15,26 +15,38 @@ RUN npm run gen-types && npm run build
 FROM golang:1.26-alpine AS go-builder
 RUN apk add git
 WORKDIR /build
+# #679: stamp the build into go-live so its X-Served-By header carries it and
+# the forwarder can record which build served each play. Same VERSION arg
+# go-proxy already uses (the release string from the VERSION file).
+ARG VERSION=unknown
 COPY go-live /build/go-live
 RUN cd /build/go-live && \
-    go build -o /out/go-live cmd/server/main.go
+    go build -ldflags "-X main.Version=${VERSION}" -o /out/go-live cmd/server/main.go
 
 COPY go-upload /build/go-upload
 RUN cd /build/go-upload && \
     go mod download && \
     go build -o /out/go-upload ./cmd/server
 
-ARG VERSION=unknown
 COPY go-proxy /build/go-proxy
 RUN cd /build/go-proxy && \
     go build -ldflags "-X main.versionString=${VERSION}" -o /out/go-proxy ./cmd/server
 
-FROM alpine:3.23
+FROM alpine:3.24
+
+# KERNEL_SHAPING=1 (default) installs the NET_ADMIN traffic-shaping binaries:
+# iproute2 (tc/ip) + nftables (nft). Build with --build-arg KERNEL_SHAPING=0 for
+# a degraded / no-NET_ADMIN image (Cloud Run / Fargate / PaaS) — those binaries
+# are omitted entirely and nothing calls them in http-only mode
+# (SHAPING_FORCE_DEGRADED short-circuits the boot probe; runtime shaping is gated
+# off via kernelRateOn/kernelNetemOn). See #910.
+ARG KERNEL_SHAPING=1
 
 # Install dependencies first (expensive, rarely changes - gets cached)
 RUN \
   apk update && \
-  apk add iproute2 iperf nftables openssl && \
+  if [ "$KERNEL_SHAPING" = "1" ]; then apk add iproute2 nftables; fi && \
+  apk add iperf openssl && \
   apk add nginx && \
   apk add ffmpeg && \
   apk add python3 py3-pip && \

@@ -18,162 +18,162 @@
 
 package main
 
-//	@Summary  List active sessions
-//	@Tags     sessions
-//	@Produce  json
-//	@Success  200 {array}  object  "Each item is a normalized session record (~80 fields). Subset returned to the dashboard; harness-cli reads the full record from /api/session/{id}."
-//	@Router   /api/sessions [get]
+// @Summary  List active sessions
+// @Tags     sessions
+// @Produce  json
+// @Success  200 {array}  object  "Each item is a normalized session record (~80 fields). Subset returned to the dashboard; harness-cli reads the full record from /api/session/{id}."
+// @Router   /api/sessions [get]
 func docsListSessions() {}
 
-//	@Summary  Get one session
-//	@Tags     sessions
-//	@Param    id   path      string true "session_id"
-//	@Produce  json
-//	@Success  200  {object}  object "Full session record including fault counters, shaping state, player metrics, manifest_variants."
-//	@Failure  404  {object}  map[string]string
-//	@Router   /api/session/{id} [get]
+// @Summary  Get one session
+// @Tags     sessions
+// @Param    id   path      string true "session_id"
+// @Produce  json
+// @Success  200  {object}  object "Full session record including fault counters, shaping state, player metrics, manifest_variants."
+// @Failure  404  {object}  map[string]string
+// @Router   /api/session/{id} [get]
 func docsGetSession() {}
 
-//	@Summary  Delete one session
-//	@Description Removes the session from the in-memory map and frees its dedicated proxy port.
-//	@Tags     sessions
-//	@Param    id   path  string true "session_id"
-//	@Success  204  "No Content"
-//	@Router   /api/session/{id} [delete]
+// @Summary  Delete one session
+// @Description Removes the session from the in-memory map and frees its dedicated proxy port.
+// @Tags     sessions
+// @Param    id   path  string true "session_id"
+// @Success  204  "No Content"
+// @Router   /api/session/{id} [delete]
 func docsDeleteSession() {}
 
-//	@Summary  Patch session settings
-//	@Description Optimistic-concurrency PATCH used for fault config + shaping flags.
-//	@Description Body envelope: `{set: {field: value, ...}, fields: [field, ...], base_revision: "<iso8601>"}`.
-//	@Description Returns 409 with the current control_revision when base_revision is stale.
-//	@Tags     sessions
-//	@Param    id        path    string                 true  "session_id"
-//	@Param    envelope  body    PatchSessionRequest    true  "Set+fields+base_revision envelope"
-//	@Produce  json
-//	@Success  200       {object} PatchSessionResponse
-//	@Failure  409       {object} ConflictResponse      "control_revision conflict"
-//	@Router   /api/session/{id} [patch]
+// @Summary  Patch session settings
+// @Description Optimistic-concurrency PATCH used for fault config + shaping flags.
+// @Description Body envelope: `{set: {field: value, ...}, fields: [field, ...], base_revision: "<iso8601>"}`.
+// @Description Returns 409 with the current control_revision when base_revision is stale.
+// @Tags     sessions
+// @Param    id        path    string                 true  "session_id"
+// @Param    envelope  body    PatchSessionRequest    true  "Set+fields+base_revision envelope"
+// @Produce  json
+// @Success  200       {object} PatchSessionResponse
+// @Failure  409       {object} ConflictResponse      "control_revision conflict"
+// @Router   /api/session/{id} [patch]
 func docsPatchSession() {}
 
-//	@Summary  Wipe every session
-//	@Description Destructive: clears all sessions, fault config, and nftables shaping. Confirm before calling.
-//	@Tags     sessions
-//	@Success  200
-//	@Router   /api/clear-sessions [post]
+// @Summary  Wipe every session
+// @Description Destructive: clears all sessions, fault config, and nftables shaping. Confirm before calling.
+// @Tags     sessions
+// @Success  200
+// @Router   /api/clear-sessions [post]
 func docsClearSessions() {}
 
-//	@Summary  Stream session-state diffs (SSE)
-//	@Description Long-lived `text/event-stream` connection. Server emits one `data:` frame per session-record change (debounced ~250ms). Optional `player_id` query param filters to one player.
-//	@Description
-//	@Description Each `data:` frame is a JSON-encoded `SessionStreamFrame` (see schemas).
-//	@Description Heartbeat: comment line `: ping` every ~15s. Reconnect on disconnect; the proxy does not replay missed frames.
-//	@Tags     streams
-//	@Param    player_id query string false "filter frames to one player_id"
-//	@Produce  text/event-stream
-//	@Success  200 {object} SessionStreamFrame "JSON payload of one SSE data frame"
-//	@Router   /api/sessions/stream [get]
+// @Summary  Stream session-state diffs (SSE)
+// @Description Long-lived `text/event-stream` connection. Server emits one `data:` frame per session-record change (debounced ~250ms). Optional `player_id` query param filters to one player.
+// @Description
+// @Description Each `data:` frame is a JSON-encoded `SessionStreamFrame` (see schemas).
+// @Description Heartbeat: comment line `: ping` every ~15s. Reconnect on disconnect; the proxy does not replay missed frames.
+// @Tags     streams
+// @Param    player_id query string false "filter frames to one player_id"
+// @Produce  text/event-stream
+// @Success  200 {object} SessionStreamFrame "JSON payload of one SSE data frame"
+// @Router   /api/sessions/stream [get]
 func docsSessionStream() {}
 
-//	@Summary  Stream per-request network events (SSE)
-//	@Description Long-lived `text/event-stream` connection. Server emits one `data:` frame per HTTP request as it lands in any session's ring buffer.
-//	@Description
-//	@Description Each `data:` frame is a JSON-encoded `NetworkStreamFrame` (see schemas), shape `{session_id, entry: NetworkLogEntry}`.
-//	@Description Heartbeat: comment line `: ping` every 15s. Reconnect on disconnect; nothing is replayed. Wrapped by `harness-cli tail`.
-//	@Tags     streams
-//	@Produce  text/event-stream
-//	@Success  200 {object} NetworkStreamFrame "JSON payload of one SSE data frame"
-//	@Router   /api/network/stream [get]
+// @Summary  Stream per-request network events (SSE)
+// @Description Long-lived `text/event-stream` connection. Server emits one `data:` frame per HTTP request as it lands in any session's ring buffer.
+// @Description
+// @Description Each `data:` frame is a JSON-encoded `NetworkStreamFrame` (see schemas), shape `{session_id, entry: NetworkLogEntry}`.
+// @Description Heartbeat: comment line `: ping` every 15s. Reconnect on disconnect; nothing is replayed. Wrapped by `harness-cli tail`.
+// @Tags     streams
+// @Produce  text/event-stream
+// @Success  200 {object} NetworkStreamFrame "JSON payload of one SSE data frame"
+// @Router   /api/network/stream [get]
 func docsNetworkStream() {}
 
-//	@Summary  Get one session's network ring buffer
-//	@Description One-shot snapshot of the per-session in-memory request log (HAR-shaped). Bounded; older entries fall off as new ones arrive.
-//	@Tags     network
-//	@Param    id   path      string  true  "session_id"
-//	@Produce  json
-//	@Success  200  {array}   NetworkLogEntry
-//	@Router   /api/session/{id}/network [get]
+// @Summary  Get one session's network ring buffer
+// @Description One-shot snapshot of the per-session in-memory request log (HAR-shaped). Bounded; older entries fall off as new ones arrive.
+// @Tags     network
+// @Param    id   path      string  true  "session_id"
+// @Produce  json
+// @Success  200  {array}   NetworkLogEntry
+// @Router   /api/session/{id}/network [get]
 func docsGetNetworkLog() {}
 
-//	@Summary  Apply transport shaping to a port
-//	@Description nftables/tc rate + delay + loss on the proxy's egress for one session port. Setting any axis disables an active pattern on the same port.
-//	@Tags     shaping
-//	@Param    port  path  string         true  "session-bound port (e.g. 30281)"
-//	@Param    body  body  ShapeRequest   true  "rate / delay / loss"
-//	@Produce  json
-//	@Success  200   {object} object
-//	@Router   /api/nftables/shape/{port} [post]
+// @Summary  Apply transport shaping to a port
+// @Description nftables/tc rate + delay + loss on the proxy's egress for one session port. Setting any axis disables an active pattern on the same port.
+// @Tags     shaping
+// @Param    port  path  string         true  "session-bound port (e.g. 30281)"
+// @Param    body  body  ShapeRequest   true  "rate / delay / loss"
+// @Produce  json
+// @Success  200   {object} object
+// @Router   /api/nftables/shape/{port} [post]
 func docsNftShape() {}
 
-//	@Summary  Install a step pattern on a port
-//	@Description Time-boxed sequence of rate steps (ramp_up, square_wave, etc). steps=[] clears.
-//	@Tags     shaping
-//	@Param    port  path  string         true  "session-bound port"
-//	@Param    body  body  PatternRequest true  "steps + template_mode"
-//	@Produce  json
-//	@Success  200   {object} object
-//	@Router   /api/nftables/pattern/{port} [post]
+// @Summary  Install a step pattern on a port
+// @Description Time-boxed sequence of rate steps (ramp_up, square_wave, etc). steps=[] clears.
+// @Tags     shaping
+// @Param    port  path  string         true  "session-bound port"
+// @Param    body  body  PatternRequest true  "steps + template_mode"
+// @Produce  json
+// @Success  200   {object} object
+// @Router   /api/nftables/pattern/{port} [post]
 func docsNftPattern() {}
 
-//	@Summary  Set port bandwidth alone
-//	@Tags     shaping
-//	@Param    port  path  string  true  "session-bound port"
-//	@Param    body  body  BandwidthRequest true "{rate_mbps}"
-//	@Success  200
-//	@Router   /api/nftables/bandwidth/{port} [post]
+// @Summary  Set port bandwidth alone
+// @Tags     shaping
+// @Param    port  path  string  true  "session-bound port"
+// @Param    body  body  BandwidthRequest true "{rate_mbps}"
+// @Success  200
+// @Router   /api/nftables/bandwidth/{port} [post]
 func docsNftBandwidth() {}
 
-//	@Summary  Set port packet loss alone
-//	@Tags     shaping
-//	@Param    port  path  string  true  "session-bound port"
-//	@Param    body  body  LossRequest true "{loss_pct}"
-//	@Success  200
-//	@Router   /api/nftables/loss/{port} [post]
+// @Summary  Set port packet loss alone
+// @Tags     shaping
+// @Param    port  path  string  true  "session-bound port"
+// @Param    body  body  LossRequest true "{loss_pct}"
+// @Success  200
+// @Router   /api/nftables/loss/{port} [post]
 func docsNftLoss() {}
 
-//	@Summary  Inspect current shaping for a port
-//	@Tags     shaping
-//	@Param    port path string true "session-bound port"
-//	@Produce  json
-//	@Success  200  {object} object
-//	@Router   /api/nftables/port/{port} [get]
+// @Summary  Inspect current shaping for a port
+// @Tags     shaping
+// @Param    port path string true "session-bound port"
+// @Produce  json
+// @Success  200  {object} object
+// @Router   /api/nftables/port/{port} [get]
 func docsNftPort() {}
 
-//	@Summary  Global nftables status
-//	@Tags     shaping
-//	@Produce  json
-//	@Success  200 {object} object
-//	@Router   /api/nftables/status [get]
+// @Summary  Global nftables status
+// @Tags     shaping
+// @Produce  json
+// @Success  200 {object} object
+// @Router   /api/nftables/status [get]
 func docsNftStatus() {}
 
-//	@Summary  Kernel shaping primitives available
-//	@Description Reports whether netem, htb, and per-port rules are operational.
-//	@Tags     shaping
-//	@Produce  json
-//	@Success  200 {object} object
-//	@Router   /api/nftables/capabilities [get]
+// @Summary  Kernel shaping primitives available
+// @Description Reports whether netem, htb, and per-port rules are operational.
+// @Tags     shaping
+// @Produce  json
+// @Success  200 {object} object
+// @Router   /api/nftables/capabilities [get]
 func docsNftCapabilities() {}
 
-//	@Summary  External IPs the harness is reachable from
-//	@Tags     diagnostics
-//	@Produce  json
-//	@Success  200 {object} object
-//	@Router   /api/external-ips [get]
+// @Summary  External IPs the harness is reachable from
+// @Tags     diagnostics
+// @Produce  json
+// @Success  200 {object} object
+// @Router   /api/external-ips [get]
 func docsExternalIPs() {}
 
-//	@Summary  Proxy version
-//	@Tags     diagnostics
-//	@Produce  json
-//	@Success  200 {object} object
-//	@Router   /api/version [get]
+// @Summary  Proxy version
+// @Tags     diagnostics
+// @Produce  json
+// @Success  200 {object} object
+// @Router   /api/version [get]
 func docsVersion() {}
 
-//	@Summary  Player-side metrics ingestion
-//	@Description Players post their internal metrics here. Not for ops use.
-//	@Tags     internal
-//	@Param    id path string true "session_id"
-//	@Param    body body object true "player metrics"
-//	@Success  200
-//	@Router   /api/session/{id}/metrics [post]
+// @Summary  Player-side metrics ingestion
+// @Description Players post their internal metrics here. Not for ops use.
+// @Tags     internal
+// @Param    id path string true "session_id"
+// @Param    body body object true "player metrics"
+// @Success  200
+// @Router   /api/session/{id}/metrics [post]
 func docsPostMetrics() {}
 
 // Request/response types referenced from the @Param / @Success blocks above.

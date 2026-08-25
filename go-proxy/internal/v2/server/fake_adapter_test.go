@@ -15,14 +15,16 @@ import (
 // store's sessionsMu single-mutex contract).
 type fakeAdapter struct {
 	defaultRateMbps int
-	mu       sync.Mutex
-	sessions []map[string]any
+	shaping         ShapingCapabilities
+	mu              sync.Mutex
+	sessions        []map[string]any
 
 	// Test-side observation hooks for kernel-apply calls. Real adapter
 	// drives v1's nftables / tc helpers; the fake just records.
-	shapeApplyCalls     []string
-	transportFaultCalls []fakeTransportFaultCall
-	patternApplyCalls   []fakePatternCall
+	shapeApplyCalls       []string
+	shapingModeApplyCalls []string
+	transportFaultCalls   []fakeTransportFaultCall
+	patternApplyCalls     []fakePatternCall
 
 	// SubscribeSessions delivers snapshots whenever sessionsChanged
 	// fires; pretests can call it directly to drive the diff.
@@ -89,10 +91,10 @@ func (a *fakeAdapter) NetworkLogForPlayer(playerID string, limit int) []map[stri
 	return nil
 }
 
-func (a *fakeAdapter) Version() string          { return "fake" }
-func (a *fakeAdapter) ContentDir() string       { return "/tmp/fake" }
-func (a *fakeAdapter) AuthEnabled() bool        { return false }
-func (a *fakeAdapter) AnalyticsEnabled() bool   { return false }
+func (a *fakeAdapter) Version() string        { return "fake" }
+func (a *fakeAdapter) ContentDir() string     { return "/tmp/fake" }
+func (a *fakeAdapter) AuthEnabled() bool      { return false }
+func (a *fakeAdapter) AnalyticsEnabled() bool { return false }
 
 // Mutations ------------------------------------------------------------
 
@@ -176,6 +178,13 @@ func (a *fakeAdapter) ApplyShapeToPlayer(playerID string) error {
 	return nil
 }
 
+func (a *fakeAdapter) ApplyShapingModeToPlayer(playerID string) error {
+	a.mu.Lock()
+	a.shapingModeApplyCalls = append(a.shapingModeApplyCalls, playerID)
+	a.mu.Unlock()
+	return nil
+}
+
 func (a *fakeAdapter) ApplyTransportFaultToPlayer(playerID, faultType string, consecutive int, consecutiveUnits string, frequency int) error {
 	a.mu.Lock()
 	a.transportFaultCalls = append(a.transportFaultCalls, fakeTransportFaultCall{
@@ -204,14 +213,22 @@ func (a *fakeAdapter) DefaultRateMbps() int {
 	return a.defaultRateMbps
 }
 
+// ShapingCapabilities test stub — returns the zero value (all controls
+// unavailable, mode "") unless a test sets a.shaping to exercise a specific
+// mode. Issue #910.
+func (a *fakeAdapter) ShapingCapabilities() ShapingCapabilities {
+	return a.shaping
+}
+
 // ApplyPatternToPlayer test stub — records the call for assertions.
-func (a *fakeAdapter) ApplyPatternToPlayer(playerID string, steps []ShapePatternStep, delayMs int, lossPct float64) error {
+func (a *fakeAdapter) ApplyPatternToPlayer(playerID string, steps []ShapePatternStep, imp LinkImpairment) error {
 	a.mu.Lock()
 	a.patternApplyCalls = append(a.patternApplyCalls, fakePatternCall{
 		PlayerID: playerID,
 		Steps:    steps,
-		DelayMs:  delayMs,
-		LossPct:  lossPct,
+		DelayMs:  imp.DelayMs,
+		LossPct:  imp.LossPct,
+		Imp:      imp,
 	})
 	a.mu.Unlock()
 	return nil
@@ -222,6 +239,7 @@ type fakePatternCall struct {
 	Steps    []ShapePatternStep
 	DelayMs  int
 	LossPct  float64
+	Imp      LinkImpairment
 }
 
 func (a *fakeAdapter) DeletePlayer(playerID string) bool {

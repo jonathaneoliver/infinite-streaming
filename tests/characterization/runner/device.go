@@ -7,12 +7,12 @@ import "fmt"
 type Platform string
 
 const (
-	PlatformIPhone    Platform = "iphone"      // real iOS device via xcrun devicectl
-	PlatformIPad      Platform = "ipad"        // iPadOS — real device or simulator
-	PlatformIPadSim   Platform = "ipad-sim"    // iPad simulator (xcrun simctl)
-	PlatformAppleTV   Platform = "appletv"     // tvOS real device via xcrun devicectl
-	PlatformAndroidTV Platform = "androidtv"   // Android TV via adb
-	PlatformWeb       Platform = "web"         // browser via chromedp
+	PlatformIPhone    Platform = "iphone"    // real iOS device via xcrun devicectl
+	PlatformIPad      Platform = "ipad"      // iPadOS — real device or simulator
+	PlatformIPadSim   Platform = "ipad-sim"  // iPad simulator (xcrun simctl)
+	PlatformAppleTV   Platform = "appletv"   // tvOS real device via xcrun devicectl
+	PlatformAndroidTV Platform = "androidtv" // Android TV via adb
+	PlatformWeb       Platform = "web"       // browser via chromedp
 )
 
 // LaunchMode picks the layer that brings the player up.
@@ -63,6 +63,12 @@ type Device struct {
 	//   - Android: com.example.infinitestreamplayer
 	//   - Web: ignored
 	BundleID string
+	// FleetIndex is this device's position in a parallel fleet roster
+	// (resolveFleet assigns it by order). It seeds the per-sim WDA /
+	// MJPEG ports in appiumCapabilities so concurrent XCUITest sessions
+	// don't collide on the default 8100/9100. Default 0 — the value a
+	// single-device run uses, identical to today's behaviour.
+	FleetIndex int
 }
 
 // String is for log lines and report headings.

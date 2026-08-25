@@ -191,7 +191,9 @@ func contentManipulationFromSession(s map[string]any) *oapigen.ContentManipulati
 	} else if raw, ok := s["content_allowed_variants"].([]string); ok {
 		allowed = append([]string{}, raw...)
 	}
-	if !stripCodecs && !stripAvgBw && !stripResolution && !overstate && offset == 0 && len(allowed) == 0 {
+	variantOrder, _ := s["content_variant_order"].(string)
+	hasVariantOrder := variantOrder != "" && variantOrder != "default"
+	if !stripCodecs && !stripAvgBw && !stripResolution && !overstate && offset == 0 && len(allowed) == 0 && !hasVariantOrder {
 		return nil
 	}
 	off := oapigen.ContentManipulationLiveOffset(offset)
@@ -204,6 +206,10 @@ func contentManipulationFromSession(s map[string]any) *oapigen.ContentManipulati
 	}
 	if allowed != nil {
 		out.AllowedVariants = &allowed
+	}
+	if hasVariantOrder {
+		vo := oapigen.ContentManipulationVariantOrder(variantOrder)
+		out.VariantOrder = &vo
 	}
 	return &out
 }
@@ -224,14 +230,39 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 	}{
 		{"player_metrics_video_resolution", &pm.VideoResolution},
 		{"player_metrics_display_resolution", &pm.DisplayResolution},
+		{"player_metrics_fetching_resolution", &pm.FetchingResolution},
 		{"player_metrics_last_event", &pm.LastEvent},
 		{"player_metrics_trigger_type", &pm.TriggerType},
 		{"player_metrics_state", &pm.State},
+		{"player_metrics_state_from", &pm.StateFrom},
+		{"player_metrics_state_to", &pm.StateTo},
+		{"player_metrics_content_name", &pm.ContentName},
+		{"player_metrics_user_marked_at", &pm.UserMarkedAt},
 		{"player_metrics_waiting_reason", &pm.WaitingReason},
 		{"player_metrics_browser_family", &pm.BrowserFamily},
 		{"player_metrics_playback_engine", &pm.PlaybackEngine},
 		{"player_metrics_error", &pm.Error},
 		{"player_metrics_source", &pm.Source},
+		// #550 Phase 2: outcome + error string fields.
+		{"player_metrics_playback_status", &pm.PlaybackStatus},
+		{"player_metrics_playback_reason", &pm.PlaybackReason},
+		{"player_metrics_error_domain", &pm.ErrorDomain},
+		{"player_metrics_error_details", &pm.ErrorDetails},
+		{"player_metrics_terminal_error_domain", &pm.TerminalErrorDomain},
+		{"player_metrics_terminal_error_details", &pm.TerminalErrorDetails},
+		// #550 Phase 4: device taxonomy string fields.
+		{"player_metrics_app_version", &pm.AppVersion},
+		{"player_metrics_device_class", &pm.DeviceClass},
+		{"player_metrics_device_model", &pm.DeviceModel},
+		{"player_metrics_player_tech", &pm.PlayerTech},
+		{"player_metrics_player_tech_version", &pm.PlayerTechVersion},
+		// Per-variant dwell map — iOS emits as JSON-string for compactness.
+		// Dashboard parses on the client side via JSON.parse.
+		{"player_metrics_time_per_variant_s", &pm.TimePerVariantS},
+		// Orientation-aware physical-pixel screen resolution. Same
+		// "WxH" format as video_resolution / display_resolution for
+		// side-by-side comparison.
+		{"player_metrics_device_resolution", &pm.DeviceResolution},
 	} {
 		if v, ok := s[m.key].(string); ok && v != "" {
 			vv := v
@@ -246,7 +277,10 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		dst **float32
 	}{
 		{"player_metrics_video_bitrate_mbps", &pm.VideoBitrateMbps},
+		{"player_metrics_frames_rate", &pm.FramesRate},
 		{"player_metrics_video_quality_pct", &pm.VideoQualityPct},
+		{"player_metrics_video_quality_60s_pct", &pm.VideoQuality60sPct},
+		{"player_metrics_video_quality_avg_pct", &pm.VideoQualityAvgPct},
 		{"player_metrics_avg_network_bitrate_mbps", &pm.AvgNetworkBitrateMbps},
 		{"player_metrics_network_bitrate_mbps", &pm.NetworkBitrateMbps},
 		{"player_metrics_buffer_depth_s", &pm.BufferDepthS},
@@ -254,13 +288,14 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		{"player_metrics_seekable_end_s", &pm.SeekableEndS},
 		{"player_metrics_live_edge_s", &pm.LiveEdgeS},
 		{"player_metrics_live_offset_s", &pm.LiveOffsetS},
+		{"player_metrics_recommended_offset_s", &pm.RecommendedOffsetS}, // #786
+		{"player_metrics_configured_offset_s", &pm.ConfiguredOffsetS},   // #786
 		{"player_metrics_true_offset_s", &pm.TrueOffsetS},
 		{"player_metrics_position_s", &pm.PositionS},
 		{"player_metrics_playback_rate", &pm.PlaybackRate},
 		{"player_metrics_video_first_frame_time_s", &pm.FirstFrameTimeS},
 		{"player_metrics_video_start_time_s", &pm.VideoStartTimeS},
 		{"player_metrics_stall_time_s", &pm.StallTimeS},
-		{"player_metrics_last_stall_time_s", &pm.LastStallTimeS},
 	} {
 		if v, ok := numericFloatTranslate(s[m.key]); ok {
 			f := float32(v)
@@ -277,12 +312,41 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		{"player_metrics_stalls", &pm.Stalls},
 		{"player_metrics_stall_count", &pm.Stalls}, // v1 alias
 		{"player_metrics_frames_displayed", &pm.FramesDisplayed},
-		{"player_metrics_dropped_frames", &pm.DroppedFrames},
+		{"player_metrics_frames_dropped", &pm.FramesDropped},
 		{"player_restarts", &pm.PlayerRestarts},
 		{"player_metrics_loop_count_player", &pm.LoopCountPlayer},
-		{"player_metrics_loop_count_increment", &pm.LoopCountIncrement},
+		{"player_metrics_loop_count_delta", &pm.LoopCountDelta},
 		{"player_metrics_profile_shift_count", &pm.ProfileShiftCount},
 		{"player_metrics_playhead_wallclock_ms", &pm.PlayheadWallclockMs},
+		// #550 Phase 1: residency accumulators + per-event durations.
+		{"player_metrics_playing_time_ms", &pm.PlayingTimeMs},
+		{"player_metrics_playing_count", &pm.PlayingCount},
+		{"player_metrics_pausing_time_ms", &pm.PausingTimeMs},
+		{"player_metrics_pausing_count", &pm.PausingCount},
+		{"player_metrics_buffering_time_ms", &pm.BufferingTimeMs},
+		{"player_metrics_buffering_count", &pm.BufferingCount},
+		{"player_metrics_stalling_time_ms", &pm.StallingTimeMs},
+		{"player_metrics_stalling_count", &pm.StallingCount},
+		{"player_metrics_idling_time_ms", &pm.IdlingTimeMs},
+		{"player_metrics_idling_count", &pm.IdlingCount},
+		{"player_metrics_seeking_time_ms", &pm.SeekingTimeMs},
+		{"player_metrics_seeking_count", &pm.SeekingCount},
+		{"player_metrics_trickplaying_time_ms", &pm.TrickplayingTimeMs},
+		{"player_metrics_trickplaying_count", &pm.TrickplayingCount},
+		{"player_metrics_stall_duration_ms", &pm.StallDurationMs},
+		{"player_metrics_buffering_duration_ms", &pm.BufferingDurationMs},
+		// stall_stuck is bool-shaped but the session map can carry it
+		// as bool, "true"/"false" string, or 0/1. boolTranslate below
+		// handles all three; this loop just covers the int fields.
+		{"player_metrics_video_first_frame_time_ms", &pm.VideoFirstFrameTimeMs},
+		{"player_metrics_video_start_time_ms", &pm.VideoStartTimeMs},
+		// #550 Phase 2: error code + counter (signed code via int; NSError codes are negative).
+		{"player_metrics_error_code", &pm.ErrorCode},
+		{"player_metrics_terminal_error_code", &pm.TerminalErrorCode},
+		{"player_metrics_error_count", &pm.ErrorCount},
+		// #550 Phase 4: integer device taxonomy fields.
+		{"player_metrics_os_version_major", &pm.OsVersionMajor},
+		{"player_metrics_os_version_minor", &pm.OsVersionMinor},
 	} {
 		if v, ok := numericFloatTranslate(s[m.key]); ok {
 			i := int(v)
@@ -295,10 +359,49 @@ func playerMetricsFromSession(s map[string]any) *oapigen.PlayerMetrics {
 		pm.EventTime = &t
 		any = true
 	}
+
+	// Bool fields — tolerant of native bool, "true"/"false" strings,
+	// and numeric 0/1 from older clients.
+	for _, m := range []struct {
+		key string
+		dst **bool
+	}{
+		{"player_metrics_stall_stuck", &pm.StallStuck},
+	} {
+		if b, ok := boolTranslate(s[m.key]); ok {
+			*m.dst = &b
+			any = true
+		}
+	}
+
 	if !any {
 		return nil
 	}
 	return &pm
+}
+
+// boolTranslate parses raw session-map values into a bool the same way
+// the forwarder's getBool does. Native bool wins; "true"/"false"
+// strings (case-insensitive) translate; numeric non-zero is true.
+// Returns (_, false) when the key is missing or unparseable so the
+// caller can leave the pointer nil and the field stays omitted in JSON.
+func boolTranslate(v any) (bool, bool) {
+	switch x := v.(type) {
+	case bool:
+		return x, true
+	case string:
+		switch strings.ToLower(x) {
+		case "true", "1", "t", "yes":
+			return true, true
+		case "false", "0", "f", "no":
+			return false, true
+		}
+	case float64:
+		return x != 0, true
+	case float32:
+		return x != 0, true
+	}
+	return false, false
 }
 
 // serverMetricsFromSession projects v1's TCP_INFO / ICMP / byte-counter
@@ -335,17 +438,17 @@ func serverMetricsFromSession(s map[string]any) *oapigen.ServerMetrics {
 		"client_rto_ms":              func(f float32) { sm.RtoMs = &f },
 		"client_path_ping_rtt_ms":    func(f float32) { sm.PathPingRttMs = &f },
 		// Shaper / transfer measurements (developer-mode in v1).
-		"mbps_shaper_avg":            func(f float32) { sm.MbpsShaperAvg = &f },
-		"mbps_shaper_rate":           func(f float32) { sm.MbpsShaperRate = &f },
-		"mbps_transfer_rate":         func(f float32) { sm.MbpsTransferRate = &f },
-		"mbps_transfer_complete":     func(f float32) { sm.MbpsTransferComplete = &f },
-		"mbps_in":                    func(f float32) { sm.MbpsIn = &f },
-		"mbps_out":                   func(f float32) { sm.MbpsOut = &f },
-		"mbps_in_avg":                func(f float32) { sm.MbpsInAvg = &f },
-		"mbps_in_active":             func(f float32) { sm.MbpsInActive = &f },
-		"measured_mbps":              func(f float32) { sm.MeasuredMbps = &f },
-		"measurement_window_io":      func(f float32) { sm.MeasurementWindowIo = &f },
-		"measurement_window_active":  func(f float32) { sm.MeasurementWindowActive = &f },
+		"mbps_shaper_avg":           func(f float32) { sm.MbpsShaperAvg = &f },
+		"mbps_shaper_rate":          func(f float32) { sm.MbpsShaperRate = &f },
+		"mbps_transfer_rate":        func(f float32) { sm.MbpsTransferRate = &f },
+		"mbps_transfer_complete":    func(f float32) { sm.MbpsTransferComplete = &f },
+		"mbps_in":                   func(f float32) { sm.MbpsIn = &f },
+		"mbps_out":                  func(f float32) { sm.MbpsOut = &f },
+		"mbps_in_avg":               func(f float32) { sm.MbpsInAvg = &f },
+		"mbps_in_active":            func(f float32) { sm.MbpsInActive = &f },
+		"measured_mbps":             func(f float32) { sm.MeasuredMbps = &f },
+		"measurement_window_io":     func(f float32) { sm.MeasurementWindowIo = &f },
+		"measurement_window_active": func(f float32) { sm.MeasurementWindowActive = &f },
 	} {
 		if v, ok := numericFloatTranslate(s[key]); ok {
 			set(float32(v))
@@ -469,6 +572,13 @@ func currentPlayFromSession(s map[string]any, playerUUID uuid.UUID) *oapigen.Pla
 	}
 	if t, ok := getTime(s, "session_start_time", "first_request_time"); ok {
 		rec.StartedAt = t
+	}
+	// start_time is the CLIENT-supplied, play-scoped start (#587). Unlike
+	// started_at (session_start_time — frozen at the connection's first
+	// request, so stale after a play_id rotation), the player rotates
+	// start_time with play_id, so this reflects when THIS play began.
+	if t, ok := getTime(s, "start_time"); ok {
+		rec.StartTime = &t
 	}
 	// Manifest projection: master_manifest_url is the master playlist
 	// the player loaded; manifest_url is the variant playlist most
@@ -614,7 +724,90 @@ func faultRuleFromMap(rule map[string]any) oapigen.FaultRule {
 				f.RequestKind = &rk
 			}
 		}
+		// #919: variant + url_match must round-trip too. Before the native
+		// engine these filters were rejected at PATCH time so they never
+		// reached here; now they persist, and dropping them on read makes the
+		// dashboard's scope selector snap back (optimistic update reverts to a
+		// filter-less rule).
+		if variant, ok := filter["variant"].(map[string]any); ok && len(variant) > 0 {
+			f.Variant = variantPredicateFromMap(variant)
+		}
+		if um, ok := filter["url_match"].(map[string]any); ok && len(um) > 0 {
+			if mode, ok := um["mode"].(string); ok && mode != "" {
+				patterns := stringSliceFromAny(um["patterns"])
+				if len(patterns) > 0 {
+					f.UrlMatch = &oapigen.UrlMatch{Mode: oapigen.UrlMatchMode(mode), Patterns: patterns}
+				}
+			}
+		}
 		out.Filter = &f
+	}
+	return out
+}
+
+// variantPredicateFromMap reconstructs a v2 VariantPredicate from its stored
+// map form so a variant-scoped fault rule round-trips intact on read (#919).
+func variantPredicateFromMap(v map[string]any) *oapigen.VariantPredicate {
+	vp := &oapigen.VariantPredicate{}
+	// Preserve arrays that are PRESENT even when empty: `resolutions: []`
+	// means "match no video variant" (the scope-selector OFF state) and is
+	// semantically distinct from an absent resolutions ("all in scope").
+	// Dropping the empty array collapses OFF back to ON — the dashboard
+	// scope changes silently revert. (#919)
+	if raw, ok := v["rung_indexes"].([]any); ok {
+		idxs := intSliceFromAny(raw)
+		vp.RungIndexes = &idxs
+	}
+	if raw, ok := v["rung_positions"].([]any); ok {
+		pos := stringSliceFromAny(raw)
+		rp := make([]oapigen.VariantPredicateRungPositions, 0, len(pos))
+		for _, p := range pos {
+			rp = append(rp, oapigen.VariantPredicateRungPositions(p))
+		}
+		vp.RungPositions = &rp
+	}
+	if raw, ok := v["resolutions"].([]any); ok {
+		res := stringSliceFromAny(raw)
+		vp.Resolutions = &res
+	}
+	if f, ok := numericFloatTranslate(v["bandwidth_above"]); ok {
+		n := int(f)
+		vp.BandwidthAbove = &n
+	}
+	if f, ok := numericFloatTranslate(v["bandwidth_below"]); ok {
+		n := int(f)
+		vp.BandwidthBelow = &n
+	}
+	if cp, ok := v["codec_prefix"].(string); ok && cp != "" {
+		vp.CodecPrefix = &cp
+	}
+	return vp
+}
+
+func stringSliceFromAny(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, x := range arr {
+		if s, ok := x.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func intSliceFromAny(v any) []int {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]int, 0, len(arr))
+	for _, x := range arr {
+		if f, ok := numericFloatTranslate(x); ok {
+			out = append(out, int(f))
+		}
 	}
 	return out
 }
@@ -623,17 +816,40 @@ func faultRuleFromMap(rule map[string]any) oapigen.FaultRule {
 // fields + `_v2_shape_pattern` stash back into a v2 Shape. Returns nil
 // when no shape is configured (rate=0, delay=0, loss=0, no transport
 // fault, no pattern).
+//
+// A single-owner group SLAVE is the exception: it has no LOCAL rate/pattern
+// of its own — the master drives its kernel cap via the fan-out, identified
+// only by `nftables_pattern_driven_by`. Without treating that as a
+// shape-bearing condition, the slave's shape returns nil and the
+// "driven by master" badge + `pattern_rate_runtime_mbps` never reach the v2
+// record the shaping panel reads (#849 follow-up: the cap is applied, but the
+// UI showed an empty 0-Mbps panel).
 func shapeFromSession(s map[string]any) *oapigen.Shape {
 	rate, _ := numericFloatTranslate(s["nftables_bandwidth_mbps"])
 	delay, _ := numericFloatTranslate(s["nftables_delay_ms"])
 	loss, _ := numericFloatTranslate(s["nftables_packet_loss"])
+	// #826 link-impairment knobs.
+	jitter, _ := numericFloatTranslate(s["nftables_jitter_ms"])
+	lossCorr, _ := numericFloatTranslate(s["nftables_loss_correlation_pct"])
+	jitterCorr, _ := numericFloatTranslate(s["nftables_jitter_correlation_pct"])
 	tfType, _ := s["transport_failure_type"].(string)
 	pattern, _ := s["_v2_shape_pattern"].(map[string]any)
+	drivenBy, _ := s["nftables_pattern_driven_by"].(string)
+	// #910 per-session degraded mode. "http-only" is a shape-bearing state on
+	// its own — a session forced degraded with no rate/delay/loss must still
+	// surface `shape.mode` so the dashboard's mode control reflects it.
+	forcedMode, _ := s["shaping_forced_mode"].(string)
+	degraded := forcedMode == "http-only"
 
-	if rate == 0 && delay == 0 && loss == 0 && (tfType == "" || tfType == "none") && pattern == nil {
+	if rate == 0 && delay == 0 && loss == 0 && jitter == 0 && lossCorr == 0 && jitterCorr == 0 &&
+		(tfType == "" || tfType == "none") && pattern == nil && drivenBy == "" && !degraded {
 		return nil
 	}
 	out := &oapigen.Shape{}
+	if degraded {
+		m := oapigen.HttpOnly
+		out.Mode = &m
+	}
 	if rate > 0 {
 		r := float32(rate)
 		out.RateMbps = &r
@@ -645,6 +861,18 @@ func shapeFromSession(s map[string]any) *oapigen.Shape {
 	if loss > 0 {
 		l := float32(loss)
 		out.LossPct = &l
+	}
+	if jitter > 0 {
+		j := float32(jitter)
+		out.JitterMs = &j
+	}
+	if lossCorr > 0 {
+		lc := float32(lossCorr)
+		out.LossCorrelationPct = &lc
+	}
+	if jitterCorr > 0 {
+		jc := float32(jitterCorr)
+		out.JitterCorrelationPct = &jc
 	}
 	if tfType != "" && tfType != "none" {
 		tf := oapigen.TransportFault{Type: oapigen.TransportFaultType(tfType)}
@@ -713,6 +941,17 @@ func shapeFromSession(s map[string]any) *oapigen.Shape {
 		f := float32(v)
 		out.PatternRateRuntimeMbps = &f
 	}
+	// Single-owner group shaping markers (issue: single-master group shaping).
+	// A driven slave has no pattern of its own; these tell the UI to show the
+	// "driven by master" badge + disabled slider and which template is running.
+	if by, ok := s["nftables_pattern_driven_by"].(string); ok && by != "" {
+		b := by
+		out.GroupDrivenBy = &b
+	}
+	if tmpl, ok := s["nftables_pattern_driven_template"].(string); ok && tmpl != "" {
+		t := tmpl
+		out.GroupDrivenTemplate = &t
+	}
 	return out
 }
 
@@ -733,6 +972,26 @@ func numericFloatTranslate(v any) (float64, bool) {
 		return float64(x), true
 	}
 	return 0, false
+}
+
+// truthy coerces a v1-row value to a boolean. The proxy SSE path carries
+// JSON booleans; the ClickHouse read path carries UInt8 columns as 0/1
+// numbers (and, under a UseNumber decoder, json.Number). Anything that
+// parses to a non-zero number, or a literal true/"true"/"1", is true.
+func truthy(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return x == "1" || strings.EqualFold(x, "true")
+	case json.Number:
+		f, _ := x.Float64()
+		return f != 0
+	}
+	if f, ok := numericFloatTranslate(v); ok {
+		return f != 0
+	}
+	return false
 }
 
 // NetworkEntryFromV1 projects a v1 network ring-buffer row into a v2
@@ -792,11 +1051,20 @@ func NetworkEntryFromV1(row map[string]any) oapigen.NetworkLogEntry {
 		{"tls_ms", &out.TlsMs},
 		{"transfer_ms", &out.TransferMs},
 		{"client_wait_ms", &out.ClientWaitMs},
+		{"delivery_rate_mbps", &out.DeliveryRateMbps},
 	} {
 		if v, ok := numericFloatTranslate(row[m.key]); ok {
 			f := float32(v)
 			*m.dst = &f
 		}
+	}
+	// Kernel app-limited flag for the delivery_rate_mbps sample — surfaced
+	// only when true (the sample is unreliable), mirroring faulted. Coerce
+	// robustly: the live proxy SSE sends a JSON bool, the ClickHouse read
+	// path (UInt8) sends 0/1 as a number, so accept both.
+	if truthy(row["delivery_rate_app_limited"]) {
+		t := true
+		out.DeliveryRateAppLimited = &t
 	}
 	// Fault metadata — flagged on rows where the proxy injected a fault.
 	if v, ok := row["faulted"].(bool); ok && v {
