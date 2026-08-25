@@ -171,13 +171,32 @@ Make targets: `make analytics-rebuild-forwarder` (rebuild + recreate forwarder o
 Defaults: 6s segment, 200ms partial, 1s GOP, AAC-LC 96k stereo 48kHz, two-pass
 software encode, `--ladder apple-uniq-live-xs`.
 
-**This is the fallback encoder, not the primary one.** Content is normally
-produced by the separate **Encoder** project (`~/Projects/Encoder`) and landed in
-`$ENCODE_STAGING_DIR`. The built-in pipeline is kept aligned with the Encoder's
-default ladder of the same name so either tool yields the same shape of content:
-identical rungs (12 per codec — h264 climbs to 4K, hevc/av1 to 2160p), the same
-VBV, and the same `_xs` directory tag. `generate_abr/ladder_audit.py` and
-`analytics/tools/` compare across both.
+**This is the fallback encoder, not the primary one — it is largely superseded.**
+Production content is produced by the separate **Encoder** project
+(`infinite-streaming-encoder`, `~/Projects/Encoder`) and copied onto the
+infinite-streaming server:
+
+```
+Encoder project  →  $ENCODE_STAGING_DIR  →  rsync  →  server  →  /media/dynamic_content/
+```
+
+The Encoder writes finished packages to `$ENCODE_STAGING_DIR` (e.g.
+`/Volumes/4TB/media/encode-staging`); they are rsynced to the server's content
+volume (`CONTENT_DIR`, bind-mounted to `/media` in the container), landing under
+`/media/dynamic_content/<content>/`. Discovery is a plain directory scan gated on
+a manifest being present, so a package joins the catalogue as soon as it is in
+place — no registration step, no restart.
+
+Do not add features to `generate_abr/` that belong in the Encoder project. **Do**
+keep the two aligned: content from either must be the same shape, or a clip
+encoded here cannot be compared against one encoded there — which is the whole
+reason the fallback still exists. `generate_abr/README.md` carries the detail,
+including what the Encoder produces that this script does not (self-describing
+manifests with per-fragment `@mediaRange`, distributed encoding, VMAF audit).
+
+Concretely, "same shape" means identical rungs (12 per codec — h264 climbs to 4K,
+hevc/av1 to 2160p), the same VBV, and the same `_xs` directory tag.
+`generate_abr/ladder_audit.py` and `analytics/tools/` compare across both.
 
 The ladder is a *delivery profile*, not just a bitrate table. Its VBV is what
 makes ONE encode safe for go-live to re-chop into LL/2s/6s:
