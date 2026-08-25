@@ -3,12 +3,19 @@ version: 2
 # Dependabot config — opens PRs for security and version updates across
 # every ecosystem in this repo. Weekly cadence keeps the PR volume low.
 # All PRs land via the same squash-merge workflow as everything else.
+#
+# target-branch: "dev" on every entry — active development happens on `dev`
+# (main is the release branch), so bumps must open against `dev` or they drift
+# onto main and dev silently runs stale deps. NOTE: Dependabot reads THIS file
+# from the repo's default branch (main), so this config must live on main even
+# though it points the PRs at dev.
 
 updates:
 
   # GitHub Actions used by .github/workflows/*
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     commit-message:
@@ -25,6 +32,7 @@ updates:
   # Go modules — one entry per module.
   - package-ecosystem: "gomod"
     directory: "/go-upload"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     commit-message:
@@ -33,6 +41,7 @@ updates:
 
   - package-ecosystem: "gomod"
     directory: "/go-live"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     commit-message:
@@ -48,6 +57,7 @@ updates:
 
   - package-ecosystem: "gomod"
     directory: "/go-proxy"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     commit-message:
@@ -57,6 +67,7 @@ updates:
   # npm — pair-rendezvous Cloudflare Worker (wrangler etc.)
   - package-ecosystem: "npm"
     directory: "/cloudflare/pair-rendezvous"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     commit-message:
@@ -66,6 +77,7 @@ updates:
   # Docker base images in the Dockerfile (alpine, golang).
   - package-ecosystem: "docker"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     commit-message:
