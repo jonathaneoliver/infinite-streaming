@@ -188,7 +188,7 @@ const sections: NavSection[] = [
       { id: 'test-playback', icon: '🧭', text: 'Testing Playback',href: '/dashboard/testing-session.html?nav=1' },
       { id: 'testing',       icon: '🧪', text: 'Testing Monitor', href: '/dashboard/testing.html' },
       { id: 'sessions',      icon: '⏪', text: 'Sessions',         href: '/dashboard/sessions.html' },
-      { id: 'study',         icon: '📊', text: 'Study Report',     href: '/dashboard/study.html' },
+      { id: 'study',         icon: '📊', text: 'Study Report',     href: '/dashboard/study.html', developerOnly: true },
       { id: 'characterization', icon: '📈', text: 'Automated Testing', href: '/dashboard/characterization.html' },
       { id: 'sweep',         icon: '🔬', text: 'QE Lab',           href: '/dashboard/sweep.html', developerOnly: true },
       { id: 'quartet',       icon: '🎬', text: 'Quartet',          href: '/dashboard/quartet.html', alpha: true },
