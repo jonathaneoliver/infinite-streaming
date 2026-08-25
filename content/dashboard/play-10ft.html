@@ -1047,7 +1047,7 @@
         localStorage.setItem('ismSelectedContent', fullName);
         localStorage.setItem('ismSelectedContentFull', fullName);
         const baseName = fullName
-            .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+            .replace(/_(?:h264|hevc|av1|dash|ts|hw)(?:_(?:xs|vod|\d+(?:\.\d+)?s))?$/i, '')
             .replace(/_\d{8}_\d{6}$/i, '');
         localStorage.setItem('ismSelectedContentBase', baseName);
         localStorage.setItem('ismSelectedUrl', streamUrlFor(item));

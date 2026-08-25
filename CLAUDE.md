@@ -168,7 +168,34 @@ Make targets: `make analytics-rebuild-forwarder` (rebuild + recreate forwarder o
 - `create_hls_manifests.py` — HLS manifest generation helper
 - `convert_to_segmentlist.py` — DASH SegmentTemplate → SegmentList conversion
 
-Defaults: 6s segment, 200ms partial, 1s GOP.
+Defaults: 6s segment, 200ms partial, 1s GOP, AAC-LC 96k stereo 48kHz, two-pass
+software encode, `--ladder apple-uniq-live-xs`.
+
+**This is the fallback encoder, not the primary one.** Content is normally
+produced by the separate **Encoder** project (`~/Projects/Encoder`) and landed in
+`$ENCODE_STAGING_DIR`. The built-in pipeline is kept aligned with the Encoder's
+default ladder of the same name so either tool yields the same shape of content:
+identical rungs (12 per codec — h264 climbs to 4K, hevc/av1 to 2160p), the same
+VBV, and the same `_xs` directory tag. `generate_abr/ladder_audit.py` and
+`analytics/tools/` compare across both.
+
+The ladder is a *delivery profile*, not just a bitrate table. Its VBV is what
+makes ONE encode safe for go-live to re-chop into LL/2s/6s:
+
+```
+peak/avg = MAXRATE_PERCENT/100 + BUFSIZE_MULT/T     # 100% + 0.25x
+         = 1.04x (6s) / 1.13x (2s) / 1.25x (1s)
+```
+
+The 1s case lands exactly on Apple's live/linear 1.25x bound and longer variants
+sit below it. Two-pass is not optional at this buffer size: single-pass x265
+undershoots `-b:v` by ~17%, so the published bitrates are only truthful with it.
+
+Output directories are `<stem>_p200_<codec>[_<tag>]`; the tag is `xs` on this
+ladder and absent on `legacy`/`apple`/`apple-uniq`, so pre-existing content keeps
+its current names. Anything parsing content names must tolerate the optional tag
+after the codec — `go-upload/internal/util/content.go`'s `_p200_(codec)(_|$)`
+already does, and `findOutputDirectories` globs rather than reconstructing.
 
 ### Client Apps
 

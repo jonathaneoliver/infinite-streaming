@@ -56,8 +56,13 @@ strip_codec() {
     local n=$1
     # case-insensitive lowercase first
     n=$(echo "$n" | tr '[:upper:]' '[:lower:]')
-    # strip optional trailing _YYYYMMDD_HHMMSS, then _h264|_hevc|_av1, then _p200
+    # strip optional trailing _YYYYMMDD_HHMMSS, then the profile tag, then
+    # _h264|_hevc|_av1, then _p200. The tag sits AFTER the codec
+    # (<stem>_p200_h264_xs), so it has to come off first or the codec strip
+    # below never matches and the stem never resolves to an /originals/ file —
+    # which silently downgrades the thumbnail to a burnt-in 360p frame.
     n=$(echo "$n" | sed -E 's/_[0-9]{8}_[0-9]{6}$//')
+    n=$(echo "$n" | sed -E 's/_(xs|vod|[0-9]+(\.[0-9]+)?s)$//')
     n=$(echo "$n" | sed -E 's/_(h264|hevc|h265|av1)$//')
     n=$(echo "$n" | sed -E 's/_p200$//')
     printf '%s' "$n"
