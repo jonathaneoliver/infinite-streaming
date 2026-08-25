@@ -155,7 +155,7 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 			thumbnailURLLarge = base + "/thumbnail-large.jpg"
 		}
 		segmentDuration := detectSegmentDuration(itemPath)
-		segmentDurations := availableSegmentDurations(itemPath, hasHls, segmentDuration)
+		segmentDurations := availableSegmentDurations(name, itemPath, hasHls, segmentDuration)
 		hasLL := hasHls && contentHasPartials(itemPath)
 		maxResolution, maxHeight := detectMaxResolution(itemPath)
 		variants := parseMasterVariants(itemPath)
@@ -239,13 +239,52 @@ func detectSegmentDuration(contentPath string) *int {
 	return nil
 }
 
+// segmentPinPattern matches a trailing `_1s` / `_2s` / `_6s` on a content name.
+//
+// Such a clip is encoded natively at that one segment length and is served only
+// at it — go-live does not repackage it. `_xs` (and an unsuffixed name) carries
+// no pin and keeps the normal repackaging behaviour.
+//
+// Mirrored in go-live/internal/api/segment_pin.go: these are separate Go
+// modules with no shared package, so the rule is stated in both. The catalogue
+// must not advertise a length the manifest handler will refuse.
+var segmentPinPattern = regexp.MustCompile(`(?i)_(1|2|6)s$`)
+
+// SegmentPin returns the segment length a content name is pinned to, or 0 when
+// it carries no pin.
+func SegmentPin(name string) int {
+	m := segmentPinPattern.FindStringSubmatch(name)
+	if m == nil {
+		return 0
+	}
+	switch m[1] {
+	case "1":
+		return 1
+	case "2":
+		return 2
+	case "6":
+		return 6
+	}
+	return 0
+}
+
 // availableSegmentDurations reports the integer segment lengths go-live can
-// serve this clip at. go-live composes both a 2s and a 6s virtual master from
-// any HLS source master, so any HLS clip is available at both regardless of
-// its native encode. The natively-detected duration is folded in too so a
-// DASH-only clip (no HLS synthesis) still advertises something. LL is not an
-// integer length — it's reported separately via HasLL.
-func availableSegmentDurations(contentPath string, hasHls bool, native *int) []int {
+// serve this clip at.
+//
+// A name pinned with `_1s`/`_2s`/`_6s` reports exactly that one length: the
+// clip is natively encoded at it and is not repackaged. Everything else —
+// `_xs` and unsuffixed content alike — is repackaged, and go-live composes both
+// a 2s and a 6s virtual master from any HLS source master, so any HLS clip is
+// available at both regardless of its native encode. The natively-detected
+// duration is folded in too so a DASH-only clip (no HLS synthesis) still
+// advertises something. LL is not an integer length — it's reported separately
+// via HasLL, and a pin does not suppress it, because LL is partial-segment
+// availability rather than a segment length.
+func availableSegmentDurations(name, contentPath string, hasHls bool, native *int) []int {
+	if pin := SegmentPin(name); pin != 0 {
+		return []int{pin}
+	}
+
 	set := map[int]bool{}
 	if hasHls {
 		set[2] = true
@@ -254,7 +293,10 @@ func availableSegmentDurations(contentPath string, hasHls bool, native *int) []i
 			set[1] = true
 		}
 	}
-	if native != nil {
+	// A native duration of 0 is not a segment length — it means detection
+	// failed (an unparseable playlist or manifest). Advertising it produced
+	// rows like segment_durations [0,1,2,6], which no client can use.
+	if native != nil && *native > 0 {
 		set[*native] = true
 	}
 	if len(set) == 0 {

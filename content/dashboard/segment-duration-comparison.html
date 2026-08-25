@@ -1229,7 +1229,7 @@
             localStorage.setItem('ismSelectedContentFull', newContent);
             localStorage.setItem('ismSelectedContent', newContent);
             const baseName = newContent
-                .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+                .replace(/_(?:h264|hevc|av1|dash|ts|hw)(?:_(?:xs|vod|\d+(?:\.\d+)?s))?$/i, '')
                 .replace(/_\d{8}_\d{6}$/i, '');
             localStorage.setItem('ismSelectedContentBase', baseName);
             if (window.ISMNav && typeof window.ISMNav.updateSelectedContentBadge === 'function') {

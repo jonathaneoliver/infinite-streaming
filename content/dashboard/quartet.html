@@ -844,7 +844,7 @@
                     let prev = '';
                     while (name !== prev) {
                         prev = name;
-                    name = name.replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '');
+                    name = name.replace(/_(?:h264|hevc|av1|dash|ts|hw)(?:_(?:xs|vod|\d+(?:\.\d+)?s))?$/i, '');
                     }
                     if (name) {
                         baseNames.add(name);
@@ -870,7 +870,7 @@
 
                 const stored = localStorage.getItem('ismSelectedContentBase') || localStorage.getItem('ismSelectedContent');
                 const normalized = stored
-                    ? stored.replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '').replace(/_\d{8}_\d{6}$/i, '')
+                    ? stored.replace(/_(?:h264|hevc|av1|dash|ts|hw)(?:_(?:xs|vod|\d+(?:\.\d+)?s))?$/i, '').replace(/_\d{8}_\d{6}$/i, '')
                     : null;
                 const defaultContent = normalized && sorted.includes(normalized) ? normalized : sorted[0];
                 CONFIG.view1.content = defaultContent;

@@ -502,7 +502,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         val match = _state.value.content.firstOrNull { it.name == name }
         if (match != null) return match.clipId
         return name.lowercase().replace(
-            Regex("_p200_(h264|hevc|h265|av1)(_\\d{8}_\\d{6})?$"), ""
+            Regex("_p200_(h264|hevc|h265|av1)(_(?:xs|vod|\\d+(?:\\.\\d+)?s))?(_\\d{8}_\\d{6})?$"), ""
         )
     }
 

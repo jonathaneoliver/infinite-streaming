@@ -1225,6 +1225,10 @@ func (h *Handler) OnDemandDashManifest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if rejectPinnedVariant(w, content, variant, duration, llMode) {
+		return
+	}
+
 	mpdRelPath := filepath.Clean(filepath.Join(content, mpdPathForLoad))
 	mpdData, err := dash.LoadMPD(infiniteOutputDir, mpdRelPath)
 	if err != nil {
@@ -1580,6 +1584,10 @@ func (h *Handler) OnDemandMasterPlaylistDuration(w http.ResponseWriter, r *http.
 	prefix := routePrefix(r.URL.Path)
 	mode := "hls-" + duration
 
+	if rejectPinnedDurationLabel(w, content, duration) {
+		return
+	}
+
 	inputPath := filepath.Join(infiniteOutputDir, content, "master.m3u8")
 	if _, err := os.Stat(inputPath); os.IsNotExist(err) {
 		http.Error(w, fmt.Sprintf("Content not found: %s", content), http.StatusNotFound)
@@ -1705,6 +1713,11 @@ func (h *Handler) OnDemandVariantPlaylistDuration(w http.ResponseWriter, r *http
 	duration := vars["duration"]
 	variant := vars["variant"]
 	prefix := routePrefix(r.URL.Path)
+
+	if rejectPinnedDurationLabel(w, content, duration) {
+		return
+	}
+
 	inputPath := filepath.Join(infiniteOutputDir, content, "master.m3u8")
 	worker := ensureHLSWorker(h, content, inputPath, prefix)
 	if worker != nil {

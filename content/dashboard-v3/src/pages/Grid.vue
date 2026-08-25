@@ -229,7 +229,7 @@ function friendlyLabel(name: string): string {
 function distinctNames(): string[] {
   const seen = new Set<string>();
   for (const c of allContent.value) {
-    const stripped = c.name.replace(/_h264|_hevc|_av1|_ts|_hw|_dash/g, '');
+    const stripped = c.name.replace(/_h264|_hevc|_av1|_ts|_hw|_dash|_xs|_vod/g, '');
     seen.add(stripped);
   }
   return Array.from(seen).sort();
@@ -360,9 +360,19 @@ const LS_AUDIO_MUTED = 'ismAudioMuted';
 const LS_KNOWN_4K_PREFIX = 'ismKnown4k:';
 
 function stripContentSuffix(name: string): string {
-  // Strip the trailing "_pNNN_codec_YYYYMMDD_HHMMSS" timestamp so the
-  // base name (just the human-readable title) can survive re-encodes.
-  return name.replace(/_p\d+_[a-z0-9]+_\d{8}_\d{6}.*$/i, '');
+  // Strip the trailing "_pNNN_codec[_tag][_YYYYMMDD_HHMMSS]" so the base name
+  // (just the human-readable title) can survive re-encodes.
+  //
+  // Two alternatives rather than one loose pattern, so existing names keep
+  // their exact current base: a timestamp alone still strips (as before), and
+  // a delivery-profile tag (`_xs`) now strips whether or not a timestamp
+  // follows it — `[a-z0-9]+` could not span `h264_xs` because of the
+  // underscore, so tagged content was left untouched and the cross-page
+  // handoff key stopped matching.
+  return name.replace(
+    /_p\d+_[a-z0-9]+_(?:xs|vod|\d+(?:\.\d+)?s)(?:_\d{8}_\d{6})?.*$|_p\d+_[a-z0-9]+_\d{8}_\d{6}.*$/i,
+    '',
+  );
 }
 
 function persistFocus(item: typeof visible.value[number] | null) {
