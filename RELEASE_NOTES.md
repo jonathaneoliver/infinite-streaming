@@ -17,6 +17,10 @@ leaves an overnight sweep hunting for aberrations while you sleep.
 
 ## TL;DR
 
+- **Critical fixes first.** Several v2.0.0 bugs produced silently *wrong*
+  test results rather than visible failures — sessions running uncapped,
+  a blank Network Log, a wedge detector that could not fire. Read
+  [Critical fixes](#critical-fixes) before the feature list.
 - **Device fleets.** An Appium Device Farm integration plus a
   device-aware concurrent test pool runs mixed fleets of iOS sims,
   Android emulators, and real hardware — grouped, reserved, and
@@ -85,6 +89,118 @@ A follow-up release will drop the deprecated `stall_*` columns.
 `make deploy` is now the everyday local-tree → test-dev deploy (alias for
 `test-deploy-dev`). The k3d targets are explicit: `deploy-k3d-dev` and
 `deploy-k3d-release`.
+
+---
+
+## Critical fixes
+
+**Read this before the feature list.** v2.0.0 shipped several bugs whose
+symptom was a silently *wrong result* rather than a visible failure —
+the worst failure mode for a measurement rig, because a corrupted run
+looks exactly like a good one.
+
+### Cross-session shaping clobber (#818)
+
+Concurrent sessions clobbered each other's `tc` caps. Every per-session
+u32 classifier filter shares `prio 1` on `parent 1:0`, and deleting one
+by match-spec could match the **wrong** filter at that priority —
+collaterally removing another live session's cap. The victim's traffic
+then fell through to the uncapped 10 Gbps HTB `default 999` class until
+its next rate-set happened to re-add the filter.
+
+The production trigger was `ClearPortShaping`, the sweep that runs on
+**every session allocation** — so on a busy rig this fired constantly.
+**Any multi-session run on v2.0.0 may have had one or more sessions
+silently running uncapped.** Both delete paths now resolve the port's
+exact u32 leaf handle and delete by handle.
+
+### Lost-update races on the session list (#742, #743)
+
+`App.sessionsSnap` was read-modify-written throughout the proxy with no
+lock held across the read and the write, making every full-list writer a
+last-writer-wins lost update against every other concurrent writer.
+Session deletes, transport-fault state, group updates, inactive-session
+reaping and the entire v2 mutation surface were all exposed.
+
+Writes now go through `mutateSessions(fn)` — load snapshot, mutate a
+private clone, compare-and-swap, retry on conflict — with side effects
+hoisted out so they run exactly once on the committed result. Reads are
+clone-free via `sessionsView`.
+
+### Blank Network Log and PlayLog on existing deployments (#913)
+
+The schema was applied only through `docker-entrypoint-initdb.d`, which
+runs on first-ever boot with an empty data dir — on an existing volume
+it silently did nothing. Combined with ad-hoc `make analytics-migrate`
+changes that were never backported, even a **clean install** built
+`session_events` with 193 of its 200 columns.
+
+The dashboard's timeseries query selects `control_revision`; the missing
+column raised `UNKNOWN_IDENTIFIER`, the backfill loop bailed on the
+first error, and **both the Network Log and the PlayLog rendered empty —
+while every container booted green and video played normally.** The
+container now re-applies the idempotent schema on every boot.
+
+### Network rows unattributed at the start of every play (#914)
+
+`network_requests` rows were attributed through a forwarder map
+populated from `session_events`. That map is cold on a fresh stack **and
+at the start of every new play**, so roughly the first six rows of each
+play landed with an empty `player_id` and never appeared in the
+per-player Network Log. The proxy now stamps `player_id` from the
+request's query param, and the forwarder prefers that value and learns
+the session map from it.
+
+### Network label chips never rendered (#560)
+
+The v2 `/network_requests` read API wasn't projecting the `labels`
+column at all, so no network-row chip ever rendered. This silently
+affected the **pre-existing** `http_5xx`, `slow_segment`, `fault_*`,
+`*transport_*` and `*request_retry` labels — not just newly added ones.
+
+### The wedge detector could not detect a wedge (#706)
+
+`checkFrozenState()` was invoked only from
+`AVPlayer.addPeriodicTimeObserver`, whose callback fires off the
+**playback** clock — it goes silent the instant the playhead stops,
+which is exactly when a freeze begins.
+
+Characterized live on a real iPhone: a textbook hard wedge (`-12880`
+"removing variants", playhead frozen for ~5 minutes, no recovery when
+the cap lifted back to 60 Mbps) reported `frozen_count: 0` and no
+`wedge_detected`. Detection is now driven by a wall-clock timer, so it
+keeps running precisely when playback does not.
+
+### Android bypassed the proxy entirely (#863)
+
+`composeUrlAndLoad` selected the per-session proxy port only when
+LocalProxy was enabled, so ordinary Android playback went straight to
+the origin.
+
+Data-confirmed on a live compare group: the Android session had **0
+requests through the per-session proxy** (its paired iPhone had 229), a
+null `master_manifest_url`, and no rows carrying `manifest_variants` —
+meaning no variant ladder, no Displayed Variant line, and **no shaping
+or fault injection reaching Android at all**. Main playback now always
+routes through go-proxy.
+
+### Silent segment-length substitution (#647)
+
+`preflightMasterPlaylist` carried a fallback chain probing
+`requested → _6s → _2s → plain`. When the requested master 404'd it
+silently played a **different segment length** than the one selected —
+making 6s-vs-2s characterization untrustworthy and masking real content
+errors. The chain is gone: a play now serves exactly what was asked,
+segment length included, or fails visibly.
+
+### Measurement corrections
+
+- **Negative gauges from ExoPlayer** — position, buffer and rate could
+  emit below zero; now clamped to 0 for iOS parity (#731).
+- **`total_ms`** is lifted to ttfb+transfer at the `logEntry`
+  chokepoint (#628).
+- **`video_bitrate`** snaps to the nearest published peak instead of
+  drifting off-ladder (#620).
 
 ---
 
@@ -271,33 +387,6 @@ per-segment/chunk startup timeline.
   from 25% to 50% over top peak.
 - `.byteranges` sidecars are **off by default** — DASH now reads
   fragment byte ranges from the manifest itself (#986).
-
----
-
-## Notable fixes
-
-87 fixes landed. The ones worth calling out:
-
-**Cross-session isolation.** A cluster of proxy bugs could let one
-session silently corrupt another's results — the worst failure mode for
-a test rig. Per-session `tc` u32 filters are now deleted by exact handle
-rather than clobbering neighbours (#818); session-list writes are atomic
-via lock-free CAS and reads are clone-free (#742, #743); config-on-connect
-allocation is serialized against port collisions (#739); the shape-apply
-cache is invalidated on port clear (#738); the shared `tc` root ensure is
-idempotent under concurrency (#746); and the session-start sweep now
-clears nftables transport faults left by a crashed run (#716).
-
-**Attribution and schema.** `network_requests.player_id` is attributed
-from request #1 (#914); the analytics schema self-heals on boot (#913);
-`labels[]` is projected in the v2 network-requests read API (#560).
-
-**Client correctness.** Freeze and wedge detection is driven by a
-wall-clock timer rather than the playback observer, which could not fire
-during the very freeze it was meant to catch (#706); Android playback
-always routes through go-proxy (#863); ExoPlayer position, buffer, and
-rate gauges are clamped to 0 for iOS parity (#731); the master-fallback
-chain is gone — a play either serves what was asked or fails (#647).
 
 ---
 
