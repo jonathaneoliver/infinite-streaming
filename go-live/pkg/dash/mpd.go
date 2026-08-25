@@ -70,6 +70,12 @@ type MPDData struct {
 	StreamStartTime       float64
 	PeriodCounter         int
 	PeriodCounterInit     bool
+
+	// InlineRanges holds the fragment byte-ranges recovered when the loaded
+	// manifest was itself fragment-granularity. Empty for segment-granularity
+	// manifests, which source ranges from a sibling manifest_fragmented.mpd or
+	// from .byteranges sidecars instead.
+	InlineRanges fragmentRanges
 }
 
 var (
@@ -134,6 +140,17 @@ func LoadMPD(folder, uri string) (*MPDData, error) {
 		return nil, fmt.Errorf("mpd root missing")
 	}
 
+	// A fragment-granularity manifest is collapsed to segment granularity here,
+	// at the boundary, so every reader below sees the same shape it always has.
+	// The byte-ranges stripped out during the collapse are kept on MPDData and
+	// serve the 1s/2s/LL variants — no second file, no chance of the structure
+	// and the ranges disagreeing.
+	inlineRanges, collapsed := normalizeFragmentedMPD(root)
+	if collapsed {
+		fmt.Fprintf(os.Stderr, "INFO: %s is fragment-granularity; collapsed to %d segments carrying inline byte-ranges\n",
+			path, len(inlineRanges))
+	}
+
 	data := &MPDData{
 		Tree:                     doc,
 		Root:                     root,
@@ -147,6 +164,7 @@ func LoadMPD(folder, uri string) (*MPDData, error) {
 		TempSegmentDurationByDur: make(map[int]float64),
 		PartialDurationByDur:     make(map[int]float64),
 		VirtualSegmentsByDur:     make(map[int]map[string][]virtualSegment),
+		InlineRanges:             inlineRanges,
 	}
 
 	if mpdDuration := root.SelectAttrValue("mediaPresentationDuration", ""); mpdDuration != "" {
@@ -486,7 +504,7 @@ func parseSegmentTimeline(segTimeline *etree.Element, timescale int) (*timelineD
 
 // usesVirtualSegments reports whether a variant duration is synthesized by
 // regrouping the base (6s) fmp4 fragments into shorter segments via their
-// .byteranges sidecars, rather than served from the base SegmentList directly.
+// byte-ranges, rather than served from the base SegmentList directly.
 // The 1s and 2s variants are both sub-base regroupings; LL and 6s use the base
 // segments as-is (LL just exposes them with partial-segment availability).
 func usesVirtualSegments(duration int) bool {
@@ -586,7 +604,7 @@ func buildVirtualSegmentsForRep(data *MPDData, rep *etree.Element, repID string,
 		}
 		segmentTicks := baseDurations[minInt(i, len(baseDurations)-1)]
 		segmentDuration := float64(segmentTicks) / float64(timescale)
-		fragments, err := loadByterangesForSegment(data.Path, media)
+		fragments, err := loadByterangesForSegment(data, media)
 		if err != nil || len(fragments) == 0 {
 			virtualSegments = append(virtualSegments, virtualSegment{
 				Media:         media,
@@ -625,11 +643,37 @@ func buildVirtualSegmentsForRep(data *MPDData, rep *etree.Element, repID string,
 	return virtualSegments, nil
 }
 
-func loadByterangesForSegment(mpdPath, mediaPath string) ([]byterangePayloadFragment, error) {
+// loadByterangesForSegment returns the fragment byte-ranges for one segment.
+//
+// Sources, in priority order:
+//  1. ranges carried by the loaded manifest itself, when it was
+//     fragment-granularity (the single-input case, mirroring HLS)
+//  2. a sibling manifest_fragmented.mpd, when the loaded manifest was
+//     segment-granularity but the encoder shipped both files
+//  3. <segment>.byteranges — the legacy JSON sidecar, for older content
+//
+// Callers treat an error here as "this segment has no partials" and fall back to
+// whole-segment granularity, so a content item with none of the three degrades
+// silently. warnNoRangeSource makes that case visible.
+func loadByterangesForSegment(data *MPDData, mediaPath string) ([]byterangePayloadFragment, error) {
+	key := normalizeMediaKey(mediaPath)
+
+	if fragments, ok := data.InlineRanges[key]; ok && len(fragments) > 0 {
+		return fragments, nil
+	}
+
+	mpdPath := data.Path
+	if ranges := loadFragmentedRanges(mpdPath); ranges != nil {
+		if fragments, ok := ranges[key]; ok && len(fragments) > 0 {
+			return fragments, nil
+		}
+	}
+
 	segmentPath := filepath.Join(filepath.Dir(mpdPath), filepath.FromSlash(strings.TrimPrefix(mediaPath, "/")))
 	byterangesPath := segmentPath + ".byteranges"
 	payloadBytes, err := os.ReadFile(byterangesPath)
 	if err != nil {
+		warnNoRangeSource(mpdPath)
 		return nil, err
 	}
 	var payload byterangePayload
@@ -1076,7 +1120,7 @@ func buildExplicitSegmentList(representation *etree.Element, data *MPDData, wind
 		}
 
 		if usePartials && len(virtualSegments) == 0 {
-			fragments, err := loadByterangesForSegment(data.Path, baseMediaPath)
+			fragments, err := loadByterangesForSegment(data, baseMediaPath)
 			if err == nil && len(fragments) > 0 {
 				fragCount := int64(len(fragments))
 				baseDur := durationTicks / fragCount
