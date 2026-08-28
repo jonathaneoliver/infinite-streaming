@@ -110,13 +110,49 @@ func resolveFleetDeviceFarm(t *testing.T, p runner.Platform) []runner.Device {
 		// one group/pattern.
 		ap := runner.Platform(envOr(fmt.Sprintf("CHAR_ARM_%d_PLATFORM", i), string(p)))
 		dev := runner.Device{Platform: ap, FleetIndex: i}
-		// A real iOS device isn't matchable by platformVersion (the farm leaves
-		// it unconstrained), so it could be handed a free sim. Pin its hardware
-		// UDID — supplied by the operator via CHARACTERIZATION_DEVICE_UDID — so
-		// the iphone arm gets THE iphone. Sims stay unpinned (farm picks freely).
+		// A real iOS device (iphone/ipad — NOT the -sim tokens) needs the operator
+		// to pin its hardware UDID + an established tunnel. Guard both LOUDLY: a
+		// silent fallback here is what let a SIM steal the real-device arm (the run
+		// logs "playing" while the phone sits idle) and made a missing tunnel surface
+		// as a cryptic deep-in-appium 500.
 		if ap == runner.PlatformIPhone || ap == runner.PlatformIPad {
-			if u := strings.TrimSpace(os.Getenv("CHARACTERIZATION_DEVICE_UDID")); u != "" {
-				dev.UDID = u
+			u := strings.TrimSpace(os.Getenv("CHARACTERIZATION_DEVICE_UDID"))
+			// GUARD A — real-device arm MUST be pinned, else an iPhone/iPad SIMULATOR
+			// (which also services the bare iphone/ipad token) silently claims it.
+			if u == "" {
+				t.Fatalf("arm %d requests REAL-device platform %q but CHARACTERIZATION_DEVICE_UDID is unset — "+
+					"an iOS SIMULATOR also services the %q token and will SILENTLY steal this arm (the real device "+
+					"stays idle while the run logs 'playing'). Set CHARACTERIZATION_DEVICE_UDID to the hardware UDID "+
+					"(.env IPHONE_XCODE_ID).", i, ap, ap)
+			}
+			dev.UDID = u
+			// GUARD B — iOS 17+ hardware needs an active go-ios RemoteXPC tunnel for
+			// ANY launch. Check now; fail with the fix recipe instead of a cryptic
+			// appium error 3 minutes into bring-up. Only a POSITIVE "tunnel is down"
+			// fails the run — an inability to check (no `ios` tool) is left to the
+			// appium layer so this guard never false-positives.
+			tctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			up, terr := runner.IOSTunnelUp(tctx, u)
+			cancel()
+			if terr == nil && !up {
+				t.Fatalf("arm %d REAL device %s has NO active go-ios tunnel (`ios tunnel ls` does not list it) — "+
+					"on iOS 17+ every app launch fails without it. Fix: connect the device via WIRED USB-C, unlock + "+
+					"tap Trust, confirm `ios list --details` shows ConnectionType: USB, then restart the tunnel "+
+					"(`ios tunnel start --userspace`) and verify `ios tunnel ls` is non-empty.", i, u)
+			}
+			// GUARD C — a real iOS device is driven through a PLAIN appium (default
+			// :4799), NOT the sim farm on :4723. If that server is down the arm dies
+			// with a create-session error mid bring-up; check it up front. Skips when
+			// the URL can't be resolved (farm off ⇒ operator owns their appium).
+			if url := runner.RealDeviceAppiumURL(); url != "" {
+				actx, acancel := context.WithTimeout(context.Background(), 5*time.Second)
+				reachable := runner.AppiumReachable(actx, url)
+				acancel()
+				if !reachable {
+					t.Fatalf("arm %d REAL device %s needs a plain Appium at %s (the off-farm real-device driver, "+
+						"separate from the sim farm on :4723) but it is not answering /status — start it with "+
+						"`appium --port 4799` (or point CHAR_IOS_DIRECT_APPIUM_URL at your Appium).", i, u, url)
+				}
 			}
 		}
 		fleet[i] = dev
@@ -255,7 +291,7 @@ func resolveFleetFromUDIDs(t *testing.T, p runner.Platform, udids []string) []ru
 		t.Logf("fleet[%d] resolved %s → platform=%s (%s)", i, u, d.Platform, d.Label)
 		// Only simulators are booted + server-seeded; real devices are already
 		// on and carry their own saved server.
-		if autoboot && d.Platform == runner.PlatformIPadSim {
+		if autoboot && d.Platform.IsIOSSim() {
 			if err := runner.BootSim(ctx, d.UDID); err != nil {
 				t.Fatalf("boot fleet sim %d (%s): %v", i, d.UDID, err)
 			}
@@ -429,7 +465,7 @@ func staggerFleetLaunch(t *testing.T, fleetIndex int) {
 // data container, so non-sim platforms are skipped.
 func seedFleetServer(ctx context.Context, t *testing.T, d runner.Device) {
 	t.Helper()
-	if d.Platform != runner.PlatformIPadSim {
+	if !d.Platform.IsIOSSim() {
 		return
 	}
 	if strings.TrimSpace(os.Getenv("CHAR_FLEET_SEED_SERVER")) == "0" {

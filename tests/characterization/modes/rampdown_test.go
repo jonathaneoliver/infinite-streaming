@@ -42,6 +42,7 @@ const (
 	rampdownWarmupHold      = 15 * time.Second
 )
 
+func TestRampdownIPhoneSim(t *testing.T) { runRampdown(t, runner.PlatformIPhoneSim) }
 func TestRampdownIPadSim(t *testing.T)   { runRampdown(t, runner.PlatformIPadSim) }
 func TestRampdownIPhone(t *testing.T)    { runRampdown(t, runner.PlatformIPhone) }
 func TestRampdownAppleTV(t *testing.T)   { runRampdown(t, runner.PlatformAppleTV) }

@@ -32,12 +32,13 @@ import (
 // charPlatformToken maps a sweep platform token to the Go test-name suffix the
 // characterization modes use (TestRampupIPadSim, TestPyramidIPhone, …).
 var charPlatformToken = map[string]string{
-	"ipad-sim":  "IPadSim",
-	"iphone":    "IPhone",
-	"ipad":      "IPad",
-	"appletv":   "AppleTV",
-	"androidtv": "AndroidTV",
-	"web":       "Web",
+	"iphone-sim": "IPhoneSim",
+	"ipad-sim":   "IPadSim",
+	"iphone":     "IPhone",
+	"ipad":       "IPad",
+	"appletv":    "AppleTV",
+	"androidtv":  "AndroidTV",
+	"web":        "Web",
 }
 
 // charModeCamel converts a mode slug (downshift_severity) to its Go CamelCase
@@ -188,11 +189,11 @@ func runCharModeCapture(ctx context.Context, base, charDir string, e *sweep.Expe
 	defer func() { out.TotalMs = time.Since(start).Milliseconds() }()
 
 	// The TEST VARIANT is decided by the DEVICE, not a user string: the runner
-	// classifies every iOS sim as ipad-sim (→ TestRampupIPadSim), a real iPhone
-	// as iphone (→ TestRampupIPhone), etc. — same mapping the sweep probe uses.
-	// e.Platform is only the claim filter (farm vocabulary), which differs from
-	// the test suffix (a Fleet iPhone 15 sim is serviceable as iphone-sim but its
-	// test variant is ipad-sim).
+	// classifies an iPhone sim as iphone-sim (→ TestRampupIPhoneSim), an iPad sim
+	// as ipad-sim (→ TestRampupIPadSim), a real iPhone as iphone (→ TestRampupIPhone),
+	// etc. — same model split the sweep probe uses (runnerPlatformForDevice).
+	// e.Platform is only the claim filter (farm vocabulary), which may be coarser
+	// than the test suffix.
 	testName, err := charTestName(e.Mode, runnerPlatformForDevice(dev))
 	if err != nil {
 		out.Err = err

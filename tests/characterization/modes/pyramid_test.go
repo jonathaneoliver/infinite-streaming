@@ -37,6 +37,7 @@ const pyramidInitialLimitMbps = 1.0
 // the descent should return the player to the same variant it was at
 // when we started.
 
+func TestPyramidIPhoneSim(t *testing.T) { runPyramid(t, runner.PlatformIPhoneSim) }
 func TestPyramidIPadSim(t *testing.T)   { runPyramid(t, runner.PlatformIPadSim) }
 func TestPyramidIPhone(t *testing.T)    { runPyramid(t, runner.PlatformIPhone) }
 func TestPyramidAppleTV(t *testing.T)   { runPyramid(t, runner.PlatformAppleTV) }

@@ -64,7 +64,8 @@ import (
 
 // TestStateResidencyIPadSim — the iPad-simulator entry point. Other
 // platforms can be added by mirroring this thin wrapper.
-func TestStateResidencyIPadSim(t *testing.T) { runStateResidency(t, runner.PlatformIPadSim) }
+func TestStateResidencyIPhoneSim(t *testing.T) { runStateResidency(t, runner.PlatformIPhoneSim) }
+func TestStateResidencyIPadSim(t *testing.T)   { runStateResidency(t, runner.PlatformIPadSim) }
 
 func runStateResidency(t *testing.T, p runner.Platform) {
 	sess := OpenSession(t, p)

@@ -1,0 +1,26 @@
+=== RUN-TO-RUN VARIATION (60 cells with >=2 reps) ===
+
+Continuous metrics — coefficient of variation (CoV = stdev/mean) across reps:
+  metric          median CoV   p90 CoV   median range
+  video_start_s     10.4%       40.1%    0.57
+  ttff_s            10.8%       25.7%    0.36
+  startup_eff        1.9%       23.3%    3.81
+  settle_s          35.4%      130.1%    1.74
+  shifts_up          0.0%       81.6%    0.00
+
+Categorical (rung) metrics — % of cells where all reps AGREE:
+  first_fetched   42/60 agree (70%)
+  shown_rung      38/60 agree (63%)
+  var60           49/60 agree (82%)
+
+Most variable cells (by video-start CoV):
+  s1 2/cap16         video-start reps=[76.48, 9.46, 7.15]  CoV=104%  range=69.3s
+  s6 2/cap16         video-start reps=[6.77, 32.42, 10.24]  CoV=69%  range=25.6s
+  s1 2/cap0          video-start reps=[5.64, 15.89, 5.79]  CoV=53%  range=10.2s
+  s2 2/cap16         video-start reps=[5.55, 5.85, 15.8]  CoV=53%  range=10.2s
+  s2 2/cap8          video-start reps=[21.15, 5.17, 19.84]  CoV=47%  range=16.0s
+  s1 2/cap8          video-start reps=[5.63, 6.08, 12.79]  CoV=40%  range=7.2s
+  s6 16/cap16        video-start reps=[12.0, 5.17, 6.59]  CoV=37%  range=6.8s
+  s1 uncapped/cap8   video-start reps=[1.29, 0.64, 0.67]  CoV=34%  range=0.6s
+
+wrote /Users/jonathanoliver/.claude/jobs/e0b554ca/tmp/reps_variation.json

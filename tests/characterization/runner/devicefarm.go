@@ -41,7 +41,7 @@ func DeviceFarmEnabled() bool {
 // the run — DF then arbitrates among whatever matches the platform.
 func dfPlatformVersion(ctx context.Context, p Platform) string {
 	switch p {
-	case PlatformIPadSim:
+	case PlatformIPhoneSim, PlatformIPadSim:
 		if v := strings.TrimSpace(os.Getenv("CHAR_DF_IOS_VERSION")); v != "" {
 			return v
 		}

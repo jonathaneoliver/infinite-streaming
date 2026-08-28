@@ -19,6 +19,9 @@
 # Env:
 #   DF_POOL_COUNT     how many sims to boot           (default 4)
 #   DF_POOL_MATCH     sim-name substring to pick from (default "Fleet")
+#   DF_POOL_EXTRA_UDIDS  extra sim UDIDs to add beyond the name match — e.g. an
+#                        iPad sim not named "Fleet", so the pool serves both
+#                        iphone-sim and ipad-sim work; comma/space separated
 #   DF_POOL_OS        iOS runtime major.minor         (default: latest installed)
 #   DF_BUNDLE_ID      app to verify on each sim        (default com.jeoliver.InfiniteStreamPlayer)
 #   DF_PORT           DF/Appium port for WDA warming   (default 4723)
@@ -31,6 +34,7 @@ set -eu
 
 DF_POOL_COUNT="${DF_POOL_COUNT:-4}"
 DF_POOL_MATCH="${DF_POOL_MATCH:-Fleet}"
+DF_POOL_EXTRA_UDIDS="${DF_POOL_EXTRA_UDIDS:-}"
 DF_BUNDLE_ID="${DF_BUNDLE_ID:-com.jeoliver.InfiniteStreamPlayer}"
 DF_PORT="${DF_PORT:-4723}"
 DF_WARM_WDA="${DF_WARM_WDA:-1}"
@@ -80,6 +84,20 @@ out.sort()
 for name, udid in out[:count]:
     print(udid)
 ')
+
+# Append explicit extra UDIDs (e.g. an iPad sim not named "Fleet") beyond the
+# name-matched set, so the pool can service both iphone-sim and ipad-sim work.
+# Deduped against the matched UDIDs; order preserved (extras last).
+if [ -n "$DF_POOL_EXTRA_UDIDS" ]; then
+	for x in $(printf '%s' "$DF_POOL_EXTRA_UDIDS" | tr ',' ' '); do
+		[ -n "$x" ] || continue
+		if printf '%s\n' "$UDIDS" | grep -qx "$x"; then
+			continue
+		fi
+		if [ -z "$UDIDS" ]; then UDIDS="$x"; else UDIDS="$UDIDS
+$x"; fi
+	done
+fi
 
 if [ -z "$UDIDS" ]; then
 	echo "no available sims matching \"$DF_POOL_MATCH\" on iOS $DF_POOL_OS" >&2

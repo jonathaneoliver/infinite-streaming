@@ -1,0 +1,43 @@
+# Parallel GROUPED VALLEY across THREE targets on ONE shared bandwidth timeline:
+#   control  = iphone-sim  (leader — arms the valley; proxy broadcasts to the group)
+#   variant0 = ipad-sim    (sim, shares the group_id → same shaped pipe)
+#   variant1 = iphone       (Jonathan's REAL iPhone, pinned by hardware UDID)
+#
+#   HARNESS_BASE_URL=https://dev.jeoliver.com:21000 \
+#     harness char matrix tests/characterization/matrix/valley-3way.yaml
+#
+# All three are a control + variants of ONE explicit `groups:` block, so they
+# share a single group_id (not platform-suffixed); every member's go-proxy
+# session gets the master's fanned tc cap (fanPatternRateToGroup). The real
+# device streams through go-proxy too, so it is shaped identically to the sims.
+#
+# REAL-DEVICE ARM ROUTING: the fleet path (resolveFleetDeviceFarm) pins the real
+# iPhone from the CHARACTERIZATION_DEVICE_UDID env var — NOT a matrix device_udid
+# field (that field is not emitted to the fleet subprocess). Without the env, an
+# iPhone SIM services the bare `iphone` token and grabs the arm, leaving the real
+# phone idle. So run it with:
+#
+#   CHARACTERIZATION_DEVICE_UDID=00008120-000242DE1152201E \
+#   CHAR_IOS_XCODE_ORG_ID=63328J83Q8 \
+#   CHAR_IOS_XCODE_SIGNING_ID="Apple Development" \
+#   CHAR_IOS_WDA_BUNDLE_ID=com.jeoliver.WebDriverAgentRunner \
+#   HARNESS_BASE_URL=https://dev.jeoliver.com:21000 \
+#     harness char matrix tests/characterization/matrix/valley-3way.yaml
+#
+# Also needs: a plain appium on :4799 for the real device (the go-ios tunnel path,
+# separate from the sim farm on :4723) + the ios tunnel up; the real iPhone in the
+# DF roster (real=True) with the app installed + dev.jeoliver.com:21000 saved.
+# duration_s traverses the valley's descending leg (step 12s); full cycle ~828s.
+name: valley-3way
+class: config
+parallel: true
+duration_s: 300
+defaults:
+  content: insane_newer_p200_h264
+  proxy.shape: { pattern: valley, step_seconds: 12 }
+groups:
+  - id: valley
+    control: { platform: iphone-sim }   # master
+    variants:
+      - { platform: ipad-sim }          # sim
+      - { platform: iphone }            # real iPhone — pinned via CHARACTERIZATION_DEVICE_UDID (see header)

@@ -22,6 +22,7 @@ import (
 // Requires Manual/CLI/Appium launcher (relaunches between caps); skipped
 // when no device is reachable.
 
+func TestStartupCapsIPhoneSim(t *testing.T) { runStartupCaps(t, runner.PlatformIPhoneSim) }
 func TestStartupCapsIPadSim(t *testing.T)   { runStartupCaps(t, runner.PlatformIPadSim) }
 func TestStartupCapsIPhone(t *testing.T)    { runStartupCaps(t, runner.PlatformIPhone) }
 func TestStartupCapsAppleTV(t *testing.T)   { runStartupCaps(t, runner.PlatformAppleTV) }

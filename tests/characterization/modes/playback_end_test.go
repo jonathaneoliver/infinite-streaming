@@ -59,7 +59,8 @@ import (
 
 // TestPlaybackEndsIPadSim — iPad-simulator entry point. Mirror with
 // other platforms when needed.
-func TestPlaybackEndsIPadSim(t *testing.T) { runPlaybackEnds(t, runner.PlatformIPadSim) }
+func TestPlaybackEndsIPhoneSim(t *testing.T) { runPlaybackEnds(t, runner.PlatformIPhoneSim) }
+func TestPlaybackEndsIPadSim(t *testing.T)   { runPlaybackEnds(t, runner.PlatformIPadSim) }
 
 func runPlaybackEnds(t *testing.T, p runner.Platform) {
 	sess := OpenSession(t, p)

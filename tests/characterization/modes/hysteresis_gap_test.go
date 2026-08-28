@@ -18,6 +18,7 @@ import (
 //
 // 14 steps × 25 s ≈ 6 min + warmup.
 
+func TestHysteresisGapIPhoneSim(t *testing.T) { runHysteresisGap(t, runner.PlatformIPhoneSim) }
 func TestHysteresisGapIPadSim(t *testing.T)   { runHysteresisGap(t, runner.PlatformIPadSim) }
 func TestHysteresisGapIPhone(t *testing.T)    { runHysteresisGap(t, runner.PlatformIPhone) }
 func TestHysteresisGapAppleTV(t *testing.T)   { runHysteresisGap(t, runner.PlatformAppleTV) }

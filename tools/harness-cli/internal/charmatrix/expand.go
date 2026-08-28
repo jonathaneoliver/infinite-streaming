@@ -513,7 +513,7 @@ func validateClass(c string) error {
 
 func validPlatform(p string) bool {
 	switch p {
-	case "ipad-sim", "iphone", "appletv", "androidtv", "web":
+	case "iphone-sim", "ipad-sim", "iphone", "ipad", "appletv", "androidtv", "web":
 		return true
 	}
 	return false

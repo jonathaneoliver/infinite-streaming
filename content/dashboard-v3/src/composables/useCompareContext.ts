@@ -58,6 +58,24 @@ export interface CompareView {
   hidden: Ref<Set<string>>;
 }
 
+/** Compare-mode start-time alignment (issue #963). When the compared
+ *  sessions didn't start at the same wall-clock time, the charts shift each
+ *  sibling so its playback start coincides with the ACTIVE session's — an
+ *  elapsed-time overlay that lines them up even though they ran apart. The
+ *  active session is the reference (offset 0) so its lifecycle/event markers
+ *  and the x-axis stay truthful; only sibling line data moves. */
+export interface CompareAlign {
+  /** Alignment active — at least one sibling's start differs from the active
+   *  session's beyond the tolerance, so overlays are shifted. Drives the
+   *  "conditions differed" warning banner. */
+  enabled: boolean;
+  /** Largest sibling shift (ms) — surfaced in the warning copy. */
+  maxOffsetMs: number;
+  /** playerId → ms to SUBTRACT from that sibling's sample x. The active
+   *  session is absent / 0. Empty when alignment is off. */
+  offsets: Map<string, number>;
+}
+
 export interface CompareContext {
   /** Is compare mode on for the active session? */
   enabled: Ref<boolean>;
@@ -69,6 +87,10 @@ export interface CompareContext {
   siblings: Ref<CompareSibling[]>;
   /** Session-legend hover/hide state, applied across every chart. */
   view: CompareView;
+  /** Start-time alignment for overlays (issue #963). Optional so a provider
+   *  that predates it still satisfies the type; charts treat a missing align
+   *  as "off" (no shift). */
+  align?: Ref<CompareAlign>;
 }
 
 export const CompareContextKey: InjectionKey<CompareContext> = Symbol('compareContext');
@@ -126,10 +148,14 @@ export function useCompareOverlays(
   const ctx = inject(CompareContextKey, null);
   return computed<ChartOverlaySource[]>(() => {
     if (!ctx || !ctx.enabled.value) return [];
+    const align = ctx.align?.value;
     return ctx.siblings.value.map((sib) => ({
       key: sib.playerId,
       eventsStream: sib.stream,
       series: specsFor(sib),
+      // Elapsed-time overlay: shift this sibling onto the active session's
+      // start when their wall-clock starts differ (issue #963).
+      xOffset: align?.enabled ? (align.offsets.get(sib.playerId) ?? 0) : 0,
     }));
   });
 }

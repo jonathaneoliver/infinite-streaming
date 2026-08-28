@@ -976,6 +976,9 @@ test-pattern:
 # Override per-test timeout: PER_TEST_TIMEOUT=180m make characterize-iphone
 # Override launch mode:      LAUNCH_MODE=manual make characterize-iphone
 
+characterize-iphone-sim:
+	./tests/characterization/overnight.sh iphone-sim
+
 characterize-ipad-sim:
 	./tests/characterization/overnight.sh ipad-sim
 
