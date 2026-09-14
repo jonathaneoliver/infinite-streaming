@@ -2613,7 +2613,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
         elif [ "$TWO_PASS" = true ]; then
             # libx265 software, two-pass (accurate average — see encode_two_pass_sw)
             encode_two_pass_sw libx265 x265-params \
-                "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0:pools=+:frame-threads=0" \
+                "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0:pools=*:frame-threads=0" \
                 hvc1
         else
             # libx265 software with bitrate control (single pass)
@@ -2625,7 +2625,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -bufsize "${bufsize_kbps}k" \
                    -preset "$preset" \
                    -threads 0 \
-                   -x265-params "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0:pools=+:frame-threads=0" \
+                   -x265-params "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0:pools=*:frame-threads=0" \
                    -tag:v hvc1 \
                    -pix_fmt yuv420p \
                    -an \
