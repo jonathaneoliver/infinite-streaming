@@ -424,7 +424,6 @@ ALTER TABLE infinite_streaming.session_events
     -- `<resolution>@<kbps>kbps` with seconds-watched values. Stored
     -- verbatim; PlayLog expands it into one chip per variant via its
     -- generic JSON-field expander.
-    ADD COLUMN IF NOT EXISTS time_per_variant_s String CODEC(ZSTD(3)),
 
     -- ── #550 Phase 1: residency accumulators + paired deltas ───────
     -- New canonical names (gerund, UInt32 ms, DoubleDelta+ZSTD).
@@ -1013,3 +1012,28 @@ CREATE TABLE IF NOT EXISTS infinite_streaming.sweep_scope
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (dimension, value)
 SETTINGS index_granularity = 8192;
+
+-- ── Upgrade parity: columns that previously existed only in CREATE TABLE ────
+-- self-heal.sh re-applies this file on every boot, but CREATE TABLE IF NOT
+-- EXISTS is a no-op on a table that already exists, so a column added to (or
+-- renamed inside) a CREATE block never reaches a volume created by an earlier
+-- version. Upgrading a real v2.0.0 volume showed six such columns;
+-- /api/v2/plays then failed with "Unknown expression or function identifier
+-- 'frames_dropped'" and the Sessions page broke.
+--
+-- Rule: every column added to a CREATE TABLE also needs an
+-- ADD COLUMN IF NOT EXISTS, either in that table's ALTER block or here.
+-- tests/deploy/schema-upgrade-check.sh diffs a fresh install against an
+-- upgraded one and fails on any column that doesn't reach the upgrade.
+-- Definitions below are copied verbatim from the CREATE TABLE blocks.
+ALTER TABLE infinite_streaming.session_events
+    ADD COLUMN IF NOT EXISTS start_time            String                      CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS fetching_resolution   LowCardinality(String) DEFAULT '' CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS frames_dropped        UInt32                      DEFAULT 0;
+
+ALTER TABLE infinite_streaming.network_requests
+    ADD COLUMN IF NOT EXISTS delivery_rate_mbps        Float32                CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS delivery_rate_app_limited UInt8                  DEFAULT 0 CODEC(ZSTD(1));
+
+ALTER TABLE infinite_streaming.control_events
+    ADD COLUMN IF NOT EXISTS start_time               String                 CODEC(ZSTD(1));
