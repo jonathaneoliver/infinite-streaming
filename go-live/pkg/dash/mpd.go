@@ -720,6 +720,24 @@ func GenerateLiveMPD(data *MPDData, timeNow time.Time, streamName string, durati
         return doc.WriteToBytes()
     }
 
+	// The live window can be no longer than one loop of the content. The loop
+	// handling below wraps a negative window start exactly once and builds at
+	// most two Periods (the tail of one loop and the head of the next), both of
+	// which assume the window fits inside a single loop. A clip shorter than
+	// maxLiveWindowDurationSec broke that: a 24s clip has 5 segments against a
+	// 7-segment window, the start was still -1 after the wrap, and
+	// buildPeriodSegments panicked with "index out of range [-1]". The panic is
+	// unrecovered, so one short clip took down go-live and every stream it
+	// served. Clamping keeps start >= 0 after one wrap and the window within at
+	// most one loop crossing. Content at least as long as the window is
+	// unaffected: both values keep their previous defaults.
+	windowSegmentCount := int(maxLiveWindowDurationSec / segmentDuration)
+	timeShiftBufferDepthSec := maxLiveWindowDurationSec
+	if windowSegmentCount > segmentCount {
+		windowSegmentCount = segmentCount
+		timeShiftBufferDepthSec = float64(segmentCount) * segmentDuration
+	}
+
 	if data.AvailabilityStartTime == nil {
 		start := timeFromSeconds(float64(timeNow.UnixNano())/1e9 - totalDuration)
 		data.AvailabilityStartTime = &start
@@ -781,7 +799,7 @@ func GenerateLiveMPD(data *MPDData, timeNow time.Time, streamName string, durati
 		root.CreateAttr("minBufferTime", formatDuration(segmentDuration*2))
 		root.CreateAttr("minimumUpdatePeriod", formatDuration(segmentDuration))
 	}
-	root.CreateAttr("timeShiftBufferDepth", formatDuration(maxLiveWindowDurationSec))
+	root.CreateAttr("timeShiftBufferDepth", formatDuration(timeShiftBufferDepthSec))
 
 	// BaseURL creation intentionally omitted (no insert).
 	removeServiceDescriptions(root)
@@ -789,7 +807,6 @@ func GenerateLiveMPD(data *MPDData, timeNow time.Time, streamName string, durati
 		insertServiceDescription(root, llDashTargetDelaySec, llDashTargetDelaySec*0.5, llDashTargetDelaySec*1.5)
 	}
 
-	windowSegmentCount := int(maxLiveWindowDurationSec / segmentDuration)
 	windowEndLogical := totalElapsedSegments + 1
 	windowStartLogical := windowEndLogical - windowSegmentCount
 	if windowStartLogical < 0 {
