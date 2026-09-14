@@ -2305,7 +2305,7 @@ encode_two_pass_sw() {
            -pix_fmt yuv420p \
            -an \
            -f null - \
-           -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+           -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE" || return $?
 
     log "  Two-pass: pass 2/2 (final encode to target average)"
     ffmpeg -i "$MEZZANINE" \
@@ -2678,12 +2678,17 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
         # AV1 (libsvtav1) software, single- or two-pass (see encode_av1_sw)
         encode_av1_sw
     fi
+    local encode_rc=$?
     
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
     
-    if [[ ! -f "$output_file" ]]; then
-        log_error "Encoding failed for $bitrate_label"
+    # Fail on the encoder's exit status AND on an empty output. An encoder that
+    # refuses its parameters still leaves a 0-byte file behind, which the old
+    # `-f` (exists) test accepted: the job packaged nothing and still reported
+    # `complete`. set -o pipefail makes encode_rc the ffmpeg status, not tee's.
+    if [[ $encode_rc -ne 0 || ! -s "$output_file" ]]; then
+        log_error "Encoding failed for $bitrate_label (encoder rc=$encode_rc)"
         ENCODING_ERRORS+=("Encoding failed for ${codec_upper} ${res_name} @ ${bitrate_label}")
         exit 1
     fi
