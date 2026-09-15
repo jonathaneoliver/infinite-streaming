@@ -225,6 +225,11 @@ FORCE_HARDWARE=false  # Force hardware encoding (VideoToolbox)
 # published bitrates are only truthful with two passes. Disable with
 # --single-pass when iterating and the exact average does not matter.
 TWO_PASS=true
+
+# SVT-AV1 preset for libsvtav1 encodes (Encoder 211d77f). AV1 does not use the
+# per-rung x264/x265 $preset names, so this one value drives both the encode
+# (encode_av1_sw) and the "preset ..." label in the per-rung log line.
+AV1_SVT_PRESET=6
 HLS_FORMAT="fmp4"  # fmp4, ts, both
 PAD_TO_SEGMENT_BOUNDARY=false  # Padding is disabled by default
 MAX_RESOLUTION_HEIGHT=""  # Optional max resolution limit (e.g., "1080p")
@@ -2341,13 +2346,13 @@ encode_two_pass_sw() {
 #   - Two-pass through ffmpeg's GENERIC -pass N -passlogfile PREFIX (SVT-AV1 has
 #     no x26x-style ":pass=N:stats=" param), for an accurate target average.
 #     Encoder a52d99d.
-#   - -preset 6 (was 8). Encoder 211d77f.
+#   - -preset $AV1_SVT_PRESET (6; was 8). Encoder 211d77f.
 encode_av1_sw() {
     local passlog="$TEMP_DIR/${codec}_${label}_2pass"
     local -a video_args=(
         -vf "$filter"
         -c:v libsvtav1
-        -preset 6
+        -preset "$AV1_SVT_PRESET"
         -svtav1-params "keyint=${KEYINT}:scd=0"
         -g "$KEYINT"
         -force_key_frames "expr:gte(n,n_forced*$KEYINT)"
@@ -2462,7 +2467,9 @@ encode_variant() {
         rate_burnin_label="$avg_peak_bandwidth_label"
     fi
     
-    log "Encoding: ${codec_res_fps_label} @ ${bitrate_label} (${bitrate_kbps}kbps target, preset $preset) - $encoder_name"
+    local log_preset="$preset"
+    [ "$codec" = "av1" ] && log_preset="$AV1_SVT_PRESET"   # AV1 ignores $preset (see AV1_SVT_PRESET)
+    log "Encoding: ${codec_res_fps_label} @ ${bitrate_label} (${bitrate_kbps}kbps target, preset $log_preset) - $encoder_name"
     log "  Resolution: ${width}x${height}"
     log "  Timecode: ${fontsize_tc}px at ($x_offset, $y_tc)"
     if [[ -n "$avg_peak_bandwidth_label" ]]; then
