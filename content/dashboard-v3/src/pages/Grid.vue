@@ -15,7 +15,7 @@
  * State persists in URL params so a refresh keeps the same view:
  *   ?protocol=hls&codec=h264&segs=6&maxRes=1080&content=bucks_bunny&random=1
  */
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useUrlSearchParams } from '@vueuse/core';
 import ShellLayout from '@/components/ShellLayout.vue';
 import GridTile from '@/components/GridTile.vue';
@@ -200,25 +200,97 @@ const random = computed(() => params.random === '1');
 
 const allContent = ref<ApiContent[]>([]);
 const fetchError = ref<string | null>(null);
+// Set once the first /api/content response arrives, so an empty catalogue
+// reads as "empty" rather than "Loading…" forever (#1020).
+const contentLoaded = ref(false);
+// Jobs not yet finished. While any exist the catalogue is polled, so their
+// output appears without a manual reload -- notably the first-run sample
+// encode on a fresh install (#1020).
+const activeJobs = ref(0);
+
+function contentSignature(list: ApiContent[]): string {
+  return list
+    .map((c) => `${c.name}|${c.has_hls ? 1 : 0}|${c.has_dash ? 1 : 0}|${c.max_height ?? ''}|${c.max_resolution ?? ''}`)
+    .sort()
+    .join('\n');
+}
 
 async function fetchContent() {
   try {
     const r = await fetch('/api/content');
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = (await r.json()) as ApiContent[];
-    allContent.value = Array.isArray(data) ? data : [];
+    const data = (await r.json()) as ApiContent[] | null;
+    const next = Array.isArray(data) ? data : [];
+    // Replace only on an actual change, so a background refresh of an
+    // unchanged catalogue doesn't recompute the grid.
+    if (!contentLoaded.value || contentSignature(next) !== contentSignature(allContent.value)) {
+      allContent.value = next;
+    }
     fetchError.value = null;
   } catch (err: any) {
     fetchError.value = err?.message || String(err);
+  } finally {
+    contentLoaded.value = true;
   }
 }
 
-onMounted(fetchContent);
+const ACTIVE_JOB_STATUSES = new Set(['queued', 'uploading', 'encoding']);
+
+async function fetchActiveJobs(): Promise<number> {
+  try {
+    const r = await fetch('/api/jobs');
+    if (r.ok) {
+      const data = await r.json();
+      const jobs: Array<{ status?: string }> = Array.isArray(data) ? data : (data?.jobs ?? []);
+      activeJobs.value = jobs.filter((j) => ACTIVE_JOB_STATUSES.has(j.status ?? '')).length;
+    }
+  } catch {
+    /* keep the last known count */
+  }
+  return activeJobs.value;
+}
+
+const REFRESH_INTERVAL_MS = 10_000;
+let refreshTimer: number | undefined;
+
+async function backgroundRefresh() {
+  if (document.hidden) return;
+  const wasActive = activeJobs.value;
+  const active = await fetchActiveJobs();
+  // Poll while encodes run or nothing exists yet, and once more after the last
+  // job finishes so its output shows up.
+  if (active > 0 || wasActive > 0 || !allContent.value.length) {
+    await fetchContent();
+  }
+}
+
+function onVisibilityChange() {
+  if (!document.hidden) {
+    // Back on the tab: anything that finished while it was hidden should appear.
+    void fetchContent();
+    void fetchActiveJobs();
+  }
+}
+
+onMounted(() => {
+  void fetchContent();
+  void fetchActiveJobs();
+  refreshTimer = window.setInterval(() => { void backgroundRefresh(); }, REFRESH_INTERVAL_MS);
+  document.addEventListener('visibilitychange', onVisibilityChange);
+});
+
+onUnmounted(() => {
+  if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
+  document.removeEventListener('visibilitychange', onVisibilityChange);
+});
 
 function friendlyLabel(name: string): string {
-  // Strip noisy timestamp + codec suffix for the on-tile label.
+  // Strip noisy timestamp + codec suffix for the on-tile label. The codec may
+  // be followed by a delivery-profile / duration tag (`_xs`, `_vod`, `_6s`) --
+  // `apple-uniq-live-xs` content is `<stem>_p200_<codec>_xs` -- which used to
+  // survive as a stray "Xs" in the title (#1019).
   return name
-    .replace(/_(h264|hevc|av1|ts|hw|dash)/gi, '')
+    .replace(/_(h264|hevc|av1|ts|hw|dash)(?:_(?:xs|vod|\d+(?:\.\d+)?s))?/gi, '')
     .replace(/_\d{8}_\d{6}/i, '')
     .replace(/_p\d+/i, '')
     .replace(/_/g, ' ')
@@ -411,12 +483,20 @@ function setFocus(i: number) {
   }
 }
 
-watch(visible, () => {
-  // If the visible set changes (filter / shuffle) and the focused tile
-  // dropped out, clear the focus so nothing is left blaring.
-  if (focusIndex.value != null && focusIndex.value >= visible.value.length) {
-    focusIndex.value = null;
+watch(visible, (list, prev) => {
+  if (focusIndex.value == null) return;
+  if (!prev || !prev.length) {
+    // First population (the on-load focus restore below sets the index):
+    // just make sure it's in range.
+    if (focusIndex.value >= list.length) focusIndex.value = null;
+    return;
   }
+  // Follow the focused tile by identity. A background refresh can insert
+  // content ahead of it and shift indices (#1020); if it dropped out of view
+  // (filter / shuffle), clear focus so nothing is left blaring.
+  const was = prev[focusIndex.value];
+  const idx = was ? list.findIndex((it) => it.name === was.name && it.protocol === was.protocol) : -1;
+  focusIndex.value = idx >= 0 ? idx : null;
 });
 
 // Restore "which tile had audio" on load, if that content is still in
@@ -527,7 +607,13 @@ onBeforeUnmount(() => {
       <div v-if="fetchError" class="banner banner-error">
         Couldn't load /api/content: {{ fetchError }}
       </div>
-      <div v-else-if="!allContent.length" class="banner">Loading content…</div>
+      <div v-else-if="!contentLoaded" class="banner">Loading content…</div>
+      <div v-else-if="!allContent.length && activeJobs > 0" class="banner">
+        Encoding in progress ({{ activeJobs }} job{{ activeJobs === 1 ? '' : 's' }}) — content will appear here automatically when it finishes.
+      </div>
+      <div v-else-if="!allContent.length" class="banner">
+        No content yet. Upload a video from <a href="/dashboard/upload.html">Upload Content</a> to get started.
+      </div>
       <div v-else-if="!visible.length" class="banner">
         No content matches the current filters. Loosen them or click ↻ Reload.
       </div>
@@ -535,7 +621,7 @@ onBeforeUnmount(() => {
       <div class="grid" :style="gridStyle">
         <GridTile
           v-for="(item, i) in visible"
-          :key="`${item.name}|${item.protocol}|${effectiveSegs}|${i}`"
+          :key="`${item.name}|${item.protocol}|${effectiveSegs}`"
           :content-name="item.name"
           :label="item.label"
           :protocol="item.protocol"

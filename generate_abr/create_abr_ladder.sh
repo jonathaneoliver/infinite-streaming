@@ -1978,7 +1978,7 @@ create_mezzanine() {
 
 check_and_apply_padding() {
     if [ "$PAD_TO_SEGMENT_BOUNDARY" != "true" ]; then
-        log "Padding disabled via --no-padding flag"
+        log "Padding disabled (padding is opt-in: pass --padding or --padding-pink)"
         VIDEO_PADDING_DURATION=0
         AUDIO_PADDING_DURATION=0
         return 0

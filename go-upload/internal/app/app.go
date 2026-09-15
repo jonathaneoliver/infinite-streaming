@@ -23,6 +23,7 @@ type App struct {
 	ActiveMu    sync.Mutex
 	LogHub      *LogHub
 	Progress    *ProgressTracker
+	Results     *ResultTracker
 }
 
 func New(st *store.SQLiteStore, cfg config.Config) *App {
@@ -33,6 +34,7 @@ func New(st *store.SQLiteStore, cfg config.Config) *App {
 		ActiveProcs: make(map[string]*exec.Cmd),
 		LogHub:      NewLogHub(),
 		Progress:    NewProgressTracker(),
+		Results:     NewResultTracker(),
 	}
 }
 
@@ -146,6 +148,11 @@ func (a *App) ExecuteEncodingJob(ctx context.Context, jobID string) error {
 				a.LogHub.Broadcast(jobID, util.TimestampLog("📊 "+msg))
 			}
 		}
+		// Record what the encode actually does (encoders, padding) as the
+		// script reports it, so the job page shows reality, not the request.
+		if res := a.Results.Parse(jobID, line); res != nil {
+			_ = a.Store.UpdateJobStatus(jobID, store.JobStatusUpdate{Result: res})
+		}
 	})
 	if err != nil {
 		a.LogHub.Broadcast(jobID, util.TimestampLog("⚠️ "+err.Error()))
@@ -157,6 +164,7 @@ func (a *App) ExecuteEncodingJob(ctx context.Context, jobID string) error {
 	a.ActiveMu.Lock()
 	delete(a.ActiveProcs, jobID)
 	a.ActiveMu.Unlock()
+	a.Results.Forget(jobID)
 
 	if waitErr != nil {
 		return a.failJob(jobID, "Encoding failed: "+waitErr.Error())
