@@ -548,6 +548,11 @@ async function loadSetup() {
   }
 }
 async function setupSeedSample() {
+  // On an empty stack a content page counts down to a redirect to Upload.
+  // Seeding answers "no content", so stop that countdown first: otherwise the
+  // navigation aborts this request mid-flight (nginx 499) and drops the user
+  // on Upload before "Seeding…" / "Mark Setup Complete" can show.
+  cancelSetupRedirect();
   setupSeedState.value = 'seeding';
   try {
     await fetch('/api/setup/seed', { method: 'POST' });
