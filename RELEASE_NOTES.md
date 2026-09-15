@@ -98,6 +98,22 @@ FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
 
 Default (TLS on) installs need nothing.
 
+### Content management is no longer hidden on public hostnames
+
+The dashboard used to hide Upload / Source Library / Encoding Jobs and
+Monitor whenever it was reached through a hostname that didn't look internal
+(anything other than `.local`, `localhost`, a private IP or Tailscale) —
+which also hid them on LAN deployments reached through a real DNS name, such
+as one serving a Let's Encrypt cert. They're now always shown. **To keep the
+old behaviour**, set this in `.env`:
+
+```bash
+INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS=1
+```
+
+This was, and remains, a UI hide rather than access control — protect a
+public deployment with `INFINITE_STREAM_AUTH_HTPASSWD`.
+
 ### Deploy target renames
 
 `make deploy` is now the everyday local-tree → test-dev deploy (alias for
