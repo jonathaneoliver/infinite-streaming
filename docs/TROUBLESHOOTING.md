@@ -55,7 +55,7 @@ The dashboard lists content by scanning `/media/dynamic_content`. If you copied 
 
 ### Content plays on the dashboard but is missing from the iOS / Android picker
 
-The apps filter by codec, and the codec comes **only** from the directory name's `_p200_<codec>` segment. `GET /api/content` shows `"codec": ""` for a name that doesn't match — e.g. `my-show_h264`, `my-show_p100_h264`, or the Encoder's padded `my-show_p200_padblack_h264`. Rename the directory to `<stem>_p200_<codec>[_<tag>]`; see [`CONTENT_FORMAT.md`](CONTENT_FORMAT.md#the-directory-name).
+The apps filter by codec, and the codec comes **only** from the directory name's `_p200_<codec>` segment. `GET /api/content` shows `"codec": ""` for a name that doesn't match — e.g. `my-show_h264` or `my-show_p100_h264`. Rename the directory to `<stem>_p200[_padblack|_padpink]_<codec>[_<tag>]`; see [`CONTENT_FORMAT.md`](CONTENT_FORMAT.md#the-directory-name).
 
 ### LL or 1s variant missing (`has_ll: false`)
 
