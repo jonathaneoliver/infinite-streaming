@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,21 @@ import (
 )
 
 const setupMarkerFile = ".infinite-streaming-initialized"
+
+// seedPartialDurationMs is the LL partial duration the sample clip is encoded
+// with; it is also part of the output name (see seedOutputName).
+const seedPartialDurationMs = 200
+
+// seedOutputName names the seed's encode output the way uploads and re-encodes
+// do (routes.go: outputName + "_p" + <partial ms>), so the script writes
+// `<stem>_p200_<codec>[_<tag>]`. The codec is only recognised after that
+// `_p200_` marker -- by util.ListContent (/api/content's `codec`) and by the
+// Apple apps' codec filter. The seed used to pass the bare stem, so its content
+// listed with codec "" and the iOS stream picker (default filter H.264) was
+// empty on a fresh install.
+func seedOutputName(stem string) string {
+	return stem + "_p" + strconv.Itoa(seedPartialDurationMs)
+}
 
 type DirStatus struct {
 	Path     string `json:"path"`
@@ -120,12 +136,12 @@ func (h *Handler) SetupSeed(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	config := map[string]interface{}{
-		"output_name":     outputName,
+		"output_name":     seedOutputName(outputName),
 		"codec_selection": "both",
 		"hls_format":      "fmp4",
 		"segment_duration": 6,
 		"gop_duration":     1,
-		"partial_duration": 200,
+		"partial_duration": seedPartialDurationMs,
 	}
 	job := store.Job{
 		JobID:     jobID,
