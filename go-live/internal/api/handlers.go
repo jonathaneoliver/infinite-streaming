@@ -1237,7 +1237,13 @@ func (h *Handler) OnDemandDashManifest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	inputPath := filepath.Join(infiniteOutputDir, content, "master.m3u8")
-	ensureDashWorker(h, content, inputPath, mpdRelPath, mpdData)
+	// DASH refresh runs inside the unified HLS worker, which exits at once
+	// when there is no HLS master — but stays registered as running, so it
+	// is never respawned and nothing refreshes (#1033). Don't spawn it for
+	// DASH-only content; the staleness check below regenerates on request.
+	if _, statErr := os.Stat(inputPath); statErr == nil {
+		ensureDashWorker(h, content, inputPath, mpdRelPath, mpdData)
+	}
 	h.trackRequest(r, content, "dash-"+variant)
 	h.ensureTracked(content, "dash-"+variant, "hls-worker-"+content)
 
@@ -1249,17 +1255,23 @@ func (h *Handler) OnDemandDashManifest(w http.ResponseWriter, r *http.Request) {
 		dashCache[cacheKey] = entry
 	}
 	cached := entry.data
-	if cached == nil {
-		liveMPD, genErr := dash.GenerateLiveMPD(mpdData, time.Now(), r.URL.Path, duration, llMode)
-		if genErr != nil {
+	if cached == nil || time.Since(entry.updated) > dashCacheMaxAge(duration, llMode) {
+		liveMPD, genErr := dash.GenerateLiveMPD(mpdData, time.Now(), fmt.Sprintf("go-live/%s", content), duration, llMode)
+		switch {
+		case genErr == nil:
+			logf("[GO-LIVE:DASH] Generated MPD content=%s variant=%s duration=%ds bytes=%d\n", content, variant, duration, len(liveMPD))
+			entry.data = liveMPD
+			entry.updated = time.Now()
+			cached = liveMPD
+		case cached == nil:
 			dashCacheMu.Unlock()
 			http.Error(w, fmt.Sprintf("Failed to generate MPD: %v", genErr), http.StatusInternalServerError)
 			return
+		default:
+			// A stale MPD still plays for a while; a 500 stops the player now.
+			logf("[GO-LIVE:DASH] ERROR: refresh failed, serving stale MPD content=%s variant=%s age=%s: %v\n",
+				content, variant, time.Since(entry.updated).Round(time.Millisecond), genErr)
 		}
-		logf("[GO-LIVE:DASH] Generated MPD content=%s duration=%ds bytes=%d\n", content, duration, len(liveMPD))
-		entry.data = liveMPD
-		entry.updated = time.Now()
-		cached = liveMPD
 	}
 	dashCacheMu.Unlock()
 
@@ -1291,6 +1303,28 @@ var (
 
 func dashGenKey(content, mpdRelPath string) string {
 	return fmt.Sprintf("%s|%s", content, mpdRelPath)
+}
+
+// dashCacheMaxAge is how old a cached live MPD may get before a request
+// regenerates it instead of serving it (#1033).
+//
+// The unified worker refreshes LL every 200 ms tick and 2s/6s on their
+// segment boundaries, so while it runs those entries never reach these ages
+// and requests are served from cache as before. Two cases do trip it:
+//   - 1s: the worker's tick never generates it, so it is refreshed here, on
+//     demand, whenever it is older than one segment — rather than adding a
+//     per-second generation (and its log lines) for every DASH worker whether
+//     or not anyone plays 1s.
+//   - DASH-only content: no worker runs at all, so every variant is refreshed
+//     here.
+func dashCacheMaxAge(duration int, llMode bool) time.Duration {
+	switch {
+	case llMode, duration <= 1:
+		return time.Second
+	default:
+		// One segment plus a second of slack for the worker's boundary tick.
+		return time.Duration(duration+1) * time.Second
+	}
 }
 
 func dashCacheKey(content, mpdRelPath, variant string) string {
