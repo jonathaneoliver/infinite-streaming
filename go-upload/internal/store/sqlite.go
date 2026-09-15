@@ -24,6 +24,7 @@ type JobStatusUpdate struct {
 	CompletedAt *string
 	ErrorMsg    *string
 	OutputPaths interface{}
+	Result      map[string]interface{}
 }
 
 type Job struct {
@@ -39,6 +40,10 @@ type Job struct {
 	LogPath     *string                `json:"log_path"`
 	OutputPaths interface{}            `json:"output_paths"`
 	SourceID    *string                `json:"source_id"`
+	// Result records what the encode actually did -- encoders used per codec,
+	// padding applied -- as parsed from the ladder script's output. Config is
+	// only the request, and can't say which encoder ran (#1017).
+	Result map[string]interface{} `json:"result,omitempty"`
 }
 
 type Source struct {
@@ -106,7 +111,8 @@ func (s *SQLiteStore) InitSchema() error {
 			error_message TEXT,
 			log_path TEXT,
 			output_paths TEXT,
-			source_id TEXT
+			source_id TEXT,
+			result TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS sources (
 			source_id TEXT PRIMARY KEY,
@@ -132,6 +138,13 @@ func (s *SQLiteStore) InitSchema() error {
 			return err
 		}
 	}
+	// result: what the encode actually did (encoders used, padding), parsed
+	// from the ladder script's output while the job runs (#1017).
+	if _, err := s.db.Exec(`ALTER TABLE jobs ADD COLUMN result TEXT`); err != nil {
+		if !isDuplicateColumnError(err) {
+			return err
+		}
+	}
 
 	// One-shot migration: rewrite legacy /boss/ paths to /media/ for source
 	// records created before the project's content-root rename. Idempotent.
@@ -147,7 +160,7 @@ func (s *SQLiteStore) ListJobs() ([]Job, error) {
 	// (queued/uploading/encoding) regardless of age so a long-running encode
 	// never disappears from the list mid-run.
 	cutoff := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339Nano)
-	rows, err := s.db.Query(`SELECT job_id, name, status, progress, config, created_at, started_at, completed_at, error_message, log_path, output_paths, source_id
+	rows, err := s.db.Query(`SELECT job_id, name, status, progress, config, created_at, started_at, completed_at, error_message, log_path, output_paths, source_id, result
 		FROM jobs
 		WHERE created_at >= ? OR status IN ('queued','uploading','encoding')
 		ORDER BY created_at DESC`, cutoff)
@@ -168,7 +181,7 @@ func (s *SQLiteStore) ListJobs() ([]Job, error) {
 }
 
 func (s *SQLiteStore) GetJob(jobID string) (*Job, error) {
-	row := s.db.QueryRow(`SELECT job_id, name, status, progress, config, created_at, started_at, completed_at, error_message, log_path, output_paths, source_id FROM jobs WHERE job_id = ?`, jobID)
+	row := s.db.QueryRow(`SELECT job_id, name, status, progress, config, created_at, started_at, completed_at, error_message, log_path, output_paths, source_id, result FROM jobs WHERE job_id = ?`, jobID)
 	job, err := scanJob(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -242,6 +255,14 @@ func (s *SQLiteStore) UpdateJobStatus(jobID string, update JobStatusUpdate) erro
 			return err
 		}
 		fields = append(fields, "output_paths = ?")
+		args = append(args, string(b))
+	}
+	if update.Result != nil {
+		b, err := json.Marshal(update.Result)
+		if err != nil {
+			return err
+		}
+		fields = append(fields, "result = ?")
 		args = append(args, string(b))
 	}
 	if len(fields) == 0 {
@@ -360,6 +381,7 @@ func scanJob(row jobScanner) (Job, error) {
 	var errorMsg sql.NullString
 	var logPath sql.NullString
 	var sourceID sql.NullString
+	var resultStr sql.NullString
 
 	err := row.Scan(
 		&job.JobID,
@@ -374,6 +396,7 @@ func scanJob(row jobScanner) (Job, error) {
 		&logPath,
 		&outputStr,
 		&sourceID,
+		&resultStr,
 	)
 	if err != nil {
 		return job, err
@@ -407,6 +430,11 @@ func scanJob(row jobScanner) (Job, error) {
 	}
 	if sourceID.Valid {
 		job.SourceID = &sourceID.String
+	}
+	if resultStr.Valid && resultStr.String != "" {
+		if err := json.Unmarshal([]byte(resultStr.String), &job.Result); err != nil {
+			return job, fmt.Errorf("decode job.result: %w", err)
+		}
 	}
 
 	return job, nil

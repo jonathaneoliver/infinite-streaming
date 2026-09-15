@@ -293,7 +293,7 @@
             }
 
             // Configuration
-            displayConfig(job.config);
+            displayConfig(job.config, job.result);
 
             // Output
             if (job.output_paths && job.output_paths.length > 0) {
@@ -324,15 +324,51 @@
             return statusMap[status] || 'neutral';
         }
 
-        function displayConfig(config) {
+        function escapeHtml(value) {
+            return String(value).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+        }
+
+        // Encoder: what actually ran, recorded from the ladder script's output
+        // (job.result.encoders). config.force_software is only the request --
+        // it can't say which encoder was used, and hosts without VideoToolbox
+        // always encode in software (#1017).
+        function describeEncoders(config, result) {
+            const encoders = result && result.encoders;
+            if (encoders && Object.keys(encoders).length) {
+                const names = { h264: 'H.264', hevc: 'HEVC', av1: 'AV1' };
+                return ['h264', 'hevc', 'av1']
+                    .filter(codec => encoders[codec])
+                    .map(codec => `${names[codec]}: ${encoders[codec]}`)
+                    .join(' · ');
+            }
+            return config.force_software
+                ? 'Software only (requested; encoder not recorded)'
+                : 'Hardware allowed (requested; encoder not recorded)';
+        }
+
+        // Padding: what the script did (job.result.padding), else the request.
+        // go-upload's setting is config.padding (black | pink | none); padding
+        // is off unless requested. The old row read config.no_padding, which
+        // nothing writes, so it always said "Enabled" (#1017).
+        function describePadding(config, result) {
+            if (result && result.padding === 'applied') {
+                const secs = result.padding_video_s;
+                return secs ? `Applied (${secs}s)` : 'Applied';
+            }
+            if (result && result.padding === 'none') return 'None';
+            const requested = { black: 'Black (requested)', pink: 'Pink (requested)', none: 'None (requested)' };
+            return requested[config.padding] || 'None (default; not recorded)';
+        }
+
+        function displayConfig(config, result) {
             const configGrid = document.getElementById('configGrid');
             const items = [
                 { label: 'Output Name', value: config.output_name || 'Auto' },
                 { label: 'Codec', value: formatCodec(config.codec_selection) },
                 { label: 'Max Resolution', value: config.max_resolution || 'No limit' },
                 { label: 'HLS Format', value: config.hls_format || 'fMP4' },
-                { label: 'Hardware Encoding', value: config.force_software ? 'Disabled' : 'Enabled' },
-                { label: 'Padding', value: config.no_padding ? 'Disabled' : 'Enabled' },
+                { label: 'Encoder', value: describeEncoders(config, result) },
+                { label: 'Padding', value: describePadding(config, result) },
             ];
 
             if (config.duration_limit) {
@@ -341,8 +377,8 @@
 
             configGrid.innerHTML = items.map(item => `
                 <div class="config-item">
-                    <span class="config-label">${item.label}:</span>
-                    <span class="config-value">${item.value}</span>
+                    <span class="config-label">${escapeHtml(item.label)}:</span>
+                    <span class="config-value">${escapeHtml(item.value)}</span>
                 </div>
             `).join('');
         }
