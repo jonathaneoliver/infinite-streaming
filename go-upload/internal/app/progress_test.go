@@ -144,3 +144,76 @@ func TestProgressNeverDecreasesAcrossPhases(t *testing.T) {
 		t.Fatalf("final progress = %d, want 95 at Encoding Complete", last)
 	}
 }
+
+// A dashboard re-encode stores duration_limit=0 for "no limit" and carries no
+// metadata. That 0 used to become the source duration, which switched
+// time-based progress off: the bar only stepped once per rung.
+func TestProgressDurationLimitZeroIsNoLimit(t *testing.T) {
+	cfg := map[string]interface{}{"codec_selection": "hevc", "duration_limit": 0.0} // JSON number
+	tr := NewEncodingProgressTracker(cfg)
+	lines := []string{
+		scriptLog("Phase 1: Input Validation"),
+		scriptLog("Duration: 120s"),
+		ansiGreen + "✓" + ansiReset + " Selected 2 variants for encoding (ladder: x)",
+	}
+	lines = append(lines, encodeRungs(1, 120, true)...)
+	vals := replay(t, tr, lines)
+
+	if tr.sourceDuration != 120 {
+		t.Fatalf("sourceDuration = %v, want 120 from the script's Duration line", tr.sourceDuration)
+	}
+	assertMonotonicWithin(t, vals, 0, encodingCeiling)
+	mid := 18 + (encodingCeiling-18)/2
+	if last := vals[len(vals)-1]; last < mid-1 || last > mid+1 {
+		t.Fatalf("after 1 of 2 two-pass rungs progress = %d, want ~%d (all: %v)", last, mid, vals)
+	}
+}
+
+// With no metadata and no limit (the first-run seed) the tracker starts from
+// a 100s guess; a 120s clip then saturated each pass ~17% early. The script's
+// Duration line must replace the guess, and other "duration" lines must not.
+func TestProgressUsesScriptDurationOverFallback(t *testing.T) {
+	tr := NewEncodingProgressTracker(map[string]interface{}{"codec_selection": "hevc"})
+	if tr.sourceDuration != 100 {
+		t.Fatalf("precondition: fallback sourceDuration = %v, want 100", tr.sourceDuration)
+	}
+	lines := []string{
+		scriptLog("Duration: 120s"),
+		scriptLog("Video duration: 118.500s"),
+		scriptLog("Configured segment duration: 6s"),
+		ansiGreen + "✓" + ansiReset + " Selected 1 variants for encoding (ladder: x)",
+	}
+	lines = append(lines, encodeRungs(1, 120, false)...) // out_time 0, 30, 60, 90, 120
+	vals := replay(t, tr, lines)
+
+	if tr.sourceDuration != 120 {
+		t.Fatalf("sourceDuration = %v, want 120", tr.sourceDuration)
+	}
+	// out_time=90 of 120s is 75% through the only rung: 18 + 57*0.75 = 60.
+	// Measured against 100s it would read 90% (69).
+	if got := vals[len(vals)-2]; got < 59 || got > 61 {
+		t.Fatalf("progress at out_time=90s = %d, want ~60 (all: %v)", got, vals)
+	}
+}
+
+// A positive limit truncates the encode, so each pass covers only that long.
+func TestProgressDurationCappedByLimit(t *testing.T) {
+	cfg := map[string]interface{}{
+		"codec_selection": "hevc",
+		"duration_limit":  24,
+		"metadata":        map[string]interface{}{"duration": 120.0},
+	}
+	tr := NewEncodingProgressTracker(cfg)
+	if tr.sourceDuration != 24 {
+		t.Fatalf("initial sourceDuration = %v, want the 24s limit, not the 120s clip", tr.sourceDuration)
+	}
+	replay(t, tr, []string{scriptLog("Duration: 120s")})
+	if tr.sourceDuration != 24 {
+		t.Fatalf("after Duration line sourceDuration = %v, want 24", tr.sourceDuration)
+	}
+	tr = NewEncodingProgressTracker(map[string]interface{}{"duration_limit": 300.0})
+	replay(t, tr, []string{scriptLog("Duration: 120s")})
+	if tr.sourceDuration != 120 {
+		t.Fatalf("limit longer than clip: sourceDuration = %v, want 120", tr.sourceDuration)
+	}
+}

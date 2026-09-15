@@ -77,32 +77,61 @@ type EncodingProgressTracker struct {
 	currentVariantNum  int
 	currentVariantInfo string
 	totalVariants      int
-	currentPass        int // 0 single-pass, 1 or 2 within a two-pass rung
-	sourceDuration     float64
+	currentPass        int     // 0 single-pass, 1 or 2 within a two-pass rung
+	sourceDuration     float64 // seconds of video each ffmpeg pass covers
+	durationLimit      float64 // positive --time limit, 0 = no limit
 	lastProgress       int
 	lastBroadcast      string
 }
 
 func NewEncodingProgressTracker(cfg map[string]interface{}) *EncodingProgressTracker {
+	limit := positiveDurationLimit(cfg)
 	tracker := &EncodingProgressTracker{
-		config:        cfg,
-		totalVariants: estimateVariants(cfg),
-		sourceDuration: func() float64 {
-			if metadata, ok := cfg["metadata"].(map[string]interface{}); ok {
-				if dur, ok := metadata["duration"].(float64); ok {
-					return dur
-				}
-			}
-			if val, ok := cfg["duration_limit"].(float64); ok {
-				return val
-			}
-			if val, ok := cfg["duration_limit"].(int); ok {
-				return float64(val)
-			}
-			return 100
-		}(),
+		config:         cfg,
+		totalVariants:  estimateVariants(cfg),
+		durationLimit:  limit,
+		sourceDuration: initialSourceDuration(cfg, limit),
 	}
 	return tracker
+}
+
+// positiveDurationLimit returns the job's --time limit in seconds, or 0 when
+// there is none. go-upload stores duration_limit=0 for "no limit" (the ladder
+// script treats --time <= 0 the same way), so 0 must never be read as a
+// zero-second clip: that disabled time-based progress entirely.
+func positiveDurationLimit(cfg map[string]interface{}) float64 {
+	var v float64
+	switch n := cfg["duration_limit"].(type) {
+	case float64:
+		v = n
+	case int:
+		v = float64(n)
+	}
+	if v > 0 {
+		return v
+	}
+	return 0
+}
+
+// initialSourceDuration is the best guess before the script reports the real
+// clip length ("Duration: Ns", early in Phase 1), which then replaces it.
+func initialSourceDuration(cfg map[string]interface{}, limit float64) float64 {
+	if metadata, ok := cfg["metadata"].(map[string]interface{}); ok {
+		if dur, ok := metadata["duration"].(float64); ok && dur > 0 {
+			return capToLimit(dur, limit)
+		}
+	}
+	if limit > 0 {
+		return limit
+	}
+	return 100 // unknown until the script logs the source duration
+}
+
+func capToLimit(dur, limit float64) float64 {
+	if limit > 0 && limit < dur {
+		return limit
+	}
+	return dur
 }
 
 func estimateVariants(cfg map[string]interface{}) int {
@@ -155,6 +184,11 @@ const encodingCeiling = 75
 
 var selectedVariantsRE = regexp.MustCompile(`Selected (\d+) variants for encoding`)
 
+// "[11:37:56] Duration: 120s" -- the source clip length the script logs in
+// Phase 1. Anchored so "Video duration:", "Configured segment duration:" etc.
+// can't match.
+var sourceDurationRE = regexp.MustCompile(`^(?:\[[0-9:]+\]\s*)?Duration: ([0-9]+(?:\.[0-9]+)?)s\s*$`)
+
 func (t *EncodingProgressTracker) ParseLine(line string) *int {
 	switch {
 	case strings.Contains(line, "variants for encoding"):
@@ -164,6 +198,16 @@ func (t *EncodingProgressTracker) ParseLine(line string) *int {
 		if m := selectedVariantsRE.FindStringSubmatch(line); m != nil {
 			if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
 				t.totalVariants = n
+			}
+		}
+		return nil
+	case strings.Contains(line, "Duration: "):
+		// Use the real clip length rather than a guess: no job config carries
+		// it, so a 120s clip was measured against a 100s fallback, or against
+		// 0 (progress disabled) for duration_limit=0 (#1018).
+		if m := sourceDurationRE.FindStringSubmatch(ansiEscapeRE.ReplaceAllString(line, "")); m != nil {
+			if d, err := strconv.ParseFloat(m[1], 64); err == nil && d > 0 {
+				t.sourceDuration = capToLimit(d, t.durationLimit)
 			}
 		}
 		return nil
