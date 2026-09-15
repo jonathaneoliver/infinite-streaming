@@ -85,7 +85,7 @@ default `DNS:localhost,IP:127.0.0.1`. Set it in `.env` to every name/IP clients
 reach the box by, for example:
 
 ```
-INFINITE_STREAM_TLS_SAN=DNS:dev.jeoliver.com,DNS:jonathanoliver-ubuntu.local,DNS:localhost,IP:192.168.1.50
+INFINITE_STREAM_TLS_SAN=DNS:dev.jeoliver.com,DNS:jonathanoliver-ubuntu.local,DNS:localhost,IP:192.168.0.50
 ```
 
 A self-signed cert can list **all** of those at once — you're your own CA, so no
@@ -139,7 +139,8 @@ that's the catch, and it's why AppleTV is painful (see [AppleTV](#appletv-and-tv
 ## Mode 3 — public Let's Encrypt via Cloudflare DNS-01
 
 This is the cert currently on test-dev: a real Let's Encrypt cert for
-`dev.jeoliver.com`. "Issued By: R12 / Let's Encrypt" in a browser confirms it —
+`dev.jeoliver.com`. "Issued By: … / Let's Encrypt" in a browser confirms it (the
+intermediate's name, e.g. `R12` or `YR1`, rotates between issuances) —
 **Cloudflare did not sign it**; Cloudflare is only the DNS provider used to solve
 the ACME challenge.
 
@@ -155,34 +156,65 @@ that isn't WAN-reachable.
    (grey cloud, no proxy):
 
    ```
-   dev.jeoliver.com  A  192.168.1.50
+   dev.jeoliver.com  A  <box-LAN-IP>        # e.g. 192.168.0.50
    ```
 
+   Use the box's address on the LAN your clients sit on (`hostname -I` on the
+   box), and give the box a DHCP reservation — if its lease changes, the name
+   silently points at the wrong machine. Check with `dig +short dev.jeoliver.com`.
    This is a *public* DNS record holding a *private* IP — see
    [No WAN exposure](#no-wan-exposure) for why that's safe.
 
-3. **Issue the cert with `lego`** (Go ACME client) using the Cloudflare DNS plugin.
-   Create a scoped Cloudflare API token (Zone → DNS → Edit on `jeoliver.com`) and:
+3. **Issue the cert with `lego`** (Go ACME client, `brew install lego`) using the
+   Cloudflare DNS plugin. It runs anywhere with internet access — it only talks to
+   Cloudflare's API and Let's Encrypt, never to the box. Create a scoped Cloudflare
+   API token (Zone → DNS → Edit on `jeoliver.com`) and:
 
    ```bash
    export CLOUDFLARE_DNS_API_TOKEN='<scoped-token>'
-   lego --email you@example.com \
+   lego run --accept-tos \
+        --email you@example.com \
         --dns cloudflare \
         --domains dev.jeoliver.com \
-        --path /tmp/lego \
-        run --accept-tos
+        --path ~/.lego
+   unset CLOUDFLARE_DNS_API_TOKEN
    ```
 
+   This is **lego v5** syntax: options go *after* `run`, and there is no separate
+   `renew` command. (v4 put them before `run`: `lego --email … --path … run`.)
+
    `lego` writes the TXT record via the Cloudflare API, waits for propagation,
-   completes the challenge, and drops `dev.jeoliver.com.crt` (fullchain) +
-   `dev.jeoliver.com.key` under `/tmp/lego/certificates/`.
+   completes the challenge, and stores the ACME account plus the cert — a `.crt`
+   (fullchain) and a `.key` for `dev.jeoliver.com` — under `~/.lego`. **Keep
+   `--path` somewhere persistent** (not `/tmp`): renewal reuses the account and the
+   existing cert stored there. `lego certificates list --path ~/.lego` shows what's
+   stored and where; the storage layout changed between lego v4 and v5 (`lego
+   migrate` converts old state), so confirm the file paths there rather than
+   assuming them.
 
    > **Security:** the token can edit `jeoliver.com` DNS. Export it for the run
    > and clear it after; never commit it. If a token ends up in shell history or
-   > a transcript, **revoke it** in the Cloudflare dashboard.
+   > a transcript, **revoke it** in the Cloudflare dashboard. `~/.lego` holds the
+   > cert's private key and the ACME account key — keep it private.
 
-4. **Install the cert** on the host as the server's `localhost.pem` (fullchain) and
-   `localhost-key.pem` (key) — same slots the self-signed/mkcert paths use.
+4. **Install the cert** on the box as the server's `localhost.pem` (fullchain) and
+   `localhost-key.pem` (key) — same slots the self-signed/mkcert paths use. For
+   test-dev that's the bind-mounted `~/test-dev/certs/` on `$TEST_SSH`:
+
+   ```bash
+   CRT=~/.lego/certificates/dev.jeoliver.com.crt   # confirm with: lego certificates list --path ~/.lego
+   KEY=~/.lego/certificates/dev.jeoliver.com.key
+   scp "$CRT" "$TEST_SSH":test-dev/certs/localhost.pem
+   scp "$KEY" "$TEST_SSH":test-dev/certs/localhost-key.pem
+   ssh "$TEST_SSH" 'chmod 600 ~/test-dev/certs/localhost-key.pem && docker restart test-dev-server'
+   ```
+
+   **Restart the container, don't just reload nginx.** nginx would pick up the new
+   files on `nginx -s reload`, but go-proxy reads the cert once at startup for the
+   per-session shaper ports (`ListenAndServeTLS` in `go-proxy/cmd/server/main.go`),
+   so without a restart those ports keep serving the old cert — and fail once it
+   expires. For other deployments, use their certs dir (`$K3S_CERTS_DIR` for k3d)
+   and restart the server the same way.
 
 5. **Point the announce URL at the matching name** (see [Announce URL](#the-announce-url-must-match-the-cert)):
 
@@ -190,25 +222,53 @@ that isn't WAN-reachable.
    INFINITE_STREAM_ANNOUNCE_URL=https://dev.jeoliver.com:21000
    ```
 
-6. **Renew** — LE certs last 90 days. Cron `lego renew` (weekly) and reinstall.
-   `acme.sh` or `certbot --dns-cloudflare` are equivalent alternatives; `lego` was
-   chosen as a single static binary.
+6. **Verify** from a LAN client:
+
+   ```bash
+   echo | openssl s_client -connect dev.jeoliver.com:21000 -servername dev.jeoliver.com 2>/dev/null \
+     | openssl x509 -noout -subject -issuer -enddate
+   ```
+
+   Expect a subject of `CN = dev.jeoliver.com`, a Let's Encrypt issuer, and the
+   new expiry. Repeat against one of the deployment's per-session shaper ports
+   while a session is open, to confirm go-proxy picked it up too.
+
+### Renewal
+
+Let's Encrypt certs last **90 days**. **Renewal is currently manual** — there is
+no scheduled `lego run` (checked: the Mac's crontab and LaunchAgents, the test
+box's user crontab and `/etc/cron.d`). Nothing warns before expiry; when it
+lapses, every client fails TLS at once (strict clients like Go/curl and the
+AppleTV hard-fail, browsers show an interstitial).
+
+To renew, re-run the **same `lego run` command from step 3** with the same
+`--path`, then **repeat step 4** (copy + restart) and step 6 (verify). `lego run`
+only renews when the stored cert is due (by default once a third of its lifetime
+is left, ~30 days); add `--renew-force` to renew regardless. If the `--path`
+state was lost, the same command simply issues a fresh cert.
+
+Check the expiry of what's actually being served at any time with the step-6
+command. `acme.sh` or `certbot --dns-cloudflare` are equivalent alternatives to
+`lego`, which was chosen as a single static binary. Automating this (a scheduled
+`lego run` with `--deploy-hook` doing step 4) is tracked with the other TLS
+tooling in issue #484.
 
 ### No WAN exposure
 
-`dev.jeoliver.com` resolves to `192.168.1.50` — an RFC1918 LAN address — in
-**public** DNS. That sounds alarming but isn't:
+`dev.jeoliver.com` resolves to the box's LAN address — an RFC1918 private IP such
+as `192.168.0.50` — in **public** DNS. That sounds alarming but isn't:
 
-- **On the LAN:** your machine resolves the name to `192.168.1.50` and connects
+- **On the LAN:** your machine resolves the name to that private IP and connects
   directly over the local network. The cert name matches → green padlock. The WAN
   is never involved.
-- **From the internet:** the same lookup returns `192.168.1.50`, which is
+- **From the internet:** the same lookup returns the same private IP, which is
   non-routable on the public internet. There's no port-forward and no firewall
   hole — the box is invisible from outside.
 
 The only "public" thing is the DNS *record*; the IP it hands out goes nowhere off
-your LAN. Side effect: it publishes your internal IP (harmless), and the name only
-*works* for clients sitting on the `192.168.0.x` network.
+your LAN. Side effects: it publishes your internal IP (harmless), and the name only
+*works* for clients on the same LAN subnet as the box — a phone on cellular, or a
+client on another VLAN without a route, can't reach it.
 
 ## The announce URL must match the cert
 

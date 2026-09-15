@@ -173,15 +173,15 @@ software encode, `--ladder apple-uniq-live-xs`.
 
 **This is the fallback encoder, not the primary one — it is largely superseded.**
 Production content is produced by the separate **Encoder** project
-(`infinite-streaming-encoder`, `~/Projects/Encoder`) and copied onto the
+([`infinite-streaming-encoder`](https://github.com/jonathaneoliver/infinite-streaming-encoder))
+and copied onto the
 infinite-streaming server:
 
 ```
 Encoder project  →  $ENCODE_STAGING_DIR  →  rsync  →  server  →  /media/dynamic_content/
 ```
 
-The Encoder writes finished packages to `$ENCODE_STAGING_DIR` (e.g.
-`/Volumes/4TB/media/encode-staging`); they are rsynced to the server's content
+The Encoder writes finished packages to `$ENCODE_STAGING_DIR`; they are rsynced to the server's content
 volume (`CONTENT_DIR`, bind-mounted to `/media` in the container), landing under
 `/media/dynamic_content/<content>/`. Discovery is a plain directory scan gated on
 a manifest being present, so a package joins the catalogue as soon as it is in
@@ -212,7 +212,9 @@ undershoots `-b:v` by ~17%, so the published bitrates are only truthful with it.
 
 Output directories are `<stem>_p200_<codec>[_<tag>]`; the tag is `xs` on this
 ladder and absent on `legacy`/`apple`/`apple-uniq`, so pre-existing content keeps
-its current names. Anything parsing content names must tolerate the optional tag
+its current names. The full contract (what each name part drives, required files,
+partial-segment info) is [`docs/CONTENT_FORMAT.md`](docs/CONTENT_FORMAT.md) —
+update it with any change to a name parser or to go-live's input reading. Anything parsing content names must tolerate the optional tag
 after the codec — `go-upload/internal/util/content.go`'s `_p200_(codec)(_|$)`
 already does, and `findOutputDirectories` globs rather than reconstructing.
 

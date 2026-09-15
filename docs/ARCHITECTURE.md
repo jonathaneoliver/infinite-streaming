@@ -83,19 +83,24 @@ Host volume mounted at `/media` inside the container:
 /media/
 ├── originals/                      # source files (uploaded or copied in)
 │   └── my-show.mp4
-├── dynamic_content/                # encoded ABR output (served as segments)
-│   └── my-show_p200_h264/
-│       ├── video/240p/…m4s
-│       ├── video/480p/…m4s
-│       ├── video/720p/…m4s
-│       ├── audio/…m4s
-│       └── manifest.json           # consumed by go-live as the source of truth
+├── dynamic_content/                # encoded ABR packages, one directory per codec
+│   └── my-show_p200_h264_xs/       # name is a contract — see CONTENT_FORMAT.md
+│       ├── master.m3u8             # HLS source master: go-live's input
+│       ├── manifest.mpd            # DASH source manifest
+│       ├── 360p/ … 2160p/          # one dir per video rung
+│       │   ├── init.mp4
+│       │   ├── playlist.m3u8       # carries #EXT-X-PART byte ranges (LL + 1s)
+│       │   └── segment_00001.m4s …
+│       ├── audio/                  # same shape as a rung
+│       └── thumbnail{,-small,-large}.jpg
 └── certs/                          # optional TLS certs (auto-generated if missing)
     ├── localhost.pem
     └── localhost-key.pem
 ```
 
 Live manifests generated on the fly live in tmpfs at `/content/go-live/{content}/…` and are not persisted.
+
+Packages normally come from [infinite-streaming-encoder](https://github.com/jonathaneoliver/infinite-streaming-encoder) and are copied in; the bundled `generate_abr/` pipeline is the fallback. The full naming and layout contract — what each part of the directory name drives, which files are required, and the partial-segment info LL depends on — is in [`CONTENT_FORMAT.md`](CONTENT_FORMAT.md).
 
 ## Subprocess boundaries
 
