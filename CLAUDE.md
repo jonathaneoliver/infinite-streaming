@@ -210,12 +210,12 @@ The 1s case lands exactly on Apple's live/linear 1.25x bound and longer variants
 sit below it. Two-pass is not optional at this buffer size: single-pass x265
 undershoots `-b:v` by ~17%, so the published bitrates are only truthful with it.
 
-Output directories are `<stem>_p200_<codec>[_<tag>]`; the tag is `xs` on this
+Output directories are `<stem>_p<partial ms>_<codec>[_<tag>]` (`_p200` by default); the tag is `xs` on this
 ladder and absent on `legacy`/`apple`/`apple-uniq`, so pre-existing content keeps
 its current names. The full contract (what each name part drives, required files,
 partial-segment info) is [`docs/CONTENT_FORMAT.md`](docs/CONTENT_FORMAT.md) —
 update it with any change to a name parser or to go-live's input reading. Anything parsing content names must tolerate the optional tag
-after the codec — `go-upload/internal/util/content.go`'s `_p200_(codec)(_|$)`
+after the codec — `go-upload/internal/util/content.go`'s `_p(\d+)[_pad…]_(codec)(_|$)`
 already does, and `findOutputDirectories` globs rather than reconstructing.
 
 ### Client Apps

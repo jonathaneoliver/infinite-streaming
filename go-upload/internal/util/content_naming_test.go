@@ -28,9 +28,20 @@ func TestSplitClipIDAndCodec(t *testing.T) {
 		{"clip_p200_padblack_h264_xs", "clip_padblack_xs", "h264"},
 		{"clip_p200_PadBlack_AV1_6s_20260101_010101", "clip_padblack_6s", "av1"},
 
+		// Any partial duration. 200 is dropped from clip_id (unchanged
+		// behaviour); others stay so 200 ms and 1000 ms encodes don't dedup.
+		{"clip_p1000_h264_xs", "clip_p1000_xs", "h264"},
+		{"clip_p1000_hevc", "clip_p1000", "hevc"},
+		{"clip_p100_h264", "clip_p100", "h264"},
+		{"clip_p1000_padblack_av1_6s", "clip_p1000_padblack_6s", "av1"},
+		{"clip_P1000_H264_20260101_010101", "clip_p1000", "h264"},
+		// A name that already carried a partial, re-encoded (doubled suffix).
+		{"clip_p200_p200_h264_xs", "clip_p200_xs", "h264"},
+		{"clip_p1000_p200_hevc_xs", "clip_p1000_xs", "hevc"},
+
 		// Still outside the contract: no codec.
 		{"sample_clip_h264_xs", "sample_clip_h264_xs", ""},
-		{"clip_p100_h264", "clip_p100_h264", ""},
+		{"clip_p_h264", "clip_p_h264", ""},
 		{"clip_p200_padgreen_h264", "clip_p200_padgreen_h264", ""},
 		{"clip_p200_vp9", "clip_p200_vp9", ""},
 	}
@@ -150,6 +161,33 @@ func TestByterangesSidecarMustMatchSegment(t *testing.T) {
 	}
 	if contentHasPartials(stray) {
 		t.Error("a stray *.byteranges file counted as partials")
+	}
+}
+
+// End to end through ListContent: a 1000 ms partial encode lists with its codec,
+// groups across codecs, and doesn't hide (or get hidden by) the 200 ms encode
+// of the same source.
+func TestListContentPartialDurationSiblings(t *testing.T) {
+	root := t.TempDir()
+	for _, n := range []string{"clip_p200_h264_xs", "clip_p1000_h264_xs", "clip_p1000_hevc_xs"} {
+		writeContent(t, root, n, map[string]string{"720p/playlist.m3u8": playlistWithParts})
+	}
+	list, err := ListContent(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("ListContent returned %d items, want 3 (200 ms and 1000 ms must not dedup): %+v", len(list), list)
+	}
+	want := map[string][2]string{
+		"clip_p200_h264_xs":  {"h264", "clip_xs"},
+		"clip_p1000_h264_xs": {"h264", "clip_p1000_xs"},
+		"clip_p1000_hevc_xs": {"hevc", "clip_p1000_xs"},
+	}
+	for _, c := range list {
+		if w := want[c.Name]; c.Codec != w[0] || c.ClipID != w[1] {
+			t.Errorf("%s: codec=%q clip_id=%q, want %s / %s", c.Name, c.Codec, c.ClipID, w[0], w[1])
+		}
 	}
 }
 
