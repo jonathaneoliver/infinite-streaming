@@ -81,8 +81,13 @@ spec:
           value: "30000"
         - name: INFINITE_STREAM_UPSTREAM_HOST
           value: "127.0.0.1"
+        # go-proxy fetches from nginx over plain HTTP, so it must use the cleartext
+        # loopback listener on 30005 (nginx-content.conf.template). With TLS on
+        # (the default) 30000 is HTTPS-only and every proxied playlist and segment
+        # gets "400 plain HTTP request sent to HTTPS port". 30005 serves with TLS
+        # on or off.
         - name: INFINITE_STREAM_UPSTREAM_PORT
-          value: "30000"
+          value: "30005"
         - name: INFINITE_STREAM_MAX_SESSIONS
           value: "8"
         - name: INFINITE_STREAM_TC_INTERFACE

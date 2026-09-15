@@ -66,15 +66,21 @@ services:
       - GO_UPLOAD_ADDR=:8003
       - INFINITE_STREAM_LISTEN_PORT=30000
       # TLS toggle (default on = HTTPS+HTTP/2). Set INFINITE_STREAM_TLS=off
-      # in .env to serve plain HTTP on the dashboard + shaper ports.
+      # in .env to serve plain HTTP on the dashboard + shaper ports -- and
+      # set FORWARDER_SSE_URL to http:// to match (see the forwarder service).
       - INFINITE_STREAM_TLS=${INFINITE_STREAM_TLS:-on}
       # SAN list for the auto-generated self-signed cert (used only when no
       # mkcert / Let's Encrypt cert is mounted into the certs dir). Comma-
       # separated openssl SAN entries — list every hostname/IP clients reach
       # this box by, since browsers match on SAN not CN. See docs/TLS.md.
       - INFINITE_STREAM_TLS_SAN=${INFINITE_STREAM_TLS_SAN:-DNS:localhost,IP:127.0.0.1}
+      # go-proxy fetches from nginx over plain HTTP, so it must use the cleartext
+      # loopback listener on 30005 (nginx-content.conf.template). With TLS on
+      # (the default) 30000 is HTTPS-only and every proxied playlist and segment
+      # gets "400 plain HTTP request sent to HTTPS port". 30005 serves with TLS
+      # on or off.
       - INFINITE_STREAM_UPSTREAM_HOST=127.0.0.1
-      - INFINITE_STREAM_UPSTREAM_PORT=30000
+      - INFINITE_STREAM_UPSTREAM_PORT=30005
       - INFINITE_STREAM_MAX_SESSIONS=8
       - INFINITE_STREAM_TC_INTERFACE=eth0
       # Set this to your deployed Cloudflare Worker URL to enable the
@@ -162,7 +168,12 @@ services:
       # can be a fixed value regardless of host layout.
       - ${FORWARDER_CLAUDE_DIR_HOST:-./.claude}:/claude
     environment:
-      - FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
+      # go-proxy serves TLS on 30081 by default (INFINITE_STREAM_TLS), so the
+      # forwarder must dial https. An http:// URL gets "400 Client sent an HTTP
+      # request to an HTTPS server" on every stream, forever, and nothing is
+      # archived. The forwarder trusts the self-signed cert (main.go init).
+      # With INFINITE_STREAM_TLS=off, set FORWARDER_SSE_URL=http://... in .env.
+      - FORWARDER_SSE_URL=${FORWARDER_SSE_URL:-https://go-server:30081/api/sessions/stream}
       - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
       - FORWARDER_CLICKHOUSE_DB=infinite_streaming
       - FORWARDER_CLICKHOUSE_TABLE=session_events

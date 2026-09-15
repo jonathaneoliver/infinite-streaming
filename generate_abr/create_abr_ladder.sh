@@ -80,12 +80,12 @@ Optional Arguments:
   --single-pass          Disable two-pass (two-pass is ON by default). Faster,
                          but a tight VBV buffer makes single-pass x265 undershoot
                          the target average by ~17%.
-  --two-pass             Two-pass software encode (libx264/libx265). Pass 1
+  --two-pass             Two-pass software encode (libx264/libx265/libsvtav1). Pass 1
                          profiles complexity; pass 2 distributes bits to hit the
                          -b:v target accurately while the tight VBV still holds
                          peaks flat. Fixes the single-pass x265 average undershoot
                          under a small bufsize (~17% low on HEVC — see #868).
-                         Roughly doubles encode time. Ignored for hardware/AV1.
+                         Roughly doubles encode time. Ignored for hardware.
   --max-res <resolution> Limit maximum resolution tier encoded
                          Valid: 360p, 540p, 720p, 1080p, 1440p, 2160p
                          Example: --max-res 1080p (skips 1440p, 2160p)
@@ -225,6 +225,11 @@ FORCE_HARDWARE=false  # Force hardware encoding (VideoToolbox)
 # published bitrates are only truthful with two passes. Disable with
 # --single-pass when iterating and the exact average does not matter.
 TWO_PASS=true
+
+# SVT-AV1 preset for libsvtav1 encodes (Encoder 211d77f). AV1 does not use the
+# per-rung x264/x265 $preset names, so this one value drives both the encode
+# (encode_av1_sw) and the "preset ..." label in the per-rung log line.
+AV1_SVT_PRESET=6
 HLS_FORMAT="fmp4"  # fmp4, ts, both
 PAD_TO_SEGMENT_BOUNDARY=false  # Padding is disabled by default
 MAX_RESOLUTION_HEIGHT=""  # Optional max resolution limit (e.g., "1080p")
@@ -411,8 +416,8 @@ case "$LADDER" in
         ;;
 esac
 
-# Two-pass only applies to software libx264/libx265. Hardware VideoToolbox and
-# AV1 (libsvtav1) fall back to single pass; warn so the flag isn't assumed active.
+# Two-pass applies to every software encoder (libx264/libx265/libsvtav1).
+# Hardware VideoToolbox is single-pass; warn so the flag isn't assumed active.
 if [[ "$TWO_PASS" == "true" ]] && [[ "$FORCE_HARDWARE" == "true" ]]; then
     echo "Warning: --two-pass is ignored under --force-hardware (VideoToolbox is single-pass); use software encoding for two-pass."
 fi
@@ -2305,7 +2310,7 @@ encode_two_pass_sw() {
            -pix_fmt yuv420p \
            -an \
            -f null - \
-           -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+           -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE" || return $?
 
     log "  Two-pass: pass 2/2 (final encode to target average)"
     ffmpeg -i "$MEZZANINE" \
@@ -2323,6 +2328,60 @@ encode_two_pass_sw() {
            -movflags empty_moov+default_base_moof -frag_duration 1000000 \
            "$output_file" \
            -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+}
+
+# AV1 (libsvtav1) software encode, aligned with the Encoder project
+# (scripts/infinite_streaming_encoder/encode_variants.py: build_ffmpeg_cmd +
+# _codec_specific_args). Relies on encode_variant's locals via bash dynamic
+# scope, like encode_two_pass_sw.
+#
+#   - NO -maxrate/-bufsize. The libsvtav1 wrapper rejects a max bitrate outside
+#     CRF mode ("Max Bitrate only supported with CRF mode"), and with maxrate
+#     equal to the target it reads the pair as CBR, which SVT-AV1 does not
+#     support for random-access GOPs ("CBR Rate control is currently not
+#     supported ... use VBR mode"). Every AV1 rung failed at encoder open and
+#     left a 0-byte file. AV1 runs plain VBR to the -b:v target with no peak
+#     cap, as Encoder has since 4cc6eac. Advertised peak BANDWIDTH stays honest:
+#     create_hls_manifests.py takes the packager-measured peak, not the cap.
+#   - Two-pass through ffmpeg's GENERIC -pass N -passlogfile PREFIX (SVT-AV1 has
+#     no x26x-style ":pass=N:stats=" param), for an accurate target average.
+#     Encoder a52d99d.
+#   - -preset $AV1_SVT_PRESET (6; was 8). Encoder 211d77f.
+encode_av1_sw() {
+    local passlog="$TEMP_DIR/${codec}_${label}_2pass"
+    local -a video_args=(
+        -vf "$filter"
+        -c:v libsvtav1
+        -preset "$AV1_SVT_PRESET"
+        -svtav1-params "keyint=${KEYINT}:scd=0"
+        -g "$KEYINT"
+        -force_key_frames "expr:gte(n,n_forced*$KEYINT)"
+        -pix_fmt yuv420p
+        -b:v "${bitrate_kbps}k"
+    )
+    if [ "$TWO_PASS" = true ]; then
+        log "  Two-pass: pass 1/2 (complexity analysis, output discarded)"
+        ffmpeg -i "$MEZZANINE" "${video_args[@]}" \
+               -pass 1 -passlogfile "$passlog" \
+               -an \
+               -f null - \
+               -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE" || return $?
+        log "  Two-pass: pass 2/2 (final encode to target average)"
+        ffmpeg -i "$MEZZANINE" "${video_args[@]}" \
+               -pass 2 -passlogfile "$passlog" \
+               -tag:v av01 \
+               -an \
+               -movflags empty_moov+default_base_moof -frag_duration 1000000 \
+               "$output_file" \
+               -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+    else
+        ffmpeg -i "$MEZZANINE" "${video_args[@]}" \
+               -tag:v av01 \
+               -an \
+               -movflags empty_moov+default_base_moof -frag_duration 1000000 \
+               "$output_file" \
+               -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+    fi
 }
 
 encode_variant() {
@@ -2408,7 +2467,9 @@ encode_variant() {
         rate_burnin_label="$avg_peak_bandwidth_label"
     fi
     
-    log "Encoding: ${codec_res_fps_label} @ ${bitrate_label} (${bitrate_kbps}kbps target, preset $preset) - $encoder_name"
+    local log_preset="$preset"
+    [ "$codec" = "av1" ] && log_preset="$AV1_SVT_PRESET"   # AV1 ignores $preset (see AV1_SVT_PRESET)
+    log "Encoding: ${codec_res_fps_label} @ ${bitrate_label} (${bitrate_kbps}kbps target, preset $log_preset) - $encoder_name"
     log "  Resolution: ${width}x${height}"
     log "  Timecode: ${fontsize_tc}px at ($x_offset, $y_tc)"
     if [[ -n "$avg_peak_bandwidth_label" ]]; then
@@ -2559,7 +2620,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
         elif [ "$TWO_PASS" = true ]; then
             # libx265 software, two-pass (accurate average — see encode_two_pass_sw)
             encode_two_pass_sw libx265 x265-params \
-                "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0:pools=+:frame-threads=0" \
+                "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0:pools=*:frame-threads=0" \
                 hvc1
         else
             # libx265 software with bitrate control (single pass)
@@ -2571,7 +2632,7 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -bufsize "${bufsize_kbps}k" \
                    -preset "$preset" \
                    -threads 0 \
-                   -x265-params "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0:pools=+:frame-threads=0" \
+                   -x265-params "keyint=${KEYINT}:min-keyint=${KEYINT}:scenecut=0:open-gop=0:pools=*:frame-threads=0" \
                    -tag:v hvc1 \
                    -pix_fmt yuv420p \
                    -an \
@@ -2621,30 +2682,20 @@ drawtext=fontfile='${FONT}':text='JEO':fontsize=${fontsize_label}:fontcolor=whit
                    -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
         fi
     else
-        # AV1 (libsvtav1) software encoding
-        ffmpeg -i "$MEZZANINE" \
-               -vf "$filter" \
-               -c:v libsvtav1 \
-               -preset 8 \
-               -b:v "${bitrate_kbps}k" \
-               -maxrate "$((bitrate_kbps * MAXRATE_PERCENT / 100))k" \
-               -bufsize "${bufsize_kbps}k" \
-               -g "$KEYINT" \
-               -force_key_frames "expr:gte(n,n_forced*$KEYINT)" \
-               -svtav1-params "keyint=${KEYINT}:scd=0" \
-               -pix_fmt yuv420p \
-               -tag:v av01 \
-               -an \
-               -movflags empty_moov+default_base_moof -frag_duration 1000000 \
-               "$output_file" \
-               -loglevel warning -stats 2>&1 | tee -a "$LOG_FILE"
+        # AV1 (libsvtav1) software, single- or two-pass (see encode_av1_sw)
+        encode_av1_sw
     fi
+    local encode_rc=$?
     
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
     
-    if [[ ! -f "$output_file" ]]; then
-        log_error "Encoding failed for $bitrate_label"
+    # Fail on the encoder's exit status AND on an empty output. An encoder that
+    # refuses its parameters still leaves a 0-byte file behind, which the old
+    # `-f` (exists) test accepted: the job packaged nothing and still reported
+    # `complete`. set -o pipefail makes encode_rc the ffmpeg status, not tee's.
+    if [[ $encode_rc -ne 0 || ! -s "$output_file" ]]; then
+        log_error "Encoding failed for $bitrate_label (encoder rc=$encode_rc)"
         ENCODING_ERRORS+=("Encoding failed for ${codec_upper} ${res_name} @ ${bitrate_label}")
         exit 1
     fi
