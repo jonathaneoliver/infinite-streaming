@@ -11,10 +11,9 @@ services:
     # /media/dynamic_content), so overlaying just these dirs is enough for the
     # catalogue to appear.
     #
-    # No certs mount and no INFINITE_STREAM_UPSTREAM_PORT override: with TLS off,
-    # nginx's external listener on 30000 is already cleartext, so in-container
-    # go-proxy → nginx calls use it directly (the 30005 loopback split is a
-    # TLS-only concern).
+    # No certs mount and no INFINITE_STREAM_UPSTREAM_PORT override: the base
+    # compose's 30005 loopback listener is cleartext with TLS on or off, so
+    # in-container go-proxy → nginx calls need nothing different here.
     volumes:
       - ${SHARED_CONTENT_DIR}/dynamic_content:/media/dynamic_content
       - ${SHARED_CONTENT_DIR}/originals:/media/originals

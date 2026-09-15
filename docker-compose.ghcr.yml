@@ -32,8 +32,13 @@ services:
       - GO_LIVE_OUTPUT_DIR=/go-live
       - GO_UPLOAD_ADDR=:8003
       - INFINITE_STREAM_LISTEN_PORT=30000
+      # go-proxy fetches from nginx over plain HTTP, so it must use the cleartext
+      # loopback listener on 30005 (nginx-content.conf.template). With TLS on
+      # (the default) 30000 is HTTPS-only and every proxied playlist and segment
+      # gets "400 plain HTTP request sent to HTTPS port". 30005 serves with TLS
+      # on or off.
       - INFINITE_STREAM_UPSTREAM_HOST=127.0.0.1
-      - INFINITE_STREAM_UPSTREAM_PORT=30000
+      - INFINITE_STREAM_UPSTREAM_PORT=30005
       - INFINITE_STREAM_MAX_SESSIONS=8
       - INFINITE_STREAM_TC_INTERFACE=eth0
       # Wire nginx /analytics/api/* and /grafana/* to the analytics

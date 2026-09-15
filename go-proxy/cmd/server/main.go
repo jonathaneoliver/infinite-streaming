@@ -2556,7 +2556,10 @@ func (m PortMapping) MapExternalPort(port string) (string, bool) {
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	upstreamHost := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_HOST", "INFINITE_UPSTREAM_HOST", "ISM_UPSTREAM_HOST"}, "127.0.0.1")
-	upstreamPort := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_PORT", "INFINITE_UPSTREAM_PORT", "ISM_UPSTREAM_PORT"}, "30000")
+	// Default to nginx's cleartext loopback listener: go-proxy dials upstream
+	// over plain HTTP, and the public 30000 listener is HTTPS-only when TLS is
+	// on (the default), which answers every proxied request with a 400.
+	upstreamPort := getenvAny([]string{"INFINITE_STREAM_UPSTREAM_PORT", "INFINITE_UPSTREAM_PORT", "ISM_UPSTREAM_PORT"}, "30005")
 	maxSessions := getenvIntAny([]string{"INFINITE_STREAM_MAX_SESSIONS", "INFINITE_MAX_SESSIONS", "ISM_MAX_SESSIONS"}, 8)
 	defaultRateMbps := getenvInt("INFINITE_STREAM_DEFAULT_RATE_MBPS", 0)
 	if defaultRateMbps < 0 {

@@ -21,6 +21,12 @@ services:
     volumes:
       - ${CONTENT_DIR:-./sample-content}:/media
     environment:
+      # go-proxy fetches from nginx over plain HTTP, so it must use the cleartext
+      # loopback listener on 30005 (nginx-content.conf.template). With TLS on
+      # (the default) 30000 is HTTPS-only and every proxied playlist and segment
+      # gets "400 plain HTTP request sent to HTTPS port". 30005 serves with TLS
+      # on or off.
+      - INFINITE_STREAM_UPSTREAM_PORT=30005
       - INFINITE_STREAM_MAX_SESSIONS=8
       - INFINITE_STREAM_TC_INTERFACE=eth0
       - INFINITE_STREAM_ENABLE_ANALYTICS=1
