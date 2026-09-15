@@ -27,20 +27,24 @@ different; see [Known gaps](#known-gaps).)
 One directory per codec:
 
 ```
-<stem>_p200_<codec>[_<tag>][_<YYYYMMDD>_<HHMMSS>]
+<stem>_p200[_padblack|_padpink]_<codec>[_<tag>][_<YYYYMMDD>_<HHMMSS>]
 ```
 
 | Part | Example | Read by | What it drives |
 |---|---|---|---|
 | `<stem>` | `tears-of-steel-4k` | catalogue | The title. Lowercased, it becomes `clip_id`: packages sharing a `clip_id` are one clip in several codecs, so clients group them into one row. |
 | `_p200` | `_p200` | catalogue, iOS, Android: **the literal `200`** | A marker for "the codec comes next". go-live does **not** read the number: partial duration comes from the manifests ([below](#partial-segment-information)). |
+| `_padblack` / `_padpink` | `_padblack` | catalogue | Optional. infinite-streaming-encoder's padding option, which it places **before** the codec. Kept in `clip_id` (`clip_padblack`), so a padded and an unpadded encode of the same source are separate rows and never hide each other. |
 | `_<codec>` | `_h264`, `_hevc`, `_h265`, `_av1` | catalogue, iOS, Android | Sets `codec` in `/api/content`. The iOS and Android codec filters depend on it, so without it the clip is missing from the app's stream picker. |
 | `_<tag>` | `_xs`, `_2s` | catalogue; go-live for pins | Distinguishes encodes of the same source. It stays in `clip_id`, so `fpv_p200_h264_xs` and `fpv_p200_h264_6s` are separate rows. |
 | `_<YYYYMMDD>_<HHMMSS>` | `_20260101_010101` | catalogue | Added by the encoders when re-encoding into a name that already exists. Removed from `clip_id`. **Newest wins:** only the latest package per (`clip_id`, codec) is listed. A name without a timestamp uses the directory mtime. |
 
-The server matches `_p200_(h264|hevc|h265|av1)(_|$)`, case-insensitively
+The server matches `_p200(_pad(black|pink))?_(h264|hevc|h265|av1)(_|$)`,
+case-insensitively
 ([`go-upload/internal/util/content.go`](../go-upload/internal/util/content.go)).
-The iOS and Android apps use the same pattern.
+The iOS and Android apps use the server's `codec` and `clip_id`; their own copies
+of the pattern (without the padding suffix) are only a cold-start fallback before
+`/api/content` has loaded.
 
 ### Tags
 
@@ -60,7 +64,7 @@ filters never match them:
 |---|---|
 | `my-show_h264` | no `_p200_` (v2.0.0's first-run seed looked like this) |
 | `my-show_p100_h264` | only the literal `_p200_` is recognised |
-| `my-show_p200_padblack_h264` | the Encoder's padding option inserts `_padblack` / `_padpink` **before** the codec |
+| `my-show_p200_padgreen_h264` | only `_padblack` / `_padpink` are recognised between `_p200` and the codec |
 | `my-show_p200_vp9` | codec not in the list |
 
 Also:
@@ -90,8 +94,8 @@ my-show_p200_h264_xs/
 
 | File | Required | Notes |
 |---|---|---|
-| `master.m3u8` | **Yes** | The catalogue lists a directory only if it has `master.m3u8` or `manifest.mpd`. In practice go-live needs `master.m3u8` even for DASH, because DASH refresh runs inside the HLS worker (see [Known gaps](#known-gaps)). |
-| Media playlists | Yes | Found by following the master's `EXT-X-STREAM-INF` and `EXT-X-MEDIA:TYPE=AUDIO` URIs. go-live doesn't care about names. The catalogue does: see [Known gaps](#known-gaps). |
+| `master.m3u8` | **Yes** for HLS | The catalogue lists a directory only if it has `master.m3u8` or `manifest.mpd`. DASH-only content plays, but its live MPDs are refreshed on request rather than by a worker (see [Known gaps](#known-gaps)). |
+| Media playlists | Yes | Found by following the master's `EXT-X-STREAM-INF` and `EXT-X-MEDIA:TYPE=AUDIO` URIs, so names are free. The catalogue follows the same URIs (the first four variants) to detect partials and segment length. Without a master it falls back to `1080p/`, `720p/`, `540p/` or `360p/` containing `playlist.m3u8`. |
 | `init.mp4` via `EXT-X-MAP` | Yes for fMP4 | Only `URI` is read; a `BYTERANGE` on the map is ignored. |
 | `manifest.mpd` | For DASH | See [DASH](#dash). |
 | `<segment>.m4s.byteranges` | No | Fallback partial info; see below. |
@@ -207,6 +211,11 @@ One JSON file per segment, named `<segment>.byteranges` (e.g.
 - The fallback encoder writes sidecars, turns them into `#EXT-X-PART` tags, then
   keeps or prunes them. The Encoder does not write them.
 
+For `has_ll`, the catalogue counts a playlist as having partials if it has an
+`#EXT-X-PART:` tag (`#EXT-X-PART-INF` alone is only a declaration and doesn't
+count), or if the sidecar for its **first segment** exists. A stray
+`*.byteranges` file that no segment names doesn't count.
+
 ### Without partial info
 
 The package still serves, but:
@@ -264,8 +273,7 @@ Our encoders' defaults (6s segments, 200 ms partials, 1s GOP) meet all of these.
 
 ## Checklist
 
-1. The directory name is `<stem>_p200_<h264|hevc|h265|av1>[_<tag>]`, with no
-   padding suffix before the codec.
+1. The directory name is `<stem>_p200[_padblack|_padpink]_<h264|hevc|h265|av1>[_<tag>]`.
 2. `master.m3u8` is at the top level. Variants and audio are in their own
    directories, with `init.mp4`, `playlist.m3u8` and segments side by side.
 3. Every media playlist has `#EXT-X-PART … BYTERANGE="len@offset"` tiling each
@@ -290,15 +298,15 @@ just your pinned length), and your full ladder under `variants`.
 
 These are current limitations, not contract rules.
 
-- **The catalogue looks for rendition directories by name.** `has_ll`,
-  `segment_durations` and `segment_duration` are detected only from
-  `1080p/`, `720p/`, `540p/` or `360p/` containing `playlist.m3u8`. A ladder with
-  none of those plays fine through go-live but is reported with no LL and no 1s.
-  Our encoders always produce at least one.
 - **The codec comes from the name only**, not from the master's `CODECS`
   attribute.
-- **DASH needs `master.m3u8` too.** Without it the live MPD is generated once and
-  then stays frozen.
+- **DASH-only content is refreshed per request, not continuously.** Live MPDs are
+  normally regenerated by the per-content worker, which needs `master.m3u8`.
+  Without one, each MPD is regenerated when a request finds it older than its
+  variant allows (1 s for LL and 1s, one segment plus 1 s for 2s/6s). It plays,
+  but an LL-DASH MPD can be up to 1 s behind instead of one 200 ms part.
+- **The DASH 1s MPD is refreshed per request for all content** (when older than
+  1 s); the worker refreshes LL, 2s and 6s continuously.
 - **go-live caches the parsed DASH manifests, and the HLS master and variant
   list, for as long as a worker runs.** After replacing the files of a package
   that has already been played, restart go-live, or wait for the idle worker to
