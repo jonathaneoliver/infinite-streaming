@@ -216,9 +216,12 @@ async function fetchContent() {
 onMounted(fetchContent);
 
 function friendlyLabel(name: string): string {
-  // Strip noisy timestamp + codec suffix for the on-tile label.
+  // Strip noisy timestamp + codec suffix for the on-tile label. The codec may
+  // be followed by a delivery-profile / duration tag (`_xs`, `_vod`, `_6s`) --
+  // `apple-uniq-live-xs` content is `<stem>_p200_<codec>_xs` -- which used to
+  // survive as a stray "Xs" in the title (#1019).
   return name
-    .replace(/_(h264|hevc|av1|ts|hw|dash)/gi, '')
+    .replace(/_(h264|hevc|av1|ts|hw|dash)(?:_(?:xs|vod|\d+(?:\.\d+)?s))?/gi, '')
     .replace(/_\d{8}_\d{6}/i, '')
     .replace(/_p\d+/i, '')
     .replace(/_/g, ' ')
