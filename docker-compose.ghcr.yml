@@ -40,6 +40,9 @@ services:
       - INFINITE_STREAM_UPSTREAM_HOST=127.0.0.1
       - INFINITE_STREAM_UPSTREAM_PORT=30005
       - INFINITE_STREAM_MAX_SESSIONS=8
+      # Optional: hide content management + Monitor in the dashboard nav on
+      # public-looking hostnames (soft UI hide; off by default).
+      - INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS=${INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS:-0}
       - INFINITE_STREAM_TC_INTERFACE=eth0
       # Wire nginx /analytics/api/* and /grafana/* to the analytics
       # sidecar services below. Same gating pattern as base compose;

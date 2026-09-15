@@ -444,25 +444,6 @@ async function submitPair() {
   }
 }
 
-// --- Access restrictions (ported from shared-nav.js) ---
-// Hide content-management (Upload / Sources / Jobs) and the Monitor item when
-// the dashboard is reached over a non-internal (public) host. This is a soft
-// UI hide matching the legacy nav — real auth is the optional htpasswd.
-function isInternalNetworkHost(hostname: string): boolean {
-  const host = (hostname || '').toLowerCase();
-  if (!host) return false;
-  if (host === 'localhost' || host === '::1' || host.startsWith('127.')) return true;
-  if (host.endsWith('.local')) return true;
-  if (!host.includes('.')) return true; // bare single-label hostname
-  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-  if (/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$/.test(host)) return true; // Tailscale CGNAT
-  return false;
-}
-const restrictContent = computed(
-  () => typeof window !== 'undefined' && !isInternalNetworkHost(window.location.hostname),
-);
 
 // Developer mode — the `?developer=1` convention (shared-nav.js, SessionDetails,
 // playback/quartet, …). NOT sticky: honoured only when the CURRENT URL carries
@@ -505,9 +486,35 @@ interface SetupStatus {
   initialized?: boolean;
   issues?: string[];
   recommendations?: string[];
+  /** INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS (optional, default off). */
+  restrict_public_hosts?: boolean;
+}
+// --- Optional public-host restriction (mirrors shared-nav.js) ---
+// Off by default. When the server sets INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS
+// (/api/setup's restrict_public_hosts), hide content management (Upload /
+// Sources / Jobs) and Monitor on hostnames that don't look internal. A soft UI
+// hide only -- real auth is the optional htpasswd. It used to be unconditional,
+// which hid these on any LAN deployment reached through a real DNS name.
+function isInternalNetworkHost(hostname: string): boolean {
+  const host = (hostname || '').toLowerCase();
+  if (!host) return false;
+  if (host === 'localhost' || host === '::1' || host.startsWith('127.')) return true;
+  if (host.endsWith('.local')) return true;
+  if (!host.includes('.')) return true; // bare single-label hostname
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$/.test(host)) return true; // Tailscale CGNAT
+  return false;
 }
 const SETUP_PAGES_REQUIRE_CONTENT = new Set(['playback', 'testing', 'quartet', 'grid', 'segment-duration']);
 const setup = ref<SetupStatus | null>(null);
+const restrictContent = computed(
+  () =>
+    !!setup.value?.restrict_public_hosts &&
+    typeof window !== 'undefined' &&
+    !isInternalNetworkHost(window.location.hostname),
+);
 const setupModalOpen = ref(false);
 const setupSeedState = ref<'idle' | 'seeding' | 'seeded' | 'failed'>('idle');
 const setupRedirectMsg = ref('');
