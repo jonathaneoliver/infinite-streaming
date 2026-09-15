@@ -535,16 +535,11 @@ Host-mounted volume at `/media` inside the container:
 - `/media/dynamic_content/{content}/` — encoded outputs
 - `/media/certs/` — TLS certs (auto-generated if missing)
 
-Three ways to add content:
+Ways to add content:
 
-- **Upload via the dashboard.** Open **Upload Content**, pick a file and encoding options. The server writes the source to `/media/originals/` and the encoded ladder to `/media/dynamic_content/`.
-- **Drop a source file in and encode from the UI.** Copy into `$CONTENT_DIR/originals/`, refresh **Source Library**, and trigger an encode from the UI.
-- **Drop pre-encoded ladders in directly.** If you've already run the pipeline offline (locally or on a build machine), copy the whole `{content}/` directory into `$CONTENT_DIR/dynamic_content/`. It appears in the dashboard immediately — no import step.
-
-To encode outside the dashboard (offline, in CI, or on a build box):
-
-- Run the pipeline locally with [`generate_abr/create_abr_ladder.sh`](generate_abr/README.md). See [`generate_abr/QUICKSTART.md`](generate_abr/QUICKSTART.md) for common invocations and [`generate_abr/HARDWARE_ENCODING_QUICKREF.md`](generate_abr/HARDWARE_ENCODING_QUICKREF.md) for hardware-accelerated encodes.
-- Offload to AWS EC2 spot instances via [`docs/CLOUD_ENCODING.md`](docs/CLOUD_ENCODING.md) — the cloud runner produces the same `{content}_h264/` and `{content}_hevc/` directory layout, so the output drops straight into `/media/dynamic_content/`.
+- **Encode with [infinite-streaming-encoder](https://github.com/jonathaneoliver/infinite-streaming-encoder) (recommended).** The companion encoder fans an encode out across a local farm or AWS Batch spot capacity and writes packages in exactly the shape this server serves. Copy (or `rsync`) each finished `<content>/` directory into `$CONTENT_DIR/dynamic_content/`. It appears in the catalogue immediately — no import step, no restart.
+- **Bring your own encode.** Any packager works if its output follows the content contract in [`docs/CONTENT_FORMAT.md`](docs/CONTENT_FORMAT.md): the directory name (`<stem>_p200_<codec>[_<tag>]`), the fMP4 layout, and the partial-segment byte ranges in the manifests that LL-HLS / LL-DASH and 1s serving depend on. A directory that breaks the naming contract still plays, but loses its codec — and the iOS / Android pickers hide it.
+- **Upload via the dashboard (built-in fallback encoder).** Open **Upload Content**, pick a file and encoding options, or drop a source into `$CONTENT_DIR/originals/` and encode it from **Source Library**. This runs the bundled [`generate_abr/`](generate_abr/README.md) pipeline — kept working and aligned with the Encoder for quick one-off clips and the first-run seed, but no longer the primary path.
 
 ### Primary endpoints
 
@@ -606,15 +601,17 @@ Implementation details (netlink counters, caching, scope of overhead inclusion) 
 
 ## Encoding pipeline
 
-Driven by `generate_abr/create_abr_ladder.sh` (ffmpeg + Shaka Packager v3.4.2, bundled in the container).
+**Content is normally produced by [infinite-streaming-encoder](https://github.com/jonathaneoliver/infinite-streaming-encoder)**, a separate project: a parallel, chunking encoder (local farm or AWS Batch spot) that drives the same ffmpeg + Shaka Packager pipeline and writes multi-codec (H.264 / HEVC / AV1) LL-HLS + DASH ladders. Its default delivery profile, `apple-uniq-live-xs`, is what the rest of this README assumes. Whatever encodes the content, the server only cares that the output matches [`docs/CONTENT_FORMAT.md`](docs/CONTENT_FORMAT.md).
 
-Defaults: segment duration **6 s**, partial duration **200 ms**, GOP duration **1 s**.
+The container also bundles a **fallback** encoder, `generate_abr/create_abr_ladder.sh` (ffmpeg + Shaka Packager v3.4.2). It powers **Upload Content**, **Source Library** re-encodes and the first-run seed clip, and is kept aligned with the Encoder's default profile so a clip from either can be compared — but new encoding features land in the Encoder, not here.
+
+Fallback defaults: `--ladder apple-uniq-live-xs`, segment duration **6 s**, partial duration **200 ms**, GOP duration **1 s**, two-pass software encode.
 
 **Audio**: source audio is normalized to **AAC** during transcode (`always-AAC`). Source tracks in non-AAC codecs are re-encoded so every variant on the ladder has a uniform audio layer, eliminating an entire class of "this segment plays on iOS but not Android" debugging.
 
 **Synthetic source content**: `make test-pattern` generates a 4K test pattern clip you can use as a controlled source — no copyrighted material, deterministic visuals, useful when testing ABR / ladder behaviour without confounding "is this just because of the content?" questions.
 
-See [`generate_abr/README.md`](generate_abr/README.md) for the pipeline, [`generate_abr/QUICKSTART.md`](generate_abr/QUICKSTART.md) for common commands, and [`docs/CLOUD_ENCODING.md`](docs/CLOUD_ENCODING.md) for offloading encodes to AWS EC2 spot instances.
+See [`generate_abr/README.md`](generate_abr/README.md) for the fallback pipeline and [`generate_abr/QUICKSTART.md`](generate_abr/QUICKSTART.md) for common commands. For cloud / distributed encoding, use [infinite-streaming-encoder](https://github.com/jonathaneoliver/infinite-streaming-encoder).
 
 ---
 
@@ -824,9 +821,10 @@ Captured from the live dashboard; files live in [`docs/screenshots/`](docs/scree
 - [`PRD.md`](PRD.md) — product behavior source of truth
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow
 
-**Encoding:**
-- [`generate_abr/README.md`](generate_abr/README.md), [`generate_abr/QUICKSTART.md`](generate_abr/QUICKSTART.md)
-- [`docs/CLOUD_ENCODING.md`](docs/CLOUD_ENCODING.md) — AWS EC2 spot offload
+**Content & encoding:**
+- [`docs/CONTENT_FORMAT.md`](docs/CONTENT_FORMAT.md) — the content contract: directory naming, on-disk layout, partial-segment info in the manifests
+- [infinite-streaming-encoder](https://github.com/jonathaneoliver/infinite-streaming-encoder) — the primary encoder (local farm or AWS Batch spot)
+- [`generate_abr/README.md`](generate_abr/README.md), [`generate_abr/QUICKSTART.md`](generate_abr/QUICKSTART.md) — the bundled fallback encoder
 - [`generate_abr/HARDWARE_ENCODING_QUICKREF.md`](generate_abr/HARDWARE_ENCODING_QUICKREF.md)
 - [`generate_abr/PACKAGER_COMPARISON.md`](generate_abr/PACKAGER_COMPARISON.md), [`generate_abr/DASH_PACKAGING_COMPARISON.md`](generate_abr/DASH_PACKAGING_COMPARISON.md)
 

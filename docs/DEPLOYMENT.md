@@ -91,7 +91,7 @@ Consumption (pulling pre-built images) is documented in the [README](../README.m
 
 ## Cloud encoding
 
-For offloading ABR ladder encoding to AWS EC2 spot instances, see [`CLOUD_ENCODING.md`](CLOUD_ENCODING.md).
+Encoding at scale — a local farm or AWS Batch spot capacity — is handled by the companion project [infinite-streaming-encoder](https://github.com/jonathaneoliver/infinite-streaming-encoder). Copy its finished packages into `$CONTENT_DIR/dynamic_content/`; the format they must follow is in [`CONTENT_FORMAT.md`](CONTENT_FORMAT.md).
 
 ## Troubleshooting
 

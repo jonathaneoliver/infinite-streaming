@@ -2,9 +2,10 @@
 
 **Status (Aug 2026): largely superseded.** This is the FALLBACK encoder, not the primary one.
 
-Production content is now produced by the separate **Encoder** project
-(`infinite-streaming-encoder`, `~/Projects/Encoder`) and copied onto the
-infinite-streaming server. `create_abr_ladder.sh` is kept working, and kept
+Production content is now produced by the separate **Encoder** project,
+[infinite-streaming-encoder](https://github.com/jonathaneoliver/infinite-streaming-encoder),
+and copied onto the infinite-streaming server. Either way, the output must match
+the content contract in [`docs/CONTENT_FORMAT.md`](../docs/CONTENT_FORMAT.md). `create_abr_ladder.sh` is kept working, and kept
 *aligned* with that project, for the cases where standing the Encoder up is not
 worth it — a quick one-off clip, a box without it, or a change to the pipeline
 itself.
@@ -21,7 +22,7 @@ Encoder project  →  $ENCODE_STAGING_DIR  →  rsync  →  server  →  /media/
 ```
 
 The Encoder writes finished packages to the staging directory
-(`$ENCODE_STAGING_DIR`, e.g. `/Volumes/4TB/media/encode-staging`), and they are
+(`$ENCODE_STAGING_DIR`), and they are
 rsynced to the server's content volume. On the server that volume is `CONTENT_DIR`,
 bind-mounted to `/media` inside the container, so a package must land under
 `/media/dynamic_content/<content>/` to be discovered by `/api/content` and served
