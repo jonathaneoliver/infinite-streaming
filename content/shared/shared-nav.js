@@ -115,17 +115,28 @@
         return `${base}${separator}player_id=${encodeURIComponent(playerId)}`;
     }
 
+    // player_id is a UUID (API v2 spec; the v3 dashboard and apps mint
+    // UUIDv4). This used to mint 8-hex ids, which the server canonicalises
+    // to a v5 UUID -- so the id in the page URL never matched the id on
+    // /api/v2/players or the archive (#1025). Ids already saved in
+    // localStorage (ismTestPlaybackPlayerId) are kept so per-player proxy
+    // config carries over; only newly minted ids change shape.
+    // crypto.randomUUID needs a secure context; getRandomValues does not,
+    // so TLS-off (plain HTTP) stacks still get a real UUIDv4.
     function createPlayerId() {
-        if (window.crypto && window.crypto.getRandomValues) {
-            const bytes = new Uint8Array(6);
-            window.crypto.getRandomValues(bytes);
-            let value = '';
-            bytes.forEach(byte => {
-                value += byte.toString(16).padStart(2, '0');
-            });
-            return value.slice(0, 8);
+        if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+            return window.crypto.randomUUID();
         }
-        return Math.random().toString(36).slice(2, 10);
+        const bytes = new Uint8Array(16);
+        if (window.crypto && window.crypto.getRandomValues) {
+            window.crypto.getRandomValues(bytes);
+        } else {
+            for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+        }
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
     }
 
     function getOrCreateTestPlaybackPlayerId() {

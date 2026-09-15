@@ -198,6 +198,20 @@ async function ensureScript(src: string): Promise<void> {
   });
 }
 
+async function ensureStylesheet(href: string): Promise<void> {
+  if (document.querySelector(`link[data-loaded="${href}"]`)) return;
+  await new Promise<void>((resolve) => {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet';
+    l.href = href;
+    l.dataset.loaded = href;
+    // A missing stylesheet only costs styling; never block playback on it.
+    l.onload = () => resolve();
+    l.onerror = () => resolve();
+    document.head.appendChild(l);
+  });
+}
+
 async function ensureHlsJs(): Promise<any> {
   if ((window as any).Hls) return (window as any).Hls;
   await ensureScript('https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js');
@@ -209,9 +223,29 @@ async function ensureShaka(): Promise<any> {
   return (window as any).shaka;
 }
 async function ensureVideoJs(): Promise<any> {
+  // The stylesheet is not optional: without it video.js's control bar,
+  // loading spinner and menus render as raw page elements over the stats
+  // grid (#1024). The legacy pages load both the same way.
+  await ensureStylesheet('https://vjs.zencdn.net/8.21.1/video-js.css');
   if ((window as any).videojs) return (window as any).videojs;
   await ensureScript('https://vjs.zencdn.net/8.21.1/video.min.js');
   return (window as any).videojs;
+}
+
+/** Capture a <video>'s position and attributes; the returned function puts
+ *  the same element back exactly as it was (video.js moves it into its own
+ *  wrapper, adds classes/ids, and removes it on dispose). */
+function snapshotVideoElement(v: HTMLVideoElement): () => void {
+  const parent = v.parentNode;
+  const next = v.nextSibling;
+  const attrs = Array.from(v.attributes).map((a) => [a.name, a.value] as const);
+  return () => {
+    for (const name of v.getAttributeNames()) v.removeAttribute(name);
+    for (const [name, value] of attrs) v.setAttribute(name, value);
+    if (parent && v.parentNode !== parent) {
+      parent.insertBefore(v, next && next.parentNode === parent ? next : null);
+    }
+  };
 }
 
 function detach() {
@@ -363,10 +397,23 @@ async function attach(urlIn: string) {
     if (chosen === 'videojs') {
       const videojs = await ensureVideoJs();
       if (cancelled()) return;
-      const inst = videojs(v, { autoplay: true, muted: true, controls: true });
-      if (cancelled()) { try { inst.dispose(); } catch { /* ignore */ } return; }
+      // video.js wraps the <video> in its own element and dispose() removes
+      // the <video> from the DOM along with it. Remember where it lived so
+      // it can be put back, or switching to another engine attaches that
+      // engine to a detached element and nothing plays (#1026).
+      const restore = snapshotVideoElement(v);
+      // video.js copies the tag's classes onto its wrapper, and all of
+      // video-js.css is scoped under `.video-js` -- without the class the
+      // stylesheet matches nothing (#1024). restore() removes it again.
+      v.classList.add('video-js');
+      const inst = videojs(v, { autoplay: true, muted: true, controls: true, fill: true });
+      const dispose = () => {
+        try { inst.dispose(); } catch { /* ignore */ }
+        restore();
+      };
+      if (cancelled()) { dispose(); return; }
       inst.src({ src: url, type: url.includes('.mpd') ? 'application/dash+xml' : 'application/x-mpegURL' });
-      activeInstance = { destroy: () => inst.dispose() };
+      activeInstance = { destroy: dispose };
       return;
     }
   } catch (err) {
@@ -476,14 +523,19 @@ onBeforeUnmount(() => detach());
     </div>
     <div class="url-line muted" v-else>No master URL yet</div>
 
-    <video
-      ref="videoEl"
-      controls
-      muted
-      playsinline
-      autoplay
-      class="player"
-    />
+    <!-- Host element: video.js inserts its own wrapper around <video>, so the
+         element Vue renders must not be a direct sibling of other patched
+         nodes (the url-line v-if above uses it as an insert anchor). -->
+    <div class="player-host">
+      <video
+        ref="videoEl"
+        controls
+        muted
+        playsinline
+        autoplay
+        class="player"
+      />
+    </div>
 
     <PlayerStatsGrid :player-id="playerId" :sse-missed="sseMissed" />
 
@@ -503,10 +555,18 @@ onBeforeUnmount(() => detach());
   word-break: break-all;
 }
 .url-line.muted { color: #9aa0a6; font-style: italic; }
-.player {
+.player-host {
+  position: relative;
   width: 100%;
+  aspect-ratio: 16 / 9;
   background: #000;
   border-radius: 6px;
-  aspect-ratio: 16 / 9;
+  overflow: hidden;
+}
+.player {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #000;
 }
 </style>
