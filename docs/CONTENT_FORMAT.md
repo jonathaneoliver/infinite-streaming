@@ -27,24 +27,24 @@ different; see [Known gaps](#known-gaps).)
 One directory per codec:
 
 ```
-<stem>_p200[_padblack|_padpink]_<codec>[_<tag>][_<YYYYMMDD>_<HHMMSS>]
+<stem>_p<ms>[_padblack|_padpink]_<codec>[_<tag>][_<YYYYMMDD>_<HHMMSS>]
 ```
 
 | Part | Example | Read by | What it drives |
 |---|---|---|---|
 | `<stem>` | `tears-of-steel-4k` | catalogue | The title. Lowercased, it becomes `clip_id`: packages sharing a `clip_id` are one clip in several codecs, so clients group them into one row. |
-| `_p200` | `_p200` | catalogue, iOS, Android: **the literal `200`** | A marker for "the codec comes next". go-live does **not** read the number: partial duration comes from the manifests ([below](#partial-segment-information)). |
+| `_p<ms>` | `_p200`, `_p1000` | catalogue (any number); iOS/Android cold-start fallback: **only `200`** | The LL partial duration the package was encoded with, in ms: the Encoder always writes `_p200`, and the dashboard's upload / re-encode writes one package per partial duration picked (200 or 1000). It also marks "the codec comes next". A value other than 200 stays in `clip_id` (`clip_p1000`), so a 200 ms and a 1000 ms encode of the same source are separate rows. go-live does **not** read the number: partial duration comes from the manifests ([below](#partial-segment-information)). |
 | `_padblack` / `_padpink` | `_padblack` | catalogue | Optional. infinite-streaming-encoder's padding option, which it places **before** the codec. Kept in `clip_id` (`clip_padblack`), so a padded and an unpadded encode of the same source are separate rows and never hide each other. |
 | `_<codec>` | `_h264`, `_hevc`, `_h265`, `_av1` | catalogue, iOS, Android | Sets `codec` in `/api/content`. The iOS and Android codec filters depend on it, so without it the clip is missing from the app's stream picker. |
 | `_<tag>` | `_xs`, `_2s` | catalogue; go-live for pins | Distinguishes encodes of the same source. It stays in `clip_id`, so `fpv_p200_h264_xs` and `fpv_p200_h264_6s` are separate rows. |
 | `_<YYYYMMDD>_<HHMMSS>` | `_20260101_010101` | catalogue | Added by the encoders when re-encoding into a name that already exists. Removed from `clip_id`. **Newest wins:** only the latest package per (`clip_id`, codec) is listed. A name without a timestamp uses the directory mtime. |
 
-The server matches `_p200(_pad(black|pink))?_(h264|hevc|h265|av1)(_|$)`,
+The server matches `_p(\d+)(_pad(black|pink))?_(h264|hevc|h265|av1)(_|$)`,
 case-insensitively
 ([`go-upload/internal/util/content.go`](../go-upload/internal/util/content.go)).
 The iOS and Android apps use the server's `codec` and `clip_id`; their own copies
-of the pattern (without the padding suffix) are only a cold-start fallback before
-`/api/content` has loaded.
+of the pattern (literal `_p200_`, without the padding suffix) are only a
+cold-start fallback before `/api/content` has loaded.
 
 ### Tags
 
@@ -62,9 +62,9 @@ filters never match them:
 
 | Name | Why |
 |---|---|
-| `my-show_h264` | no `_p200_` (v2.0.0's first-run seed looked like this) |
-| `my-show_p100_h264` | only the literal `_p200_` is recognised |
-| `my-show_p200_padgreen_h264` | only `_padblack` / `_padpink` are recognised between `_p200` and the codec |
+| `my-show_h264` | no `_p<ms>_` (v2.0.0's first-run seed and single-step `POST /api/upload` looked like this) |
+| `my-show_p_h264` | `_p` must be followed by the partial duration in ms |
+| `my-show_p200_padgreen_h264` | only `_padblack` / `_padpink` are recognised between `_p<ms>` and the codec |
 | `my-show_p200_vp9` | codec not in the list |
 
 Also:
@@ -273,7 +273,7 @@ Our encoders' defaults (6s segments, 200 ms partials, 1s GOP) meet all of these.
 
 ## Checklist
 
-1. The directory name is `<stem>_p200[_padblack|_padpink]_<h264|hevc|h265|av1>[_<tag>]`.
+1. The directory name is `<stem>_p<ms>[_padblack|_padpink]_<h264|hevc|h265|av1>[_<tag>]` (the Encoder uses `_p200`).
 2. `master.m3u8` is at the top level. Variants and audio are in their own
    directories, with `init.mp4`, `playlist.m3u8` and segments side by side.
 3. Every media playlist has `#EXT-X-PART … BYTERANGE="len@offset"` tiling each

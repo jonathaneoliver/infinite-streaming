@@ -79,16 +79,24 @@ type ContentInfo struct {
 	encodeTS time.Time
 }
 
-// Strips `_p200_<codec>` from a content name, returning (stem-with-any-
+// Strips `_p<ms>_<codec>` from a content name, returning (stem-with-any-
 // trailing-timestamp, codec). The stem is then further reduced by
 // stripTimestampSuffix to produce the final clip_id used for dedup.
+//
+// `<ms>` is the LL partial duration the package was encoded with: go-upload
+// names each job `<name>_p<partial ms>` from the partial durations picked in
+// the dashboard (200 by default, 1000 offered), and the Encoder always uses
+// 200. Only 200 used to be recognised, so 1000 ms encodes listed with no codec.
+// A non-200 partial is kept in the clip_id (`clip_p1000`) so a 200 ms and a
+// 1000 ms encode of the same source stay separate rows; 200 is dropped, which
+// keeps every existing clip_id unchanged.
 //
 // infinite-streaming-encoder puts its padding option BETWEEN `_p200` and the
 // codec (`<stem>_p200_padblack_<codec>`, #1032), so an optional
 // `_padblack` / `_padpink` is accepted there. The padding suffix is kept in
 // the clip_id: a padded and an unpadded encode of the same source are
 // different content and must not collapse under newest-wins dedup.
-var clipIDPattern = regexp.MustCompile(`(?i)_p200(_pad(?:black|pink))?_(h264|hevc|h265|av1)(_|$)`)
+var clipIDPattern = regexp.MustCompile(`(?i)_p(\d+)(_pad(?:black|pink))?_(h264|hevc|h265|av1)(_|$)`)
 
 // Matches `_YYYYMMDD_HHMMSS` at the end of a string. shaka-packager / the
 // encode pipeline appends this when re-encoding the same source so distinct
@@ -101,13 +109,18 @@ func splitClipIDAndCodec(name string) (clipID, codec string, ts time.Time) {
 	if m == nil {
 		return strings.ToLower(stripTimestampSuffix(name)), "", time.Time{}
 	}
-	// Submatches: 1 = optional padding suffix, 2 = codec, 3 = separator.
-	codec = strings.ToLower(name[m[4]:m[5]])
-	padding := ""
-	if m[2] >= 0 {
-		padding = name[m[2]:m[3]]
+	// Submatches: 1 = partial ms, 2 = optional padding suffix, 3 = codec,
+	// 4 = separator.
+	partial := ""
+	if ms, err := strconv.Atoi(name[m[2]:m[3]]); err != nil || ms != 200 {
+		partial = "_p" + name[m[2]:m[3]]
 	}
-	stem := name[:m[0]] + padding + name[m[6]:]
+	codec = strings.ToLower(name[m[6]:m[7]])
+	padding := ""
+	if m[4] >= 0 {
+		padding = name[m[4]:m[5]]
+	}
+	stem := name[:m[0]] + partial + padding + name[m[8]:]
 	stem = strings.TrimSuffix(stem, "_")
 	ts = parseEncodeTimestamp(stem)
 	stem = stripTimestampSuffix(stem)
