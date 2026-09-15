@@ -82,7 +82,13 @@ type ContentInfo struct {
 // Strips `_p200_<codec>` from a content name, returning (stem-with-any-
 // trailing-timestamp, codec). The stem is then further reduced by
 // stripTimestampSuffix to produce the final clip_id used for dedup.
-var clipIDPattern = regexp.MustCompile(`(?i)_p200_(h264|hevc|h265|av1)(_|$)`)
+//
+// infinite-streaming-encoder puts its padding option BETWEEN `_p200` and the
+// codec (`<stem>_p200_padblack_<codec>`, #1032), so an optional
+// `_padblack` / `_padpink` is accepted there. The padding suffix is kept in
+// the clip_id: a padded and an unpadded encode of the same source are
+// different content and must not collapse under newest-wins dedup.
+var clipIDPattern = regexp.MustCompile(`(?i)_p200(_pad(?:black|pink))?_(h264|hevc|h265|av1)(_|$)`)
 
 // Matches `_YYYYMMDD_HHMMSS` at the end of a string. shaka-packager / the
 // encode pipeline appends this when re-encoding the same source so distinct
@@ -95,8 +101,13 @@ func splitClipIDAndCodec(name string) (clipID, codec string, ts time.Time) {
 	if m == nil {
 		return strings.ToLower(stripTimestampSuffix(name)), "", time.Time{}
 	}
-	codec = strings.ToLower(name[m[2]:m[3]])
-	stem := name[:m[0]] + name[m[4]:]
+	// Submatches: 1 = optional padding suffix, 2 = codec, 3 = separator.
+	codec = strings.ToLower(name[m[4]:m[5]])
+	padding := ""
+	if m[2] >= 0 {
+		padding = name[m[2]:m[3]]
+	}
+	stem := name[:m[0]] + padding + name[m[6]:]
 	stem = strings.TrimSuffix(stem, "_")
 	ts = parseEncodeTimestamp(stem)
 	stem = stripTimestampSuffix(stem)
@@ -216,12 +227,65 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 	return contentList, nil
 }
 
+// legacyRungDirs is where the catalogue used to look for variant playlists
+// before it followed the master (#1033). Still the fallback when there is no
+// master.m3u8 or it names no variants.
+var legacyRungDirs = []string{"720p", "540p", "360p", "1080p"}
+
+// maxProbedVariants bounds how many variant playlists a per-request catalogue
+// probe opens. Every rung of one encode shares segment length and partial
+// layout, so a few are enough; a 12-rung ladder shouldn't cost 12 file scans
+// per content item on every /api/content call.
+const maxProbedVariants = 4
+
+// variantPlaylistPaths returns the content's video variant playlists, in the
+// order go-live would find them: the URI line following each
+// #EXT-X-STREAM-INF in master.m3u8, resolved against the content directory.
+// Absolute and remote URIs are skipped (go-live can't serve them either).
+// Falls back to <dir>/playlist.m3u8 under the legacy rung directories when the
+// master is missing or names no usable variants, so directory-convention
+// content keeps working.
+func variantPlaylistPaths(contentPath string) []string {
+	var paths []string
+	if file, err := os.Open(filepath.Join(contentPath, "master.m3u8")); err == nil {
+		scanner := bufio.NewScanner(file)
+		expectURI := false
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if strings.HasPrefix(line, "#EXT-X-STREAM-INF") {
+				expectURI = true
+				continue
+			}
+			if !expectURI || line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			expectURI = false
+			if strings.Contains(line, "://") || strings.HasPrefix(line, "/") {
+				continue
+			}
+			p := filepath.Join(contentPath, filepath.FromSlash(line))
+			if fileExists(p) {
+				paths = append(paths, p)
+			}
+		}
+		file.Close()
+	}
+	if len(paths) > 0 {
+		return paths
+	}
+	for _, dir := range legacyRungDirs {
+		p := filepath.Join(contentPath, dir, "playlist.m3u8")
+		if fileExists(p) {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
 func detectSegmentDuration(contentPath string) *int {
-	hlsDirs := []string{"720p", "540p", "360p", "1080p"}
-	for _, dir := range hlsDirs {
-		playlistPath := filepath.Join(contentPath, dir, "playlist.m3u8")
-		if !fileExists(playlistPath) {
-			continue
+	for i, playlistPath := range variantPlaylistPaths(contentPath) {
+		if i >= maxProbedVariants {
+			break
 		}
 		if dur := parseHlsPlaylistDuration(playlistPath); dur != nil {
 			return dur
@@ -314,48 +378,53 @@ func availableSegmentDurations(name, contentPath string, hasHls bool, native *in
 // info LL-HLS needs. Mirrors go-live's LoadPlaylistInfoWithByteranges fallback
 // chain (parser/playlist.go, parser/byterange.go) so the catalogue's LL flag
 // matches what go-live can actually generate: prefer #EXT-X-PART tags in a
-// variant playlist, fall back to a sibling .byteranges file next to the media
-// segments. 2s/6s never need this; LL always does.
+// variant playlist, fall back to the `<segment>.byteranges` sidecar go-live
+// would load for that playlist's segments. 2s/6s never need this; LL always
+// does. Variant playlists come from the master (#1033), not fixed directory
+// names.
 func contentHasPartials(contentPath string) bool {
-	resDirs := []string{"1080p", "720p", "540p", "360p"}
-	for _, dir := range resDirs {
-		resPath := filepath.Join(contentPath, dir)
-		if playlistHasPartTags(filepath.Join(resPath, "playlist.m3u8")) {
+	for i, playlistPath := range variantPlaylistPaths(contentPath) {
+		if i >= maxProbedVariants {
+			break
+		}
+		hasParts, firstSegment := scanPlaylistForPartials(playlistPath)
+		if hasParts {
 			return true
 		}
-		if dirHasByteranges(resPath) {
+		if firstSegment != "" && fileExists(filepath.Join(filepath.Dir(playlistPath), filepath.FromSlash(firstSegment)+".byteranges")) {
 			return true
 		}
 	}
 	return false
 }
 
-func playlistHasPartTags(path string) bool {
+// scanPlaylistForPartials reports whether a media playlist carries
+// `#EXT-X-PART:` tags, and otherwise returns its first segment URI (for the
+// sidecar check). `#EXT-X-PART-INF` alone is only a declaration, not partial
+// info, so it does not count. go-live reads sidecars only for .m4s/.ts
+// segments, so other extensions return no segment.
+func scanPlaylistForPartials(path string) (hasParts bool, firstSegment string) {
 	file, err := os.Open(path)
 	if err != nil {
-		return false
+		return false, ""
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		if strings.HasPrefix(strings.TrimSpace(scanner.Text()), "#EXT-X-PART") {
-			return true
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "#EXT-X-PART:") {
+			return true, ""
+		}
+		if firstSegment == "" && line != "" && !strings.HasPrefix(line, "#") {
+			if strings.HasSuffix(line, ".m4s") || strings.HasSuffix(line, ".ts") {
+				firstSegment = line
+			}
+			// Parts precede the segment they belong to, so a playlist with
+			// partials has shown one by its first segment line.
+			return false, firstSegment
 		}
 	}
-	return false
-}
-
-func dirHasByteranges(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".byteranges") {
-			return true
-		}
-	}
-	return false
+	return false, firstSegment
 }
 
 func parseHlsPlaylistDuration(path string) *int {
