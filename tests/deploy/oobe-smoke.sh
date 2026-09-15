@@ -95,4 +95,39 @@ if ! printf '%s' "$resp" | grep -q '"columns"'; then
   printf '%s\n' "$resp" | head -3
   exit 1
 fi
-echo "OOBE smoke OK: plays query + dashboard timeseries events+network path healthy (no schema drift)"
+# Proxied playback path. Player-facing streams go through go-proxy's shaping
+# port, which fetches from nginx over plain HTTP. With the wrong upstream port
+# (the HTTPS-only public listener under TLS) every proxied playlist and segment
+# gets a 400 while direct go-live keeps working, so nothing above notices.
+# Archiving can't tell either: a 400 is archived like any other request.
+#
+# A clean install has no content yet, so request a clip that can't exist:
+#   404      -> the proxy reached go-live (healthy)
+#   200      -> fine too (content exists)
+#   anything else (400 from the wrong upstream port, 5xx) -> broken
+# The shaper port follows the UI port's convention: last three digits -> 081.
+base_port="${BASE##*:}"
+base_port="${base_port%%/*}"
+shaper="${BASE%:*}:${base_port%???}081"
+pid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr 'A-Z' 'a-z')"
+probe="/go-live/oobe_smoke_missing_clip/master.m3u8"
+redirect="$(curl -sk -o /dev/null -D - --max-time 15 "${shaper}${probe}?player_id=${pid}" 2>/dev/null \
+  | awk 'tolower($1)=="location:"{print $2}' | tr -d '\r' || true)"
+if [ -z "$redirect" ]; then
+  echo "OOBE SMOKE FAIL: go-proxy at ${shaper} did not redirect a new player to a session port"
+  exit 1
+fi
+proxied_code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 15 "$redirect" 2>/dev/null || true)"
+# Free the session slot this probe allocated (best effort).
+curl -sk -o /dev/null --max-time 10 -X DELETE "${BASE}/api/v2/players/${pid}" 2>/dev/null || true
+case "$proxied_code" in
+  200|404) ;;
+  *)
+    echo "OOBE SMOKE FAIL: proxied playlist request returned ${proxied_code:-no response} (want 404 for a missing clip, or 200)"
+    echo "  ${redirect}"
+    echo "  400 here usually means go-proxy's upstream port points at nginx's HTTPS listener (INFINITE_STREAM_UPSTREAM_PORT)."
+    exit 1
+    ;;
+esac
+
+echo "OOBE smoke OK: plays query + dashboard timeseries events+network path healthy (no schema drift); proxied playback path reaches go-live (HTTP ${proxied_code})"
