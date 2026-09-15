@@ -34,7 +34,9 @@ services:
   forwarder:
     container_name: test-oobe-forwarder
     environment:
-      - FORWARDER_SSE_URL=https://go-server:30081/api/sessions/stream  # TLS is on by default
+      # TLS is on by default; a TLS-off stack sets FORWARDER_SSE_URL=http://... in
+      # .env (per the release notes), which this must not override.
+      - FORWARDER_SSE_URL=${FORWARDER_SSE_URL:-https://go-server:30081/api/sessions/stream}
       - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
       - FORWARDER_CLICKHOUSE_DB=infinite_streaming
       - FORWARDER_CLICKHOUSE_TABLE=session_events

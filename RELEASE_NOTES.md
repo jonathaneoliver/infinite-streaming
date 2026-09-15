@@ -76,6 +76,12 @@ history, and the forwarder mirror-writes both pairs during the
 deprecation window. Expect historical rows to read empty in the *new*
 columns only; nothing is lost, and nothing needs to be run by hand.
 
+One column also changes **type**: `session_events.control_revision` goes from
+`UInt64` to `String` (it holds go-proxy's RFC3339 revision; the old column only
+ever stored the truncated year). Self-heal converts it in place on the first
+boot. Until it has, a v2.1.0 forwarder can't write player metrics to a v2.0.0
+volume.
+
 ```bash
 # Standard upgrade — the schema self-heal runs on container boot.
 make build && make run

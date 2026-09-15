@@ -647,17 +647,26 @@ ALTER TABLE infinite_streaming.session_events
 -- so step 2's IF EXISTS is a no-op (nothing to drop) and step 3 is
 -- a no-op (nothing to rename — control_revision_str was never added
 -- because step 1 above is IF NOT EXISTS).
--- NOTE (fix): the DROP + RENAME dance that used to live here was a one-time
--- UInt64→String migration for clusters that predated the canonical String
--- column. It was actively HARMFUL on a fresh install: init.d runs ONLY on first
--- DB creation, where the CREATE TABLE above already declares control_revision as
--- String — so `DROP COLUMN IF EXISTS control_revision` dropped that good column,
--- and the RENAME (of a control_revision_str that was NEVER actually added — the
--- "already done above" was aspirational) couldn't restore it. Result: every
--- clean install had session_events missing control_revision, which errored the
--- events timeseries query and broke the dashboard's network/events panels.
--- Existing clusters already migrated by hand and init.d never re-runs on them,
--- so removing the migration loses nothing.
+-- History: the DROP + RENAME dance that used to live here was HARMFUL on a
+-- fresh install — the CREATE TABLE above already declares control_revision as
+-- String, so `DROP COLUMN IF EXISTS control_revision` dropped that good column,
+-- and the RENAME (of a control_revision_str that was never actually added)
+-- couldn't restore it. Every clean install lost control_revision, which errored
+-- the events timeseries query and blanked the dashboard's network/events panels.
+-- It was removed on the assumption that init.d never re-runs on existing
+-- volumes. Since self-heal.sh (#913) it re-runs on EVERY boot, and v2.0.0
+-- volumes still carry the old UInt64 column: the forwarder's RFC3339 string then
+-- fails every session_events insert (CANNOT_PARSE_INPUT, "while reading the
+-- value of key control_revision"), so an upgraded v2.0.0 stack archived no
+-- player metrics at all.
+--
+-- The type change is an idempotent MODIFY instead: a no-op where the column is
+-- already String (every fresh install), a one-time in-place conversion on a
+-- v2.0.0 volume. The UInt64 values were only the truncated year (e.g. 2026), so
+-- nothing meaningful is lost. control_revision isn't in the sort/partition key,
+-- the TTL, or any view.
+ALTER TABLE infinite_streaming.session_events
+    MODIFY COLUMN IF EXISTS control_revision String DEFAULT '' CODEC(ZSTD(1));
 
 -- Fresh-install completeness: guarantee every column the dashboard's timeseries
 -- SELECTs exists on a clean CREATE — including ones that were historically only
