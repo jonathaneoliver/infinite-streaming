@@ -18,8 +18,13 @@
 #              applied the way self-heal.sh does (per file, --multiquery)
 # then applies the current files to the upgraded server a second time
 # (idempotency), and fails if any table or column in fresh is missing from
-# upgraded. Columns that exist only in upgraded are legacy leftovers from
-# renames and are listed but allowed.
+# upgraded, or if a column present in both has a different TYPE. Columns that
+# exist only in upgraded are legacy leftovers from renames and are listed but
+# allowed.
+#
+# The type comparison exists because ADD COLUMN IF NOT EXISTS never changes an
+# existing column: v2.0.0's session_events.control_revision stayed UInt64 after
+# upgrade while the forwarder writes a String, silently failing every insert.
 #
 # Usage: tests/deploy/schema-upgrade-check.sh [baseline-ref]   (default v2.0.0)
 # Needs: docker, git. Run from anywhere inside the repo.
@@ -87,6 +92,12 @@ snapshot() {
     | LC_ALL=C sort
 }
 
+# "table.column<TAB>type", for the type comparison (types can contain spaces).
+snapshot_types() {
+  docker exec "$1" clickhouse-client -q \
+    "SELECT concat(table, '.', name), type FROM system.columns WHERE database = 'infinite_streaming' ORDER BY 1 FORMAT TSV"
+}
+
 echo "schema-upgrade-check: $BASELINE -> working tree ($IMAGE)"
 start "$FRESH" & p1=$!
 start "$UPGRADED" & p2=$!
@@ -115,6 +126,16 @@ fi
 if [ -n "$missing" ]; then
   echo "FAIL: in a fresh install but missing after upgrade:"
   printf '%s\n' "$missing" | sed 's/^/  /'
+  status=1
+fi
+
+snapshot_types "$FRESH" > "$WORK/fresh-types.tsv"
+snapshot_types "$UPGRADED" > "$WORK/upgraded-types.tsv"
+type_mismatch="$(awk -F'\t' 'NR == FNR { up[$1] = $2; next } ($1 in up) && up[$1] != $2 { printf "  %s: upgraded=%s fresh=%s\n", $1, up[$1], $2 }' \
+  "$WORK/upgraded-types.tsv" "$WORK/fresh-types.tsv")"
+if [ -n "$type_mismatch" ]; then
+  echo "FAIL: column type differs between a fresh install and an upgraded volume:"
+  printf '%s\n' "$type_mismatch"
   status=1
 fi
 
