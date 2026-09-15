@@ -746,6 +746,19 @@ test-status:
 # TEST_OOBE_MEDIA_DIR explicitly in .env if your TEST_SSH lacks a user.
 TEST_OOBE_MEDIA_DIR ?= /home/$(shell echo $(TEST_SSH) | cut -d@ -f1)/test-oobe-media
 
+# Hostname the OOBE stack advertises (INFINITE_STREAM_ANNOUNCE_URL /
+# INFINITE_STREAM_BASE_URL -> the pairing page). Defaults to TEST_HOST.
+TEST_OOBE_HOST ?= $(TEST_HOST)
+# Optional: directory ON THE TEST BOX holding a supplied localhost.pem +
+# localhost-key.pem (Let's Encrypt / mkcert), installed after the wipe so the
+# stack serves a trusted cert instead of auto-generating a self-signed one.
+# Empty (default) keeps the stock fresh-install behaviour. Apple clients (the
+# iOS/tvOS app) reject the self-signed cert, so set this -- plus a
+# TEST_OOBE_HOST the cert's SAN covers -- to test the apps against OOBE, e.g.
+#   TEST_OOBE_CERTS_SRC=~/test-dev/certs  TEST_OOBE_HOST=dev.jeoliver.com
+# Use ~ or an absolute path (a $VAR would be expanded by make, not the box).
+TEST_OOBE_CERTS_SRC ?=
+
 test-deploy-oobe:
 	@echo "=== OOBE: fresh-install simulation (port 26000) ==="
 	@case "$(TEST_OOBE_MEDIA_DIR)" in \
@@ -763,6 +776,17 @@ test-deploy-oobe:
 	  */test-oobe-media) docker run --rm -v $(TEST_OOBE_MEDIA_DIR):/m alpine sh -c "rm -rf /m/* /m/.* 2>/dev/null; true" ;; \
 	  *) echo "REFUSING wipe of $(TEST_OOBE_MEDIA_DIR)"; exit 1 ;; \
 	esac'
+	@# Supplied cert (opt-in): launch.sh uses a cert with no .self-signed-san
+	@# marker as-is, so dropping the pair into <media>/certs before first boot
+	@# is all it takes. Copied via a container because the wipe above leaves
+	@# the media dir's contents owned by in-container users.
+	@if [ -n "$(TEST_OOBE_CERTS_SRC)" ]; then \
+		echo "Installing supplied TLS certificate from $(TEST_OOBE_CERTS_SRC) (advertising $(TEST_OOBE_HOST))..."; \
+		ssh -n $(TEST_SSH) 'test -f $(TEST_OOBE_CERTS_SRC)/localhost.pem && test -f $(TEST_OOBE_CERTS_SRC)/localhost-key.pem \
+		  || { echo "REFUSING: $(TEST_OOBE_CERTS_SRC) must contain localhost.pem and localhost-key.pem"; exit 1; }; \
+		  docker run --rm -v $(TEST_OOBE_CERTS_SRC):/src:ro -v $(TEST_OOBE_MEDIA_DIR):/m alpine \
+		    sh -c "mkdir -p /m/certs && cp /src/localhost.pem /src/localhost-key.pem /m/certs/ && chmod 600 /m/certs/localhost-key.pem"' || exit 1; \
+	fi
 	@echo "Syncing local working tree (excluding .git and .gitignore matches)..."
 	rsync -az --delete \
 		--filter=':- .gitignore' \
@@ -783,7 +807,7 @@ test-deploy-oobe:
 		echo "dashboard-v3 not present, skipping Vue build"; \
 	fi
 	ssh -n $(TEST_SSH) 'printf "COMPOSE_PROJECT_NAME=test-oobe\nCONTENT_DIR=%s\nINFINITE_STREAM_RENDEZVOUS_URL=%s\nINFINITE_STREAM_ANNOUNCE_URL=https://%s:26000\nINFINITE_STREAM_BASE_URL=https://%s:26000\n" \
-		"$(TEST_OOBE_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(TEST_HOST)" "$(TEST_HOST)" > ~/test-oobe/.env'
+		"$(TEST_OOBE_MEDIA_DIR)" "$(INFINITE_STREAM_RENDEZVOUS_URL)" "$(TEST_OOBE_HOST)" "$(TEST_OOBE_HOST)" > ~/test-oobe/.env'
 	scp tests/deploy/override-oobe.yml $(TEST_SSH):~/test-oobe/docker-compose.override.yml
 	ssh $(TEST_SSH) 'cd ~/test-oobe && VERSION=$$(cat VERSION) docker compose -p test-oobe build && docker compose -p test-oobe up -d'
 	@# Smoke test: a fresh install boots green even with a broken analytics
