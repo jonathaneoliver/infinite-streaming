@@ -1,6 +1,7 @@
 package app
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,6 +77,7 @@ type EncodingProgressTracker struct {
 	currentVariantNum  int
 	currentVariantInfo string
 	totalVariants      int
+	currentPass        int // 0 single-pass, 1 or 2 within a two-pass rung
 	sourceDuration     float64
 	lastProgress       int
 	lastBroadcast      string
@@ -147,8 +149,30 @@ func (t *EncodingProgressTracker) parseTime(line string) (float64, bool) {
 	return float64(h)*3600 + float64(m)*60 + s, true
 }
 
+// encodingCeiling is where the per-variant encoding share of the bar ends;
+// the audio phase takes over at this value.
+const encodingCeiling = 75
+
+var selectedVariantsRE = regexp.MustCompile(`Selected (\d+) variants for encoding`)
+
 func (t *EncodingProgressTracker) ParseLine(line string) *int {
 	switch {
+	case strings.Contains(line, "variants for encoding"):
+		// The ladder script prints the real rung count once tiers are chosen.
+		// Prefer it to estimateVariants(), which assumes one rung per
+		// resolution and badly undercounts multi-rung ladders (#1018).
+		if m := selectedVariantsRE.FindStringSubmatch(line); m != nil {
+			if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
+				t.totalVariants = n
+			}
+		}
+		return nil
+	case strings.Contains(line, "Two-pass: pass 1/2"):
+		t.currentPass = 1
+		return nil
+	case strings.Contains(line, "Two-pass: pass 2/2"):
+		t.currentPass = 2
+		return nil
 	case strings.Contains(line, "Phase 1: Input Validation"):
 		return t.setProgress("validation", 5)
 	case strings.Contains(line, "Phase 1b: Tool Checks"):
@@ -165,7 +189,8 @@ func (t *EncodingProgressTracker) ParseLine(line string) *int {
 		if strings.Contains(line, "H264") || strings.Contains(line, "HEVC") || strings.Contains(line, "AV1") {
 			t.currentVariantNum++
 			t.currentVariantInfo = line
-			return t.setProgress("encoding", 20+(t.currentVariantNum-1))
+			t.currentPass = 0
+			return t.setProgress("encoding", min(20+(t.currentVariantNum-1), encodingCeiling))
 		}
 	case strings.Contains(line, "Phase 4: Creating Audio Mezzanine"):
 		return t.setProgress("audio", 75)
@@ -189,11 +214,20 @@ func (t *EncodingProgressTracker) ParseLine(line string) *int {
 			return t.setProgress("mezzanine", 8+int(percent*7))
 		case "encoding":
 			if t.currentVariantNum > 0 {
+				// A two-pass rung runs ffmpeg twice and each pass reports out_time
+				// from zero, so give pass 1 the first half of the rung and pass 2
+				// the second; otherwise pass 2 would replay pass 1's range.
+				switch t.currentPass {
+				case 1:
+					percent = percent / 2
+				case 2:
+					percent = 0.5 + percent/2
+				}
 				base := 18
-				rangeSize := 57
-				variantSize := float64(rangeSize) / float64(t.totalVariants)
+				rangeSize := float64(encodingCeiling - base)
+				variantSize := rangeSize / float64(t.totalVariants)
 				progress := int(float64(base) + float64(t.currentVariantNum-1)*variantSize + percent*variantSize)
-				return t.setProgress("encoding", progress)
+				return t.setProgress("encoding", min(progress, encodingCeiling))
 			}
 		case "audio":
 			return t.setProgress("audio", 75+int(percent*3))
@@ -202,9 +236,16 @@ func (t *EncodingProgressTracker) ParseLine(line string) *int {
 	return nil
 }
 
+// setProgress records the phase and returns the progress to publish. The
+// value is clamped to 0–100 and never moves backwards: later phases set fixed
+// values (audio 75, packaging 80, ...) and a new two-pass pass restarts
+// out_time, either of which would otherwise make the bar jump back (#1018).
 func (t *EncodingProgressTracker) setProgress(phase string, progress int) *int {
 	t.currentPhase = phase
-	t.lastProgress = progress
+	progress = max(0, min(progress, 100))
+	if progress > t.lastProgress {
+		t.lastProgress = progress
+	}
 	return &t.lastProgress
 }
 
