@@ -46,6 +46,8 @@
         return urlParams.get('expert') === '1';
     }
 
+    // Hostnames treated as internal (LAN / loopback / Tailscale) by the optional
+    // public-host restriction below.
     function isInternalNetworkHost(hostname) {
         if (!hostname) return false;
         const host = String(hostname).toLowerCase();
@@ -59,15 +61,27 @@
         return false;
     }
 
-    function shouldRestrictContentManagement() {
-        // Hide content-management UI on public-facing hosts; only show it on
-        // local-network deployments where the operator can be trusted.
-        const host = window.location.hostname || '';
-        return !isInternalNetworkHost(host);
-    }
-
-    function shouldRestrictMonitorAccess() {
-        return shouldRestrictContentManagement();
+    // Optional, off by default: when the server sets
+    // INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS (surfaced as /api/setup's
+    // restrict_public_hosts), disable content management (Upload / Sources /
+    // Jobs) and Monitor in the nav on hostnames that don't look internal. A soft
+    // UI hide only -- the pages stay reachable; real auth is the optional
+    // htpasswd. It used to be unconditional, which greyed these out on any LAN
+    // deployment reached through a real DNS name (e.g. one with a Let's Encrypt
+    // cert).
+    function applyPublicHostRestriction(status) {
+        if (!status || !status.restrict_public_hosts) return;
+        if (isInternalNetworkHost(window.location.hostname || '')) return;
+        const ids = NAVIGATION.content.map((item) => item.id).concat(['monitor']);
+        ids.forEach((id) => {
+            const link = document.getElementById(`nav-${id}`);
+            if (!link) return;
+            link.classList.add('disabled');
+            link.setAttribute('href', '#');
+            link.setAttribute('aria-disabled', 'true');
+            link.setAttribute('tabindex', '-1');
+            link.setAttribute('title', 'Available only on internal network hosts.');
+        });
     }
 
     function resolvePreferredStreamHost(sourceHostname) {
@@ -192,8 +206,6 @@
     // Build sidebar HTML
     function buildSidebar(activePage) {
         const isDeveloper = isDeveloperMode();
-        const restrictContent = shouldRestrictContentManagement();
-        const restrictMonitor = shouldRestrictMonitorAccess();
         
         const sections = [
             { title: 'MAIN', items: NAVIGATION.main },
@@ -233,20 +245,11 @@
             html += `<div class="nav-section-title">${section.title}</div>`;
             
             visibleItems.forEach(item => {
-                const isContentRestrictedItem = restrictContent && section.title === 'CONTENT';
-                const isMonitorRestrictedItem = restrictMonitor && section.title === 'LIVE STREAMING' && item.id === 'monitor';
-                const isRestrictedItem = isContentRestrictedItem || isMonitorRestrictedItem;
                 const isActive = item.id === activePage ? 'active' : '';
-                const isDisabled = isRestrictedItem ? 'disabled' : '';
                 const warning = item.warning ? '<span class="nav-item-warning">⚠️</span>' : '';
                 const alpha = item.alpha ? '<span class="nav-item-alpha">ALPHA</span>' : '';
                 const external = item.external ? ' target="_blank" rel="noopener"' : '';
-                const href = isRestrictedItem ? '#' : item.href;
-                const disabledAttrs = isRestrictedItem
-                    ? ' aria-disabled="true" tabindex="-1" title="Available only on internal network hosts."'
-                    : '';
-                
-                html += `<a id="nav-${item.id}" href="${href}" class="nav-item ${isActive} ${isDisabled}"${external}${disabledAttrs}>`;
+                html += `<a id="nav-${item.id}" href="${item.href}" class="nav-item ${isActive}"${external}>`;
                 html += `<span class="nav-item-icon">${item.icon}</span>`;
                 html += `<span class="nav-item-text">${item.text}</span>`;
                 html += warning;
@@ -1084,6 +1087,7 @@
     function initSetupExperience(activePage) {
         fetchSetupStatus()
             .then((status) => {
+                applyPublicHostRestriction(status);
                 renderSetupBanner(status, activePage);
                 maybeShowSetupModal(status);
             })
@@ -1515,9 +1519,7 @@
         setSelectedUrl: setSelectedUrl,
         normalizeTestingBaseUrl: normalizeTestingBaseUrl,
         buildTestingUrl: buildTestingUrl,
-        createPlayerId: createPlayerId,
-        isContentManagementRestricted: shouldRestrictContentManagement,
-        isMonitorRestricted: shouldRestrictMonitorAccess
+        createPlayerId: createPlayerId
     };
 
     // Auto-initialize on DOM ready (unless disabled)

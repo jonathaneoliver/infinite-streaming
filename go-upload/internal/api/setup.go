@@ -54,6 +54,20 @@ type SetupStatus struct {
 	ContentEmpty   bool                 `json:"content_empty"`
 	Issues         []string             `json:"issues"`
 	Recommendations []string            `json:"recommendations"`
+	// RestrictPublicHosts mirrors INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS: when
+	// true the dashboard nav hides content management and Monitor on hostnames
+	// that don't look internal. Optional; off by default.
+	RestrictPublicHosts bool `json:"restrict_public_hosts"`
+}
+
+// restrictPublicHostsEnabled reads the optional INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS
+// switch (1/true/yes/on). Unset or anything else means off.
+func restrictPublicHostsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func (h *Handler) SetupStatus(w http.ResponseWriter, _ *http.Request) {
@@ -232,6 +246,7 @@ func (h *Handler) buildSetupStatus() SetupStatus {
 		ContentEmpty:   contentEmpty,
 		Issues:         issues,
 		Recommendations: recs,
+		RestrictPublicHosts: restrictPublicHostsEnabled(),
 	}
 }
 
