@@ -85,6 +85,19 @@ make harness-cli              # rebuild the CLI; go install writes the wrong pat
 
 A follow-up release will drop the deprecated `stall_*` columns.
 
+### TLS-off deployments: set the forwarder URL
+
+TLS is on by default, and the analytics forwarder now dials go-proxy over
+`https://` to match (it previously dialed `http://`, which archived nothing on
+a default install — see [Critical fixes](#critical-fixes)). **If you run with
+`INFINITE_STREAM_TLS=off`**, add this to `.env` or nothing is archived:
+
+```bash
+FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
+```
+
+Default (TLS on) installs need nothing.
+
 ### Deploy target renames
 
 `make deploy` is now the everyday local-tree → test-dev deploy (alias for
@@ -201,6 +214,46 @@ silently played a **different segment length** than the one selected —
 making 6s-vs-2s characterization untrustworthy and masking real content
 errors. The chain is gone: a play now serves exactly what was asked,
 segment length included, or fails visibly.
+
+### Nothing archived on a default install (#1021)
+
+TLS has been on by default since v2.0.0, but the analytics forwarder still
+subscribed to go-proxy's session stream over plain `http://`. Every stream
+connection got `400 Client sent an HTTP request to an HTTPS server` and
+retried forever — **so a default install archived no sessions, network
+requests or control events**, while the dashboard's live views kept working.
+The forwarder now dials `https://` (and trusts the self-signed cert); TLS-off
+deployments set `FORWARDER_SSE_URL` (see [Upgrading](#upgrading)).
+
+### Proxied playback failed on a default install (#1021, #1030)
+
+go-proxy fetches playlists and segments from nginx inside the container over
+plain HTTP, but the stock `docker-compose.yml`, `docker-compose.ghcr.yml`, the
+registry compose, the k8s template and go-proxy's built-in default all
+pointed it at port 30000 — which is **HTTPS-only when TLS is on**. Every
+request through a shaping port got a 400, so the testing-session page, the
+10ft drill-through and any player using per-session shaping never played on
+a default install, while pages that talk to go-live directly (grid, playback,
+the 10ft hero) worked. Deployments using the repo's test-dev overrides never
+saw it, because those already set the cleartext loopback port. go-proxy now
+dials nginx's cleartext loopback listener (30005) everywhere, and go-upload's
+post-encode go-live warm-up — which had the same port mistake and so never
+warmed anything — does too. The OOBE smoke test now fails a deploy whose
+proxied path doesn't reach go-live.
+
+### go-live crashed on short content (#1021)
+
+A clip shorter than the 36-second DASH live window drove the window start
+negative and panicked go-live (`index out of range [-1]`), taking **every**
+stream on the server down with a 502, not just the short clip. The window and
+`timeShiftBufferDepth` are now clamped to the clip's length.
+
+### Failed encodes reported as complete (#1021)
+
+The ladder script didn't check the encoder's exit status, and accepted a
+0-byte output file, so a rung whose encoder failed still let the job finish
+as **`complete`** with missing renditions. A failed encoder now fails the
+job, for every codec.
 
 ### Measurement corrections
 
@@ -380,6 +433,19 @@ per-segment/chunk startup timeline.
 - **A 4-category event taxonomy** across the viewer and sessions list.
 - **Study Report** — a new comparison page, currently developer-only
   (`?developer=1`) while it settles.
+- **Fixes found by a fresh-install (OOBE) pass:**
+  - The job page reports the encoder that actually ran and the real padding
+    outcome, instead of echoing the request (#1017); encode progress no
+    longer overshoots 100% or jumps backwards, and tracks the real clip
+    length (#1018).
+  - The grid picks up newly encoded content without a reload, and tile
+    titles no longer show a stray "Xs" (#1019, #1020).
+  - Testing Playback: with the Video.js engine the player is styled and
+    switching engines in place works (#1024, #1026); the stats row no longer
+    sticks at Idle for sessions started with a short `player_id`, and the
+    legacy pages now mint UUID player ids (#1025).
+  - The first-run setup modal's **Seed Sample Content** no longer races the
+    empty-stack redirect to Upload, which cancelled the seed request (#1030).
 
 ### 14. Encoding and delivery
 
@@ -396,6 +462,13 @@ per-segment/chunk startup timeline.
   from 25% to 50% over top peak.
 - `.byteranges` sidecars are **off by default** — DASH now reads
   fragment byte ranges from the manifest itself (#986).
+- **AV1 encodes work again** with the built-in encoder: aligned with the
+  Encoder project (no bitrate cap, real two-pass, preset 6), after every AV1
+  rung had been failing (#1021).
+- **First-run sample content now carries a codec.** The seed named its output
+  without the `_p200_` marker, so `/api/content` listed it with an empty codec
+  and the iOS app's stream picker was empty on a fresh install (present since
+  v2.0.0; #1029). Already-seeded stacks keep the old names until re-seeded.
 
 ---
 
