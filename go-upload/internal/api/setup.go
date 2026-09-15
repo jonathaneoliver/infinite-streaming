@@ -18,19 +18,20 @@ import (
 
 const setupMarkerFile = ".infinite-streaming-initialized"
 
-// seedPartialDurationMs is the LL partial duration the sample clip is encoded
-// with; it is also part of the output name (see seedOutputName).
-const seedPartialDurationMs = 200
+// defaultPartialDurationMs is the LL partial duration used when a job doesn't
+// choose one (the ladder script's own default); it is also part of the output
+// name (see outputNameForPartial).
+const defaultPartialDurationMs = 200
 
-// seedOutputName names the seed's encode output the way uploads and re-encodes
-// do (routes.go: outputName + "_p" + <partial ms>), so the script writes
-// `<stem>_p200_<codec>[_<tag>]`. The codec is only recognised after that
+// outputNameForPartial names an encode's output the way chunked uploads and
+// re-encodes do (routes.go: outputName + "_p" + <partial ms>), so the script
+// writes `<stem>_p200_<codec>[_<tag>]`. The codec is only recognised after that
 // `_p200_` marker -- by util.ListContent (/api/content's `codec`) and by the
-// Apple apps' codec filter. The seed used to pass the bare stem, so its content
-// listed with codec "" and the iOS stream picker (default filter H.264) was
-// empty on a fresh install.
-func seedOutputName(stem string) string {
-	return stem + "_p" + strconv.Itoa(seedPartialDurationMs)
+// Apple apps' codec filter. The first-run seed and the single-step
+// POST /api/upload used to pass the bare stem, so their content listed with
+// codec "" and was missing from the apps' stream pickers (default filter H.264).
+func outputNameForPartial(stem string, partialMs int) string {
+	return stem + "_p" + strconv.Itoa(partialMs)
 }
 
 type DirStatus struct {
@@ -150,12 +151,12 @@ func (h *Handler) SetupSeed(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	config := map[string]interface{}{
-		"output_name":     seedOutputName(outputName),
+		"output_name":     outputNameForPartial(outputName, defaultPartialDurationMs),
 		"codec_selection": "both",
 		"hls_format":      "fmp4",
 		"segment_duration": 6,
 		"gop_duration":     1,
-		"partial_duration": seedPartialDurationMs,
+		"partial_duration": defaultPartialDurationMs,
 	}
 	job := store.Job{
 		JobID:     jobID,

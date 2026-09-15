@@ -457,7 +457,11 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	config := map[string]interface{}{
-		"output_name":     outputName,
+		// Same `<name>_p<partial ms>` shape as the chunked upload and re-encode
+		// paths, with the partial duration pinned explicitly so the name and the
+		// encode can't disagree (#1029 fixed the same bare name in the seed).
+		"output_name":      outputNameForPartial(outputName, defaultPartialDurationMs),
+		"partial_duration": defaultPartialDurationMs,
 		"codec_selection": r.FormValue("codec_selection"),
 		"max_resolution":  r.FormValue("max_resolution"),
 		"hls_format":      r.FormValue("hls_format"),
