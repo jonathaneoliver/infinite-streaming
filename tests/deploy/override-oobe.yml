@@ -38,3 +38,17 @@ services:
       - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
       - FORWARDER_CLICKHOUSE_DB=infinite_streaming
       - FORWARDER_CLICKHOUSE_TABLE=session_events
+  # Analytics label sidecars (added in v2.1.0). The base compose pins
+  # container_name to infinite-streaming-*, so without these renames the
+  # OOBE stack collides with any other stack on the same host (e.g.
+  # test-dev) and `docker compose up` aborts half-way.
+  token-deriver:
+    container_name: test-oobe-token-deriver
+  label-trainer:
+    container_name: test-oobe-label-trainer
+  label-scorer:
+    container_name: test-oobe-label-scorer
+  hmm-label-trainer:
+    container_name: test-oobe-hmm-label-trainer
+  hmm-label-scorer:
+    container_name: test-oobe-hmm-label-scorer
