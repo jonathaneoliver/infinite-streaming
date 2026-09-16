@@ -17,7 +17,7 @@
  * the legacy used (`ismSidebarCollapsed`) so the user's collapsed/
  * expanded preference survives the legacy/v3 transition.
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 const props = defineProps<{ activePage: string }>();
 
@@ -28,6 +28,7 @@ interface NavItem {
   href: string;
   warning?: boolean;
   alpha?: boolean;
+  developerOnly?: boolean; // hidden unless ?developer=1 (mirrors shared-nav.js)
 }
 
 interface NavSection {
@@ -54,7 +55,7 @@ const DEV_BACKEND = 'https://jonathanoliver-ubuntu.local:21000';
 // /v3/ in dev so links stay on the Vite dev server (HMR); legacy/unmigrated
 // pages are served by the real backend.
 const V3_PAGES =
-  /^\/dashboard\/(dashboard|testing|testing-session|sessions|session-viewer|grid|characterization|ask|hello)\.html/;
+  /^\/dashboard\/(dashboard|testing|testing-session|sessions|session-viewer|grid|characterization|sweep|ask|hello|study)\.html/;
 function rewriteHrefForDev(href: string): string {
   if (typeof window === 'undefined') return href;
   if (window.location.port !== DEV_PORT) return href;
@@ -187,7 +188,9 @@ const sections: NavSection[] = [
       { id: 'test-playback', icon: '🧭', text: 'Testing Playback',href: '/dashboard/testing-session.html?nav=1' },
       { id: 'testing',       icon: '🧪', text: 'Testing Monitor', href: '/dashboard/testing.html' },
       { id: 'sessions',      icon: '⏪', text: 'Sessions',         href: '/dashboard/sessions.html' },
+      { id: 'study',         icon: '📊', text: 'Study Report',     href: '/dashboard/study.html', developerOnly: true },
       { id: 'characterization', icon: '📈', text: 'Automated Testing', href: '/dashboard/characterization.html' },
+      { id: 'sweep',         icon: '🔬', text: 'QE Lab',           href: '/dashboard/sweep.html', developerOnly: true },
       { id: 'quartet',       icon: '🎬', text: 'Quartet',          href: '/dashboard/quartet.html', alpha: true },
       { id: 'segment-duration', icon: '⏱️', text: 'Live Offset',   href: '/dashboard/segment-duration-comparison.html', alpha: true },
     ],
@@ -441,33 +444,33 @@ async function submitPair() {
   }
 }
 
-// --- Access restrictions (ported from shared-nav.js) ---
-// Hide content-management (Upload / Sources / Jobs) and the Monitor item when
-// the dashboard is reached over a non-internal (public) host. This is a soft
-// UI hide matching the legacy nav — real auth is the optional htpasswd.
-function isInternalNetworkHost(hostname: string): boolean {
-  const host = (hostname || '').toLowerCase();
-  if (!host) return false;
-  if (host === 'localhost' || host === '::1' || host.startsWith('127.')) return true;
-  if (host.endsWith('.local')) return true;
-  if (!host.includes('.')) return true; // bare single-label hostname
-  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-  if (/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$/.test(host)) return true; // Tailscale CGNAT
-  return false;
-}
-const restrictContent = computed(
-  () => typeof window !== 'undefined' && !isInternalNetworkHost(window.location.hostname),
-);
+
+// Developer mode — the `?developer=1` convention (shared-nav.js, SessionDetails,
+// playback/quartet, …). NOT sticky: honoured only when the CURRENT URL carries
+// `?developer=1`, matching every other consumer. (This component used to persist
+// it to localStorage, so dev-only nav like QE Lab leaked across sessions.) Also
+// clears any stale `ismDeveloperMode` a previous sticky build left behind.
+const isDeveloper = ref<boolean>((() => {
+  if (typeof window === 'undefined') return false;
+  try {
+    localStorage.removeItem('ismDeveloperMode'); // un-stick past persistence
+    return new URLSearchParams(window.location.search).get('developer') === '1';
+  } catch {
+    return false;
+  }
+})());
+
 const visibleSections = computed<NavSection[]>(() =>
   sections
     .filter((s) => !(restrictContent.value && s.title === 'CONTENT'))
-    .map((s) =>
-      restrictContent.value && s.title === 'LIVE STREAMING'
-        ? { ...s, items: s.items.filter((i) => i.id !== 'monitor') }
-        : s,
-    )
+    .map((s) => ({
+      ...s,
+      items: s.items.filter(
+        (i) =>
+          (!i.developerOnly || isDeveloper.value) &&
+          !(restrictContent.value && s.title === 'LIVE STREAMING' && i.id === 'monitor'),
+      ),
+    }))
     .filter((s) => s.items.length > 0),
 );
 
@@ -483,9 +486,35 @@ interface SetupStatus {
   initialized?: boolean;
   issues?: string[];
   recommendations?: string[];
+  /** INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS (optional, default off). */
+  restrict_public_hosts?: boolean;
+}
+// --- Optional public-host restriction (mirrors shared-nav.js) ---
+// Off by default. When the server sets INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS
+// (/api/setup's restrict_public_hosts), hide content management (Upload /
+// Sources / Jobs) and Monitor on hostnames that don't look internal. A soft UI
+// hide only -- real auth is the optional htpasswd. It used to be unconditional,
+// which hid these on any LAN deployment reached through a real DNS name.
+function isInternalNetworkHost(hostname: string): boolean {
+  const host = (hostname || '').toLowerCase();
+  if (!host) return false;
+  if (host === 'localhost' || host === '::1' || host.startsWith('127.')) return true;
+  if (host.endsWith('.local')) return true;
+  if (!host.includes('.')) return true; // bare single-label hostname
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$/.test(host)) return true; // Tailscale CGNAT
+  return false;
 }
 const SETUP_PAGES_REQUIRE_CONTENT = new Set(['playback', 'testing', 'quartet', 'grid', 'segment-duration']);
 const setup = ref<SetupStatus | null>(null);
+const restrictContent = computed(
+  () =>
+    !!setup.value?.restrict_public_hosts &&
+    typeof window !== 'undefined' &&
+    !isInternalNetworkHost(window.location.hostname),
+);
 const setupModalOpen = ref(false);
 const setupSeedState = ref<'idle' | 'seeding' | 'seeded' | 'failed'>('idle');
 const setupRedirectMsg = ref('');
@@ -526,6 +555,11 @@ async function loadSetup() {
   }
 }
 async function setupSeedSample() {
+  // On an empty stack a content page counts down to a redirect to Upload.
+  // Seeding answers "no content", so stop that countdown first: otherwise the
+  // navigation aborts this request mid-flight (nginx 499) and drops the user
+  // on Upload before "Seeding…" / "Mark Setup Complete" can show.
+  cancelSetupRedirect();
   setupSeedState.value = 'seeding';
   try {
     await fetch('/api/setup/seed', { method: 'POST' });
@@ -693,9 +727,28 @@ const whatsNewUrl = computed(() => `https://github.com/${REPO_SLUG}/releases/tag
 const latestUrl = computed(() => `https://github.com/${REPO_SLUG}/releases/latest`);
 
 function dismissWhatsNew() {
+  // localStorage is already marked on first impression (watcher
+  // below); the × button only needs to hide the banner in this
+  // window. Set is harmless / idempotent so we keep it.
   localStorage.setItem('ismWhatsNewSeen', runningVersion.value);
   whatsNewDismissed.value = true;
 }
+
+// Auto-mark the "what's new" banner as seen on first display so it
+// doesn't reappear in every new tab/window until manually dismissed.
+// User can still click × in the current window to hide it; but
+// localStorage is set the moment the banner becomes visible, which
+// means the very next tab/window check passes and the banner stays
+// hidden until the next deploy bumps `runningVersion`. The computed
+// `whatsNewVisible` doesn't re-evaluate on localStorage writes (it
+// reads localStorage non-reactively), so the banner remains visible
+// in THIS window until the user explicitly dismisses or navigates
+// away.
+watch(whatsNewVisible, (visible) => {
+  if (visible && runningVersion.value) {
+    localStorage.setItem('ismWhatsNewSeen', runningVersion.value);
+  }
+});
 function dismissUpgrade() {
   localStorage.setItem('ismUpgradeDismissed', latestVersion.value);
   upgradeDismissed.value = true;

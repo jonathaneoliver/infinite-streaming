@@ -20,9 +20,14 @@ import type { NetworkLogEntry } from '@/repo/v2-repo';
 import { usePlayer } from '@/composables/usePlayer';
 import { useChartCoordination } from '@/composables/useChartCoordination';
 import type { Stream } from '@/composables/useSessionTimeSeries';
+import { collapseNetFailureLabels, humanizeNetFailure, labelTooltip } from '@/lib/labelGlossary';
 
 const props = defineProps<{
   playerId: string;
+  /** Coordination scope key (per-player, stable across plays). Drives
+   *  useChartCoordination only; data still keys off playerId. Falls back to
+   *  playerId when absent. */
+  coordId?: string;
   /** Network stream from the parent SessionDisplay's
    *  useSessionTimeSeries model. Supplies every per-request row for
    *  this (player, play), server-filtered to the current play_id,
@@ -31,7 +36,7 @@ const props = defineProps<{
 }>();
 const playerIdRef = toRef(props, 'playerId');
 usePlayer(playerIdRef); // keep the SSE subscription warm; live state is read off `coord` below
-const coord = useChartCoordination(playerIdRef);
+const coord = useChartCoordination(computed(() => props.coordId ?? props.playerId));
 
 /** Rows to highlight for the synchronized "selected event" cursor.
  *
@@ -148,6 +153,7 @@ function chRowToEntry(raw: Record<string, unknown>): NetworkLogEntry {
     tls_ms: toNum(raw.tls_ms),
     transfer_ms: toNum(raw.transfer_ms),
     client_wait_ms: toNum(raw.client_wait_ms),
+    delivery_rate_mbps: toNum(raw.delivery_rate_mbps),
     faulted: !!raw.faulted && raw.faulted !== 0,
     fault_type: (raw.fault_type as string) ?? '',
     fault_action: (raw.fault_action as string) ?? '',
@@ -168,6 +174,9 @@ interface Row {
   // entry instead of on NetworkLogEntry itself because the OpenAPI-
   // generated type doesn't know about labels yet.
   labels: string[];
+  // #506 — batch-derived per-row token (V_SEG(ΔP,ΔS), V_PROBE, …)
+  // LEFT-JOINed onto the row by the forwarder. Empty for un-scored rows.
+  token: string;
 }
 
 function num(v: unknown): number {
@@ -175,7 +184,18 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function buildRow(e: NetworkLogEntry, labels: string[]): Row | null {
+/** Displayed per-request rate. Prefers the kernel-measured
+ *  delivery_rate_mbps (#850 — honest under tc shaping, where the implied
+ *  bytes_out/transfer_ms figure over-reads up to ~5000× on sub-buffer
+ *  transfers) and falls back to the implied figure only for rows that
+ *  predate the field (old archives, non-Linux dev proxy). */
+function rowMbps(r: Row): number {
+  const kernel = num(r.entry.delivery_rate_mbps);
+  if (kernel > 0) return kernel;
+  return r.transfer > 0 ? (num(r.entry.bytes_out) * 8) / (r.transfer * 1000) : 0;
+}
+
+function buildRow(e: NetworkLogEntry, labels: string[], token: string): Row | null {
   const ts = e.timestamp ? Date.parse(e.timestamp) : NaN;
   if (!Number.isFinite(ts)) return null;
   const dns = Math.max(0, num(e.dns_ms));
@@ -189,7 +209,7 @@ function buildRow(e: NetworkLogEntry, labels: string[]): Row | null {
   const transfer = Math.max(0, num(e.transfer_ms));
   let duration = num(e.total_ms);
   if (duration <= 0) duration = dns + connect + tls + wait + transfer;
-  return { entry: e, ts, duration, dns, connect, tls, wait, transfer, labels };
+  return { entry: e, ts, duration, dns, connect, tls, wait, transfer, labels, token };
 }
 
 // Per-label rendering helpers — mirror PlayLog so chips look the
@@ -206,7 +226,13 @@ function labelSeverity(label: string): 'info' | 'warning' | 'critical' | 'error'
 function labelName(label: string): string {
   const eq = label.indexOf('=');
   const tail = eq > 0 ? label.slice(eq + 1) : label;
-  return tail.startsWith('*') ? tail.slice(1) : tail;
+  const ev = tail.startsWith('*') ? tail.slice(1) : tail;
+  return ev.startsWith('net_failure:') ? humanizeNetFailure(ev) : ev;
+}
+// A net_failure signature chip gets the composed tooltip; every other chip
+// keeps the raw label on hover (unchanged behaviour).
+function labelChipTitle(label: string): string {
+  return label.includes('net_failure:') ? (labelTooltip(label) || label) : label;
 }
 
 function isSuccessful(e: NetworkLogEntry): boolean {
@@ -235,7 +261,10 @@ const allRows = computed<Row[]>(() => {
     const labels = Array.isArray((obj as { labels?: unknown }).labels)
       ? ((obj as { labels: unknown[] }).labels).filter((x): x is string => typeof x === 'string')
       : [];
-    const r = buildRow(entry, labels);
+    const token = typeof (obj as { token?: unknown }).token === 'string'
+      ? ((obj as { token: string }).token)
+      : '';
+    const r = buildRow(entry, labels, token);
     if (!r) continue;
     built.push(r);
   }
@@ -243,7 +272,14 @@ const allRows = computed<Row[]>(() => {
 });
 
 const rows = computed<Row[]>(() => {
+  // Follow the focus bar (issue #586): only rows within the coordinated
+  // visible window, so the Network Log lines up with the charts +
+  // timeline. effectiveRange is the live tail when live, or the pinned
+  // window when the operator pans back. (The summary line below stays a
+  // full-log tally on purpose.)
+  const w = coord.effectiveRange.value;
   return allRows.value.filter((r) => {
+    if (w && (r.ts < w.min || r.ts > w.max)) return false;
     if (faultedOnly.value && !r.entry.faulted) return false;
     if (hideSuccessful.value && isSuccessful(r.entry)) return false;
     return true;
@@ -282,13 +318,26 @@ function fmtBytesShort(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+/** Drop the "/go-live/<content>/" prefix — identical for every request on a
+ *  play — so the column shows just the resource within the content. Falls back
+ *  to the raw value for non-go-live requests (e.g. /api/...). Mirrors
+ *  PlayLog.vue's pathTail(). */
+function shortResource(raw: string): string {
+  if (!raw) return '';
+  const idx = raw.indexOf('/go-live/');
+  if (idx < 0) return raw;
+  const after = raw.slice(idx + '/go-live/'.length);
+  const slash = after.indexOf('/');
+  return slash >= 0 ? after.slice(slash + 1) : after;
+}
+
 function sortValue(r: Row, c: SortCol): number | string {
   switch (c) {
     case 'time': return r.ts;
     case 'method': return r.entry.method ?? '';
-    case 'path': return r.entry.path ?? r.entry.url ?? '';
+    case 'path': return shortResource(r.entry.path || r.entry.url || '');
     case 'bytes': return num(r.entry.bytes_out);
-    case 'mbps': return r.transfer > 0 ? (num(r.entry.bytes_out) * 8) / (r.transfer * 1000) : 0;
+    case 'mbps': return rowMbps(r);
     case 'duration': return r.duration;
     case 'status': return num(r.entry.status);
   }
@@ -355,9 +404,8 @@ function fmtKB(n: number): string {
 }
 
 function fmtMbps(r: Row): string {
-  if (r.transfer <= 0) return '—';
-  const v = (num(r.entry.bytes_out) * 8) / (r.transfer * 1000);
-  if (!Number.isFinite(v)) return '—';
+  const v = rowMbps(r);
+  if (!Number.isFinite(v) || v <= 0) return '—';
   if (v < 1) return v.toFixed(2);
   if (v < 100) return v.toFixed(1);
   return v.toFixed(0);
@@ -416,6 +464,11 @@ function tooltipFor(r: Row): string {
   if (r.tls) lines.push(`TLS ${r.tls.toFixed(0)} ms`);
   if (r.wait) lines.push(`wait ${r.wait.toFixed(0)} ms`);
   if (r.transfer) lines.push(`transfer ${r.transfer.toFixed(0)} ms`);
+  const kernelMbps = num(r.entry.delivery_rate_mbps);
+  if (kernelMbps > 0) lines.push(`delivery rate ${kernelMbps.toFixed(2)} Mbps (kernel)`);
+  if (r.transfer > 0 && num(r.entry.bytes_out) > 0) {
+    lines.push(`implied ${((num(r.entry.bytes_out) * 8) / (r.transfer * 1000)).toFixed(2)} Mbps (bytes/transfer)`);
+  }
   if (r.entry.content_type) lines.push(`type: ${r.entry.content_type}`);
   if (r.entry.bytes_out) lines.push(`bytes out: ${r.entry.bytes_out}`);
   if (r.entry.bytes_in) lines.push(`bytes in: ${r.entry.bytes_in}`);
@@ -608,13 +661,15 @@ function onRowsWheel(e: WheelEvent) {
     </div>
 
     <p class="warning">
-      Transfer timings and derived Mbps are approximate, measured
-      <strong>downstream</strong> — from when go-proxy starts writing the
-      response back to the client device until the last byte is flushed
-      (proxy → player). They do <strong>not</strong> include the upstream
-      fetch from go-proxy to go-live. Numbers are most reliable when the
-      network is slow and transfers are large (especially video segments);
-      short responses transfer in &lt;1 ms and round to noise.
+      The Mbps column shows the <strong>kernel-measured delivery rate</strong>
+      (tcpi_delivery_rate, #850) when available — the rate bytes actually
+      drained onto the wire under tc shaping. Rows predating the field fall
+      back to the implied bytes/transfer figure, which times only the
+      write into the socket send buffer and over-reads badly on small
+      transfers. Both rates appear in the row tooltip. Even the kernel rate
+      is connection-level: below ~64&nbsp;KB it reflects the socket's recent
+      history, not that one request. Transfer timings remain downstream-only
+      (proxy → player) and exclude the upstream go-live fetch.
     </p>
 
     <div v-if="!sortedRows.length" class="empty">No requests to plot yet.</div>
@@ -623,8 +678,9 @@ function onRowsWheel(e: WheelEvent) {
         <div class="cell c-time sortable" @click="clickSort('time')">Time<span class="arr">{{ arrow('time') }}</span></div>
         <div class="cell c-flags">⚑</div>
         <div class="cell c-labels">Labels</div>
+        <div class="cell c-token">Token</div>
         <div class="cell c-method sortable" @click="clickSort('method')">M<span class="arr">{{ arrow('method') }}</span></div>
-        <div class="cell c-path sortable" @click="clickSort('path')">Path<span class="arr">{{ arrow('path') }}</span></div>
+        <div class="cell c-path sortable" @click="clickSort('path')">Resource<span class="arr">{{ arrow('path') }}</span></div>
         <div class="cell c-bytes sortable" @click="clickSort('bytes')">KB<span class="arr">{{ arrow('bytes') }}</span></div>
         <div class="cell c-mbps sortable" @click="clickSort('mbps')">Mbps<span class="arr">{{ arrow('mbps') }}</span></div>
         <div class="cell c-dur sortable" @click="clickSort('duration')">Dur<span class="arr">{{ arrow('duration') }}</span></div>
@@ -644,17 +700,21 @@ function onRowsWheel(e: WheelEvent) {
           <div class="cell c-flags" :style="{ color: flagsFor(r).color }">{{ flagsFor(r).text }}</div>
           <div class="cell c-labels">
             <span
-              v-for="l in r.labels"
+              v-for="l in collapseNetFailureLabels(r.labels)"
               :key="l"
               class="nl-label-chip"
               :class="'label-' + labelSeverity(l)"
-              :title="l"
+              :title="labelChipTitle(l)"
             >{{ labelName(l) }}</span>
             <span v-if="!r.labels.length" class="dash">—</span>
           </div>
+          <div class="cell c-token" :title="r.token">
+            <span v-if="r.token" class="nl-token">{{ r.token }}</span>
+            <span v-else class="dash">—</span>
+          </div>
           <div class="cell c-method">{{ r.entry.method ?? '?' }}</div>
           <div class="cell c-path" :title="r.entry.url ?? r.entry.path ?? ''">
-            {{ r.entry.path || r.entry.url || '—' }}
+            {{ shortResource(r.entry.path || r.entry.url || '') || '—' }}
           </div>
           <div class="cell c-bytes">{{ fmtKB(num(r.entry.bytes_out)) }}</div>
           <div class="cell c-mbps">{{ fmtMbps(r) }}</div>
@@ -797,6 +857,7 @@ function onRowsWheel(e: WheelEvent) {
     var(--c-time, 96px)
     var(--c-flags, 28px)
     var(--c-labels, minmax(120px, 1fr))
+    var(--c-token, minmax(110px, 0.8fr))
     var(--c-method, 44px)
     var(--c-path, minmax(140px, 1fr))
     var(--c-bytes, 64px)
@@ -828,6 +889,9 @@ function onRowsWheel(e: WheelEvent) {
 }
 
 .rows {
+  /* position:relative makes this the offsetParent so the cursor
+     auto-scroll's target.offsetTop is measured against THIS container. */
+  position: relative;
   max-height: 480px;
   overflow-y: auto;
 }
@@ -863,6 +927,16 @@ function onRowsWheel(e: WheelEvent) {
 }
 .c-time { color: #6b7280; }
 .c-flags { text-align: center; font-weight: 700; }
+.c-token { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.nl-token {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 10px;
+  color: #3730a3;
+  background: #eef2ff;
+  border: 1px solid #e0e7ff;
+  border-radius: 3px;
+  padding: 0 4px;
+}
 .c-labels {
   display: flex; flex-wrap: wrap; gap: 3px;
   align-items: center; min-width: 0;

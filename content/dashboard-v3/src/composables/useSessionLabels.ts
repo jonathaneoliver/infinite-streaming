@@ -70,10 +70,13 @@ function prettifyContentSlug(raw: string): string {
   let s = raw;
   // _<YYYYMMDD>_<HHMMSS> at the end (with or without preceding tokens).
   s = s.replace(/_\d{8}_\d{6}$/i, '');
-  // _p<digits> profile and/or _<codec> trailing tokens. Repeat in case
-  // both are present (e.g. `..._p200_h264`).
-  for (let i = 0; i < 3; i++) {
-    const next = s.replace(/_(p\d{2,4}|h264|h265|hevc|av1|vp9|vvc)$/i, '');
+  // _p<digits> profile, _<codec>, and the delivery-profile tag as trailing
+  // tokens. Repeat in case several are present (e.g. `..._p200_h264_xs`).
+  // The tag (`xs` on the flexible ladder, `6s`/`2s`/`1s` on natively-segmented
+  // ones) sits LAST, after the codec — without it here the loop stops on the
+  // first pass and the pill shows the raw slug.
+  for (let i = 0; i < 4; i++) {
+    const next = s.replace(/_(p\d{2,4}|h264|h265|hevc|av1|vp9|vvc|xs|vod|\d+(\.\d+)?s)$/i, '');
     if (next === s) break;
     s = next;
   }

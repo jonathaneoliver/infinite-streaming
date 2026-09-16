@@ -99,7 +99,11 @@ func ReclassifyPlay(ctx context.Context, b Backend, playID string, force bool) e
 	probe := fmt.Sprintf(`
 		SELECT count() FROM %s.%s
 		WHERE play_id = {play:String}
-		  AND last_event IN ('user_marked', 'frozen', 'segment_stall', 'restart', 'error')
+		  AND (
+		    last_event IN ('user_marked', 'frozen', 'segment_stall', 'restart', 'error')
+		    OR terminal_error_code != 0
+		    OR playback_status IN ('start_failure', 'mid_stream_failure', 'abandoned_start')
+		  )
 		FORMAT TSV`, b.Database, b.EventsTable)
 	body, err := b.queryBytes(ctx, probe, map[string]string{"play": playID})
 	if err != nil {
@@ -122,7 +126,11 @@ func ReclassifySession(ctx context.Context, b Backend, sessionID, playID string,
 	probe := fmt.Sprintf(`
 		SELECT count() FROM %s.%s
 		WHERE session_id = {session:String} AND play_id = {play:String}
-		  AND last_event IN ('user_marked', 'frozen', 'segment_stall', 'restart', 'error')
+		  AND (
+		    last_event IN ('user_marked', 'frozen', 'segment_stall', 'restart', 'error')
+		    OR terminal_error_code != 0
+		    OR playback_status IN ('start_failure', 'mid_stream_failure', 'abandoned_start')
+		  )
 		FORMAT TSV`, b.Database, b.EventsTable)
 	body, err := b.queryBytes(ctx, probe, map[string]string{
 		"session": sessionID,

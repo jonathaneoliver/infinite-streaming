@@ -168,7 +168,7 @@ func writeSessionMetadata(ctx context.Context, zw *zip.Writer, cfg config, sessi
 		  argMax(player_state, ts) AS last_player_state,
 		  argMax(player_error, ts) AS last_player_error,
 		  max(stall_count) AS stalls,
-		  max(dropped_frames) AS dropped_frames,
+		  max(frames_dropped) AS frames_dropped,
 		  max(loop_count_server) AS loops_server,
 		  round(avgIf(video_quality_pct, video_quality_pct > 0), 1) AS avg_quality_pct,
 		  max(master_manifest_consecutive_failures) AS master_manifest_failures,

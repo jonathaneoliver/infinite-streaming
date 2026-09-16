@@ -1,0 +1,14 @@
+name: user-live-offset-fine
+class: config
+duration_s: 60
+reps: 1
+defaults:
+  platform: ipad-sim
+  is.protocol: hls
+  content: insane_newer_p200_h264
+arms:
+  - { id: F-s2-02, is.segment: s2, is.live_offset: 2 }
+  - { id: F-s2-04, is.segment: s2, is.live_offset: 4 }
+  - { id: F-s1-02, is.segment: s1, is.live_offset: 2 }
+  - { id: F-s1-04, is.segment: s1, is.live_offset: 4 }
+  - { id: F-s1-06, is.segment: s1, is.live_offset: 6 }

@@ -60,12 +60,17 @@ Player bugs are usually environmental — a network blip, a truncated segment, a
 | Tool / approach | Good at | Why InfiniteStream instead |
 |---|---|---|
 | Public test streams (Apple, DASH-IF, Bitmovin demos) | Quick playback sanity checks | Not deterministic; no failure injection; no looping on your schedule |
+| Live-from-VOD fakers ([mock-hls-server](https://github.com/tjenkinson/mock-hls-server), [hls-loop](https://github.com/jbochi/hls-loop)) | Faking a looping live HLS stream from VOD | HLS-only; no faults, no shaping, no shared-clock LL/2s/6s variants, no dashboard |
 | Production origins (Wowza, AWS Elemental, Unified Streaming) | Serving real viewers | Heavy, costly; not built for faults or side-by-side QA |
 | FFmpeg + nginx-rtmp / nginx-vod (DIY) | Full control of the stack | Days of setup; no shared-clock LL-HLS + LL-DASH; no fault UI |
 | Shaka Streamer | Packaging pipelines | Not a live test server; no looping, no faults, no dashboard |
+| [Eyevinn chaos-stream-proxy](https://github.com/Eyevinn/chaos-stream-proxy) | Streaming-aware corruptions over an *existing* HLS/DASH stream | Proxy only — the origin isn't yours or deterministic; per-URL query-param config, no per-session isolation, no shaping/transport faults, no forensics |
 | toxiproxy, `tc`, Chaos Mesh | Generic network faults | Protocol-agnostic — no awareness of segments, partials, playlists |
 | Charles, mitmproxy | Per-request rewriting | Manual, per-operator; not scripted or repeatable across runs |
 | mediamtx, SRS, OvenMediaEngine | Live ingest and serving | Not looping-VOD focused; not QA-focused; no fault injection |
+| [CTA WAVE DPCTF suite](https://github.com/cta-wave/dpctf-deploy) | Device playback *conformance* (camera-observed) | Complementary — conformance on correct media; says nothing about behavior under failure |
+| Locust-based load testing ([unifiedstreaming/streaming-load-testing](https://github.com/unifiedstreaming/streaming-load-testing)) | Stressing an origin with simulated players | The mirror image — it tests servers with fake players; this tests real players with a controlled server |
+| ABR simulators ([Sabre](https://github.com/UMass-LIDS/sabre), ABRSim) | Offline algorithm evaluation on throughput traces | Simulated player model — can't tell you what a *shipped player binary* actually does |
 
 **Why this is as important as live-feed testing for ABR work:**
 
@@ -227,8 +232,8 @@ Linux-only (macOS Docker Desktop can't do this).
 ### Network Shaping (per session)
 
 - **Delay / Loss / Throughput** sliders — steady-state shaping (0–250 ms, 0–10%, 0–50 Mbps). Throughput is disabled when a pattern is active.
-- **Pattern mode**: `sliders` (static), `square_wave`, `ramp_up`, `ramp_down`, `pyramid`. Non-`sliders` modes drive throughput through a scripted sequence of steps.
-- **Step duration**: `6s` / `12s` / `18s` / `24s` — how long each pattern step holds.
+- **Pattern mode**: `sliders` (static), `square_wave`, `ramp_up`, `ramp_down`, `pyramid`, `valley` (high → low → high — the inverse of pyramid; starts at the top so the player cold-starts cleanly, no startup cap needed), `transient_shock` (hold the top cap, dip to each lower rung in turn — deepening — recovering to top between dips). Non-`sliders` modes drive throughput through a scripted sequence of steps.
+- **Step duration**: `6s` / `12s` / `18s` / `24s` / `60s` / `120s` — how long each pattern step holds (`60s` / `120s` give buffer-draining holds for `transient_shock`-style probes).
 - **Margin**: `Exact` / `+10%` / `+25%` / `+50%` — headroom added on top of each ladder bitrate when picking preset rates.
 - **Throughput presets** are generated from the current manifest's variants (video + audio, deduped). Effective rate:
   `shaping_mbps = variant_mbps × (1 + margin_pct/100) + overhead_mbps`
@@ -530,16 +535,11 @@ Host-mounted volume at `/media` inside the container:
 - `/media/dynamic_content/{content}/` — encoded outputs
 - `/media/certs/` — TLS certs (auto-generated if missing)
 
-Three ways to add content:
+Ways to add content:
 
-- **Upload via the dashboard.** Open **Upload Content**, pick a file and encoding options. The server writes the source to `/media/originals/` and the encoded ladder to `/media/dynamic_content/`.
-- **Drop a source file in and encode from the UI.** Copy into `$CONTENT_DIR/originals/`, refresh **Source Library**, and trigger an encode from the UI.
-- **Drop pre-encoded ladders in directly.** If you've already run the pipeline offline (locally or on a build machine), copy the whole `{content}/` directory into `$CONTENT_DIR/dynamic_content/`. It appears in the dashboard immediately — no import step.
-
-To encode outside the dashboard (offline, in CI, or on a build box):
-
-- Run the pipeline locally with [`generate_abr/create_abr_ladder.sh`](generate_abr/README.md). See [`generate_abr/QUICKSTART.md`](generate_abr/QUICKSTART.md) for common invocations and [`generate_abr/HARDWARE_ENCODING_QUICKREF.md`](generate_abr/HARDWARE_ENCODING_QUICKREF.md) for hardware-accelerated encodes.
-- Offload to AWS EC2 spot instances via [`docs/CLOUD_ENCODING.md`](docs/CLOUD_ENCODING.md) — the cloud runner produces the same `{content}_h264/` and `{content}_hevc/` directory layout, so the output drops straight into `/media/dynamic_content/`.
+- **Encode with [infinite-streaming-encoder](https://github.com/jonathaneoliver/infinite-streaming-encoder) (recommended).** The companion encoder fans an encode out across a local farm or AWS Batch spot capacity and writes packages in exactly the shape this server serves. Copy (or `rsync`) each finished `<content>/` directory into `$CONTENT_DIR/dynamic_content/`. It appears in the catalogue immediately — no import step, no restart.
+- **Bring your own encode.** Any packager works if its output follows the content contract in [`docs/CONTENT_FORMAT.md`](docs/CONTENT_FORMAT.md): the directory name (`<stem>_p200_<codec>[_<tag>]`), the fMP4 layout, and the partial-segment byte ranges in the manifests that LL-HLS / LL-DASH and 1s serving depend on. A directory that breaks the naming contract still plays, but loses its codec — and the iOS / Android pickers hide it.
+- **Upload via the dashboard (built-in fallback encoder).** Open **Upload Content**, pick a file and encoding options, or drop a source into `$CONTENT_DIR/originals/` and encode it from **Source Library**. This runs the bundled [`generate_abr/`](generate_abr/README.md) pipeline — kept working and aligned with the Encoder for quick one-off clips and the first-run seed, but no longer the primary path.
 
 ### Primary endpoints
 
@@ -567,6 +567,7 @@ Full API (`/api/content`, `/api/jobs`, `/api/sessions/*`, `/api/nftables/*`, etc
 | `mbps_shaper_avg` | 100 ms | Rolling 6 s average of `mbps_shaper_rate` values |
 | `mbps_transfer_rate` | 250 ms | Byte-change-gated rate during segment transfer, aligned to HTB burst edges. Reports at drain/refill boundaries |
 | `mbps_transfer_complete` | per segment | Total bytes / total time for one completed segment transfer (backlog drained to 0) |
+| `delivery_rate_mbps` | per request (network log) | Kernel wire-delivery estimate (`tcpi_delivery_rate`) sampled at end of each proxied transfer — the honest per-request rate under tc shaping (#850) |
 
 ### Server-side RTT metrics
 
@@ -587,6 +588,7 @@ Sampled inside go-proxy via `getsockopt(TCP_INFO)` on each session's most-recent
 - **Limit value** (`nftables` shaping rate): configured ceiling for the session port; a control target, not a measured throughput.
 - **Shaper metrics** (`mbps_shaper_rate`, `mbps_shaper_avg`): from TC class byte counters on the 100 ms updatePort loop. Only active when TC shaping is configured (backlog > 0). `shaper_rate` goes to 0 on drain; `shaper_avg` smooths across segments.
 - **Transfer metrics** (`mbps_transfer_rate`, `mbps_transfer_complete`): from the 10 ms awaitSocketDrain goroutine. `transfer_rate` aligns to actual TC burst edges (250 ms min gap). `transfer_complete` is the ground-truth per-segment rate.
+- **Per-request delivery rate** (`delivery_rate_mbps`, on every network-log entry): the kernel's `tcpi_delivery_rate` read via `getsockopt(TCP_INFO)` at end of transfer (#850). Honest to within ~1% of client-measured truth for transfers ≥ 256 KB, where the naive `bytes_out/transfer_ms` figure over-reads 3–5000× (it times only the memcpy into the socket send buffer, not the tc-shaped wire drain). Connection-level: below ~64 KB it reflects the socket's recent history rather than that one request. Linux-only; 0 on the macOS dev build. Shown as the network-log Mbps column and the bandwidth chart's "Delivery rate (kernel)" dots.
 - **Player averaged bandwidth** (`player_metrics_avg_network_bitrate_mbps`): player-side averaged ABR estimate; slow-moving, model-based; intended for ladder analysis, initial variant pick, and comparison against shaper average. Populated by iOS (AVPlayer `observedBitrate`), Android (`DefaultBandwidthMeter.bitrateEstimate`), and browser players (HLS.js / Shaka / native) — i.e., the one signal every player can provide.
 - **Player instantaneous bandwidth** (`player_metrics_network_bitrate_mbps`): short-window near-instantaneous wire throughput; reacts quickly to sudden rate drops. Requires per-request wire visibility, so currently iOS-only (via LocalHTTPProxy); null on clients without that plumbing.
 - **Wall-clock offset** (`player_metrics_true_offset_s`): how far behind live the player is, computed *server-side* and *independent of the client's clock*. Players post `player_metrics_playhead_wallclock_ms` (the encoder's PDT at the playhead); the server timestamps the receive moment with its own clock and reports the difference: `true_offset_s = (server_received_at_ms − playhead_wallclock_ms) / 1000`. Survives clock skew on the client device, drift between phone NTP and laptop NTP, and any offset the player engine applies. Surfaced as a session-item field, on the buffer-depth chart's right Y-axis, and as the basis for cross-client comparison on the Live Offset page.
@@ -599,15 +601,17 @@ Implementation details (netlink counters, caching, scope of overhead inclusion) 
 
 ## Encoding pipeline
 
-Driven by `generate_abr/create_abr_ladder.sh` (ffmpeg + Shaka Packager v3.4.2, bundled in the container).
+**Content is normally produced by [infinite-streaming-encoder](https://github.com/jonathaneoliver/infinite-streaming-encoder)**, a separate project: a parallel, chunking encoder (local farm or AWS Batch spot) that drives the same ffmpeg + Shaka Packager pipeline and writes multi-codec (H.264 / HEVC / AV1) LL-HLS + DASH ladders. Its default delivery profile, `apple-uniq-live-xs`, is what the rest of this README assumes. Whatever encodes the content, the server only cares that the output matches [`docs/CONTENT_FORMAT.md`](docs/CONTENT_FORMAT.md).
 
-Defaults: segment duration **6 s**, partial duration **200 ms**, GOP duration **1 s**.
+The container also bundles a **fallback** encoder, `generate_abr/create_abr_ladder.sh` (ffmpeg + Shaka Packager v3.4.2). It powers **Upload Content**, **Source Library** re-encodes and the first-run seed clip, and is kept aligned with the Encoder's default profile so a clip from either can be compared — but new encoding features land in the Encoder, not here.
+
+Fallback defaults: `--ladder apple-uniq-live-xs`, segment duration **6 s**, partial duration **200 ms**, GOP duration **1 s**, two-pass software encode.
 
 **Audio**: source audio is normalized to **AAC** during transcode (`always-AAC`). Source tracks in non-AAC codecs are re-encoded so every variant on the ladder has a uniform audio layer, eliminating an entire class of "this segment plays on iOS but not Android" debugging.
 
 **Synthetic source content**: `make test-pattern` generates a 4K test pattern clip you can use as a controlled source — no copyrighted material, deterministic visuals, useful when testing ABR / ladder behaviour without confounding "is this just because of the content?" questions.
 
-See [`generate_abr/README.md`](generate_abr/README.md) for the pipeline, [`generate_abr/QUICKSTART.md`](generate_abr/QUICKSTART.md) for common commands, and [`docs/CLOUD_ENCODING.md`](docs/CLOUD_ENCODING.md) for offloading encodes to AWS EC2 spot instances.
+See [`generate_abr/README.md`](generate_abr/README.md) for the fallback pipeline and [`generate_abr/QUICKSTART.md`](generate_abr/QUICKSTART.md) for common commands. For cloud / distributed encoding, use [infinite-streaming-encoder](https://github.com/jonathaneoliver/infinite-streaming-encoder).
 
 ---
 
@@ -817,9 +821,10 @@ Captured from the live dashboard; files live in [`docs/screenshots/`](docs/scree
 - [`PRD.md`](PRD.md) — product behavior source of truth
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow
 
-**Encoding:**
-- [`generate_abr/README.md`](generate_abr/README.md), [`generate_abr/QUICKSTART.md`](generate_abr/QUICKSTART.md)
-- [`docs/CLOUD_ENCODING.md`](docs/CLOUD_ENCODING.md) — AWS EC2 spot offload
+**Content & encoding:**
+- [`docs/CONTENT_FORMAT.md`](docs/CONTENT_FORMAT.md) — the content contract: directory naming, on-disk layout, partial-segment info in the manifests
+- [infinite-streaming-encoder](https://github.com/jonathaneoliver/infinite-streaming-encoder) — the primary encoder (local farm or AWS Batch spot)
+- [`generate_abr/README.md`](generate_abr/README.md), [`generate_abr/QUICKSTART.md`](generate_abr/QUICKSTART.md) — the bundled fallback encoder
 - [`generate_abr/HARDWARE_ENCODING_QUICKREF.md`](generate_abr/HARDWARE_ENCODING_QUICKREF.md)
 - [`generate_abr/PACKAGER_COMPARISON.md`](generate_abr/PACKAGER_COMPARISON.md), [`generate_abr/DASH_PACKAGING_COMPARISON.md`](generate_abr/DASH_PACKAGING_COMPARISON.md)
 

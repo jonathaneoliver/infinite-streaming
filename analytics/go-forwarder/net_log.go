@@ -20,7 +20,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 )
 
 // netRow is the JSONEachRow shape for network_requests. Tags match the
@@ -49,58 +48,72 @@ type netRow struct {
 	TransferMs           float32 `json:"transfer_ms"`
 	TotalMs              float32 `json:"total_ms"`
 	ClientWaitMs         float32 `json:"client_wait_ms"`
-	Faulted              uint8   `json:"faulted"`
-	FaultType            string  `json:"fault_type"`
-	FaultAction          string  `json:"fault_action"`
-	FaultCategory        string  `json:"fault_category"`
-	RequestHeaders       string  `json:"request_headers"`
-	ResponseHeaders      string  `json:"response_headers"`
-	QueryString          string  `json:"query_string"`
+	// Kernel-measured shaped delivery rate (tcpi_delivery_rate, Mbps).
+	// Honest cross-check for bytes_out/transfer_ms, which over-reports
+	// ~1000× on sub-buffer transfers. 0 when the proxy couldn't sample
+	// (non-Linux build, torn-down conn). Issue #850.
+	DeliveryRateMbps float32 `json:"delivery_rate_mbps"`
+	// tcpi_delivery_rate_app_limited for the sample above (1 = app-limited
+	// / unreliable). Consumers trust delivery_rate_mbps only when 0.
+	DeliveryRateAppLimited uint8  `json:"delivery_rate_app_limited"`
+	Faulted                uint8  `json:"faulted"`
+	FaultType              string `json:"fault_type"`
+	FaultAction            string `json:"fault_action"`
+	FaultCategory          string `json:"fault_category"`
+	RequestHeaders         string `json:"request_headers"`
+	ResponseHeaders        string `json:"response_headers"`
+	QueryString            string `json:"query_string"`
 	// `,string` tag forces JSON serialization as a string. UInt64 values
 	// exceed JS's 2^53 safe-integer range, and the dashboard's per-row
 	// fpOf() compares fingerprints as strings — without `,string` the
 	// SSE-live overlay JSON would arrive as a precision-lossy JS Number
 	// and never match the same row's CH-backfill string, so the same
 	// network row got rendered twice in PlayLog.
-	EntryFingerprint     uint64  `json:"entry_fingerprint,string"`
+	EntryFingerprint uint64 `json:"entry_fingerprint,string"`
 	// Labels — see the corresponding field on `row` in main.go.
 	// Same vocabulary; <severity>=<event> strings stamped at ingest
 	// from computeNetworkLabels(). Drives the dashboard's row tint
 	// and chip rendering. Issue #473.
-	Labels               []string `json:"labels,omitempty"`
+	Labels []string `json:"labels,omitempty"`
 }
 
 // netEntry mirrors go-proxy's NetworkLogEntry. Only the fields we keep
 // are listed; unknown JSON keys are tolerated by the decoder.
 type netEntry struct {
-	Timestamp            time.Time     `json:"timestamp"`
-	Method               string        `json:"method"`
-	URL                  string        `json:"url"`
-	UpstreamURL          string        `json:"upstream_url"`
-	Path                 string        `json:"path"`
-	RequestKind          string        `json:"request_kind"`
-	Status               int           `json:"status"`
-	BytesIn              int64         `json:"bytes_in"`
-	BytesOut             int64         `json:"bytes_out"`
-	ContentType          string        `json:"content_type"`
-	PlayID               string        `json:"play_id"`
-	AttemptID            uint32        `json:"attempt_id"`
-	RequestHeaders       []nameValue   `json:"request_headers"`
-	ResponseHeaders      []nameValue   `json:"response_headers"`
-	QueryString          []nameValue   `json:"query_string"`
-	DNSMs                float64       `json:"dns_ms"`
-	ConnectMs            float64       `json:"connect_ms"`
-	TLSMs                float64       `json:"tls_ms"`
-	TTFBMs               float64       `json:"ttfb_ms"`
-	TransferMs           float64       `json:"transfer_ms"`
-	TotalMs              float64       `json:"total_ms"`
-	ClientWaitMs         float64       `json:"client_wait_ms"`
-	Faulted              bool          `json:"faulted"`
-	FaultType            string        `json:"fault_type"`
-	FaultAction          string        `json:"fault_action"`
-	FaultCategory        string        `json:"fault_category"`
-	RequestRange         string        `json:"request_range"`
-	ResponseContentRange string        `json:"response_content_range"`
+	Timestamp   time.Time `json:"timestamp"`
+	Method      string    `json:"method"`
+	URL         string    `json:"url"`
+	UpstreamURL string    `json:"upstream_url"`
+	Path        string    `json:"path"`
+	RequestKind string    `json:"request_kind"`
+	Status      int       `json:"status"`
+	BytesIn     int64     `json:"bytes_in"`
+	BytesOut    int64     `json:"bytes_out"`
+	ContentType string    `json:"content_type"`
+	PlayID      string    `json:"play_id"`
+	// PlayerID rides the proxy SSE entry off the request's own player_id query
+	// param (#911). Preferred over the session→player_id map (which is cold for
+	// a burst of early requests on a fresh stack); also used to warm that map.
+	PlayerID               string      `json:"player_id"`
+	AttemptID              uint32      `json:"attempt_id"`
+	RequestHeaders         []nameValue `json:"request_headers"`
+	ResponseHeaders        []nameValue `json:"response_headers"`
+	QueryString            []nameValue `json:"query_string"`
+	DNSMs                  float64     `json:"dns_ms"`
+	ConnectMs              float64     `json:"connect_ms"`
+	TLSMs                  float64     `json:"tls_ms"`
+	TTFBMs                 float64     `json:"ttfb_ms"`
+	TransferMs             float64     `json:"transfer_ms"`
+	TotalMs                float64     `json:"total_ms"`
+	ClientWaitMs           float64     `json:"client_wait_ms"`
+	DeliveryRateMbps       float64     `json:"delivery_rate_mbps"`
+	DeliveryRateAppLimited bool        `json:"delivery_rate_app_limited"`
+	Faulted                bool        `json:"faulted"`
+	FaultType              string      `json:"fault_type"`
+	FaultAction            string      `json:"fault_action"`
+	FaultCategory          string      `json:"fault_category"`
+	RequestRange           string      `json:"request_range"`
+	ResponseContentRange   string      `json:"response_content_range"`
 }
 
 type nameValue struct {
@@ -141,6 +154,22 @@ func (s *sessionPlayerMap) lookup(sessionID string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.m[sessionID]
+}
+
+// resolveNetworkPlayerID picks the player_id for a network row (#911). The
+// entry's own player_id (stamped by the proxy off the request's query param) is
+// preferred because it's warm from request #1, whereas the session→player map
+// lags on a fresh stack (it's populated from session_events, which arrive after
+// a burst of early network requests). When the entry carries one we also LEARN
+// the mapping, so later same-session entries that didn't carry a player_id (some
+// sub-requests) attribute via the now-warm map instead of landing empty. Returns
+// the canonicalised (lowercase) id, or "" when neither source knows it yet.
+func resolveNetworkPlayerID(m *sessionPlayerMap, sessionID, entryPlayerID string) string {
+	if pid := canonicalV2ID(entryPlayerID); pid != "" {
+		m.set(sessionID, pid)
+		return pid
+	}
+	return m.lookup(sessionID)
 }
 
 func (s *sessionPlayerMap) prune(active map[string]struct{}) {
@@ -251,6 +280,10 @@ func entryToRow(sessionID, playerID string, e *netEntry) netRow {
 	if e.Faulted {
 		faulted = 1
 	}
+	deliveryAppLimited := uint8(0)
+	if e.DeliveryRateAppLimited {
+		deliveryAppLimited = 1
+	}
 	// Canonicalise — see canonicalV2ID()'s doc on case-sensitivity.
 	// `playerID` already came in canonicalised via sessionToPlayerID,
 	// but `e.PlayID` lands raw off the proxy SSE entry — historically
@@ -258,37 +291,39 @@ func entryToRow(sessionID, playerID string, e *netEntry) netRow {
 	// landed with mixed case and the dashboard / archive plays
 	// histogram missed them on lowercase JOINs.
 	return netRow{
-		Ts:                   e.Timestamp.UTC().Format("2006-01-02 15:04:05.000"),
-		SessionID:            sessionID,
-		PlayerID:             canonicalV2ID(playerID),
-		PlayID:               canonicalV2ID(e.PlayID),
-		AttemptID:            e.AttemptID,
-		Method:               e.Method,
-		URL:                  e.URL,
-		UpstreamURL:          e.UpstreamURL,
-		Path:                 e.Path,
-		RequestKind:          e.RequestKind,
-		Status:               uint16(e.Status),
-		BytesIn:              e.BytesIn,
-		BytesOut:             e.BytesOut,
-		ContentType:          e.ContentType,
-		RequestRange:         e.RequestRange,
-		ResponseContentRange: e.ResponseContentRange,
-		DNSMs:                float32(e.DNSMs),
-		ConnectMs:            float32(e.ConnectMs),
-		TLSMs:                float32(e.TLSMs),
-		TTFBMs:               float32(e.TTFBMs),
-		TransferMs:           float32(e.TransferMs),
-		TotalMs:              float32(e.TotalMs),
-		ClientWaitMs:         float32(e.ClientWaitMs),
-		Faulted:              faulted,
-		FaultType:            e.FaultType,
-		FaultAction:          e.FaultAction,
-		FaultCategory:        e.FaultCategory,
-		RequestHeaders:       jsonOrEmpty(e.RequestHeaders),
-		ResponseHeaders:      jsonOrEmpty(e.ResponseHeaders),
-		QueryString:          jsonOrEmpty(e.QueryString),
-		EntryFingerprint:     netFingerprint(e),
+		Ts:                     e.Timestamp.UTC().Format("2006-01-02 15:04:05.000"),
+		SessionID:              sessionID,
+		PlayerID:               canonicalV2ID(playerID),
+		PlayID:                 canonicalV2ID(e.PlayID),
+		AttemptID:              e.AttemptID,
+		Method:                 e.Method,
+		URL:                    e.URL,
+		UpstreamURL:            e.UpstreamURL,
+		Path:                   e.Path,
+		RequestKind:            e.RequestKind,
+		Status:                 uint16(e.Status),
+		BytesIn:                e.BytesIn,
+		BytesOut:               e.BytesOut,
+		ContentType:            e.ContentType,
+		RequestRange:           e.RequestRange,
+		ResponseContentRange:   e.ResponseContentRange,
+		DNSMs:                  float32(e.DNSMs),
+		ConnectMs:              float32(e.ConnectMs),
+		TLSMs:                  float32(e.TLSMs),
+		TTFBMs:                 float32(e.TTFBMs),
+		TransferMs:             float32(e.TransferMs),
+		TotalMs:                float32(e.TotalMs),
+		ClientWaitMs:           float32(e.ClientWaitMs),
+		DeliveryRateMbps:       float32(e.DeliveryRateMbps),
+		DeliveryRateAppLimited: deliveryAppLimited,
+		Faulted:                faulted,
+		FaultType:              e.FaultType,
+		FaultAction:            e.FaultAction,
+		FaultCategory:          e.FaultCategory,
+		RequestHeaders:         jsonOrEmpty(e.RequestHeaders),
+		ResponseHeaders:        jsonOrEmpty(e.ResponseHeaders),
+		QueryString:            jsonOrEmpty(e.QueryString),
+		EntryFingerprint:       netFingerprint(e),
 	}
 }
 
@@ -356,8 +391,9 @@ func streamNetworkSSE(ctx context.Context, cfg config, seen *netSeen, out chan<-
 		if seen.check(ev.SessionID, fp) {
 			continue
 		}
+		pid := resolveNetworkPlayerID(sessionToPlayerID, ev.SessionID, ev.Entry.PlayerID)
 		select {
-		case out <- entryToRow(ev.SessionID, sessionToPlayerID.lookup(ev.SessionID), &ev.Entry):
+		case out <- entryToRow(ev.SessionID, pid, &ev.Entry):
 		case <-ctx.Done():
 			return ctx.Err()
 		}

@@ -46,6 +46,8 @@
         return urlParams.get('expert') === '1';
     }
 
+    // Hostnames treated as internal (LAN / loopback / Tailscale) by the optional
+    // public-host restriction below.
     function isInternalNetworkHost(hostname) {
         if (!hostname) return false;
         const host = String(hostname).toLowerCase();
@@ -59,15 +61,27 @@
         return false;
     }
 
-    function shouldRestrictContentManagement() {
-        // Hide content-management UI on public-facing hosts; only show it on
-        // local-network deployments where the operator can be trusted.
-        const host = window.location.hostname || '';
-        return !isInternalNetworkHost(host);
-    }
-
-    function shouldRestrictMonitorAccess() {
-        return shouldRestrictContentManagement();
+    // Optional, off by default: when the server sets
+    // INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS (surfaced as /api/setup's
+    // restrict_public_hosts), disable content management (Upload / Sources /
+    // Jobs) and Monitor in the nav on hostnames that don't look internal. A soft
+    // UI hide only -- the pages stay reachable; real auth is the optional
+    // htpasswd. It used to be unconditional, which greyed these out on any LAN
+    // deployment reached through a real DNS name (e.g. one with a Let's Encrypt
+    // cert).
+    function applyPublicHostRestriction(status) {
+        if (!status || !status.restrict_public_hosts) return;
+        if (isInternalNetworkHost(window.location.hostname || '')) return;
+        const ids = NAVIGATION.content.map((item) => item.id).concat(['monitor']);
+        ids.forEach((id) => {
+            const link = document.getElementById(`nav-${id}`);
+            if (!link) return;
+            link.classList.add('disabled');
+            link.setAttribute('href', '#');
+            link.setAttribute('aria-disabled', 'true');
+            link.setAttribute('tabindex', '-1');
+            link.setAttribute('title', 'Available only on internal network hosts.');
+        });
     }
 
     function resolvePreferredStreamHost(sourceHostname) {
@@ -115,17 +129,28 @@
         return `${base}${separator}player_id=${encodeURIComponent(playerId)}`;
     }
 
+    // player_id is a UUID (API v2 spec; the v3 dashboard and apps mint
+    // UUIDv4). This used to mint 8-hex ids, which the server canonicalises
+    // to a v5 UUID -- so the id in the page URL never matched the id on
+    // /api/v2/players or the archive (#1025). Ids already saved in
+    // localStorage (ismTestPlaybackPlayerId) are kept so per-player proxy
+    // config carries over; only newly minted ids change shape.
+    // crypto.randomUUID needs a secure context; getRandomValues does not,
+    // so TLS-off (plain HTTP) stacks still get a real UUIDv4.
     function createPlayerId() {
-        if (window.crypto && window.crypto.getRandomValues) {
-            const bytes = new Uint8Array(6);
-            window.crypto.getRandomValues(bytes);
-            let value = '';
-            bytes.forEach(byte => {
-                value += byte.toString(16).padStart(2, '0');
-            });
-            return value.slice(0, 8);
+        if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+            return window.crypto.randomUUID();
         }
-        return Math.random().toString(36).slice(2, 10);
+        const bytes = new Uint8Array(16);
+        if (window.crypto && window.crypto.getRandomValues) {
+            window.crypto.getRandomValues(bytes);
+        } else {
+            for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+        }
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
     }
 
     function getOrCreateTestPlaybackPlayerId() {
@@ -181,8 +206,6 @@
     // Build sidebar HTML
     function buildSidebar(activePage) {
         const isDeveloper = isDeveloperMode();
-        const restrictContent = shouldRestrictContentManagement();
-        const restrictMonitor = shouldRestrictMonitorAccess();
         
         const sections = [
             { title: 'MAIN', items: NAVIGATION.main },
@@ -222,20 +245,11 @@
             html += `<div class="nav-section-title">${section.title}</div>`;
             
             visibleItems.forEach(item => {
-                const isContentRestrictedItem = restrictContent && section.title === 'CONTENT';
-                const isMonitorRestrictedItem = restrictMonitor && section.title === 'LIVE STREAMING' && item.id === 'monitor';
-                const isRestrictedItem = isContentRestrictedItem || isMonitorRestrictedItem;
                 const isActive = item.id === activePage ? 'active' : '';
-                const isDisabled = isRestrictedItem ? 'disabled' : '';
                 const warning = item.warning ? '<span class="nav-item-warning">⚠️</span>' : '';
                 const alpha = item.alpha ? '<span class="nav-item-alpha">ALPHA</span>' : '';
                 const external = item.external ? ' target="_blank" rel="noopener"' : '';
-                const href = isRestrictedItem ? '#' : item.href;
-                const disabledAttrs = isRestrictedItem
-                    ? ' aria-disabled="true" tabindex="-1" title="Available only on internal network hosts."'
-                    : '';
-                
-                html += `<a id="nav-${item.id}" href="${href}" class="nav-item ${isActive} ${isDisabled}"${external}${disabledAttrs}>`;
+                html += `<a id="nav-${item.id}" href="${item.href}" class="nav-item ${isActive}"${external}>`;
                 html += `<span class="nav-item-icon">${item.icon}</span>`;
                 html += `<span class="nav-item-text">${item.text}</span>`;
                 html += warning;
@@ -1073,6 +1087,7 @@
     function initSetupExperience(activePage) {
         fetchSetupStatus()
             .then((status) => {
+                applyPublicHostRestriction(status);
                 renderSetupBanner(status, activePage);
                 maybeShowSetupModal(status);
             })
@@ -1504,9 +1519,7 @@
         setSelectedUrl: setSelectedUrl,
         normalizeTestingBaseUrl: normalizeTestingBaseUrl,
         buildTestingUrl: buildTestingUrl,
-        createPlayerId: createPlayerId,
-        isContentManagementRestricted: shouldRestrictContentManagement,
-        isMonitorRestricted: shouldRestrictMonitorAccess
+        createPlayerId: createPlayerId
     };
 
     // Auto-initialize on DOM ready (unless disabled)

@@ -536,9 +536,9 @@ private fun FieldRow(label: String, value: String, kt: KeyboardType, onChange: (
 }
 
 @Composable
-internal fun PrimaryButton(text: String, onClick: () -> Unit, accent: Boolean = false) {
+internal fun PrimaryButton(text: String, onClick: () -> Unit, accent: Boolean = false, modifier: Modifier = Modifier) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .height(44.dp)
             .tvFocus(cornerRadius = Radius.pill)
             .clip(RoundedCornerShape(Radius.pill))

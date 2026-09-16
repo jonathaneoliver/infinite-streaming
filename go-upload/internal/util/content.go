@@ -12,6 +12,19 @@ import (
 	"time"
 )
 
+// Variant is one rung of a content item's ABR ladder, parsed from the on-disk
+// HLS master playlist. Resolution-keyed (no URI): the *served* master's
+// per-segment-duration URIs (`playlist_6s_360p.m3u8`) differ from the source
+// master's (`360p/playlist.m3u8`) and from each other across 2s/6s/LL, so the
+// stable cross-segment identity is resolution + bitrate. Field names mirror the
+// proxy v2 `ManifestVariant` so dashboard code can consume either source.
+type Variant struct {
+	Resolution       string `json:"resolution"`        // "640x360"
+	Height           int    `json:"height"`            // 360
+	Bandwidth        int    `json:"bandwidth"`         // EXT-X-STREAM-INF BANDWIDTH (peak)
+	AverageBandwidth int    `json:"average_bandwidth"` // AVERAGE-BANDWIDTH, 0 if the playlist omits it
+}
+
 type ContentInfo struct {
 	Name string `json:"name"`
 	// Logical clip identifier — the lowercased name with the
@@ -33,9 +46,32 @@ type ContentInfo struct {
 	ThumbnailURLSmall string  `json:"thumbnail_url_small,omitempty"`
 	// 1280 px wide — Continue Watching hero / large surfaces.
 	ThumbnailURLLarge string  `json:"thumbnail_url_large,omitempty"`
-	SegmentDuration   *int    `json:"segment_duration"`
-	MaxResolution     *string `json:"max_resolution"`
-	MaxHeight         *int    `json:"max_height"`
+	// Native segment length (seconds) the source was encoded at, as
+	// detected from the on-disk playlists. Kept for display / upload
+	// config / forwarder Chromecast discovery. NOT the set of lengths the
+	// clip is *playable* at — see SegmentDurations.
+	SegmentDuration *int `json:"segment_duration"`
+	// All segment lengths (seconds) go-live can actually serve this clip
+	// at. go-live synthesizes both a 2s and a 6s master playlist on the
+	// fly from ANY HLS source master (RangeHLSGenerator composes virtual
+	// segment windows from the stored segments), so segment length is a
+	// presentation choice — every HLS clip is browsable at 2s AND 6s
+	// regardless of its native SegmentDuration. LL is reported separately
+	// via HasLL because it additionally needs on-disk partial info.
+	SegmentDurations []int `json:"segment_durations,omitempty"`
+	// True when the source carries the partial-segment info LL-HLS needs
+	// (#EXT-X-PART tags, or a .byteranges sidecar fallback) — the
+	// prerequisite for go-live to generate the low-latency master. 2s/6s
+	// never need partials; LL always does.
+	HasLL         bool    `json:"has_ll"`
+	MaxResolution *string `json:"max_resolution"`
+	MaxHeight     *int    `json:"max_height"`
+	// Full ABR ladder (one entry per video rung), ascending by bandwidth,
+	// parsed from the on-disk master.m3u8. Resolution-keyed — see Variant.
+	// Empty/omitted for content with no HLS master. Lets clients (the
+	// characterization harness, the dashboard) read the rung list without
+	// fetching + parsing a playlist or priming a proxy session.
+	Variants []Variant `json:"variants,omitempty"`
 
 	// Internal — used for newest-wins dedup. Lowercase so encoding/json
 	// skips it. Set during ListContent from the encode-timestamp suffix
@@ -43,10 +79,24 @@ type ContentInfo struct {
 	encodeTS time.Time
 }
 
-// Strips `_p200_<codec>` from a content name, returning (stem-with-any-
+// Strips `_p<ms>_<codec>` from a content name, returning (stem-with-any-
 // trailing-timestamp, codec). The stem is then further reduced by
 // stripTimestampSuffix to produce the final clip_id used for dedup.
-var clipIDPattern = regexp.MustCompile(`(?i)_p200_(h264|hevc|h265|av1)(_|$)`)
+//
+// `<ms>` is the LL partial duration the package was encoded with: go-upload
+// names each job `<name>_p<partial ms>` from the partial durations picked in
+// the dashboard (200 by default, 1000 offered), and the Encoder always uses
+// 200. Only 200 used to be recognised, so 1000 ms encodes listed with no codec.
+// A non-200 partial is kept in the clip_id (`clip_p1000`) so a 200 ms and a
+// 1000 ms encode of the same source stay separate rows; 200 is dropped, which
+// keeps every existing clip_id unchanged.
+//
+// infinite-streaming-encoder puts its padding option BETWEEN `_p200` and the
+// codec (`<stem>_p200_padblack_<codec>`, #1032), so an optional
+// `_padblack` / `_padpink` is accepted there. The padding suffix is kept in
+// the clip_id: a padded and an unpadded encode of the same source are
+// different content and must not collapse under newest-wins dedup.
+var clipIDPattern = regexp.MustCompile(`(?i)_p(\d+)(_pad(?:black|pink))?_(h264|hevc|h265|av1)(_|$)`)
 
 // Matches `_YYYYMMDD_HHMMSS` at the end of a string. shaka-packager / the
 // encode pipeline appends this when re-encoding the same source so distinct
@@ -59,8 +109,18 @@ func splitClipIDAndCodec(name string) (clipID, codec string, ts time.Time) {
 	if m == nil {
 		return strings.ToLower(stripTimestampSuffix(name)), "", time.Time{}
 	}
-	codec = strings.ToLower(name[m[2]:m[3]])
-	stem := name[:m[0]] + name[m[4]:]
+	// Submatches: 1 = partial ms, 2 = optional padding suffix, 3 = codec,
+	// 4 = separator.
+	partial := ""
+	if ms, err := strconv.Atoi(name[m[2]:m[3]]); err != nil || ms != 200 {
+		partial = "_p" + name[m[2]:m[3]]
+	}
+	codec = strings.ToLower(name[m[6]:m[7]])
+	padding := ""
+	if m[4] >= 0 {
+		padding = name[m[4]:m[5]]
+	}
+	stem := name[:m[0]] + partial + padding + name[m[8]:]
 	stem = strings.TrimSuffix(stem, "_")
 	ts = parseEncodeTimestamp(stem)
 	stem = stripTimestampSuffix(stem)
@@ -119,7 +179,10 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 			thumbnailURLLarge = base + "/thumbnail-large.jpg"
 		}
 		segmentDuration := detectSegmentDuration(itemPath)
+		segmentDurations := availableSegmentDurations(name, itemPath, hasHls, segmentDuration)
+		hasLL := hasHls && contentHasPartials(itemPath)
 		maxResolution, maxHeight := detectMaxResolution(itemPath)
+		variants := parseMasterVariants(itemPath)
 		clipID, codec, ts := splitClipIDAndCodec(name)
 		// If the name didn't carry an encode timestamp (older content),
 		// fall back to the directory's mtime for tiebreaks. Avoids
@@ -141,8 +204,11 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 			ThumbnailURLSmall: thumbnailURLSmall,
 			ThumbnailURLLarge: thumbnailURLLarge,
 			SegmentDuration:   segmentDuration,
+			SegmentDurations:  segmentDurations,
+			HasLL:             hasLL,
 			MaxResolution:     maxResolution,
 			MaxHeight:         maxHeight,
+			Variants:          variants,
 			encodeTS:          ts,
 		})
 	}
@@ -174,12 +240,65 @@ func ListContent(contentDir string) ([]ContentInfo, error) {
 	return contentList, nil
 }
 
+// legacyRungDirs is where the catalogue used to look for variant playlists
+// before it followed the master (#1033). Still the fallback when there is no
+// master.m3u8 or it names no variants.
+var legacyRungDirs = []string{"720p", "540p", "360p", "1080p"}
+
+// maxProbedVariants bounds how many variant playlists a per-request catalogue
+// probe opens. Every rung of one encode shares segment length and partial
+// layout, so a few are enough; a 12-rung ladder shouldn't cost 12 file scans
+// per content item on every /api/content call.
+const maxProbedVariants = 4
+
+// variantPlaylistPaths returns the content's video variant playlists, in the
+// order go-live would find them: the URI line following each
+// #EXT-X-STREAM-INF in master.m3u8, resolved against the content directory.
+// Absolute and remote URIs are skipped (go-live can't serve them either).
+// Falls back to <dir>/playlist.m3u8 under the legacy rung directories when the
+// master is missing or names no usable variants, so directory-convention
+// content keeps working.
+func variantPlaylistPaths(contentPath string) []string {
+	var paths []string
+	if file, err := os.Open(filepath.Join(contentPath, "master.m3u8")); err == nil {
+		scanner := bufio.NewScanner(file)
+		expectURI := false
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if strings.HasPrefix(line, "#EXT-X-STREAM-INF") {
+				expectURI = true
+				continue
+			}
+			if !expectURI || line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			expectURI = false
+			if strings.Contains(line, "://") || strings.HasPrefix(line, "/") {
+				continue
+			}
+			p := filepath.Join(contentPath, filepath.FromSlash(line))
+			if fileExists(p) {
+				paths = append(paths, p)
+			}
+		}
+		file.Close()
+	}
+	if len(paths) > 0 {
+		return paths
+	}
+	for _, dir := range legacyRungDirs {
+		p := filepath.Join(contentPath, dir, "playlist.m3u8")
+		if fileExists(p) {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
 func detectSegmentDuration(contentPath string) *int {
-	hlsDirs := []string{"720p", "540p", "360p", "1080p"}
-	for _, dir := range hlsDirs {
-		playlistPath := filepath.Join(contentPath, dir, "playlist.m3u8")
-		if !fileExists(playlistPath) {
-			continue
+	for i, playlistPath := range variantPlaylistPaths(contentPath) {
+		if i >= maxProbedVariants {
+			break
 		}
 		if dur := parseHlsPlaylistDuration(playlistPath); dur != nil {
 			return dur
@@ -195,6 +314,130 @@ func detectSegmentDuration(contentPath string) *int {
 	}
 
 	return nil
+}
+
+// segmentPinPattern matches a trailing `_1s` / `_2s` / `_6s` on a content name.
+//
+// Such a clip is encoded natively at that one segment length and is served only
+// at it — go-live does not repackage it. `_xs` (and an unsuffixed name) carries
+// no pin and keeps the normal repackaging behaviour.
+//
+// Mirrored in go-live/internal/api/segment_pin.go: these are separate Go
+// modules with no shared package, so the rule is stated in both. The catalogue
+// must not advertise a length the manifest handler will refuse.
+var segmentPinPattern = regexp.MustCompile(`(?i)_(1|2|6)s$`)
+
+// SegmentPin returns the segment length a content name is pinned to, or 0 when
+// it carries no pin.
+func SegmentPin(name string) int {
+	m := segmentPinPattern.FindStringSubmatch(name)
+	if m == nil {
+		return 0
+	}
+	switch m[1] {
+	case "1":
+		return 1
+	case "2":
+		return 2
+	case "6":
+		return 6
+	}
+	return 0
+}
+
+// availableSegmentDurations reports the integer segment lengths go-live can
+// serve this clip at.
+//
+// A name pinned with `_1s`/`_2s`/`_6s` reports exactly that one length: the
+// clip is natively encoded at it and is not repackaged. Everything else —
+// `_xs` and unsuffixed content alike — is repackaged, and go-live composes both
+// a 2s and a 6s virtual master from any HLS source master, so any HLS clip is
+// available at both regardless of its native encode. The natively-detected
+// duration is folded in too so a DASH-only clip (no HLS synthesis) still
+// advertises something. LL is not an integer length — it's reported separately
+// via HasLL, and a pin does not suppress it, because LL is partial-segment
+// availability rather than a segment length.
+func availableSegmentDurations(name, contentPath string, hasHls bool, native *int) []int {
+	if pin := SegmentPin(name); pin != 0 {
+		return []int{pin}
+	}
+
+	set := map[int]bool{}
+	if hasHls {
+		set[2] = true
+		set[6] = true
+		if contentHasPartials(contentPath) { // 1s rung is composed from LL partials (go-live groups parts into ~1s GOP sub-segments)
+			set[1] = true
+		}
+	}
+	// A native duration of 0 is not a segment length — it means detection
+	// failed (an unparseable playlist or manifest). Advertising it produced
+	// rows like segment_durations [0,1,2,6], which no client can use.
+	if native != nil && *native > 0 {
+		set[*native] = true
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(set))
+	for d := range set {
+		out = append(out, d)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// contentHasPartials reports whether the source carries the partial-segment
+// info LL-HLS needs. Mirrors go-live's LoadPlaylistInfoWithByteranges fallback
+// chain (parser/playlist.go, parser/byterange.go) so the catalogue's LL flag
+// matches what go-live can actually generate: prefer #EXT-X-PART tags in a
+// variant playlist, fall back to the `<segment>.byteranges` sidecar go-live
+// would load for that playlist's segments. 2s/6s never need this; LL always
+// does. Variant playlists come from the master (#1033), not fixed directory
+// names.
+func contentHasPartials(contentPath string) bool {
+	for i, playlistPath := range variantPlaylistPaths(contentPath) {
+		if i >= maxProbedVariants {
+			break
+		}
+		hasParts, firstSegment := scanPlaylistForPartials(playlistPath)
+		if hasParts {
+			return true
+		}
+		if firstSegment != "" && fileExists(filepath.Join(filepath.Dir(playlistPath), filepath.FromSlash(firstSegment)+".byteranges")) {
+			return true
+		}
+	}
+	return false
+}
+
+// scanPlaylistForPartials reports whether a media playlist carries
+// `#EXT-X-PART:` tags, and otherwise returns its first segment URI (for the
+// sidecar check). `#EXT-X-PART-INF` alone is only a declaration, not partial
+// info, so it does not count. go-live reads sidecars only for .m4s/.ts
+// segments, so other extensions return no segment.
+func scanPlaylistForPartials(path string) (hasParts bool, firstSegment string) {
+	file, err := os.Open(path)
+	if err != nil {
+		return false, ""
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "#EXT-X-PART:") {
+			return true, ""
+		}
+		if firstSegment == "" && line != "" && !strings.HasPrefix(line, "#") {
+			if strings.HasSuffix(line, ".m4s") || strings.HasSuffix(line, ".ts") {
+				firstSegment = line
+			}
+			// Parts precede the segment they belong to, so a playlist with
+			// partials has shown one by its first segment line.
+			return false, firstSegment
+		}
+	}
+	return false, firstSegment
 }
 
 func parseHlsPlaylistDuration(path string) *int {
@@ -282,6 +525,52 @@ func parseDashSegmentDuration(path string) *int {
 			}
 		}
 	}
+}
+
+// parseMasterVariants reads the content's source master.m3u8 and returns its
+// full video-variant ladder (resolution + peak/average bandwidth per rung),
+// sorted ascending by bandwidth. Returns nil when there is no master or it
+// carries no EXT-X-STREAM-INF entries. The source master is segment-duration
+// independent (go-live synthesizes the 2s/6s/LL masters on the fly), so this is
+// the content's intrinsic ladder — every existing clip gets it for free, no
+// re-encode. The BANDWIDTH match is anchored on `[,:]` so it does NOT capture
+// the digits of `AVERAGE-BANDWIDTH=` (which contains the substring "BANDWIDTH").
+func parseMasterVariants(contentPath string) []Variant {
+	file, err := os.Open(filepath.Join(contentPath, "master.m3u8"))
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+
+	bwRe := regexp.MustCompile(`[,:]BANDWIDTH=(\d+)`)
+	avgRe := regexp.MustCompile(`AVERAGE-BANDWIDTH=(\d+)`)
+	resRe := regexp.MustCompile(`RESOLUTION=(\d+)x(\d+)`)
+
+	var variants []Variant
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "#EXT-X-STREAM-INF") {
+			continue
+		}
+		var v Variant
+		if m := bwRe.FindStringSubmatch(line); m != nil {
+			v.Bandwidth, _ = strconv.Atoi(m[1])
+		}
+		if m := avgRe.FindStringSubmatch(line); m != nil {
+			v.AverageBandwidth, _ = strconv.Atoi(m[1])
+		}
+		if m := resRe.FindStringSubmatch(line); m != nil {
+			v.Resolution = m[1] + "x" + m[2]
+			v.Height, _ = strconv.Atoi(m[2])
+		}
+		variants = append(variants, v)
+	}
+	if len(variants) == 0 {
+		return nil
+	}
+	sort.Slice(variants, func(i, j int) bool { return variants[i].Bandwidth < variants[j].Bandwidth })
+	return variants
 }
 
 func detectMaxResolution(contentPath string) (*string, *int) {

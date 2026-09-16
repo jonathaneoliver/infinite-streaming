@@ -1,0 +1,29 @@
+# Declarative characterization matrix (issue #811, namespaced-knob revision).
+#
+# Run sequentially, expanding + driving each arm and printing an achieved-offset
+# table:
+#
+#     harness char matrix tests/characterization/matrix/live-offset.yaml
+#
+# Sanity-check the expansion without touching any session:
+#
+#     harness char matrix tests/characterization/matrix/live-offset.yaml --dry-run
+#
+# The #793 live-offset matrix. The old `lever` axis is gone: a live offset is now
+# imposed by whichever surface you set —
+#   - proxy.live_offset → server manifest hold-back (config-on-connect, no relaunch)
+#   - is.live_offset    → client -is.flag.live_offset_s override (cold launch per arm)
+# Setting BOTH is the precedence case (see precedence.yaml). Here we sweep the
+# server hold-back across segment sizes.
+name: live-offset
+class: config
+duration_s: 90
+
+# Shared across every arm; an axis or explicit arm overrides per-field.
+defaults:
+  platform: ipad-sim
+
+# Cartesian product → is.segment{s2,s6} × proxy.live_offset{24,30} = 4 arms.
+axes:
+  is.segment: [s2, s6]
+  proxy.live_offset: [24, 30]

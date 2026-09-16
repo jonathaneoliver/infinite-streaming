@@ -83,19 +83,24 @@ Host volume mounted at `/media` inside the container:
 /media/
 ├── originals/                      # source files (uploaded or copied in)
 │   └── my-show.mp4
-├── dynamic_content/                # encoded ABR output (served as segments)
-│   └── my-show_p200_h264/
-│       ├── video/240p/…m4s
-│       ├── video/480p/…m4s
-│       ├── video/720p/…m4s
-│       ├── audio/…m4s
-│       └── manifest.json           # consumed by go-live as the source of truth
+├── dynamic_content/                # encoded ABR packages, one directory per codec
+│   └── my-show_p200_h264_xs/       # name is a contract — see CONTENT_FORMAT.md
+│       ├── master.m3u8             # HLS source master: go-live's input
+│       ├── manifest.mpd            # DASH source manifest
+│       ├── 360p/ … 2160p/          # one dir per video rung
+│       │   ├── init.mp4
+│       │   ├── playlist.m3u8       # carries #EXT-X-PART byte ranges (LL + 1s)
+│       │   └── segment_00001.m4s …
+│       ├── audio/                  # same shape as a rung
+│       └── thumbnail{,-small,-large}.jpg
 └── certs/                          # optional TLS certs (auto-generated if missing)
     ├── localhost.pem
     └── localhost-key.pem
 ```
 
 Live manifests generated on the fly live in tmpfs at `/content/go-live/{content}/…` and are not persisted.
+
+Packages normally come from [infinite-streaming-encoder](https://github.com/jonathaneoliver/infinite-streaming-encoder) and are copied in; the bundled `generate_abr/` pipeline is the fallback. The full naming and layout contract — what each part of the directory name drives, which files are required, and the partial-segment info LL depends on — is in [`CONTENT_FORMAT.md`](CONTENT_FORMAT.md).
 
 ## Subprocess boundaries
 
@@ -109,6 +114,7 @@ go-proxy's throughput metrics (`mbps_shaper_rate`, `mbps_shaper_avg`, `mbps_tran
 - Per-port TC stats are cached with a 5 ms TTL to deduplicate concurrent readers.
 - Only one `awaitSocketDrain` goroutine runs per port at a time (singleton guard).
 - TC counters include packet-level transport/application overhead (TCP/IP + TLS/HTTP headers) but **not** physical link-layer overhead (Ethernet preamble / IFG / FCS).
+- Per-request `delivery_rate_mbps` (#850) is sampled at end of transfer via `getsockopt(TCP_INFO).tcpi_delivery_rate` on the client socket (`delivery_rate_linux.go`; no-op stub off-Linux) — the kernel's own drained-onto-the-wire estimate, recorded on each network-log entry as the honest counterpart to the send-buffer-timed `bytes_out/transfer_ms`.
 - **Docker Desktop (macOS):** TC shaping works with `--cap-add NET_ADMIN` but the VM translation layer makes TC stats polling (100ms interval per session) significantly more expensive than on native Linux. On an M5 MacBook Pro, even a single session causes noticeable fan spin-up. This is inherent to Docker Desktop's Linux VM architecture, not a code issue. For sustained shaping tests, use a native Linux host.
 
 Semantics and expected behaviour of the metrics themselves (what each series means, how they relate to the configured limit and the player's own estimate) are documented in [`README.md`'s Metrics reference](../README.md#metrics-reference).
@@ -134,8 +140,8 @@ Global selection (content, URL, protocol, codec, segment) is kept in `localStora
 | Mode | How | UI | Notes |
 |---|---|---|---|
 | Docker Compose | `make run` or `docker compose up -d` | `localhost:30000` | Simplest, single-host |
-| k3d release | `make deploy-release` | `$K3S_HOST:30000` | Independent k3d cluster, api `:6544`, 30x port range |
-| k3d dev | `make deploy` | `$K3S_HOST:40000` | Independent k3d cluster, api `:6543`, 40x port range — coexists with release |
+| k3d release | `make deploy-k3d-release` | `$K3S_HOST:30000` | Independent k3d cluster, api `:6544`, 30x port range |
+| k3d dev | `make deploy-k3d-dev` | `$K3S_HOST:40000` | Independent k3d cluster, api `:6543`, 40x port range — coexists with release |
 | GHCR compose | Pull `ghcr.io/jonathaneoliver/infinite-streaming:<tag>` | `localhost:30000` | No local build |
 
 All modes mount the same content layout. See [`README.md`](../README.md#quick-start) for commands and [`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for common operational issues.

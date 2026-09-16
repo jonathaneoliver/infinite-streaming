@@ -98,7 +98,7 @@ async function loadStats() {
   if (Array.isArray(contentData)) {
     const items: any[] = contentData;
     const unique = new Set(
-      items.map((it) => String(it.name ?? '').replace(/_h264|_hevc|_av1|_ts|_hw|_dash/g, '')),
+      items.map((it) => String(it.name ?? '').replace(/_h264|_hevc|_av1|_ts|_hw|_dash|_xs|_vod/g, '')),
     );
     contentCount.value = unique.size;
   } else {

@@ -34,12 +34,25 @@ import (
 )
 
 // hasInterestingSignal returns true if the snapshot map carries any
-// of the 5 last_event values that drive the picker's "Flags" chips.
-// Matches plays.ReclassifySession's SQL predicate exactly so chip +
-// filter + retention tier agree on what "interesting" means.
+// of the last_event values that drive the picker's "Flags" chips OR
+// (#550 Phase 2) a non-zero terminal_error_code, OR an explicit
+// `failed_*` / `abandoned_start` playback_status. Matches
+// plays.ReclassifySession's SQL predicate exactly so chip + filter +
+// retention tier agree on what "interesting" means.
 func hasInterestingSignal(s map[string]interface{}) bool {
 	switch strings.ToLower(strings.TrimSpace(getStr(s, "player_metrics_last_event"))) {
 	case "user_marked", "frozen", "segment_stall", "restart", "error":
+		return true
+	}
+	// #550 Phase 2: any terminal failure marks the session interesting.
+	// `terminal_error_code != 0` only on rows where iOS classifier set
+	// it; equally `playback_status starts with 'failed_'` or equals
+	// 'abandoned_start' (EBVS) is a terminal-failure signal.
+	if code := getI64(s, "player_metrics_terminal_error_code"); code != 0 {
+		return true
+	}
+	status := strings.ToLower(strings.TrimSpace(getStr(s, "player_metrics_playback_status")))
+	if strings.HasPrefix(status, "failed_") || status == "abandoned_start" {
 		return true
 	}
 	return false

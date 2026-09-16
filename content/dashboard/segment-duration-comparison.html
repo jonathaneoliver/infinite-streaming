@@ -913,11 +913,22 @@
         let updateInterval = null;
         let activeAudioStream = null;
 
+        function uuidV4() {
+            // Same shape as ISMNav.createPlayerId: player_id is a UUID (#1025).
+            if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+            const b = new Uint8Array(16);
+            if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(b);
+            else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
+            b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+            const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+            return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+        }
+
         function createPlayerId() {
             if (window.ISMNav && typeof window.ISMNav.createPlayerId === 'function') {
                 return window.ISMNav.createPlayerId();
             }
-            return Math.random().toString(36).slice(2, 10);
+            return uuidV4();
         }
 
         // Add dynamic 4K/UHD badge when video height is >= 2160px
@@ -1229,7 +1240,7 @@
             localStorage.setItem('ismSelectedContentFull', newContent);
             localStorage.setItem('ismSelectedContent', newContent);
             const baseName = newContent
-                .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+                .replace(/_(?:h264|hevc|av1|dash|ts|hw)(?:_(?:xs|vod|\d+(?:\.\d+)?s))?$/i, '')
                 .replace(/_\d{8}_\d{6}$/i, '');
             localStorage.setItem('ismSelectedContentBase', baseName);
             if (window.ISMNav && typeof window.ISMNav.updateSelectedContentBadge === 'function') {

@@ -43,7 +43,7 @@ const stats = computed(() => [
   { label: 'Live Offset', value: fmtSec(pm.value?.live_offset_s) },
   { label: 'Bitrate', value: fmtMbps(pm.value?.video_bitrate_mbps) },
   { label: 'SSE Missed', value: props.sseMissed ?? 0 },
-  { label: 'Dropped Frames', value: pm.value?.dropped_frames ?? 0 },
+  { label: 'Dropped Frames', value: pm.value?.frames_dropped ?? 0 },
   { label: 'Stalls', value: pm.value?.stalls ?? 0 },
 ]);
 </script>

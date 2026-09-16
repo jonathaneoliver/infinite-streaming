@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Weekly renewal of the test-dev TLS certificate.
+
+  INSTALL (after this branch lands on the main checkout, so the ProgramArguments
+  path exists — a worktree is temporary and must not be the target):
+
+      cp tools/com.jeoliver.smashing.cert-renew.plist ~/Library/LaunchAgents/
+      launchctl load  ~/Library/LaunchAgents/com.jeoliver.smashing.cert-renew.plist
+      launchctl start com.jeoliver.smashing.cert-renew     # prove it once
+
+  UNINSTALL:
+
+      launchctl unload ~/Library/LaunchAgents/com.jeoliver.smashing.cert-renew.plist
+      rm ~/Library/LaunchAgents/com.jeoliver.smashing.cert-renew.plist
+
+  Weekly is deliberate. lego renews only inside the last 30 days of a 90-day
+  certificate, so ~8 of every 9 runs do nothing and exit — and a weekly cadence
+  still leaves four chances to notice before expiry if one fails. Daily would
+  add nothing but log noise.
+
+  PATH is set explicitly: launchd agents do not inherit a login shell's
+  environment, and lego lives in Homebrew's bin. Without this the job fails with
+  "lego not on PATH" every week.
+
+  The Cloudflare token is read from the login keychain by the script, so it
+  appears neither here nor in the repo. The keychain item carries an ACL for
+  /usr/bin/security so this job never blocks on a GUI prompt it cannot answer.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jeoliver.smashing.cert-renew</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>/Users/jonathanoliver/Projects/smashing/tools/renew-test-dev-cert.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- Mondays at 10:05. A login-session agent, so it runs when the Mac is
+         awake and logged in; launchd fires a missed run once the machine
+         wakes. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key><integer>1</integer>
+        <key>Hour</key><integer>10</integer>
+        <key>Minute</key><integer>5</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/jonathanoliver/Library/Logs/smashing-cert-renew.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jonathanoliver/Library/Logs/smashing-cert-renew.log</string>
+</dict>
+</plist>

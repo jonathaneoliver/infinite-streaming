@@ -32,9 +32,17 @@ services:
       - GO_LIVE_OUTPUT_DIR=/go-live
       - GO_UPLOAD_ADDR=:8003
       - INFINITE_STREAM_LISTEN_PORT=30000
+      # go-proxy fetches from nginx over plain HTTP, so it must use the cleartext
+      # loopback listener on 30005 (nginx-content.conf.template). With TLS on
+      # (the default) 30000 is HTTPS-only and every proxied playlist and segment
+      # gets "400 plain HTTP request sent to HTTPS port". 30005 serves with TLS
+      # on or off.
       - INFINITE_STREAM_UPSTREAM_HOST=127.0.0.1
-      - INFINITE_STREAM_UPSTREAM_PORT=30000
+      - INFINITE_STREAM_UPSTREAM_PORT=30005
       - INFINITE_STREAM_MAX_SESSIONS=8
+      # Optional: hide content management + Monitor in the dashboard nav on
+      # public-looking hostnames (soft UI hide; off by default).
+      - INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS=${INFINITE_STREAM_RESTRICT_PUBLIC_HOSTS:-0}
       - INFINITE_STREAM_TC_INTERFACE=eth0
       # Wire nginx /analytics/api/* and /grafana/* to the analytics
       # sidecar services below. Same gating pattern as base compose;
@@ -62,6 +70,10 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
     container_name: infinite-streaming-clickhouse
+    # Self-healing schema: re-apply the idempotent 01-schema.sql on EVERY boot so
+    # a container coming up on an older existing volume upgrades in place (init.d
+    # only runs on first-ever boot). See analytics/clickhouse/self-heal.sh.
+    entrypoint: ["/bin/sh", "/self-heal.sh"]
     environment:
       - CLICKHOUSE_DB=infinite_streaming
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
@@ -74,6 +86,7 @@ services:
     volumes:
       - ${CONTENT_DIR:-./sample-content}/analytics:/var/lib/clickhouse
       - ./analytics/clickhouse/init.d:/docker-entrypoint-initdb.d:ro
+      - ./analytics/clickhouse/self-heal.sh:/self-heal.sh:ro
     networks:
       - app_network
     restart: unless-stopped
@@ -82,7 +95,12 @@ services:
     image: ghcr.io/jonathaneoliver/infinite-streaming-forwarder:latest
     container_name: infinite-streaming-forwarder
     environment:
-      - FORWARDER_SSE_URL=http://go-server:30081/api/sessions/stream
+      # go-proxy serves TLS on 30081 by default (INFINITE_STREAM_TLS), so the
+      # forwarder must dial https. An http:// URL gets "400 Client sent an HTTP
+      # request to an HTTPS server" on every stream, forever, and nothing is
+      # archived. The forwarder trusts the self-signed cert (main.go init).
+      # With INFINITE_STREAM_TLS=off, set FORWARDER_SSE_URL=http://... in .env.
+      - FORWARDER_SSE_URL=${FORWARDER_SSE_URL:-https://go-server:30081/api/sessions/stream}
       - FORWARDER_CLICKHOUSE_URL=http://clickhouse:8123
       - FORWARDER_CLICKHOUSE_DB=infinite_streaming
       - FORWARDER_CLICKHOUSE_TABLE=session_events

@@ -38,6 +38,9 @@ struct ServerPickerScreen: View {
             }
             .background(Tokens.bg.ignoresSafeArea())
         }
+        // Stable id so UI-automation (the characterization fleet runner) can
+        // detect the picker is up and drive the "Add by URL" path.
+        .accessibilityIdentifier("server-picker-screen")
         .task { await runDiscovery() }
         .sheet(isPresented: $showPairing) {
             PairingSheet { urlString in
@@ -213,6 +216,7 @@ struct ServerPickerScreen: View {
                 systemImage: "link",
                 primary: false
             ) { showManualAdd = true }
+            .accessibilityIdentifier("server-add-by-url")
         }
     }
 }
@@ -434,6 +438,7 @@ private struct ManualAddSheet: View {
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
                         #endif
+                        .accessibilityIdentifier("server-url-field")
                 }
                 if let error {
                     Section { Text(error).foregroundColor(.red) }
@@ -450,6 +455,7 @@ private struct ManualAddSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Add") { tryAdd() }
                         .disabled(urlText.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .accessibilityIdentifier("server-url-add")
                 }
             }
         }

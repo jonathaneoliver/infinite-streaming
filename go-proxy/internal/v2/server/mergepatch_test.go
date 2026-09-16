@@ -124,3 +124,113 @@ func TestDecodePatch_RejectsNonObject(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyAppConfigPatch covers the #800 app_config translation: store nested,
+// merge partials, drop a field via null, clear the object via null, and reject
+// out-of-vocab enum values.
+func TestApplyAppConfigPatch(t *testing.T) {
+	t.Run("stores nested", func(t *testing.T) {
+		s := map[string]any{}
+		applyAppConfigPatch(s, map[string]any{
+			"segment": "s2", "protocol": "dash",
+			"live_offset_s": 12.0, "peak_bitrate_mbps": 4.0,
+		})
+		want := map[string]any{
+			"segment": "s2", "protocol": "dash",
+			"live_offset_s": 12.0, "peak_bitrate_mbps": 4,
+		}
+		if !reflect.DeepEqual(s["app_config"], want) {
+			t.Fatalf("app_config = %#v, want %#v", s["app_config"], want)
+		}
+	})
+
+	t.Run("partial patch merges (preserves untouched)", func(t *testing.T) {
+		s := map[string]any{"app_config": map[string]any{"segment": "s2", "protocol": "hls"}}
+		applyAppConfigPatch(s, map[string]any{"segment": "ll"})
+		want := map[string]any{"segment": "ll", "protocol": "hls"}
+		if !reflect.DeepEqual(s["app_config"], want) {
+			t.Fatalf("merge = %#v, want %#v", s["app_config"], want)
+		}
+	})
+
+	t.Run("field null drops just that field", func(t *testing.T) {
+		s := map[string]any{"app_config": map[string]any{"segment": "s2", "protocol": "hls"}}
+		applyAppConfigPatch(s, map[string]any{"segment": nil})
+		want := map[string]any{"protocol": "hls"}
+		if !reflect.DeepEqual(s["app_config"], want) {
+			t.Fatalf("field-null = %#v, want %#v", s["app_config"], want)
+		}
+	})
+
+	t.Run("whole null clears object", func(t *testing.T) {
+		s := map[string]any{"app_config": map[string]any{"segment": "s2"}}
+		applyAppConfigPatch(s, nil)
+		if _, present := s["app_config"]; present {
+			t.Fatalf("app_config still present after null: %#v", s["app_config"])
+		}
+	})
+
+	t.Run("last field nulled clears object", func(t *testing.T) {
+		s := map[string]any{"app_config": map[string]any{"segment": "s2"}}
+		applyAppConfigPatch(s, map[string]any{"segment": nil})
+		if _, present := s["app_config"]; present {
+			t.Fatalf("empty app_config should be removed, got %#v", s["app_config"])
+		}
+	})
+
+	t.Run("rejects bad enum, keeps valid sibling", func(t *testing.T) {
+		s := map[string]any{}
+		applyAppConfigPatch(s, map[string]any{"segment": "nope", "protocol": "dash"})
+		want := map[string]any{"protocol": "dash"}
+		if !reflect.DeepEqual(s["app_config"], want) {
+			t.Fatalf("bad-enum = %#v, want %#v", s["app_config"], want)
+		}
+	})
+
+	// #838 — muted must survive as a real bool (config-on-connect coerces the
+	// string "false" to a bool before this point, same as the strip_* fields).
+	t.Run("muted bool stored both ways", func(t *testing.T) {
+		s := map[string]any{}
+		applyAppConfigPatch(s, map[string]any{"muted": true})
+		if got := s["app_config"].(map[string]any)["muted"]; got != true {
+			t.Fatalf("muted=true stored as %#v, want true", got)
+		}
+		applyAppConfigPatch(s, map[string]any{"muted": false})
+		if got := s["app_config"].(map[string]any)["muted"]; got != false {
+			t.Fatalf("muted=false stored as %#v, want false", got)
+		}
+	})
+
+	t.Run("muted null drops just that field", func(t *testing.T) {
+		s := map[string]any{"app_config": map[string]any{"muted": true, "protocol": "hls"}}
+		applyAppConfigPatch(s, map[string]any{"muted": nil})
+		want := map[string]any{"protocol": "hls"}
+		if !reflect.DeepEqual(s["app_config"], want) {
+			t.Fatalf("muted-null = %#v, want %#v", s["app_config"], want)
+		}
+	})
+}
+
+// TestUnsupportedPaths_AppConfig — #800: app_config (and its sub-fields) must
+// be admitted by the v2 PATCH guard so harness/probe PATCHes reach
+// applyAppConfigPatch instead of 501ing. Regression for the guard gap where
+// the translator branch existed but the path wasn't allowlisted.
+func TestUnsupportedPaths_AppConfig(t *testing.T) {
+	ok := []string{
+		"app_config",
+		"app_config.segment",
+		"app_config.protocol",
+		"app_config.live_offset_s",
+		"app_config.peak_bitrate_mbps",
+		"app_config.muted",
+	}
+	if bad := unsupportedPaths(ok); len(bad) != 0 {
+		t.Fatalf("app_config paths wrongly rejected: %v", bad)
+	}
+	// A genuinely unknown top-level path is still rejected (guard didn't go
+	// permissive). Unknown app_config.* sub-keys ride the prefix match like
+	// content.*/shape.* do — applyAppConfigPatch ignores keys it doesn't know.
+	if bad := unsupportedPaths([]string{"totally_unknown"}); len(bad) != 1 {
+		t.Fatalf("expected unknown top-level path rejected, got %v", bad)
+	}
+}

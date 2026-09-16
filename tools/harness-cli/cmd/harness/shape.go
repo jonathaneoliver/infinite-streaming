@@ -6,9 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
+	"github.com/jonathaneoliver/infinite-streaming/go-proxy/pkg/ladder"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/api"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/format"
+	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/sweep"
 	"github.com/jonathaneoliver/infinite-streaming/tools/harness-cli/internal/v2gen/proxy"
 )
 
@@ -16,15 +19,40 @@ const shapeUsage = `harness shape <target> [flags]
 
 Slider mode (any subset; omitted fields are not modified):
   --rate FLOAT       rate cap in Mbps (e.g. 1.5)
-  --delay FLOAT      one-way delay in ms (e.g. 200)
+  --delay FLOAT      one-way delay in ms (e.g. 200; observed RTT ≈ delay)
   --loss FLOAT       packet loss %% (e.g. 0.5, range 0–100)
+  --jitter FLOAT     delay variation in ms (stddev, normal distribution)
+  --loss-corr FLOAT  loss burst correlation %% (0 = uniform; higher = burstier)
+  --jitter-corr FLOAT delay-distribution correlation %% (~25 ≈ real link)
+
+Named link profiles (#826) — applies a whole impairment recipe at once:
+  --profile NAME     clean | home | mobile-good | mobile-poor |
+                     nlc-wifi | nlc-wifi-ac | nlc-lte | nlc-dsl | nlc-3g |
+                     nlc-edge | nlc-very-bad | nlc-100-loss
+                     (individual --delay/--loss/… flags override the profile)
 
 Pattern mode (generates a step list from the player's current variants):
-  --pattern NAME     pyramid | ramp_up | ramp_down | square_wave | sliders
-  --step-seconds N   per-step duration: 6 | 12 | 18 | 24 (default 12)
-  --margin PCT       headroom above variant rate: 0 | 5 | 10 | 25 | 50 (default 5)
-                     5% covers TCP/IP+TLS+HTTP framing; 0% is a
-                     deliberate-stall footgun
+  --pattern NAME     pyramid | valley | ramp_up | ramp_down | square_wave | transient_shock | sliders
+  --step-seconds N   per-step duration: 6 | 12 | 18 | 24 | 60 | 120 (default 12;
+                     60/120 give buffer-draining holds for transient_shock)
+  --margin PCT       flat headroom above each variant rate: 0|5|10|25|50
+                     (default 5; covers TCP/IP+TLS+HTTP framing; 0 is a
+                     deliberate-stall footgun)
+  --max-step RATIO   fill density: max ratio between consecutive caps before
+                     a geometric fill is inserted (default 1.15). The ladder
+                     carries BOTH a peak (BANDWIDTH) and an average
+                     (AVERAGE-BANDWIDTH) rung per variant, then fills the
+                     gaps — raise --max-step to coarsen + shorten the pattern
+                     (a pyramid over a dense ladder can run ~13 min/cycle)
+  --top-headroom PCT start the ladder this %% over the top variant's peak
+                     (default 50; adds a headroom start rung above the
+                     top anchor so playback settles before constraining;
+                     0 disables it)
+  --broadcast BOOL   group fan-out for the pattern arm (only valid with
+                     --pattern): false = arm the pattern on THIS player only
+                     (e.g. the group master) so other members don't each start
+                     their own pattern engine; true = force broadcast; unset =
+                     server default (a normal group broadcasts shape to all)
   --clear-pattern    stop any running pattern (back to slider rate)
   --show-pattern     print current pattern + active step
 
@@ -40,11 +68,15 @@ Examples:
   harness shape ipad --clear
 
 Pattern semantics:
-  pyramid       ascending variant rates, then descending (without apex dupe)
-  ramp_up       ascending rates, single sweep
-  ramp_down     descending rates, single sweep
-  square_wave   alternate lowest + highest variant
-  sliders       empty step list (kernel falls back to --rate)
+  pyramid          ascending variant rates, then descending (without apex dupe)
+  valley           descending then ascending (high->low->high) — inverse of pyramid;
+                   starts at the top so the player cold-starts cleanly (no startup cap)
+  ramp_up          ascending rates, single sweep
+  ramp_down        descending rates, single sweep
+  square_wave      alternate lowest + highest variant
+  transient_shock  hold top, dip to each lower rung in turn (deepening),
+                   recovering to top between dips — the deepening-drop staircase
+  sliders          empty step list (kernel falls back to --rate)
 
 Every mutation is checkpointed to ~/.claude/state/harness/<repo>/.
 'harness undo' replays the prior shape verbatim.
@@ -58,9 +90,16 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	rate := fs.Float64("rate", -1, "rate cap Mbps")
 	delay := fs.Float64("delay", -1, "delay ms")
 	loss := fs.Float64("loss", -1, "loss %")
-	pattern := fs.String("pattern", "", "pattern template (pyramid|ramp_up|ramp_down|square_wave|sliders)")
-	stepSeconds := fs.Int("step-seconds", 12, "per-step duration: 6|12|18|24")
+	jitter := fs.Float64("jitter", -1, "delay variation (stddev) ms")
+	lossCorr := fs.Float64("loss-corr", -1, "loss burst correlation %")
+	jitterCorr := fs.Float64("jitter-corr", -1, "delay-distribution correlation %")
+	profile := fs.String("profile", "", "named link profile (clean|home|mobile-good|mobile-poor|nlc-*)")
+	pattern := fs.String("pattern", "", "pattern template (pyramid|valley|ramp_up|ramp_down|square_wave|transient_shock|sliders)")
+	stepSeconds := fs.Int("step-seconds", 12, "per-step duration: 6|12|18|24|60|120")
 	margin := fs.Int("margin", 5, "headroom %% above variant rate: 0|5|10|25|50 (5 covers protocol overhead)")
+	maxStep := fs.Float64("max-step", ladder.DefaultMaxStep, "max ratio between consecutive caps before a geometric fill is inserted (default 1.15; raise to coarsen + shorten the pattern)")
+	topHeadroom := fs.Float64("top-headroom", ladder.DefaultTopHeadroomPct, "start the ladder this %% over the top variant's peak (default 50; 0 disables the headroom start rung)")
+	broadcast := fs.String("broadcast", "", "group broadcast for the --pattern arm: false|true (unset = server default)")
 	clearPattern := fs.Bool("clear-pattern", false, "stop any running pattern")
 	showPattern := fs.Bool("show-pattern", false, "print current pattern, don't modify")
 	clear := fs.Bool("clear", false, "send {shape:null}")
@@ -74,6 +113,13 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
+	broadcastPtr, berr := parseBroadcast(*broadcast)
+	if berr != nil {
+		return berr
+	}
+	if broadcastPtr != nil && *pattern == "" {
+		return errors.New("--broadcast is only valid with --pattern (it controls whether the pattern arm broadcasts to the group)")
+	}
 
 	switch {
 	case *show:
@@ -85,13 +131,57 @@ func cmdShape(client *api.Client, args []string, asJSON bool) error {
 	case *clearPattern:
 		return doClearPattern(client, ctx, pid, asJSON)
 	case *pattern != "":
-		return doPattern(client, ctx, pid, asJSON, *pattern, *stepSeconds, *margin)
+		return doPattern(client, ctx, pid, asJSON, *pattern, *stepSeconds, *margin, *maxStep, *topHeadroom, broadcastPtr)
 	}
 
-	if *rate < 0 && *delay < 0 && *loss < 0 {
-		return errors.New("nothing to do — pass --rate/--delay/--loss, --pattern NAME, --clear-pattern, --clear, or --show")
+	imp := sliderImpairment{
+		rate: *rate, delay: *delay, loss: *loss,
+		jitter: *jitter, lossCorr: *lossCorr, jitterCorr: *jitterCorr,
+		profile: *profile,
 	}
-	return doSliderShape(client, ctx, pid, asJSON, *rate, *delay, *loss)
+	if imp.profile == "" && imp.rate < 0 && imp.delay < 0 && imp.loss < 0 &&
+		imp.jitter < 0 && imp.lossCorr < 0 && imp.jitterCorr < 0 {
+		return errors.New("nothing to do — pass --rate/--delay/--loss/--jitter/--loss-corr/--jitter-corr, --profile NAME, --pattern NAME, --clear-pattern, --clear, or --show")
+	}
+	return doSliderShape(client, ctx, pid, asJSON, imp)
+}
+
+// sliderImpairment bundles the static-shape flags. A flag left at -1 means
+// "unset — don't touch". `profile` (if set) seeds the shape from a named link
+// profile; explicitly-set axis flags then override on top.
+type sliderImpairment struct {
+	rate, delay, loss            float64
+	jitter, lossCorr, jitterCorr float64
+	profile                      string
+}
+
+// cmdReset clears a player's shape + fault rules + content to a clean baseline
+// (the comprehensive ResetSession merge-patch). The harness calls this to give a
+// reused player_id a known-clean proxy state before a test; manual sessions never
+// invoke it, so their carry-over is untouched (see feedback_manual_proxy_carryover).
+func cmdReset(client *api.Client, args []string, asJSON bool) error {
+	if len(args) < 1 {
+		return errors.New("usage: reset <player_id|target> — clear shape + fault_rules + content to a clean baseline")
+	}
+	fs := flag.NewFlagSet("reset", flag.ContinueOnError)
+	action := fs.String("action", "harness reset session", "control-event action label")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	pid, err := client.Resolve(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	if _, err := client.ResetSession(ctx, pid, *action); err != nil {
+		return err
+	}
+	if asJSON {
+		fmt.Printf("{\"player_id\":%q,\"reset\":true}\n", pid)
+	} else {
+		fmt.Printf("reset %s → clean baseline (shape + fault_rules + content cleared)\n", pid)
+	}
+	return nil
 }
 
 func showShape(client *api.Client, ctx context.Context, pid string, asJSON bool) error {
@@ -219,56 +309,69 @@ func doClear(client *api.Client, ctx context.Context, pid string, asJSON bool,
 	return nil
 }
 
-func doSliderShape(client *api.Client, ctx context.Context, pid string, asJSON bool, rate, delay, loss float64) error {
-	action := fmt.Sprintf("shape rate=%v delay=%v loss=%v", rate, delay, loss)
+func doSliderShape(client *api.Client, ctx context.Context, pid string, asJSON bool, imp sliderImpairment) error {
+	action := fmt.Sprintf("shape rate=%v delay=%v loss=%v jitter=%v loss_corr=%v jitter_corr=%v profile=%q",
+		imp.rate, imp.delay, imp.loss, imp.jitter, imp.lossCorr, imp.jitterCorr, imp.profile)
+
+	// Build the merge-patch as a map: it's the only way to express the
+	// rate-clears-pattern sentinel (pattern:null), which the typed
+	// proxy.Shape can't carry because Pattern is `omitempty`. A profile
+	// seeds the block; explicitly-set axis flags then override on top.
+	shape := map[string]any{}
+	setsRate := false
+
+	if imp.profile != "" {
+		prof, ok := sweep.ResolveLinkProfile(imp.profile)
+		if !ok {
+			return fmt.Errorf("unknown link profile %q (known: %s)", imp.profile, strings.Join(sweep.LinkProfileNames(), ", "))
+		}
+		// Deterministic IMPAIRMENT: always set all five impairment axes (omitted
+		// ones → 0, so `clean` truly clears and no stale jitter/loss leaks).
+		// Throughput is the OVERLAY axis: only the NLC presets (which model a
+		// full link's bandwidth) pin rate_mbps; the four recipes leave the
+		// operator's throughput cap alone so impairment can be stamped on top.
+		shape["delay_ms"] = derefOr(prof.DelayMs, 0)
+		shape["loss_pct"] = derefOr(prof.LossPct, 0)
+		shape["jitter_ms"] = derefOr(prof.JitterMs, 0)
+		shape["loss_correlation_pct"] = derefOr(prof.LossCorrelationPct, 0)
+		shape["jitter_correlation_pct"] = derefOr(prof.JitterCorrelationPct, 0)
+		if prof.RateMbps != nil {
+			shape["rate_mbps"] = *prof.RateMbps
+			setsRate = true
+		}
+	}
+
+	// Explicit flags override the profile seed (and are the only source
+	// in the no-profile case). -1 means "unset — leave as-is".
+	if imp.rate >= 0 {
+		shape["rate_mbps"] = imp.rate
+		setsRate = true
+	}
+	if imp.delay >= 0 {
+		shape["delay_ms"] = imp.delay
+	}
+	if imp.loss >= 0 {
+		shape["loss_pct"] = imp.loss
+	}
+	if imp.jitter >= 0 {
+		shape["jitter_ms"] = imp.jitter
+	}
+	if imp.lossCorr >= 0 {
+		shape["loss_correlation_pct"] = imp.lossCorr
+	}
+	if imp.jitterCorr >= 0 {
+		shape["jitter_correlation_pct"] = imp.jitterCorr
+	}
 
 	// Setting a static rate disarms any active throughput pattern —
 	// they're mutually exclusive sources-of-truth for the kernel cap.
-	// Delay and loss are orthogonal axes that can coexist with a
-	// running pattern, so they don't need explicit pattern-null.
-	//
-	// We can't express the rate-clears-pattern semantic through the
-	// typed proxy.Shape struct because Pattern has `omitempty` and a
-	// nil pointer would just be dropped from the JSON, leaving the
-	// pattern running. So when --rate is set we build the body as a
-	// map and use PatchShapeMap (same trick ClearShape uses for the
-	// {"shape": null} merge-patch sentinel).
-	if rate >= 0 {
-		shape := map[string]any{
-			"rate_mbps": rate,
-			"pattern":   nil,
-		}
-		if delay >= 0 {
-			shape["delay_ms"] = delay
-		}
-		if loss >= 0 {
-			shape["loss_pct"] = loss
-		}
-		newETag, err := client.PatchShapeMap(ctx, pid, action, shape)
-		if err != nil {
-			return err
-		}
-		if asJSON {
-			return format.JSON(os.Stdout, map[string]any{
-				"player_id": pid, "shape": shape, "etag": newETag,
-			})
-		}
-		fmt.Printf("patched shape on %s (etag %s)\n", pid, shortRev(newETag))
-		return nil
+	// Delay/loss/jitter are orthogonal axes that coexist with a running
+	// pattern, so a delay-only edit leaves the pattern armed.
+	if setsRate {
+		shape["pattern"] = nil
 	}
 
-	// Rate not set — only delay / loss being adjusted. Pattern (if any)
-	// stays armed. Use the typed PatchShape path.
-	shape := proxy.Shape{}
-	if delay >= 0 {
-		v := float32(delay)
-		shape.DelayMs = &v
-	}
-	if loss >= 0 {
-		v := float32(loss)
-		shape.LossPct = &v
-	}
-	newETag, err := client.PatchShape(ctx, pid, action, &shape)
+	newETag, err := client.PatchShapeMap(ctx, pid, action, shape)
 	if err != nil {
 		return err
 	}
@@ -279,6 +382,14 @@ func doSliderShape(client *api.Client, ctx context.Context, pid string, asJSON b
 	}
 	fmt.Printf("patched shape on %s (etag %s)\n", pid, shortRev(newETag))
 	return nil
+}
+
+// derefOr returns *p, or fallback when p is nil.
+func derefOr(p *float64, fallback float64) float64 {
+	if p == nil {
+		return fallback
+	}
+	return *p
 }
 
 // doClearPattern disables any running pattern by sending an empty step list.
@@ -306,11 +417,13 @@ func doClearPattern(client *api.Client, ctx context.Context, pid string, asJSON 
 }
 
 // doPattern generates step rates from the player's current manifest
-// variants using the same algorithm the dashboard's NetworkShapingPattern
-// panel runs (see buildSteps in that .vue). Snapshots pre-state for
-// `harness undo` and PATCHes.
+// variants via the shared go-proxy/pkg/ladder builder — the same one the
+// characterization harness uses and the dashboard's NetworkShapingPattern
+// panel mirrors in JS. The ladder carries both a peak and an average
+// anchor per variant, +marginPct flat, with geometric fills to maxStep
+// (#551). Snapshots pre-state for `harness undo` and PATCHes.
 func doPattern(client *api.Client, ctx context.Context, pid string, asJSON bool,
-	tplStr string, stepSecs, marginPct int) error {
+	tplStr string, stepSecs, marginPct int, maxStep, topHeadroomPct float64, broadcast *bool) error {
 
 	tpl, err := parseTemplate(tplStr)
 	if err != nil {
@@ -335,12 +448,12 @@ func doPattern(client *api.Client, ctx context.Context, pid string, asJSON bool,
 	if err != nil {
 		return err
 	}
-	rates, err := variantRatesMbps(rec, marginPct)
+	rungs, err := variantLadder(rec, float64(marginPct), maxStep, topHeadroomPct)
 	if err != nil {
 		return err
 	}
 
-	steps := buildPatternSteps(tpl, rates, stepSecs)
+	steps := buildPatternSteps(tpl, rungs, stepSecs)
 	if len(steps) == 0 && tpl != proxy.Sliders {
 		return fmt.Errorf("template %q produced an empty step list — does the player have a manifest yet?", tplStr)
 	}
@@ -355,7 +468,7 @@ func doPattern(client *api.Client, ctx context.Context, pid string, asJSON bool,
 	}
 	action := fmt.Sprintf("shape pattern=%s steps=%d step_s=%d margin=%d%%",
 		tplStr, len(steps), stepSecs, marginPct)
-	newETag, err := client.PatchShape(ctx, pid, action, &shape)
+	newETag, err := client.PatchShapeBroadcast(ctx, pid, action, &shape, broadcast)
 	if err != nil {
 		return err
 	}
@@ -369,28 +482,49 @@ func doPattern(client *api.Client, ctx context.Context, pid string, asJSON bool,
 	return nil
 }
 
+// parseBroadcast turns the tri-state --broadcast flag into a *bool:
+// "" → nil (server default), true|1 → &true, false|0 → &false. Threaded into
+// the PATCH as the ?broadcast= query param (see client.PatchShapeBroadcast).
+func parseBroadcast(s string) (*bool, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "":
+		return nil, nil
+	case "true", "1":
+		v := true
+		return &v, nil
+	case "false", "0":
+		v := false
+		return &v, nil
+	}
+	return nil, fmt.Errorf("invalid --broadcast %q: true|false", s)
+}
+
 func parseTemplate(s string) (proxy.PatternTemplate, error) {
 	switch s {
 	case "pyramid":
 		return proxy.Pyramid, nil
+	case "valley":
+		return proxy.Valley, nil
 	case "ramp_up":
 		return proxy.RampUp, nil
 	case "ramp_down":
 		return proxy.RampDown, nil
 	case "square_wave":
 		return proxy.SquareWave, nil
+	case "transient_shock":
+		return proxy.TransientShock, nil
 	case "sliders":
 		return proxy.Sliders, nil
 	}
-	return "", fmt.Errorf("invalid --pattern %q: pyramid|ramp_up|ramp_down|square_wave|sliders", s)
+	return "", fmt.Errorf("invalid --pattern %q: pyramid|valley|ramp_up|ramp_down|square_wave|transient_shock|sliders", s)
 }
 
 func parseStepSeconds(n int) (proxy.PatternDefaultStepSeconds, error) {
 	switch n {
-	case 6, 12, 18, 24:
+	case 6, 12, 18, 24, 60, 120:
 		return proxy.PatternDefaultStepSeconds(n), nil
 	}
-	return 0, fmt.Errorf("invalid --step-seconds %d: must be 6|12|18|24", n)
+	return 0, fmt.Errorf("invalid --step-seconds %d: must be 6|12|18|24|60|120", n)
 }
 
 func parseMarginPct(n int) (proxy.PatternMarginPct, error) {
@@ -401,11 +535,12 @@ func parseMarginPct(n int) (proxy.PatternMarginPct, error) {
 	return 0, fmt.Errorf("invalid --margin %d: must be 0|5|10|25|50", n)
 }
 
-// variantRatesMbps pulls the player's manifest variants, applies the
-// margin %, and returns the sorted-ascending Mbps list the buildSteps
-// algorithm consumes. Returns an error when the player has no variants
-// yet (master playlist not fetched).
-func variantRatesMbps(rec *proxy.PlayerRecord, marginPct int) ([]float32, error) {
+// variantLadder pulls the player's manifest variants and builds the
+// shared dual-rung (avg+peak) + geometrically-filled limit ladder via
+// go-proxy/pkg/ladder, descending by cap. bumpPct is the flat headroom
+// (the operator --margin); maxStep is the fill density. Returns an error
+// when the player has no variants yet (master playlist not fetched).
+func variantLadder(rec *proxy.PlayerRecord, bumpPct, maxStep, topHeadroomPct float64) ([]ladder.Rung, error) {
 	if rec == nil || rec.CurrentPlay == nil || rec.CurrentPlay.Manifest == nil || rec.CurrentPlay.Manifest.Variants == nil {
 		return nil, errors.New("player has no manifest variants yet — has it fetched the master playlist?")
 	}
@@ -413,84 +548,36 @@ func variantRatesMbps(rec *proxy.PlayerRecord, marginPct int) ([]float32, error)
 	if len(variants) == 0 {
 		return nil, errors.New("player has no manifest variants yet — has it fetched the master playlist?")
 	}
-	rates := make([]float32, 0, len(variants))
+	lv := make([]ladder.Variant, 0, len(variants))
 	for _, v := range variants {
-		// Prefer AVERAGE-BANDWIDTH when the source playlist provided
-		// it — the variant's long-term sustainable rate, which is the
-		// honest minimum for "this variant should play smoothly."
-		// BANDWIDTH (per HLS spec) is the peak segment rate, which is
-		// 30–40% higher than AVERAGE for typical CBR encoders. Using
-		// the peak gives every step ~35% of unwarranted headroom.
-		bps := float32(v.Bandwidth)
-		if v.AverageBandwidth != nil && *v.AverageBandwidth > 0 {
-			bps = float32(*v.AverageBandwidth)
+		avg := 0
+		if v.AverageBandwidth != nil {
+			avg = *v.AverageBandwidth
 		}
-		// Same shape as dashboard's buildSteps: bps × (1 + margin) / 1000
-		// rounded to 3 dp.
-		mbps := bps * (1 + float32(marginPct)/100) / 1_000_000
-		if mbps > 0 {
-			rates = append(rates, roundFloat32(mbps, 3))
-		}
+		lv = append(lv, ladder.Variant{AvgBps: avg, PeakBps: v.Bandwidth, Resolution: v.Resolution})
 	}
-	if len(rates) == 0 {
+	rungs := ladder.StandardLadder(lv, bumpPct, maxStep, topHeadroomPct)
+	if len(rungs) == 0 {
 		return nil, errors.New("manifest_variants present but all bandwidths zero")
 	}
-	// Sort ascending for the build algorithm.
-	for i := 1; i < len(rates); i++ {
-		for j := i; j > 0 && rates[j-1] > rates[j]; j-- {
-			rates[j-1], rates[j] = rates[j], rates[j-1]
-		}
-	}
-	return rates, nil
+	return rungs, nil
 }
 
-// buildPatternSteps mirrors the dashboard's NetworkShapingPattern.vue
-// `buildSteps` function. Keep in sync — operator workflows expect a
-// CLI-applied pattern to look identical to a UI-applied one.
-func buildPatternSteps(t proxy.PatternTemplate, rates []float32, stepSecs int) []proxy.PatternStep {
-	var seq []float32
-	switch t {
-	case proxy.SquareWave:
-		seq = []float32{rates[0], rates[len(rates)-1]}
-	case proxy.RampUp:
-		seq = append([]float32(nil), rates...)
-	case proxy.RampDown:
-		seq = append([]float32(nil), rates...)
-		reverseFloat32(seq)
-	case proxy.Pyramid:
-		asc := append([]float32(nil), rates...)
-		desc := append([]float32(nil), rates[:len(rates)-1]...)
-		reverseFloat32(desc)
-		seq = append(asc, desc...)
-	default:
-		// sliders / square / unknown — empty step list
-		return nil
-	}
-
+// buildPatternSteps orders the limit ladder into a pattern step list via
+// the shared ladder.BuildPattern (the same logic the dashboard's
+// NetworkShapingPattern.vue mirrors in JS, parity-checked against
+// go-proxy/pkg/ladder's golden vectors).
+func buildPatternSteps(t proxy.PatternTemplate, rungs []ladder.Rung, stepSecs int) []proxy.PatternStep {
+	lsteps := ladder.BuildPattern(string(t), rungs, stepSecs)
 	enabled := true
-	out := make([]proxy.PatternStep, 0, len(seq))
-	for _, r := range seq {
+	out := make([]proxy.PatternStep, 0, len(lsteps))
+	for _, s := range lsteps {
 		e := enabled
 		out = append(out, proxy.PatternStep{
-			RateMbps:        r,
-			DurationSeconds: stepSecs,
+			RateMbps:        float32(s.RateMbps),
+			DurationSeconds: s.DurationSeconds,
 			Enabled:         &e,
 		})
 	}
 	return out
 }
-
-func reverseFloat32(a []float32) {
-	for i, j := 0, len(a)-1; i < j; i, j = i+1, j-1 {
-		a[i], a[j] = a[j], a[i]
-	}
-}
-
-func roundFloat32(v float32, dp int) float32 {
-	m := float32(1)
-	for i := 0; i < dp; i++ {
-		m *= 10
-	}
-	return float32(int(v*m+0.5)) / m
-}
-

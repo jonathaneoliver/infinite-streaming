@@ -22,6 +22,11 @@ services:
       # the issue describes don't recur. Prod-style deployments leave
       # this unset (= 0 = unlimited) to preserve today's behaviour.
       - INFINITE_STREAM_DEFAULT_RATE_MBPS=100
+      # #910: force http-only (degraded) shaping even on this NET_ADMIN box, so
+      # the fallback can be exercised + A/B'd against real tc/netem. Empty
+      # (default) = off = live kernel probe. Set at `docker compose up` time:
+      #   SHAPING_FORCE_DEGRADED=http-only docker compose up -d go-server
+      - SHAPING_FORCE_DEGRADED=${SHAPING_FORCE_DEGRADED:-}
     ports:
       !override
       - "21000:30000"

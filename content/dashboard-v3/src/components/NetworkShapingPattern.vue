@@ -4,12 +4,15 @@
  * editor. Sits on `shape.pattern` (a typed nested struct of
  * `{ template, steps, margin_pct, default_step_seconds }`).
  *
- * Five template choices:
- *   - sliders     → pattern is null (rate slider drives the kernel)
- *   - square_wave → alternates high / low across variants
- *   - ramp_up     → ascending rates
- *   - ramp_down   → descending rates
- *   - pyramid     → up then down
+ * Template choices:
+ *   - sliders         → pattern is null (rate slider drives the kernel)
+ *   - square_wave     → alternates high / low across variants
+ *   - ramp_up         → ascending rates
+ *   - ramp_down       → descending rates
+ *   - pyramid         → up then down
+ *   - transient_shock → hold top, dip to each lower rung in turn
+ *     (deepening), recovering to top between dips — the deepening-drop
+ *     staircase mirroring the transient_shock characterization mode
  *
  * Picking a non-sliders template GENERATES a step list from the
  * manifest's variants. The user can then edit each row (rate /
@@ -24,15 +27,17 @@ import { usePlayer } from '@/composables/usePlayer';
 import { useManifestVariants } from '@/composables/useManifestVariants';
 import type { Pattern } from '@/repo/v2-repo';
 
-const TEMPLATES = ['sliders', 'square_wave', 'ramp_up', 'ramp_down', 'pyramid'] as const;
+const TEMPLATES = ['sliders', 'square_wave', 'ramp_up', 'ramp_down', 'pyramid', 'valley', 'transient_shock'] as const;
 type Template = (typeof TEMPLATES)[number];
 
 const TEMPLATE_LABELS: Record<Template, string> = {
-  sliders:     '🎚 Sliders',
-  square_wave: '▁▔ Square wave',
-  ramp_up:     '↗ Ramp up',
-  ramp_down:   '↘ Ramp down',
-  pyramid:     '⛰ Pyramid',
+  sliders:         '🎚 Sliders',
+  square_wave:     '▁▔ Square wave',
+  ramp_up:         '↗ Ramp up',
+  ramp_down:       '↘ Ramp down',
+  pyramid:         '⛰ Pyramid',
+  valley:          '🏞 Valley',
+  transient_shock: '⤓ Transient shock',
 };
 
 function marginLabel(m: number): string {
@@ -49,8 +54,76 @@ const MARGIN_CHOICES = [0, 5, 10, 25, 50] as const;
 type Margin = (typeof MARGIN_CHOICES)[number];
 const DEFAULT_MARGIN_PCT: Margin = 5;
 
-const STEP_SECONDS_CHOICES = [6, 12, 18, 24] as const;
+const STEP_SECONDS_CHOICES = [6, 12, 18, 24, 60, 120] as const;
 type StepSeconds = (typeof STEP_SECONDS_CHOICES)[number];
+
+// #551 — fill density. The limit ladder carries BOTH a peak (BANDWIDTH)
+// and an average (AVERAGE-BANDWIDTH) rung per variant, each ×(1+margin),
+// then inserts geometric fills so no two consecutive caps differ by more
+// than this ratio. Mirrors go-proxy/pkg/ladder + the harness CLI's
+// --max-step. Higher = coarser + shorter pattern (a pyramid over a dense
+// ladder can run ~13 min/cycle).
+// "None" (sentinel 1) inserts no fills — just each variant's peak + avg caps —
+// since FillLadder / standardLadder treat step <= 1 as a no-op. On the 1.5x ladder
+// the peak+avg gaps are ~1.25x, so 1.375 also yields peak+avg only; 1.25 / 1.125
+// add progressively denser geometric fills between the variant caps.
+const MAX_STEP_CHOICES = [1.125, 1.25, 1.375, 1] as const;
+const DEFAULT_MAX_STEP = 1.25;
+const maxStep = ref<number>(DEFAULT_MAX_STEP);
+
+// #551 — start the ladder this % over the top variant's peak (a headroom
+// start rung above the +bump top anchor) so playback settles at the top
+// variant before the pattern constrains it. Mirrors the Go default
+// (ladder.DefaultTopHeadroomPct); 50% gives conservative upshift room to
+// reach the top rung.
+const DEFAULT_TOP_HEADROOM = 50;
+
+interface LadderVariant {
+  avgBps: number;
+  peakBps: number;
+}
+
+const round3 = (v: number): number => Math.round(v * 1000) / 1000;
+
+/** Dual-rung (avg+peak) + geometrically-filled limit ladder, descending
+ *  by Mbps, with an optional top-headroom start rung. Mirrors
+ *  go-proxy/pkg/ladder.StandardLadder — keep in sync with that package's
+ *  golden vectors (ladder_test.go). */
+function standardLadder(variants: LadderVariant[], bumpPct: number, step: number, topHeadroomPct: number): number[] {
+  const f = 1 + bumpPct / 100;
+  const anchors: number[] = [];
+  // Bottom variant (lowest positive peak): drop its AVG anchor so the ladder
+  // floors at the bottom variant's peak×(1+bump). At the very bottom there is no
+  // lower rung to drop to, so the avg→peak band is a pure wedge. Mirrors the
+  // go-proxy/pkg/ladder.AnchorCaps change.
+  let bottomIdx = -1;
+  variants.forEach((v, i) => {
+    if (v.peakBps > 0 && (bottomIdx < 0 || v.peakBps < variants[bottomIdx].peakBps)) bottomIdx = i;
+  });
+  variants.forEach((v, i) => {
+    if (v.peakBps > 0) anchors.push(round3((v.peakBps * f) / 1e6));
+    if (v.avgBps > 0 && i !== bottomIdx) anchors.push(round3((v.avgBps * f) / 1e6));
+  });
+  if (topHeadroomPct > 0) {
+    const maxPeak = variants.reduce((m, v) => Math.max(m, v.peakBps), 0);
+    if (maxPeak > 0) anchors.push(round3((maxPeak * (1 + topHeadroomPct / 100)) / 1e6));
+  }
+  anchors.sort((a, b) => b - a); // descending
+  if (step <= 1 || anchors.length < 2) return anchors;
+  const out: number[] = [];
+  for (let i = 0; i < anchors.length; i++) {
+    out.push(anchors[i]);
+    if (i + 1 >= anchors.length) continue;
+    const hi = anchors[i];
+    const lo = anchors[i + 1];
+    if (lo <= 0 || hi <= lo) continue;
+    const n = Math.ceil(Math.log(hi / lo) / Math.log(step)) - 1;
+    for (let k = 1; k <= n; k++) {
+      out.push(round3(hi * Math.pow(lo / hi, k / (n + 1))));
+    }
+  }
+  return out;
+}
 
 const props = defineProps<{ playerId: string }>();
 const { player, setPattern } = usePlayer(toRef(props, 'playerId'));
@@ -67,6 +140,20 @@ const activeTemplate = computed<Template>(() => {
   return 'sliders';
 });
 
+// Single-owner group shaping: a driven SLAVE has no pattern of its own — its
+// kernel cap is fanned per-tick from the group master (`group_driven_by`). When
+// driven we replace the editable template UI with a read-only "driven by master"
+// banner so the operator can't arm a competing pattern on the slave. Guarded on
+// `!pattern` so the MASTER (which carries the pattern) shows the normal editor —
+// the proxy stamps the marker on the master too, but its own pattern wins here.
+const groupDrivenBy = computed<string | null>(() => {
+  const by = player.value?.shape?.group_driven_by;
+  return !pattern.value && by ? by : null;
+});
+const groupDrivenTemplate = computed<string | null>(
+  () => player.value?.shape?.group_driven_template ?? null,
+);
+
 const margin = computed<Margin>(() => {
   const src = editMode.value ? draftPattern.value : pattern.value;
   const m = src?.margin_pct;
@@ -80,7 +167,9 @@ const defaultStepSeconds = computed<StepSeconds>(() => {
 });
 
 /** Manifest variants sorted ascending by bandwidth. */
-const { variants: rawVariants } = useManifestVariants(toRef(props, 'playerId'));
+// Full ladder — the shaping pattern is designed over every published rung, not
+// the allowed_variants-thinned subset the bandwidth chart shows (#815/#820).
+const { variantsAll: rawVariants } = useManifestVariants(toRef(props, 'playerId'));
 const sortedVariants = computed(() => {
   return [...rawVariants.value].sort((a, b) => (a.bandwidth ?? 0) - (b.bandwidth ?? 0));
 });
@@ -95,17 +184,23 @@ const sortedVariants = computed(() => {
 const stepPresets = computed<{ value: number; label: string }[]>(() => {
   const items: { value: number; label: string }[] = [];
   items.push({ value: 0, label: '0 Mbps (stall)' });
-  const m = margin.value;
+  const f = 1 + margin.value / 100;
+  // #551 — offer BOTH rungs per variant: the average (AVERAGE-BANDWIDTH,
+  // long-term sustainable) and the peak (BANDWIDTH, per-segment peak,
+  // typically 30-40% higher). Carrying both lets an operator park a cap
+  // inside a variant's avg→peak band to probe which scalar the player
+  // keys on.
   for (const v of sortedVariants.value) {
-    // Prefer AVERAGE-BANDWIDTH when present — the variant's long-term
-    // sustainable rate. BANDWIDTH (the HLS spec attribute) is the peak
-    // segment rate, typically 30-40% above AVERAGE for CBR encoders;
-    // using the peak gives every step ~35% of unwarranted headroom.
-    const baseBps = (v as any).average_bandwidth || v.bandwidth || 0;
-    const mbps = Math.round((baseBps * (1 + m / 100)) / 1000) / 1000;
-    if (!Number.isFinite(mbps) || mbps <= 0) continue;
-    const tag = (v as any).average_bandwidth ? '' : ' (peak)';
-    items.push({ value: mbps, label: `${v.resolution} · ${mbps.toFixed(2)} Mbps${tag}` });
+    const avg = ((v as any).average_bandwidth as number) || 0;
+    const peak = (v.bandwidth as number) || 0;
+    if (avg > 0) {
+      const mbps = round3((avg * f) / 1e6);
+      if (mbps > 0) items.push({ value: mbps, label: `${v.resolution} avg · ${mbps.toFixed(2)} Mbps` });
+    }
+    if (peak > 0) {
+      const mbps = round3((peak * f) / 1e6);
+      if (mbps > 0) items.push({ value: mbps, label: `${v.resolution} peak · ${mbps.toFixed(2)} Mbps` });
+    }
   }
   const top = items[items.length - 1];
   if (top && top.value > 0) {
@@ -126,28 +221,78 @@ function onPresetChange(idx: number, e: Event) {
   setStepField(idx, 'rate_mbps', Number(v));
 }
 
-/** Generate step rates from template + margin + variants. */
+/** Adapt the manifest variants to the ladder's neutral shape. */
+function ladderVariants(): LadderVariant[] {
+  return sortedVariants.value.map((v) => ({
+    avgBps: ((v as any).average_bandwidth as number) || 0,
+    peakBps: (v.bandwidth as number) || 0,
+  }));
+}
+
+/** Pyramid over-selection floor — midpoint of the bottom variant's peak cap and
+ *  the next variant's avg cap, both ×(1+margin) so the midpoint carries the same
+ *  bump. Mirrors ladder.pyramidFloor in go-proxy/pkg/ladder. Returns 0 when
+ *  either is absent. #811. */
+function pyramidFloor(variants: LadderVariant[], marginPct: number): number {
+  const f = 1 + marginPct / 100;
+  let bottomIdx = -1;
+  variants.forEach((v, i) => {
+    if (v.peakBps > 0 && (bottomIdx < 0 || v.peakBps < variants[bottomIdx].peakBps)) bottomIdx = i;
+  });
+  let bottomPeak = 0;
+  let nextAvg = 0; // the next variant's avg — the bottom variant's avg anchor is dropped
+  variants.forEach((v, i) => {
+    if (v.peakBps > 0) {
+      const p = round3((v.peakBps * f) / 1e6);
+      if (bottomPeak === 0 || p < bottomPeak) bottomPeak = p;
+    }
+    if (v.avgBps > 0 && i !== bottomIdx) {
+      const a = round3((v.avgBps * f) / 1e6);
+      if (nextAvg === 0 || a < nextAvg) nextAvg = a;
+    }
+  });
+  if (bottomPeak <= 0 || nextAvg <= 0) return 0;
+  return round3((bottomPeak + nextAvg) / 2);
+}
+
+/** Generate step rates from template + margin + variants. Uses the shared
+ *  dual-rung + geometrically-filled limit ladder (#551), then orders it
+ *  per template — mirrors ladder.BuildPattern in go-proxy/pkg/ladder. */
 function buildSteps(t: Template, marginPct: number, stepSecs: number): Pattern['steps'] {
-  const rates = sortedVariants.value
-    .map((v) => {
-      // See stepPresets: prefer AVERAGE-BANDWIDTH, fall back to BANDWIDTH.
-      const baseBps = (v as any).average_bandwidth || v.bandwidth || 0;
-      return Math.round((baseBps * (1 + marginPct / 100)) / 1000) / 1000; // bps → Mbps
-    })
-    .filter((r) => Number.isFinite(r) && r > 0);
-  if (!rates.length) return [];
+  const desc = standardLadder(ladderVariants(), marginPct, maxStep.value, DEFAULT_TOP_HEADROOM); // descending
+  if (!desc.length) return [];
+  const asc = desc.slice().reverse(); // ascending
 
   let seq: number[] = [];
   if (t === 'square_wave') {
-    // Lowest + highest, alternating.
-    seq = [rates[0], rates[rates.length - 1]];
+    seq = [asc[0], asc[asc.length - 1]]; // lowest + highest
   } else if (t === 'ramp_up') {
-    seq = rates.slice();
+    seq = asc.slice();
   } else if (t === 'ramp_down') {
-    seq = rates.slice().reverse();
+    seq = asc.slice().reverse();
   } else if (t === 'pyramid') {
-    const asc = rates.slice();
-    seq = asc.concat(asc.slice(0, -1).reverse());
+    // Floor at the over-selection midpoint (#811): bottom out between the bottom
+    // variant's peak and the next variant's avg, dropping caps below that floor.
+    const fl = pyramidFloor(ladderVariants(), marginPct);
+    const base = fl > 0 ? [fl, ...asc.filter((v) => v > fl)] : asc.slice();
+    seq = base.concat(base.slice(0, -1).reverse()); // up then down, no apex dupe
+  } else if (t === 'valley') {
+    // Inverse of pyramid: high → low → high. Shares the pyramid over-selection
+    // floor so the trough stays sustainable; the nadir isn't duplicated. Starts
+    // at the top cap so the player cold-starts at full bandwidth. Mirrors
+    // ladder.BuildPattern's Valley case in go-proxy/pkg/ladder.
+    const fl = pyramidFloor(ladderVariants(), marginPct);
+    const base = fl > 0 ? [fl, ...asc.filter((v) => v > fl)] : asc.slice();
+    seq = base.slice().reverse().concat(base.slice(1)); // high→low→high, no nadir dupe
+  } else if (t === 'transient_shock') {
+    // Deepening-dip staircase: hold top, dip to each lower rung
+    // shallowest-first down to the bottom, recovering to top between dips.
+    // seq = top, r[n-2], top, r[n-3], …, top, r[0], top.
+    const top = asc[asc.length - 1];
+    seq = [top];
+    for (let i = asc.length - 2; i >= 0; i--) {
+      seq.push(asc[i], top);
+    }
   } else {
     seq = [];
   }
@@ -283,6 +428,25 @@ function onStepSecondsChange(d: StepSeconds) {
   } as Pattern;
 }
 
+// #551 — fill density. Not part of the server Pattern payload (it only
+// shapes how many client-side steps buildSteps emits), so we keep it in a
+// local ref and regenerate the draft steps when it changes.
+function onMaxStepChange(s: number) {
+  maxStep.value = s;
+  if (!editMode.value) startEdit();
+  const draft = ensureDraft();
+  const t = (draft.template as Template) ?? 'ramp_up';
+  if (t === 'sliders' as Template) return;
+  const m = (draft.margin_pct ?? 0) as number;
+  const d = (draft.default_step_seconds ?? 6) as number;
+  draftPattern.value = {
+    template: t as any,
+    margin_pct: m as any,
+    default_step_seconds: d as any,
+    steps: buildSteps(t, m, d),
+  } as Pattern;
+}
+
 /* ─── Per-step row editing ─────────────────────────────────────── */
 //
 // Per-row edits write to `draftPattern.steps` in edit mode, or commit
@@ -328,7 +492,15 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
 
 <template>
   <div v-if="player" class="shape-pattern">
-    <div class="row template-row">
+    <!-- Single-owner group shaping: a driven slave has no pattern of its own;
+         show a read-only "driven by master" banner instead of the editable
+         template UI so the operator can't arm a competing pattern on it. -->
+    <div v-if="groupDrivenBy" class="driven-banner">
+      ⛓ Shaping driven by group master <strong>{{ groupDrivenBy }}</strong>
+      <span v-if="groupDrivenTemplate"> — {{ groupDrivenTemplate }}</span>
+      <span v-if="runtimeMbps !== null" class="driven-rate"> · <strong>{{ runtimeMbps.toFixed(2) }} Mbps</strong></span>
+    </div>
+    <div v-if="!groupDrivenBy" class="row template-row">
       <span class="lbl">Template</span>
       <div class="radio-group">
         <label v-for="t in TEMPLATES" :key="t">
@@ -372,7 +544,7 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
            pattern is yet applied (first run from sliders → template).
            Hidden when a pattern is applied and the user has clicked
            Apply Pattern (collapses the definition panel back). -->
-      <template v-if="editMode || !pattern">
+      <template v-if="(editMode || !pattern) && !groupDrivenBy">
       <div class="row">
         <span class="lbl">Margin</span>
         <div class="radio-group">
@@ -405,9 +577,47 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
         </div>
       </div>
 
-      <div class="runtime" v-if="runtimeMbps !== null">
+      <!-- #551 — fill density: both an avg + a peak rung per variant, then
+           geometric fills to this ratio. Lower = finer + longer pattern. -->
+      <div class="row">
+        <span class="lbl">Fill density</span>
+        <div class="radio-group">
+          <label v-for="s in MAX_STEP_CHOICES" :key="s">
+            <input
+              type="radio"
+              :name="`fill-${playerId}`"
+              :value="s"
+              :checked="maxStep === s"
+              @change="onMaxStepChange(s)"
+            />
+            {{ s <= 1 ? 'None' : (+s.toFixed(3)) + '×' }}
+          </label>
+          <span class="fill-count" v-if="displaySteps.length">
+            → {{ displaySteps.length }} rung{{ displaySteps.length === 1 ? '' : 's' }}
+          </span>
+        </div>
+      </div>
+
+      <div class="runtime" v-if="runtimeMbps !== null && !groupDrivenBy">
         Running step <strong>{{ runtimeStep ?? '?' }}</strong> at
         <strong>{{ runtimeMbps.toFixed(2) }} Mbps</strong>
+      </div>
+
+      <!-- Commit actions on their own line directly above the step table, so
+           they're reachable without scrolling past a long (50+) step list. -->
+      <div class="step-actions above-steps">
+        <button class="clear" type="button" @click="commit(null)" title="Stop the pattern and return to slider mode">
+          Clear
+        </button>
+        <div class="apply-flow">
+          <template v-if="editMode">
+            <button class="apply" type="button" @click="applyDraft">Apply Pattern</button>
+            <button class="cancel" type="button" @click="cancelEdit">Cancel</button>
+          </template>
+          <button v-else-if="pattern" class="edit" type="button" @click="startEdit">
+            Edit Pattern
+          </button>
+        </div>
       </div>
 
       <div class="steps">
@@ -465,18 +675,6 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
         </div>
         <div class="step-actions">
           <button class="add" type="button" @click="addStep">+ Add step</button>
-          <button class="clear" type="button" @click="commit(null)" title="Stop the pattern and return to slider mode">
-            Clear
-          </button>
-          <div class="apply-flow">
-            <template v-if="editMode">
-              <button class="apply" type="button" @click="applyDraft">Apply Pattern</button>
-              <button class="cancel" type="button" @click="cancelEdit">Cancel</button>
-            </template>
-            <button v-else-if="pattern" class="edit" type="button" @click="startEdit">
-              Edit Pattern
-            </button>
-          </div>
         </div>
       </div>
 
@@ -546,6 +744,25 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
   padding: 10px 14px;
   font-size: 13px;
   color: #065f46;
+}
+
+/* Single-owner group shaping — a driven slave's read-only banner. Slate/blue so
+ * it reads as "inherited from the group master", distinct from the green
+ * applied-summary (this session's own pattern). */
+.driven-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #1e40af;
+}
+.driven-rate {
+  color: #1d4ed8;
 }
 .applied-chip {
   font-weight: 700;
@@ -649,6 +866,13 @@ const runtimeStep = computed(() => player.value?.shape?.pattern_step_runtime ?? 
   display: flex;
   gap: 8px;
   margin-top: 8px;
+}
+/* Commit bar on its own line directly above the step table — reachable
+   without scrolling past a long step list. */
+.step-actions.above-steps {
+  margin-top: 0;
+  margin-bottom: 6px;
+  align-items: center;
 }
 .add {
   background: #f1f3f4;

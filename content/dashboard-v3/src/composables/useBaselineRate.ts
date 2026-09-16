@@ -16,8 +16,23 @@
 import { computed } from 'vue';
 import { useQuery } from '@tanstack/vue-query';
 
+// ShapingCapabilities mirrors the proxy's boot-time probe result surfaced on
+// /api/v2/info.shaping (#910): which network-shaping controls the kernel can
+// actually apply on this host, plus the resolved mode. The dashboard reads
+// this to disable/annotate controls instead of showing a phantom cap.
+export interface ShapingCapabilities {
+  rate: boolean;
+  delay: boolean;
+  loss: boolean;
+  transport_fault: boolean;
+  mode: string; // "kernel" | "http-only"
+  forced: boolean;
+  reason: string;
+}
+
 interface ProxyInfo {
   default_rate_mbps?: number;
+  shaping?: ShapingCapabilities;
   // Other Info fields (version, content_dir, ...) exist but we don't
   // need them here; keep the type minimal so future Info additions
   // don't churn this file.
@@ -45,4 +60,42 @@ export function useBaselineRate() {
     return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0;
   });
   return { baselineMbps, isLoading: query.isLoading, isError: query.isError };
+}
+
+/**
+ * useShapingCapabilities — exposes the proxy's shaping-capability probe
+ * (#910) off the same cached /api/v2/info query as useBaselineRate (no extra
+ * fetch). `degraded` is the single flag the UI keys off to show the
+ * degraded-mode banner and grey out unavailable controls.
+ *
+ * Defaults are permissive (all controls available, mode "kernel") until the
+ * info request resolves, so the UI doesn't flash "disabled" on load.
+ */
+export function useShapingCapabilities() {
+  const query = useQuery<ProxyInfo>({
+    queryKey: ['proxy', 'info'],
+    queryFn: fetchProxyInfo,
+    staleTime: 5 * 60_000,
+    retry: 1,
+  });
+  const shaping = computed<ShapingCapabilities>(() => {
+    const s = query.data.value?.shaping;
+    // Permissive fallback pre-resolve / on older proxies without the field.
+    return (
+      s ?? {
+        rate: true,
+        delay: true,
+        loss: true,
+        transport_fault: true,
+        mode: 'kernel',
+        forced: false,
+        reason: '',
+      }
+    );
+  });
+  const degraded = computed(() => {
+    const s = shaping.value;
+    return !s.rate || !s.delay || !s.loss || !s.transport_fault;
+  });
+  return { shaping, degraded, isLoading: query.isLoading, isError: query.isError };
 }

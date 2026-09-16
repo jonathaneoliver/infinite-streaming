@@ -49,11 +49,17 @@ Subcommands:
                                   aggregate stats across plays
   events   <play_id> [--limit N] [--label-has L ...] [--label-not L ...]
                                   player events (session_events rows)
-  network  <play_id> [--limit N] [--label-has L ...] [--label-not L ...]
+  network  <play_id> [--limit N] [--faulted-only] [--fault-category C] [--label-has L ...] [--label-not L ...]
                                   per-request HAR rows
   control  <play_id> [--source S] [--event E] [--mode M]
            [--label-has L ...] [--label-not L ...] [--limit N]
                                   proxy / harness action log
+  avmetrics [<play_id>] [--event-type T ...] [--from ISO] [--to ISO]
+           [--label-has L ...] [--label-not L ...] [--limit N]
+                                  iOS AVMetrics events (highest-resolution
+                                  failure-timing feed: CoreMedia error
+                                  codes, variant-switch start/complete).
+                                  Bounded read — closes (no SSE hack).
   heatmap  <play_id>
   bundle   <play_id> --out PATH   download play bundle ZIP
 
@@ -88,6 +94,8 @@ func cmdQuery(client *api.Client, args []string, asJSON bool) error {
 	// proxy/harness actions live on control_events.
 	case "control":
 		return cmdQueryControl(client, args[1:], asJSON)
+	case "avmetrics":
+		return cmdQueryAVMetrics(client, args[1:], asJSON)
 	case "heatmap":
 		return cmdQueryHeatmap(client, args[1:], asJSON)
 	case "bundle":
@@ -269,10 +277,15 @@ func cmdQueryEvents(client *api.Client, args []string, asJSON bool) error {
 // shortcut that expands to `--label-has info=*pattern_step_<mode>`
 // (the densest pattern-locality signal — one row per step advance).
 func cmdQueryControl(client *api.Client, args []string, asJSON bool) error {
-	if len(args) < 1 {
-		return errors.New("usage: harness query control <play_id> [--source S] [--event E] [--mode M] [--label-has L ...] [--label-not L ...] [--limit N]")
+	// play_id is an OPTIONAL leading positional — omit it to query global /
+	// session-less events (e.g. server_start) by --event or --label-has. A
+	// leading token starting with '-' is a flag, not a play_id.
+	var playID string
+	flagArgs := args
+	if len(args) >= 1 && !strings.HasPrefix(args[0], "-") {
+		playID = args[0]
+		flagArgs = args[1:]
 	}
-	playID := args[0]
 	fs := flag.NewFlagSet("query control", flag.ContinueOnError)
 	source := fs.String("source", "", "filter to one source (harness|proxy|auto)")
 	var events arrayFlag
@@ -282,15 +295,20 @@ func cmdQueryControl(client *api.Client, args []string, asJSON bool) error {
 	fs.Var(&labelHas, "label-has", "row must have this label (repeatable; AND semantics)")
 	fs.Var(&labelNot, "label-not", "row must NOT have this label (repeatable; AND semantics)")
 	limit := fs.Int("limit", 0, "max rows")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(flagArgs); err != nil {
 		return err
+	}
+	if playID == "" && len(events) == 0 && len(labelHas) == 0 && *mode == "" {
+		return errors.New("usage: harness query control [<play_id>] [--event E] [--label-has L] [--source S] [--mode M] [--label-not L] [--limit N]\n  a play_id, --event, --label-has, or --mode is required")
 	}
 	params := &forwarder.GetApiV2ControlEventsParams{}
-	pid, err := parsePlayID(playID)
-	if err != nil {
-		return err
+	if playID != "" {
+		pid, err := parsePlayID(playID)
+		if err != nil {
+			return err
+		}
+		params.PlayId = &pid
 	}
-	params.PlayId = &pid
 	if *source != "" {
 		s := forwarder.GetApiV2ControlEventsParamsSource(*source)
 		if !s.Valid() {
@@ -324,6 +342,78 @@ func cmdQueryControl(client *api.Client, args []string, asJSON bool) error {
 	return printOrJSON(body, asJSON)
 }
 
+// cmdQueryAVMetrics queries the iOS AVMetrics event log (#693) — the
+// highest-resolution failure-timing feed. Mirrors cmdQueryControl: the
+// play_id positional is optional, so an operator can pull by --event-type
+// / --label-has alone (e.g. every error-bearing AVMetric in a window).
+// Bounded read, so it closes — no curl --max-time hack.
+func cmdQueryAVMetrics(client *api.Client, args []string, asJSON bool) error {
+	var playID string
+	flagArgs := args
+	if len(args) >= 1 && !strings.HasPrefix(args[0], "-") {
+		playID = args[0]
+		flagArgs = args[1:]
+	}
+	fs := flag.NewFlagSet("query avmetrics", flag.ContinueOnError)
+	var eventTypes arrayFlag
+	fs.Var(&eventTypes, "event-type", "filter to AVMetric subclass name, e.g. HLSPlaylistRequestEvent (repeatable; OR)")
+	from := fs.String("from", "", "ISO lower bound on ts (inclusive)")
+	to := fs.String("to", "", "ISO upper bound on ts (exclusive)")
+	var labelHas, labelNot arrayFlag
+	fs.Var(&labelHas, "label-has", "row must have this label (repeatable; AND semantics)")
+	fs.Var(&labelNot, "label-not", "row must NOT have this label (repeatable; AND semantics)")
+	limit := fs.Int("limit", 0, "max rows")
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	if playID == "" && len(eventTypes) == 0 && len(labelHas) == 0 {
+		return errors.New("usage: harness query avmetrics [<play_id>] [--event-type T] [--label-has L] [--from ISO] [--to ISO] [--label-not L] [--limit N]\n  a play_id, --event-type, or --label-has is required")
+	}
+	params := &forwarder.GetApiV2AvmetricEventsParams{}
+	if playID != "" {
+		pid, err := parsePlayID(playID)
+		if err != nil {
+			return err
+		}
+		params.PlayId = &pid
+	}
+	if len(eventTypes) > 0 {
+		et := []string(eventTypes)
+		params.EventType = &et
+	}
+	if *from != "" {
+		t, err := time.Parse(time.RFC3339, *from)
+		if err != nil {
+			return fmt.Errorf("invalid --from %q (need RFC3339, e.g. 2026-05-17T00:00:00Z): %w", *from, err)
+		}
+		params.From = &t
+	}
+	if *to != "" {
+		t, err := time.Parse(time.RFC3339, *to)
+		if err != nil {
+			return fmt.Errorf("invalid --to %q (need RFC3339): %w", *to, err)
+		}
+		params.To = &t
+	}
+	if *limit > 0 {
+		l := *limit
+		params.Limit = &l
+	}
+	if len(labelHas) > 0 {
+		v := forwarder.LabelHasFilter(labelHas)
+		params.LabelHas = &v
+	}
+	if len(labelNot) > 0 {
+		v := forwarder.LabelNotFilter(labelNot)
+		params.LabelNot = &v
+	}
+	body, err := client.ArchiveAVMetricEvents(context.Background(), params)
+	if err != nil {
+		return err
+	}
+	return printOrJSON(body, asJSON)
+}
+
 // arrayFlag is a repeatable string flag (Cobra's StringSlice without
 // pulling in Cobra). Used for `--event foo --event bar` style CLI.
 type arrayFlag []string
@@ -341,11 +431,13 @@ func (a *arrayFlag) Set(v string) error {
 
 func cmdQueryNetwork(client *api.Client, args []string, asJSON bool) error {
 	if len(args) < 1 {
-		return errors.New("usage: harness query network <play_id> [--limit N] [--label-has L ...] [--label-not L ...]")
+		return errors.New("usage: harness query network <play_id> [--limit N] [--faulted-only] [--fault-category C] [--label-has L ...] [--label-not L ...]")
 	}
 	playID := args[0]
 	fs := flag.NewFlagSet("query network", flag.ContinueOnError)
 	limit := fs.Int("limit", 0, "max rows")
+	faultedOnly := fs.Bool("faulted-only", false, "only faulted/aborted rows (filters client-side after --limit; raise --limit to scan more)")
+	faultCategory := fs.String("fault-category", "", "only rows with this fault_category (client_disconnect|http|transfer_timeout|socket|transport|corruption); implies --faulted-only")
 	var labelHas, labelNot arrayFlag
 	fs.Var(&labelHas, "label-has", "row must have this label (repeatable; AND semantics)")
 	fs.Var(&labelNot, "label-not", "row must NOT have this label (repeatable; AND semantics)")
@@ -374,7 +466,64 @@ func cmdQueryNetwork(client *api.Client, args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
+	if *faultedOnly || *faultCategory != "" {
+		body, err = filterNetworkFaults(body, *faultCategory)
+		if err != nil {
+			return err
+		}
+	}
 	return printOrJSON(body, asJSON)
+}
+
+// filterNetworkFaults keeps only faulted rows (optionally a single
+// fault_category) in a /api/v2/network_requests envelope. Client-side
+// because the read API's `faulted_only` query param isn't in the generated
+// client spec. Preserves non-`items` envelope fields (e.g. next_cursor).
+func filterNetworkFaults(body []byte, category string) ([]byte, error) {
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(body, &env); err != nil {
+		return body, nil // shape changed — leave untouched
+	}
+	rawItems, ok := env["items"]
+	if !ok {
+		return body, nil
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(rawItems, &items); err != nil {
+		return body, nil
+	}
+	kept := make([]map[string]any, 0, len(items))
+	for _, it := range items {
+		if !rowFaulted(it) {
+			continue
+		}
+		if category != "" && anyStr(it["fault_category"], "") != category {
+			continue
+		}
+		kept = append(kept, it)
+	}
+	newItems, err := json.Marshal(kept)
+	if err != nil {
+		return nil, err
+	}
+	env["items"] = newItems
+	return json.Marshal(env)
+}
+
+// rowFaulted reports whether a network row carries any fault signal. The
+// read API returns fault_type/fault_category but not always a `faulted`
+// flag, so check all three.
+func rowFaulted(it map[string]any) bool {
+	if anyStr(it["fault_type"], "") != "" {
+		return true
+	}
+	if anyStr(it["fault_category"], "") != "" {
+		return true
+	}
+	if n, ok := anyInt(it["faulted"]); ok && n == 1 {
+		return true
+	}
+	return false
 }
 
 func cmdQueryHeatmap(client *api.Client, args []string, asJSON bool) error {

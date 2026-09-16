@@ -114,6 +114,17 @@ func patternTemplateSeq(ratesAsc []float64, template string) []float64 {
 			out = append(out, ratesAsc[i])
 		}
 		return out
+	case "transient_shock":
+		// Deepening-dip staircase: top, r[n-2], top, …, top, r[0], top.
+		if len(ratesAsc) == 0 {
+			return nil
+		}
+		top := ratesAsc[len(ratesAsc)-1]
+		out := []float64{top}
+		for i := len(ratesAsc) - 2; i >= 0; i-- {
+			out = append(out, ratesAsc[i], top)
+		}
+		return out
 	default:
 		return nil
 	}

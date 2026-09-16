@@ -64,7 +64,7 @@ These are what `harness ts --streams events` emits. Priority 1=critical → 4=lo
 | `http_4xx` / `request_incomplete` / `request_faulted` | 3 | cause | HAR-derived. |
 | `slow_request` (>2s wait) / `slow_segment` (>6s transfer) | 3 | cause | HAR-derived. |
 | `request_retry` (same URL refetched <4s) | 4 | cause | HAR-derived. Often noise. |
-| `upshift` / `playback_start` | 4 | effect | Routine player behaviour. |
+| `upshift` / `play_start` | 4 | effect | Routine player behaviour. (`playback_start` was the pre-#622 name of a redundant first-render label; historical rows still carry it.) |
 | `loop_server` | 4 | cause | Source content rotated back to start. Routine in our platform. |
 | `user_marked` | 1 | effect | Operator pressed the iOS "911" button (always P1). |
 

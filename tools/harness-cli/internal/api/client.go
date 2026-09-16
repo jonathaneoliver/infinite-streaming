@@ -2,14 +2,14 @@
 // (internal/v2gen/{proxy,forwarder}). It exists because oapi-codegen
 // produces verbose method names + raw *http.Response returns:
 //
-//   resp, err := c.proxy.GetApiV2Players(ctx, nil)
-//   defer resp.Body.Close()
-//   var out []proxy.PlayerRecord
-//   json.NewDecoder(resp.Body).Decode(&out)
+//	resp, err := c.proxy.GetApiV2Players(ctx, nil)
+//	defer resp.Body.Close()
+//	var out []proxy.PlayerRecord
+//	json.NewDecoder(resp.Body).Decode(&out)
 //
 // vs what callers want:
 //
-//   players, err := c.Players(ctx)
+//	players, err := c.Players(ctx)
 //
 // The facade also owns:
 //   - the HTTP client (timeouts, optional self-signed-cert tolerance)
@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -137,6 +138,35 @@ func New(opts Options) (*Client, error) {
 		HTTP:      httpClient,
 		BasicAuth: opts.BasicAuth,
 		Snap:      opts.Snap,
+		proxy:     pc,
+		forwarder: fc,
+	}, nil
+}
+
+// WithBaseURL returns a clone of c targeting a different base URL, reusing the
+// same HTTP transport (TLS policy), auth, and snapshot store — only the generated
+// sub-clients are rebound to the new origin. Used for per-arm cross-server queries
+// (#942): a fleet arm that streamed on another server needs its events read from
+// THAT server's archive, not the default base. Empty or same base returns c as-is.
+func (c *Client) WithBaseURL(baseURL string) (*Client, error) {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if base == "" || base == c.BaseURL {
+		return c, nil
+	}
+	editor := makeAuthEditor(c.BasicAuth)
+	pc, err := proxy.NewClient(base, proxy.WithHTTPClient(c.HTTP), proxy.WithRequestEditorFn(asProxyEditor(editor)))
+	if err != nil {
+		return nil, fmt.Errorf("proxy client: %w", err)
+	}
+	fc, err := forwarder.NewClient(base+"/analytics", forwarder.WithHTTPClient(c.HTTP), forwarder.WithRequestEditorFn(asForwarderEditor(editor)))
+	if err != nil {
+		return nil, fmt.Errorf("forwarder client: %w", err)
+	}
+	return &Client{
+		BaseURL:   base,
+		HTTP:      c.HTTP,
+		BasicAuth: c.BasicAuth,
+		Snap:      c.Snap,
 		proxy:     pc,
 		forwarder: fc,
 	}, nil
@@ -303,38 +333,84 @@ func (c *Client) postMutate(playerID, action, etagBefore, etagAfter string, befo
 	return nil
 }
 
-// PatchPlayer applies a JSON-merge-patch to a player record using
-// If-Match. The etag is fetched automatically if needed (or as part
-// of snapshot prep). Action is a short label written into the
-// snapshot for replay; empty disables snapshotting.
-func (c *Client) PatchPlayer(ctx context.Context, playerID, action string, patch proxy.PlayerPatch) (string, error) {
-	before, etag, err := c.preMutate(ctx, playerID, action)
-	if err != nil {
-		return "", err
-	}
-	if etag == "" {
-		_, e, err := c.Player(ctx, playerID)
+// patchETagMaxAttempts bounds the read-modify-write retry loop in
+// patchWithETagRetry. 5 attempts with the staged backoff below tolerates a
+// busy doc (N sims heartbeating + group fan-out) without hanging on a truly
+// stuck PATCH.
+const patchETagMaxAttempts = 5
+
+// patchWithETagRetry runs a read-modify-write PATCH under If-Match, retrying
+// on 412 (precondition failed). The player doc's control_revision bumps on
+// every heartbeat — and a born-group has N sims heartbeating PLUS the proxy's
+// group fan-out cross-writing every member — so a single etag read routinely
+// goes stale between the fetch and the PATCH. The server explicitly tells us
+// to "refetch the conflicting paths and retry"; this loop does exactly that:
+// a FRESH etag every attempt (via preMutate / Player) and a short staged
+// backoff so the concurrent writer settles. do() performs ONE PATCH attempt
+// with the supplied etag and returns the raw response; snapshotPatch is the
+// wire body recorded for undo.
+func (c *Client) patchWithETagRetry(
+	ctx context.Context,
+	playerID, action, errCtx string,
+	snapshotPatch any,
+	do func(etag string) (*http.Response, error),
+) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= patchETagMaxAttempts; attempt++ {
+		before, etag, err := c.preMutate(ctx, playerID, action)
 		if err != nil {
 			return "", err
 		}
-		etag = e
+		if etag == "" {
+			_, e, perr := c.Player(ctx, playerID)
+			if perr != nil {
+				return "", perr
+			}
+			etag = e
+		}
+		resp, err := do(etag)
+		if err != nil {
+			return "", err
+		}
+		if resp.StatusCode == http.StatusPreconditionFailed {
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 32*1024))
+			resp.Body.Close()
+			lastErr = fmt.Errorf("%s: 412 revision conflict — doc moved under us (attempt %d/%d)",
+				errCtx, attempt, patchETagMaxAttempts)
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(time.Duration(attempt) * 75 * time.Millisecond):
+			}
+			continue
+		}
+		if cerr := checkProxyError(resp, errCtx); cerr != nil {
+			resp.Body.Close()
+			return "", cerr
+		}
+		newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
+		resp.Body.Close()
+		if err := c.postMutate(playerID, action, etag, newETag, before, snapshotPatch); err != nil {
+			return newETag, err
+		}
+		return newETag, nil
 	}
-	params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
-	resp, err := c.proxy.PatchApiV2PlayersPlayerIdWithApplicationMergePatchPlusJSONBody(
-		ctx, proxy.PlayerId(playerID), params, patch,
-	)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if err := checkProxyError(resp, "PATCH /api/v2/players/"+playerID); err != nil {
-		return "", err
-	}
-	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
-	if err := c.postMutate(playerID, action, etag, newETag, before, patch); err != nil {
-		return newETag, err
-	}
-	return newETag, nil
+	return "", lastErr
+}
+
+// PatchPlayer applies a JSON-merge-patch to a player record using
+// If-Match (retrying on 412 via patchWithETagRetry). The etag is fetched
+// automatically if needed (or as part of snapshot prep). Action is a short
+// label written into the snapshot for replay; empty disables snapshotting.
+func (c *Client) PatchPlayer(ctx context.Context, playerID, action string, patch proxy.PlayerPatch) (string, error) {
+	return c.patchWithETagRetry(ctx, playerID, action,
+		"PATCH /api/v2/players/"+playerID, patch,
+		func(etag string) (*http.Response, error) {
+			params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
+			return c.proxy.PatchApiV2PlayersPlayerIdWithApplicationMergePatchPlusJSONBody(
+				ctx, proxy.PlayerId(playerID), params, patch,
+			)
+		})
 }
 
 // AddFaultRule POSTs a new fault rule onto a player. The proxy
@@ -411,41 +487,81 @@ func (c *Client) PatchShape(ctx context.Context, playerID, action string, shape 
 	return c.PatchPlayer(ctx, playerID, action, proxy.PlayerPatch{Shape: shape})
 }
 
+// PatchShapeBroadcast is PatchShape with explicit control over the group
+// broadcast query param (`?broadcast=true|false`, read raw by the proxy —
+// handlers_mutate.go:263-271). broadcast==nil keeps the server default (a
+// normal group broadcasts shape to all members). broadcast=false applies the
+// shape to the TARGET ONLY — used to arm a pattern on the group master without
+// the proxy copying the pattern engine onto every member's session (each member
+// would otherwise start its own per-port pattern loop).
+func (c *Client) PatchShapeBroadcast(ctx context.Context, playerID, action string, shape *proxy.Shape, broadcast *bool) (string, error) {
+	patch := proxy.PlayerPatch{Shape: shape}
+	editor := broadcastQueryEditor(broadcast)
+	return c.patchWithETagRetry(ctx, playerID, action,
+		"PATCH /api/v2/players/"+playerID, patch,
+		func(etag string) (*http.Response, error) {
+			params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
+			return c.proxy.PatchApiV2PlayersPlayerIdWithApplicationMergePatchPlusJSONBody(
+				ctx, proxy.PlayerId(playerID), params, patch, editor,
+			)
+		})
+}
+
+// broadcastQueryEditor returns a proxy RequestEditorFn that sets the
+// `?broadcast=true|false` query param on the outgoing PATCH. Returns a no-op
+// editor when b is nil so the call keeps the server's default behaviour.
+func broadcastQueryEditor(b *bool) proxy.RequestEditorFn {
+	if b == nil {
+		return func(context.Context, *http.Request) error { return nil }
+	}
+	val := "false"
+	if *b {
+		val = "true"
+	}
+	return func(_ context.Context, req *http.Request) error {
+		q := req.URL.Query()
+		q.Set("broadcast", val)
+		req.URL.RawQuery = q.Encode()
+		return nil
+	}
+}
+
 // ClearShape sends `{"shape": null}` — the merge-patch sentinel that
 // removes all kernel shaping in one PATCH. Can't be expressed through
 // the generated typed body (PlayerPatch.Shape is `*Shape`, so nil
 // means "omit the key"), so we ship the raw JSON via the body-reader
 // variant of the generated client.
 func (c *Client) ClearShape(ctx context.Context, playerID, action string) (string, error) {
-	before, etag, err := c.preMutate(ctx, playerID, action)
-	if err != nil {
-		return "", err
-	}
-	if etag == "" {
-		_, e, err := c.Player(ctx, playerID)
-		if err != nil {
-			return "", err
-		}
-		etag = e
-	}
-	params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
-	body := bytes.NewReader([]byte(`{"shape": null}`))
-	resp, err := c.proxy.PatchApiV2PlayersPlayerIdWithBody(
-		ctx, proxy.PlayerId(playerID), params,
-		"application/merge-patch+json", body,
-	)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if err := checkProxyError(resp, "PATCH /api/v2/players/"+playerID+" (clear shape)"); err != nil {
-		return "", err
-	}
-	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
-	if err := c.postMutate(playerID, action, etag, newETag, before, map[string]any{"shape": nil}); err != nil {
-		return newETag, err
-	}
-	return newETag, nil
+	return c.patchWithETagRetry(ctx, playerID, action,
+		"PATCH /api/v2/players/"+playerID+" (clear shape)", map[string]any{"shape": nil},
+		func(etag string) (*http.Response, error) {
+			params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
+			return c.proxy.PatchApiV2PlayersPlayerIdWithBody(
+				ctx, proxy.PlayerId(playerID), params,
+				"application/merge-patch+json", bytes.NewReader([]byte(`{"shape": null}`)),
+			)
+		})
+}
+
+// ResetSession clears ALL server-side per-session settings to default in one
+// atomic merge-patch: shape (rate/delay/loss/pattern/transport_fault), HTTP fault
+// rules (error/hang/corrupt injection), and content (master-playlist) mutations.
+// Gives a player_id a known-clean proxy baseline before a test so nothing carries
+// over from a prior run that reused the same player_id — config-on-connect (#712)
+// drops proxy.* args on reattach, so it can't self-clear. Client-side per-play
+// config is reset separately by the app's reset_advanced sentinel.
+func (c *Client) ResetSession(ctx context.Context, playerID, action string) (string, error) {
+	const body = `{"shape": null, "fault_rules": [], "content": null}`
+	return c.patchWithETagRetry(ctx, playerID, action,
+		"PATCH /api/v2/players/"+playerID+" (reset session)",
+		map[string]any{"shape": nil, "fault_rules": []any{}, "content": nil},
+		func(etag string) (*http.Response, error) {
+			params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
+			return c.proxy.PatchApiV2PlayersPlayerIdWithBody(
+				ctx, proxy.PlayerId(playerID), params,
+				"application/merge-patch+json", bytes.NewReader([]byte(body)),
+			)
+		})
 }
 
 // PatchShapeMap PATCHes the player's shape with an arbitrary map body,
@@ -456,38 +572,19 @@ func (c *Client) ClearShape(ctx context.Context, playerID, action string) (strin
 // pointer and leave the pattern running. Same body-reader path
 // ClearShape uses, just with a richer payload.
 func (c *Client) PatchShapeMap(ctx context.Context, playerID, action string, shape map[string]any) (string, error) {
-	before, etag, err := c.preMutate(ctx, playerID, action)
-	if err != nil {
-		return "", err
-	}
-	if etag == "" {
-		_, e, err := c.Player(ctx, playerID)
-		if err != nil {
-			return "", err
-		}
-		etag = e
-	}
 	body, err := json.Marshal(map[string]any{"shape": shape})
 	if err != nil {
 		return "", err
 	}
-	params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
-	resp, err := c.proxy.PatchApiV2PlayersPlayerIdWithBody(
-		ctx, proxy.PlayerId(playerID), params,
-		"application/merge-patch+json", bytes.NewReader(body),
-	)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if err := checkProxyError(resp, "PATCH /api/v2/players/"+playerID+" (shape map)"); err != nil {
-		return "", err
-	}
-	newETag := strings.Trim(resp.Header.Get("ETag"), `"`)
-	if err := c.postMutate(playerID, action, etag, newETag, before, map[string]any{"shape": shape}); err != nil {
-		return newETag, err
-	}
-	return newETag, nil
+	return c.patchWithETagRetry(ctx, playerID, action,
+		"PATCH /api/v2/players/"+playerID+" (shape map)", map[string]any{"shape": shape},
+		func(etag string) (*http.Response, error) {
+			params := &proxy.PatchApiV2PlayersPlayerIdParams{IfMatch: quoteETag(etag)}
+			return c.proxy.PatchApiV2PlayersPlayerIdWithBody(
+				ctx, proxy.PlayerId(playerID), params,
+				"application/merge-patch+json", bytes.NewReader(body),
+			)
+		})
 }
 
 // CreatePlayer POSTs a new player. Does not snapshot (there's no
@@ -748,6 +845,24 @@ func (c *Client) ArchivePlays(ctx context.Context, params *forwarder.GetApiV2Pla
 	}, "GET /analytics/api/v2/plays")
 }
 
+// ArchivePlaysRaw GETs /analytics/api/v2/plays with an explicit query — used for
+// filter params (e.g. group) not yet in the generated client surface. A forwarder
+// that predates the param simply ignores it (callers keep a client-side filter as
+// the correctness fallback).
+func (c *Client) ArchivePlaysRaw(ctx context.Context, q url.Values) ([]byte, error) {
+	u := strings.TrimRight(c.BaseURL, "/") + "/analytics/api/v2/plays?" + q.Encode()
+	return c.archiveGET(func() (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		if i := strings.IndexByte(c.BasicAuth, ':'); i >= 0 {
+			req.SetBasicAuth(c.BasicAuth[:i], c.BasicAuth[i+1:])
+		}
+		return c.HTTP.Do(req)
+	}, "GET /analytics/api/v2/plays")
+}
+
 // ArchivePlay fetches a single archived play with its _links bundle.
 func (c *Client) ArchivePlay(ctx context.Context, playID string) ([]byte, error) {
 	uid, err := uuid.Parse(playID)
@@ -789,6 +904,15 @@ func (c *Client) ArchiveControlEvents(ctx context.Context, params *forwarder.Get
 	return c.archiveGET(func() (*http.Response, error) {
 		return c.forwarder.GetApiV2ControlEvents(ctx, params)
 	}, "GET /analytics/api/v2/control_events")
+}
+
+// ArchiveAVMetricEvents returns the iOS AVMetrics event log
+// (ios_avmetric_events) — the highest-resolution failure-timing feed.
+// Bounded read, so it closes (no SSE --max-time hack). Issue #693.
+func (c *Client) ArchiveAVMetricEvents(ctx context.Context, params *forwarder.GetApiV2AvmetricEventsParams) ([]byte, error) {
+	return c.archiveGET(func() (*http.Response, error) {
+		return c.forwarder.GetApiV2AvmetricEvents(ctx, params)
+	}, "GET /analytics/api/v2/avmetric_events")
 }
 
 // ArchiveSessionHeatmap returns the bucketed heatmap.

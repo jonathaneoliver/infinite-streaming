@@ -204,10 +204,14 @@ export function useSessionMetrics(opts: UseSessionMetricsOptions) {
       player_metrics_profile_shift_count: profileShiftCount,
       player_metrics_frames_displayed: displayedFrames,
       player_metrics_total_video_frames: totalFrames,
-      player_metrics_dropped_frames: droppedFrames,
-      player_metrics_stall_count: stallCount,
-      player_metrics_stall_time_s: s3(stallTimeS),
-      player_metrics_last_stall_time_s: s3(lastStallDurationS),
+      player_metrics_frames_dropped: droppedFrames,
+      // #550 Phase 1: emit canonical *_ms keys (forwarder mirror-
+      // writes the legacy _s columns so dashboards reading either
+      // shape see fresh data during the deprecation window).
+      player_metrics_stalling_count: stallCount,
+      player_metrics_stalling_time_ms: Math.max(0, Math.round((stallTimeS ?? 0) * 1000)),
+      player_metrics_stall_duration_ms: Math.max(0, Math.round((lastStallDurationS ?? 0) * 1000)),
+      player_metrics_playback_status: 'in_progress',
     };
     return { ...base, ...extra };
   }

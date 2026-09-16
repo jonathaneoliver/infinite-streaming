@@ -24,9 +24,21 @@ struct ContentItem: Decodable, Identifiable, Equatable, Hashable {
     /// "h264" / "hevc" / "av1" / "" — server-stripped codec hint.
     let codec: String
     /// Native segment duration the source was encoded at (seconds).
-    /// `nil` when the server couldn't detect it. Used by the Stream
-    /// picker to honour the Segment Length preference.
+    /// `nil` when the server couldn't detect it. Kept for display only —
+    /// for "can I play this at length N?" use `supportsSegment(_:)`, which
+    /// prefers `segmentDurations`.
     let segmentDuration: Int?
+    /// All segment lengths (seconds) go-live can actually serve this clip
+    /// at — go-live synthesizes both a 2s and a 6s master from any HLS
+    /// source, so this is `[2, 6]` for HLS content regardless of the
+    /// native encode. `nil` from a pre-#685 server (falls back to the
+    /// legacy single-`segmentDuration` match).
+    let segmentDurations: [Int]?
+    /// Whether the LL (low-latency) variant is available — go-live can
+    /// only build it when the source carries on-disk partial-segment info.
+    /// `nil` from a pre-#685 server (treated as available, preserving the
+    /// prior show-all-for-LL behaviour).
+    let hasLL: Bool?
     /// Server-relative path (or absolute URL) to the 640-px-wide poster
     /// — the default size for card / tile surfaces. `nil` when the
     /// server hasn't generated a thumbnail for this clip yet.
@@ -42,6 +54,21 @@ struct ContentItem: Decodable, Identifiable, Equatable, Hashable {
     /// identity stable across reloads.
     var id: String { name }
 
+    /// Whether go-live can serve this clip at the given integer segment
+    /// length. Prefers the server's `segmentDurations` set; falls back to
+    /// the legacy single `segmentDuration` (or shows the clip when the
+    /// server reports neither, so a pre-#685 server doesn't hide
+    /// everything when 2s/6s is selected).
+    func supportsSegment(_ seconds: Int) -> Bool {
+        if let set = segmentDurations, !set.isEmpty { return set.contains(seconds) }
+        return segmentDuration == seconds || segmentDuration == nil
+    }
+
+    /// Whether the LL (low-latency) variant is available. `true` when the
+    /// server doesn't report `has_ll` (older server), preserving the prior
+    /// show-all-for-LL behaviour.
+    var supportsLL: Bool { hasLL ?? true }
+
     enum CodingKeys: String, CodingKey {
         case name
         case hasHls = "has_hls"
@@ -49,6 +76,8 @@ struct ContentItem: Decodable, Identifiable, Equatable, Hashable {
         case clipId = "clip_id"
         case codec
         case segmentDuration = "segment_duration"
+        case segmentDurations = "segment_durations"
+        case hasLL = "has_ll"
         case thumbnailPath = "thumbnail_url"
         case thumbnailPathSmall = "thumbnail_url_small"
         case thumbnailPathLarge = "thumbnail_url_large"
@@ -64,6 +93,8 @@ struct ContentItem: Decodable, Identifiable, Equatable, Hashable {
         self.clipId = serverClip.isEmpty ? Self.deriveClipId(from: rawName) : serverClip
         self.codec = ((try? c.decode(String.self, forKey: .codec)) ?? "").lowercased()
         self.segmentDuration = try? c.decodeIfPresent(Int.self, forKey: .segmentDuration)
+        self.segmentDurations = try? c.decodeIfPresent([Int].self, forKey: .segmentDurations)
+        self.hasLL = try? c.decodeIfPresent(Bool.self, forKey: .hasLL)
         self.thumbnailPath = (try? c.decode(String.self, forKey: .thumbnailPath))?
             .nonEmpty
         self.thumbnailPathSmall = (try? c.decode(String.self, forKey: .thumbnailPathSmall))?
@@ -75,6 +106,8 @@ struct ContentItem: Decodable, Identifiable, Equatable, Hashable {
     init(name: String, hasHls: Bool = true, hasDash: Bool = false,
          clipId: String? = nil, codec: String = "",
          segmentDuration: Int? = nil,
+         segmentDurations: [Int]? = nil,
+         hasLL: Bool? = nil,
          thumbnailPath: String? = nil,
          thumbnailPathSmall: String? = nil,
          thumbnailPathLarge: String? = nil) {
@@ -84,6 +117,8 @@ struct ContentItem: Decodable, Identifiable, Equatable, Hashable {
         self.clipId = clipId ?? Self.deriveClipId(from: name)
         self.codec = codec.lowercased()
         self.segmentDuration = segmentDuration
+        self.segmentDurations = segmentDurations
+        self.hasLL = hasLL
         self.thumbnailPath = thumbnailPath
         self.thumbnailPathSmall = thumbnailPathSmall
         self.thumbnailPathLarge = thumbnailPathLarge
@@ -117,7 +152,7 @@ struct ContentItem: Decodable, Identifiable, Equatable, Hashable {
     var effectiveCodec: String {
         if !codec.isEmpty { return codec.lowercased() }
         let lower = name.lowercased()
-        let pattern = #"_p200_(h264|hevc|h265|av1)\b"#
+        let pattern = #"_p200_(h264|hevc|h265|av1)(?:_|$)"#
         if let r = lower.range(of: pattern, options: .regularExpression) {
             let match = lower[r]
             for c in ["h264", "hevc", "h265", "av1"] where match.contains(c) {
@@ -142,7 +177,7 @@ struct ContentItem: Decodable, Identifiable, Equatable, Hashable {
     }
 
     private static func stripCodecSuffix(_ name: String) -> String {
-        let pattern = #"_p200_(h264|hevc|h265|av1)(_\d{8}_\d{6})?$"#
+        let pattern = #"_p200_(h264|hevc|h265|av1)(_(?:xs|vod|\d+(?:\.\d+)?s))?(_\d{8}_\d{6})?$"#
         if let r = name.range(of: pattern, options: [.regularExpression, .caseInsensitive]) {
             return String(name[..<r.lowerBound])
         }
@@ -194,12 +229,14 @@ enum StreamProtocol: String, CaseIterable, Identifiable, Codable {
 
 enum SegmentLength: String, CaseIterable, Identifiable, Codable {
     case ll
+    case s1
     case s2
     case s6
     var id: String { rawValue }
     var label: String {
         switch self {
         case .ll: return "LL"
+        case .s1: return "1s"
         case .s2: return "2s"
         case .s6: return "6s"
         }
@@ -208,8 +245,22 @@ enum SegmentLength: String, CaseIterable, Identifiable, Codable {
     var suffix: String {
         switch self {
         case .ll: return ""
+        case .s1: return "_1s"
         case .s2: return "_2s"
         case .s6: return "_6s"
+        }
+    }
+
+    /// Worst-case (max) segment duration in seconds — segments aren't exactly the
+    /// nominal length, so this is the ceiling the manifest declares. Used to size
+    /// the startup forward-buffer cap (3× this): 6s-nominal tops out ~7s, 2s-
+    /// nominal ~9s (LL shares the 6s ceiling). 1s-nominal (TARGETDURATION 2)
+    /// tops out ~3s.
+    var maxSegmentSeconds: Double {
+        switch self {
+        case .ll, .s6: return 7
+        case .s2: return 9
+        case .s1: return 3
         }
     }
 }
@@ -252,16 +303,20 @@ enum CodecFilter: String, CaseIterable, Identifiable, Codable {
 enum StreamURLBuilder {
     /// Build the playback URL exactly the way the Android client does.
     ///
-    /// `localProxy=true` (default) routes through the per-session
-    /// go-proxy port (failure injection in the loop). `false` hits the
-    /// API port directly. Same `/go-live/...` route in both cases.
+    /// `throughGoProxy=true` (default) routes the stream through the per-session
+    /// go-proxy port (`playbackURL`) where failure injection + traffic shaping
+    /// live; `false` hits the go-live/content port directly (`contentURL`, no
+    /// per-session shaping). Same `/go-live/...` route in both cases. NOTE: this
+    /// is which SERVER PORT the stream hits — unrelated to the on-device
+    /// LocalHTTPProxy (`PlayerViewModel.localProxy`); the stream must always go
+    /// through go-proxy for shaping/variants, so this stays true (#862).
     static func playbackURL(
         server: ServerProfile,
         contentName: String,
         protocolOption: StreamProtocol,
         segment: SegmentLength,
         playerId: String,
-        localProxy: Bool = true
+        throughGoProxy: Bool = true
     ) -> URL? {
         guard !contentName.isEmpty else { return nil }
         let manifest: String
@@ -269,11 +324,31 @@ enum StreamURLBuilder {
         case .hls:  manifest = "master\(segment.suffix).m3u8"
         case .dash: manifest = "manifest\(segment.suffix).mpd"
         }
-        let base = localProxy ? server.playbackURL : server.contentURL
+        let base = throughGoProxy ? server.playbackURL : server.contentURL
         guard var components = URLComponents(string: base) else { return nil }
         components.path = "/go-live/\(contentName)/\(manifest)"
+        var items: [URLQueryItem] = []
         if !playerId.isEmpty {
-            components.queryItems = [URLQueryItem(name: "player_id", value: playerId)]
+            items.append(URLQueryItem(name: "player_id", value: playerId))
+        }
+        // #714 Approach B (config-on-connect driven by the player): if the
+        // launch provided a raw proxy.* query fragment via
+        // `-is.proxy_query "proxy.shape.rate_mbps=2.5&proxy.labels.test=x"`,
+        // append it verbatim so the proxy materializes the session config on
+        // THIS bootstrap request — no separate control-plane round-trip and no
+        // pre-flight curl. NSArgumentDomain → highest precedence; absent on a
+        // normal launch. The 302 to the session port strips proxy.*, so child
+        // requests never carry it.
+        if let raw = UserDefaults.standard.string(forKey: "is.proxy_query"), !raw.isEmpty {
+            for pair in raw.split(separator: "&") where !pair.isEmpty {
+                let kv = pair.split(separator: "=", maxSplits: 1)
+                let name = String(kv[0])
+                let value = kv.count > 1 ? String(kv[1]) : ""
+                items.append(URLQueryItem(name: name, value: value))
+            }
+        }
+        if !items.isEmpty {
+            components.queryItems = items
         }
         return components.url
     }

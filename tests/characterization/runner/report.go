@@ -195,7 +195,7 @@ type StartupCycleResult struct {
 	UpshiftsIn30S      int `json:"upshifts_in_30s"`
 	DownshiftsIn30S    int `json:"downshifts_in_30s"`
 	StallsIn30S        int `json:"stalls_in_30s"`
-	DroppedFramesIn30S int `json:"dropped_frames_in_30s"`
+	FramesDroppedIn30S int `json:"frames_dropped_in_30s"`
 	// SettledVariant is the resolution with the majority of samples
 	// in the last 10 s of the 30 s window. Empty if the player never
 	// stabilised.
@@ -365,18 +365,19 @@ type Summary struct {
 	MinBitrateMbps      float64 `json:"min_bitrate_mbps"`
 	MaxBitrateMbps      float64 `json:"max_bitrate_mbps"`
 	ProfileShifts       int     `json:"profile_shifts"`
-	DroppedFrames       int     `json:"dropped_frames"`
+	FramesDropped       int     `json:"frames_dropped"`
 	SampleCount         int     `json:"sample_count"`
 	VariantSampleCounts []int   `json:"variant_sample_counts,omitempty"`
 
-	// LowestSustainableCapMbps is the smallest applied cap that kept the
-	// buffer above SustainableBufferS for the entire step AND produced no
-	// stall events. The next-lower cap is the first that broke either
-	// rule. 0 = sweep never produced a sustainable step (every cap stalled
-	// or depleted). Computed by Finalize when len(Steps) > 0.
+	// LowestSustainableCapMbps is the smallest applied cap (min over all
+	// steps, regardless of sweep order) that kept the buffer above
+	// SustainableBufferS for the entire step AND produced no stall events.
+	// 0 = sweep never produced a sustainable step (every cap stalled or
+	// depleted). Computed by Finalize when len(Steps) > 0.
 	LowestSustainableCapMbps float64 `json:"lowest_sustainable_cap_mbps,omitempty"`
-	// HighestStallingCapMbps is the largest applied cap that depleted the
-	// buffer OR stalled — i.e. the boundary between safe and unsafe.
+	// HighestStallingCapMbps is the largest applied cap (max over all
+	// steps, regardless of sweep order) that depleted the buffer OR
+	// stalled — i.e. the boundary between safe and unsafe.
 	HighestStallingCapMbps float64 `json:"highest_stalling_cap_mbps,omitempty"`
 	// BottomVariantFloorMbps is the largest applied cap that caused a
 	// stall or buffer depletion while the cap's target was the BOTTOM
@@ -477,9 +478,9 @@ func (r *Report) Finalize(endedAt time.Time) {
 	if r.Summary.ProfileShifts < 0 {
 		r.Summary.ProfileShifts = last.ProfileShiftCount
 	}
-	r.Summary.DroppedFrames = last.DroppedFrames - first.DroppedFrames
-	if r.Summary.DroppedFrames < 0 {
-		r.Summary.DroppedFrames = last.DroppedFrames
+	r.Summary.FramesDropped = last.FramesDropped - first.FramesDropped
+	if r.Summary.FramesDropped < 0 {
+		r.Summary.FramesDropped = last.FramesDropped
 	}
 	r.Summary.SampleCount = len(r.Samples)
 
@@ -532,11 +533,13 @@ func (r *Report) Finalize(endedAt time.Time) {
 		}
 	}
 
-	// Walk steps top-down (caps are descending) and find the smallest cap
-	// that kept the buffer healthy AND stalled zero times. The next-lower
-	// cap is the boundary between sustainable and not. Also pick out the
-	// distinct "bottom-variant floor" — failures on the lowest rung have
-	// no further downshift escape, so they're qualitatively different.
+	// Find the smallest cap that kept the buffer healthy AND stalled zero
+	// times (the sustainable floor) and the largest cap that stalled or
+	// depleted (the unsafe ceiling). Both are computed order-independently
+	// as min/max over the steps, so the sweep direction (rampup, rampdown,
+	// pyramid) doesn't matter. Also pick out the distinct "bottom-variant
+	// floor" — failures on the lowest rung have no further downshift
+	// escape, so they're qualitatively different.
 	bottomRes := ""
 	if n := len(r.Variants); n > 0 {
 		bottomRes = r.Variants[n-1].Resolution
@@ -548,10 +551,15 @@ func (r *Report) Finalize(endedAt time.Time) {
 		}
 		sustainable := st.StallsDelta == 0 && st.MinBufferS >= SustainableBufferS && st.SampleCount > 0
 		if sustainable {
-			r.Summary.LowestSustainableCapMbps = st.RateMbps
-		} else if r.Summary.LowestSustainableCapMbps > 0 && r.Summary.HighestStallingCapMbps == 0 {
-			// First failure below the lowest-good = the boundary.
-			r.Summary.HighestStallingCapMbps = st.RateMbps
+			// Smallest sustainable cap across the whole sweep.
+			if r.Summary.LowestSustainableCapMbps == 0 || st.RateMbps < r.Summary.LowestSustainableCapMbps {
+				r.Summary.LowestSustainableCapMbps = st.RateMbps
+			}
+		} else if st.SampleCount > 0 {
+			// Largest cap that failed (stalled or depleted) across the sweep.
+			if st.RateMbps > r.Summary.HighestStallingCapMbps {
+				r.Summary.HighestStallingCapMbps = st.RateMbps
+			}
 		}
 		// Bottom-variant floor: the highest cap whose target is the
 		// lowest rung AND the step failed. Definitive "can't deliver"
@@ -723,7 +731,7 @@ func renderMarkdown(r *Report) string {
 	fmt.Fprintf(&b, "| stalls               | %d |\n", r.Summary.TotalStalls)
 	fmt.Fprintf(&b, "| stall seconds        | %.1f |\n", r.Summary.TotalStallSeconds)
 	fmt.Fprintf(&b, "| profile shifts       | %d |\n", r.Summary.ProfileShifts)
-	fmt.Fprintf(&b, "| dropped frames       | %d |\n", r.Summary.DroppedFrames)
+	fmt.Fprintf(&b, "| dropped frames       | %d |\n", r.Summary.FramesDropped)
 	fmt.Fprintf(&b, "| buffer min / max (s) | %.1f / %.1f |\n", r.Summary.MinBufferDepthS, r.Summary.MaxBufferDepthS)
 	fmt.Fprintf(&b, "| bitrate min / mean / max (Mbps) | %.2f / %.2f / %.2f |\n",
 		r.Summary.MinBitrateMbps, r.Summary.MeanBitrateMbps, r.Summary.MaxBitrateMbps)

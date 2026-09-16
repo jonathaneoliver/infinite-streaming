@@ -52,6 +52,11 @@ export interface ChartCoordinationState {
    *  position so the operator can see exactly where the prev/next
    *  selected event sits across all panels. null = no cursor. */
   cursorMs: number | null;
+  /** Operator-facing label for the cursor — set alongside `cursorMs`
+   *  by `setCursor`. Surfaces in the hover tooltip on every chart's
+   *  vertical marker so the operator never has to guess what the
+   *  pinned event was. Issue #486. */
+  cursorLabel: string | null;
 
   /** The single source of truth for "what range is currently
    *  displayed". null → operator is following live (chart x-axis is
@@ -77,21 +82,75 @@ function writeExpandedStored(v: boolean) {
   try { localStorage.setItem(EXPANDED_STORAGE_KEY, v ? 'true' : 'false'); } catch { /* ignore */ }
 }
 
-function freshState(): ChartCoordinationState {
+// Bitrate-chart Y-axis max, persisted PER SCOPE (the coordination key —
+// per-player, not per-play; see SessionDisplay's coordId). Survives both a new
+// play (state is re-seeded from here) and a browser reload. Auto = key absent.
+const YMAX_STORAGE_PREFIX = 'dashboard_v3_bandwidth_ymax:';
+function readYMaxStored(pid: string): number | undefined {
+  try {
+    const raw = localStorage.getItem(YMAX_STORAGE_PREFIX + pid);
+    if (!raw) return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  } catch { return undefined; }
+}
+function writeYMaxStored(pid: string, v: number | undefined) {
+  try {
+    if (v == null) localStorage.removeItem(YMAX_STORAGE_PREFIX + pid);
+    else localStorage.setItem(YMAX_STORAGE_PREFIX + pid, String(v));
+  } catch { /* ignore */ }
+}
+
+/** Rolling-window choices offered in developer mode, in minutes.
+ *
+ *  Chosen against this system's actual cadence rather than round numbers: a
+ *  pattern step is 6s and a full valley cycle is 47 steps (~4.7 min), so
+ *    1m  ~10 steps  — individual shifts legible
+ *    2m  ~20 steps  — under half a cycle
+ *    5m             — ONE whole cycle, the arc the demo is about
+ *   10m             — two cycles (the historical default)
+ *   30m             — session overview
+ *  Below a minute the window is shorter than the buffer, and a variant change
+ *  cannot be seen reaching the screen at all. */
+export const FOCUS_CHOICES_MIN = [1, 2, 5, 10, 30] as const;
+
+const FOCUS_STORAGE_PREFIX = 'dashboard_v3_focus_ms:';
+function readFocusStored(pid: string): number | undefined {
+  try {
+    const raw = localStorage.getItem(FOCUS_STORAGE_PREFIX + pid);
+    if (!raw) return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  } catch { return undefined; }
+}
+function writeFocusStored(pid: string, v: number | undefined) {
+  try {
+    if (v == null) localStorage.removeItem(FOCUS_STORAGE_PREFIX + pid);
+    else localStorage.setItem(FOCUS_STORAGE_PREFIX + pid, String(v));
+  } catch { /* ignore */ }
+}
+
+function freshState(pid: string): ChartCoordinationState {
   return reactive<ChartCoordinationState>({
     expanded: readExpandedStored(),
     lastSampleMs: 0,
-    bandwidthYMax: undefined,
+    // Seed from the per-scope store so the operator's chosen ceiling survives a
+    // new play (fresh state) and a browser reload, instead of resetting to Auto.
+    bandwidthYMax: readYMaxStored(pid),
     cursorMs: null,
+    cursorLabel: null,
     range: null,
-    liveSpan: DEFAULT_FOCUS_MS,
+    // Same reasoning as bandwidthYMax above: a chosen window should survive a
+    // reload and a new play. Seeding here is also what lets a recorder set it
+    // from localStorage before the page loads, instead of driving the gesture.
+    liveSpan: readFocusStored(pid) ?? DEFAULT_FOCUS_MS,
   });
 }
 
 function ensureState(pid: string): ChartCoordinationState {
   let s = states.get(pid);
   if (!s) {
-    s = freshState();
+    s = freshState(pid);
     states.set(pid, s);
   }
   return s;
@@ -171,7 +230,13 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
    *  by explicit user gestures. Pass any positive number; <= 0
    *  reverts to DEFAULT_FOCUS_MS. */
   function setLiveSpan(ms: number) {
-    cur().liveSpan = ms > 0 ? ms : DEFAULT_FOCUS_MS;
+    const v = ms > 0 ? ms : DEFAULT_FOCUS_MS;
+    cur().liveSpan = v;
+    // Persist only an EXPLICIT choice. Alt+wheel lands on arbitrary spans and
+    // writing those would make every incidental zoom sticky across reloads.
+    if (FOCUS_CHOICES_MIN.some((m) => m * 60_000 === v)) {
+      writeFocusStored(playerIdRef.value, v);
+    }
   }
 
   /** Single Live-toggle handler used by chart toolbars, the lane
@@ -196,12 +261,47 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
 
   function setBandwidthYMax(v: number | undefined) {
     cur().bandwidthYMax = v;
+    // Persist per scope so it survives a new play + a browser reload.
+    writeYMaxStored(playerIdRef.value, v);
+  }
+
+  /** Reset only the position / data-edge fields for a fresh play, KEEPING the
+   *  scale + display prefs (bandwidthYMax, liveSpan, expanded). The coordination
+   *  state is now keyed per-player (stable across plays), so without this a
+   *  pinned absolute zoom window from the prior play would carry into the new
+   *  play (wrong time domain) instead of following live. Called from
+   *  SessionDisplay on a play_id change. */
+  function resetForNewPlay() {
+    const s = cur();
+    s.lastSampleMs = 0;
+    s.range = null;
+    s.cursorMs = null;
+    s.cursorLabel = null;
   }
 
   /** Move the synchronized "selected event" cursor. Pass null to
    *  hide it. */
   function setCursorMs(ms: number | null) {
     cur().cursorMs = ms;
+    if (ms == null) cur().cursorLabel = null;
+  }
+  /** Set position AND label in one call. Use this from callers that
+   *  know which event the cursor represents (SessionDisplay's
+   *  prev/next navigator); use `setCursorMs` from callers that only
+   *  know the timestamp. Issue #486. */
+  function setCursor(ms: number | null, label: string | null) {
+    // Set the highlighted-event cursor only. Does NOT touch the live/pinned
+    // range: user event-navigation pins the window via recenterOnNav()
+    // (setRange) — that is what keeps a *user-selected* row on screen (#662).
+    // Previously (#663) setCursor itself dropped out of Live whenever ms was
+    // set while live; but the navigator AUTO-advances to each new event on a
+    // live view, so that fired on every incoming event and made the page
+    // unable to stay in Live (testing.html + in-progress session-viewer both
+    // snapped to a 10-min window around the oldest event). Auto-advance must
+    // not drop live; only explicit navigation (recenterOnNav) pins.
+    const s = cur();
+    s.cursorMs = ms;
+    s.cursorLabel = ms == null ? null : label;
   }
 
   return {
@@ -219,7 +319,9 @@ export function useChartCoordination(playerIdInput: string | Ref<string>) {
     toggleLive,
     toggleExpanded,
     setBandwidthYMax,
+    resetForNewPlay,
     setCursorMs,
+    setCursor,
   };
 }
 

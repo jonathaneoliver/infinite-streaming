@@ -131,7 +131,7 @@ func renderMatrix(reports []runner.Report) string {
 			s := r.Summary
 			fmt.Fprintf(&b, "| %s | %d | %.1f | %d | %d | %.1f / %.1f | %.2f / %.2f / %.2f |\n",
 				plat,
-				s.TotalStalls, s.TotalStallSeconds, s.ProfileShifts, s.DroppedFrames,
+				s.TotalStalls, s.TotalStallSeconds, s.ProfileShifts, s.FramesDropped,
 				s.MinBufferDepthS, s.MaxBufferDepthS,
 				s.MinBitrateMbps, s.MeanBitrateMbps, s.MaxBitrateMbps,
 			)

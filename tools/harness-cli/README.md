@@ -26,6 +26,7 @@ harness --insecure info       # smoke check
 | **`labels`** | Operator KV labels on player | `show`, `set`, `rm`, `clear` |
 | **`timeouts`** | Transfer timeouts | `<target> --active --idle [--applies-* / --show / --clear]` |
 | **`content`** | Master playlist mutators | `<target> --strip-* --overstate-* --live-offset` |
+| **`app-config`** | Client-side per-play config (#800) the player applies at its next play boundary, no relaunch | `<target> --segment --protocol --live-offset --peak-bitrate [--clear]` |
 | **`play`** | Inspect live play | `show`, `patch` |
 | **`groups`** | Player groups | `list`, `show`, `create`, `patch`, `add`, `remove`, `rm` |
 | **`tail`**, **`ts`**, **`events`** | Live SSE streams | `tail` (network), `ts` (combined), `events` (lifecycle) |
@@ -71,8 +72,8 @@ echo "$out" | jq …
 - **Label filters are `--label-has` / `--label-not`, NOT `--label`.** Used by every `query` subcommand. Repeatable (AND semantics):
     ```sh
     harness --insecure --json query plays \
-        --label-has info=test_rampup \
-        --label-has info=platform_iphone \
+        --label-has testing=test_rampup \
+        --label-has testing=platform_iphone \
         --limit 20
     ```
 - **`harness query control <play_id>`** parses a play_id positionally but the underlying endpoint requires `player_id`. Until that's fixed, use:
@@ -88,10 +89,10 @@ echo "$out" | jq …
 
 1. Lives on the player record (visible via `harness labels show`).
 2. Emits a `label_changed` control event (the proxy fix in #487 made this work on the v2 PATCH path).
-3. The forwarder turns each KV pair into an `info=<key>_<value>` row label on the control_events table.
-4. The Sessions dashboard's Labels column renders them as chips on the current play.
+3. The forwarder turns each KV pair into a `testing=<key>_<value>` row label on the control_events table (the `testing` tier, #571 — was `info=` before that; legacy rows persist for the ≤30-day TTL).
+4. The Sessions dashboard's Labels column renders them as chips on the current play, grouped under the Testing tier.
 
-**Encoding gotcha:** `test=rampup` on the player → `info=test_rampup` on the row. The filter is `query plays --label-has info=test_rampup`, NOT `--label-has test=rampup`.
+**Encoding gotcha:** `test=rampup` on the player → `testing=test_rampup` on the row. The filter is `query plays --label-has testing=test_rampup`, NOT `--label-has test=rampup`. (For rows written before #571, use the legacy `--label-has info=test_rampup`.)
 
 ## Common patterns
 
@@ -108,8 +109,8 @@ harness --insecure ts 3bff77d6 --streams events,network,control
 
 # Find every play tagged by a characterization run
 harness --insecure --json query plays \
-    --label-has info=test_rampup \
-    --label-has info=platform_iphone \
+    --label-has testing=test_rampup \
+    --label-has testing=platform_iphone \
     --limit 20
 
 # Inspect one play's events + label histogram
@@ -124,6 +125,38 @@ harness --insecure labels set <player> test=rampup run_id=20260521T160000Z
 # Snapshot before mutating then undo if needed
 harness --insecure checkpoint list | head
 harness --insecure undo
+```
+
+## Multi-server char-matrix (#942)
+
+A matrix arm's **`server:`** field pins which backend that arm streams against. It threads to the client as the `-is.server_url` launch-arg override (iOS `NSArgumentDomain` / Android `--es is.server_url`) **and** to the config-on-connect bootstrap, so an arm bootstraps *and* streams on the same server. Omit it and every arm uses `HARNESS_BASE_URL` — which means each arm always pins a server explicitly, so a sim never inherits a stale saved server (the drift class of "arm played but nothing landed" failures).
+
+As a **compare axis**, `server:` runs concurrent arms against *different* backends:
+
+```yaml
+# tests/characterization/matrix/server-split.yaml — two sims, two servers
+name: server-split
+parallel: true
+duration_s: 90
+defaults: { platform: iphone-sim, content: <clip> }
+groups:
+  - id: srv
+    control:  { server: https://dev.jeoliver.com:21000 }   # test-dev, full stack
+    variants: [ { server: https://dev.jeoliver.com:28000 } ] # lean/degraded stack
+```
+
+```sh
+env HARNESS_BASE_URL=https://dev.jeoliver.com:21000 \
+  harness char matrix tests/characterization/matrix/server-split.yaml
+```
+
+Cross-server arms are handled end to end: the probe reads `play_id` (harness `--base`), `measureArm` queries events (`api.Client.WithBaseURL`), and the RESULT viewer link is built (`cfg.ServerURL`) — all against **the arm's own** server, so each arm's pass/fail is honest (no false "FAIL") and its dashboard link points at the right host.
+
+**Spot-check a cross-server run** on each server's archive — a correct run is a clean diagonal (each player_id's traffic + play only on its own server, zero crossover):
+
+```sh
+curl -sk "$SERVER/analytics/api/v2/network_requests?player_id=$PID&from=$FROM"  # segments fetched
+curl -sk "$SERVER/analytics/api/v2/plays?from=$FROM"                            # play landed here
 ```
 
 ## Checkpoints + undo

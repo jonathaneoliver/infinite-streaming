@@ -51,7 +51,13 @@ Each item is a `PlaySummary` (see `api/openapi/v2/forwarder.yaml`). Trouble sign
 | `net_errors` / `net_faults` | network plane errors | from `network_requests` table join |
 | `bitrate_shifts` / `resolution_changes` | ABR churn | very high = unstable variant boundary |
 | `avg_quality_pct` / `min_quality_pct` | quality envelope | low avg = sustained downshifting |
-| `last_player_error` | terminal error string | non-empty = play ended in error |
+| `last_player_error` | terminal error string (legacy `player_error`) | non-empty = play ended in error |
+| `playback_status` (#550 Phase 2) | terminal outcome enum | `mid_stream_failure` / `start_failure` / `abandoned_start` = play died; `completed` / `user_stopped` = clean exit; `in_progress` = live |
+| `playback_reason` (#550 Phase 2) | controlled-vocab reason per status | mirrors `player_state` during in_progress; classifier-derived on terminal rows |
+| `terminal_error_code` / `terminal_error_domain` (#550 Phase 2) | structured error that ended the play | non-zero = play died; SQL-safe (never carries transient codes). Pairs with the legacy `last_player_error` string. |
+| `error_count` (#550 Phase 2) | cumulative error observations | high count even with `playback_status=completed` = the play recovered through several hiccups |
+| `playing_time_ms` / `buffering_time_ms` / `stalling_time_ms` (#550 Phase 1) | per-state residency (cumulative ms) | `buffering+stalling / playing` = qoe ratio; >0 buffering on a `completed` play with low stalling = re-buffer happy path |
+| `device_class` / `device_model` / `player_tech` / `app_version` (#550 Phase 4) | device taxonomy | group by these to spot fleet-wide vs single-device incidents |
 
 ### A2. Score each play
 
@@ -61,6 +67,12 @@ Sum the "user-visible badness" signals with sensible weights. The dashboard's "i
 jq -r '.[] | {
   play_id, player_id, started_at, last_seen_at,
   classification, last_state, last_player_error,
+  # #550 Phase 2 outcome fields — pulled into the triage row so the
+  # rank step can surface terminal failures and device-grouped views.
+  playback_status, playback_reason,
+  terminal_error_code, terminal_error_domain,
+  error_count: (.error_count|tonumber? // 0),
+  device_class, device_model, player_tech, app_version,
   stalls: (.stalls|tonumber? // 0),
   frozen: (.frozen_count|tonumber? // 0),
   user_marked: (.user_marked_count|tonumber? // 0),
@@ -78,6 +90,9 @@ jq -r '.[] | {
   avg_q: .avg_quality_pct,
   score: (
     (.user_marked_count|tonumber? // 0) * 100   # operator 911 — biggest weight
+    # #550 Phase 2: terminal failure outweighs almost everything.
+    + (if (.playback_status // "") | test("^(start|mid_stream)_failure$") then 80 else 0 end)
+    + (if (.playback_status // "") == "abandoned_start" then 60 else 0 end)
     + (.frozen_count|tonumber? // 0)     * 50
     + (.error_event_count|tonumber? // 0) * 40
     + (.restart_count|tonumber? // 0)   * 20

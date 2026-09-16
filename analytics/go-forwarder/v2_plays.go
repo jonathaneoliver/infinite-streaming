@@ -73,6 +73,7 @@ func v2PlaysListHandler(w http.ResponseWriter, r *http.Request, cfg config) {
 		PlayerID:       canonicalV2ID(q.Get("player_id")),
 		PlayID:         canonicalV2ID(q.Get("play_id")),
 		AttemptID:      q.Get("attempt_id"),
+		GroupID:        q.Get("group"),
 		From:           q.Get("from"),
 		To:             q.Get("to"),
 		Classification: q.Get("classification"),

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 )
 
 func buildAbrCommand(scriptPath, outputDir, inputFile string, cfg map[string]interface{}) ([]string, error) {
@@ -64,28 +66,84 @@ func buildAbrCommand(scriptPath, outputDir, inputFile string, cfg map[string]int
 	return cmd, nil
 }
 
+// findOutputDirectories reports the content directories the ABR script just
+// produced, as bare names relative to outputDir.
+//
+// It DISCOVERS them rather than reconstructing the name. The script owns the
+// naming convention and has grown two suffixes Go cannot predict: a profile tag
+// appended after the codec (`_xs` on the apple-uniq-live-xs ladder, chosen by
+// the script's --ladder default) and a `_YYYYMMDD_HHMMSS` disambiguator added
+// when the target directory already exists. Rebuilding `<name>_<codec>` by
+// concatenation missed both, and the failure was silent: no output paths
+// recorded on the job, and warmGoLiveWorkers never called, so the first play of
+// the new content paid a cold start with nothing in the log to explain it.
+//
+// Globbing keeps the script as the single source of truth for naming, so a
+// future tag needs no matching change here.
 func findOutputDirectories(cfg map[string]interface{}, outputDir string) []string {
 	outputName, _ := cfg["output_name"].(string)
 	if outputName == "" {
 		outputName = "output"
 	}
 	selection, _ := cfg["codec_selection"].(string)
-	paths := []string{}
-	if selection == "" || selection == "both" || selection == "hevc" {
-		if dirExists(filepath.Join(outputDir, outputName+"_hevc")) {
-			paths = append(paths, outputName+"_hevc")
-		}
+
+	// Which codecs this run was asked to produce. "" and "both" mean
+	// hevc+h264; "all" means every codec — that case previously matched none
+	// of the branches and returned an empty list.
+	var codecs []string
+	switch selection {
+	case "", "both":
+		codecs = []string{"hevc", "h264"}
+	case "all":
+		codecs = []string{"hevc", "h264", "av1"}
+	default:
+		codecs = []string{selection}
 	}
-	if selection == "" || selection == "both" || selection == "h264" || selection == "av1" {
-		suffix := "_h264"
-		if selection == "av1" {
-			suffix = "_av1"
-		}
-		if dirExists(filepath.Join(outputDir, outputName+suffix)) {
-			paths = append(paths, outputName+suffix)
+
+	paths := []string{}
+	for _, codec := range codecs {
+		if name := newestPackageDir(outputDir, outputName, codec); name != "" {
+			paths = append(paths, name)
 		}
 	}
 	return paths
+}
+
+// newestPackageDir finds the fMP4 package directory for one codec: the entry
+// named `<outputName>_<codec>` optionally followed by `_<tag>` and/or a
+// `_<timestamp>`. When more than one matches (a re-encode that collided and got
+// a timestamp), the most recently modified wins — that is the one this run just
+// wrote. Returns "" when nothing matches.
+func newestPackageDir(outputDir, outputName, codec string) string {
+	prefix := outputName + "_" + codec
+	matches, err := filepath.Glob(filepath.Join(outputDir, prefix+"*"))
+	if err != nil {
+		return ""
+	}
+
+	var best string
+	var bestMod time.Time
+	for _, path := range matches {
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		name := filepath.Base(path)
+		// Reject a longer codec name matched by the prefix, and skip the
+		// parallel MPEG-TS package — it is a separate artifact, not this
+		// content's fMP4 output, and was never reported before.
+		rest := strings.TrimPrefix(name, prefix)
+		if rest != "" && !strings.HasPrefix(rest, "_") {
+			continue
+		}
+		if rest == "_ts" || strings.HasPrefix(rest, "_ts_") {
+			continue
+		}
+		if best == "" || info.ModTime().After(bestMod) {
+			best, bestMod = name, info.ModTime()
+		}
+	}
+	return best
 }
 
 func dirExists(path string) bool {

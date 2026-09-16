@@ -709,7 +709,7 @@
 
     function populateContentFilter() {
         const sel = document.getElementById('contentFilter');
-        const names = [...new Set(ALL_CONTENT.map(c => c.name.replace(/_h264|_hevc|_av1|_ts|_hw|_dash/g, '')))];
+        const names = [...new Set(ALL_CONTENT.map(c => c.name.replace(/_h264|_hevc|_av1|_ts|_hw|_dash|_xs|_vod/g, '')))];
         names.sort();
         for (const name of names) {
             const opt = document.createElement('option');
@@ -1196,9 +1196,20 @@
 
     // ─── go-proxy URL helpers (mirror grid.html) ───
 
+    function uuidV4() {
+        // Same shape as ISMNav.createPlayerId: player_id is a UUID (#1025).
+        if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+        const b = new Uint8Array(16);
+        if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(b);
+        else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
+        b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+        const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+        return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+    }
+
     function createPlayerId() {
         if (window.ISMNav && typeof window.ISMNav.createPlayerId === 'function') return window.ISMNav.createPlayerId();
-        return Math.random().toString(36).slice(2, 10);
+        return uuidV4();
     }
     function getProxyPort() {
         const uiPort = window.location.port || '30000';
@@ -1225,7 +1236,7 @@
         localStorage.setItem('ismSelectedContent', fullName);
         localStorage.setItem('ismSelectedContentFull', fullName);
         const baseName = fullName
-            .replace(/_(h264|hevc|av1|dash|ts|hw)$/i, '')
+            .replace(/_(?:h264|hevc|av1|dash|ts|hw)(?:_(?:xs|vod|\d+(?:\.\d+)?s))?$/i, '')
             .replace(/_\d{8}_\d{6}$/i, '');
         localStorage.setItem('ismSelectedContentBase', baseName);
         const url = streamUrlFor(item);

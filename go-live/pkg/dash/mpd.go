@@ -70,6 +70,12 @@ type MPDData struct {
 	StreamStartTime       float64
 	PeriodCounter         int
 	PeriodCounterInit     bool
+
+	// InlineRanges holds the fragment byte-ranges recovered when the loaded
+	// manifest was itself fragment-granularity. Empty for segment-granularity
+	// manifests, which source ranges from a sibling manifest_fragmented.mpd or
+	// from .byteranges sidecars instead.
+	InlineRanges fragmentRanges
 }
 
 var (
@@ -134,6 +140,17 @@ func LoadMPD(folder, uri string) (*MPDData, error) {
 		return nil, fmt.Errorf("mpd root missing")
 	}
 
+	// A fragment-granularity manifest is collapsed to segment granularity here,
+	// at the boundary, so every reader below sees the same shape it always has.
+	// The byte-ranges stripped out during the collapse are kept on MPDData and
+	// serve the 1s/2s/LL variants — no second file, no chance of the structure
+	// and the ranges disagreeing.
+	inlineRanges, collapsed := normalizeFragmentedMPD(root)
+	if collapsed {
+		fmt.Fprintf(os.Stderr, "INFO: %s is fragment-granularity; collapsed to %d segments carrying inline byte-ranges\n",
+			path, len(inlineRanges))
+	}
+
 	data := &MPDData{
 		Tree:                     doc,
 		Root:                     root,
@@ -147,6 +164,7 @@ func LoadMPD(folder, uri string) (*MPDData, error) {
 		TempSegmentDurationByDur: make(map[int]float64),
 		PartialDurationByDur:     make(map[int]float64),
 		VirtualSegmentsByDur:     make(map[int]map[string][]virtualSegment),
+		InlineRanges:             inlineRanges,
 	}
 
 	if mpdDuration := root.SelectAttrValue("mediaPresentationDuration", ""); mpdDuration != "" {
@@ -484,8 +502,17 @@ func parseSegmentTimeline(segTimeline *etree.Element, timescale int) (*timelineD
 	}, nil
 }
 
+// usesVirtualSegments reports whether a variant duration is synthesized by
+// regrouping the base (6s) fmp4 fragments into shorter segments via their
+// byte-ranges, rather than served from the base SegmentList directly.
+// The 1s and 2s variants are both sub-base regroupings; LL and 6s use the base
+// segments as-is (LL just exposes them with partial-segment availability).
+func usesVirtualSegments(duration int) bool {
+	return duration == 1 || duration == 2
+}
+
 func ensureVirtualSegments(data *MPDData, duration int) (int, float64) {
-	if duration != 2 {
+	if !usesVirtualSegments(duration) {
 		return data.SegmentCount, data.SegmentDuration
 	}
 	if data.VirtualSegmentsByDur[duration] == nil {
@@ -577,7 +604,7 @@ func buildVirtualSegmentsForRep(data *MPDData, rep *etree.Element, repID string,
 		}
 		segmentTicks := baseDurations[minInt(i, len(baseDurations)-1)]
 		segmentDuration := float64(segmentTicks) / float64(timescale)
-		fragments, err := loadByterangesForSegment(data.Path, media)
+		fragments, err := loadByterangesForSegment(data, media)
 		if err != nil || len(fragments) == 0 {
 			virtualSegments = append(virtualSegments, virtualSegment{
 				Media:         media,
@@ -616,11 +643,37 @@ func buildVirtualSegmentsForRep(data *MPDData, rep *etree.Element, repID string,
 	return virtualSegments, nil
 }
 
-func loadByterangesForSegment(mpdPath, mediaPath string) ([]byterangePayloadFragment, error) {
+// loadByterangesForSegment returns the fragment byte-ranges for one segment.
+//
+// Sources, in priority order:
+//  1. ranges carried by the loaded manifest itself, when it was
+//     fragment-granularity (the single-input case, mirroring HLS)
+//  2. a sibling manifest_fragmented.mpd, when the loaded manifest was
+//     segment-granularity but the encoder shipped both files
+//  3. <segment>.byteranges — the legacy JSON sidecar, for older content
+//
+// Callers treat an error here as "this segment has no partials" and fall back to
+// whole-segment granularity, so a content item with none of the three degrades
+// silently. warnNoRangeSource makes that case visible.
+func loadByterangesForSegment(data *MPDData, mediaPath string) ([]byterangePayloadFragment, error) {
+	key := normalizeMediaKey(mediaPath)
+
+	if fragments, ok := data.InlineRanges[key]; ok && len(fragments) > 0 {
+		return fragments, nil
+	}
+
+	mpdPath := data.Path
+	if ranges := loadFragmentedRanges(mpdPath); ranges != nil {
+		if fragments, ok := ranges[key]; ok && len(fragments) > 0 {
+			return fragments, nil
+		}
+	}
+
 	segmentPath := filepath.Join(filepath.Dir(mpdPath), filepath.FromSlash(strings.TrimPrefix(mediaPath, "/")))
 	byterangesPath := segmentPath + ".byteranges"
 	payloadBytes, err := os.ReadFile(byterangesPath)
 	if err != nil {
+		warnNoRangeSource(mpdPath)
 		return nil, err
 	}
 	var payload byterangePayload
@@ -652,7 +705,7 @@ func GenerateLiveMPD(data *MPDData, timeNow time.Time, streamName string, durati
 	fmt.Fprintf(os.Stderr, "[GO-LIVE:DASH] Base MPD: totalDuration=%.3f segmentDuration=%.3f segmentCount=%d\n",
 		totalDuration, segmentDuration, segmentCount)
 
-	if duration == 2 {
+	if usesVirtualSegments(duration) {
 		virtualCount, virtualDuration := ensureVirtualSegments(data, duration)
 		if virtualCount > 0 {
 			segmentCount = virtualCount
@@ -666,6 +719,24 @@ func GenerateLiveMPD(data *MPDData, timeNow time.Time, streamName string, durati
             totalDuration, segmentDuration, segmentCount)
         return doc.WriteToBytes()
     }
+
+	// The live window can be no longer than one loop of the content. The loop
+	// handling below wraps a negative window start exactly once and builds at
+	// most two Periods (the tail of one loop and the head of the next), both of
+	// which assume the window fits inside a single loop. A clip shorter than
+	// maxLiveWindowDurationSec broke that: a 24s clip has 5 segments against a
+	// 7-segment window, the start was still -1 after the wrap, and
+	// buildPeriodSegments panicked with "index out of range [-1]". The panic is
+	// unrecovered, so one short clip took down go-live and every stream it
+	// served. Clamping keeps start >= 0 after one wrap and the window within at
+	// most one loop crossing. Content at least as long as the window is
+	// unaffected: both values keep their previous defaults.
+	windowSegmentCount := int(maxLiveWindowDurationSec / segmentDuration)
+	timeShiftBufferDepthSec := maxLiveWindowDurationSec
+	if windowSegmentCount > segmentCount {
+		windowSegmentCount = segmentCount
+		timeShiftBufferDepthSec = float64(segmentCount) * segmentDuration
+	}
 
 	if data.AvailabilityStartTime == nil {
 		start := timeFromSeconds(float64(timeNow.UnixNano())/1e9 - totalDuration)
@@ -687,7 +758,7 @@ func GenerateLiveMPD(data *MPDData, timeNow time.Time, streamName string, durati
 	elapsedTime := timeOffset
 	availabilityOffset := segmentDuration
 	if llMode {
-		if duration == 2 {
+		if usesVirtualSegments(duration) {
 			availabilityOffset = detectPartialDuration(data, duration, baseSegmentDuration)
 		} else {
 			availabilityOffset = detectPartialDuration(data, duration, segmentDuration)
@@ -728,7 +799,7 @@ func GenerateLiveMPD(data *MPDData, timeNow time.Time, streamName string, durati
 		root.CreateAttr("minBufferTime", formatDuration(segmentDuration*2))
 		root.CreateAttr("minimumUpdatePeriod", formatDuration(segmentDuration))
 	}
-	root.CreateAttr("timeShiftBufferDepth", formatDuration(maxLiveWindowDurationSec))
+	root.CreateAttr("timeShiftBufferDepth", formatDuration(timeShiftBufferDepthSec))
 
 	// BaseURL creation intentionally omitted (no insert).
 	removeServiceDescriptions(root)
@@ -736,7 +807,6 @@ func GenerateLiveMPD(data *MPDData, timeNow time.Time, streamName string, durati
 		insertServiceDescription(root, llDashTargetDelaySec, llDashTargetDelaySec*0.5, llDashTargetDelaySec*1.5)
 	}
 
-	windowSegmentCount := int(maxLiveWindowDurationSec / segmentDuration)
 	windowEndLogical := totalElapsedSegments + 1
 	windowStartLogical := windowEndLogical - windowSegmentCount
 	if windowStartLogical < 0 {
@@ -982,7 +1052,7 @@ func buildExplicitSegmentList(representation *etree.Element, data *MPDData, wind
 	virtualSegments := []virtualSegment{}
 	usePartials := llMode
 
-	if duration == 2 {
+	if usesVirtualSegments(duration) {
 		if byDur, ok := data.VirtualSegmentsByDur[duration]; ok {
 			virtualSegments = byDur[repID]
 			if len(virtualSegments) > 0 {
@@ -1006,7 +1076,7 @@ func buildExplicitSegmentList(representation *etree.Element, data *MPDData, wind
 		segList.CreateAttr("timescale", segMeta.timescale)
 	}
 	if segMeta.initialization != nil {
-		if duration == 2 || duration == 4 {
+		if usesVirtualSegments(duration) || duration == 4 {
 			initURL := segMeta.initialization.SelectAttrValue("sourceURL", "")
 			if initURL != "" {
 				segMeta.initialization.RemoveAttr("sourceURL")
@@ -1062,12 +1132,12 @@ func buildExplicitSegmentList(representation *etree.Element, data *MPDData, wind
 		}
 
 		segmentBasePath := baseMediaPath
-		if duration == 2 {
+		if usesVirtualSegments(duration) {
 			segmentBasePath = prefixDashPath(data.Rel, segmentBasePath)
 		}
 
 		if usePartials && len(virtualSegments) == 0 {
-			fragments, err := loadByterangesForSegment(data.Path, baseMediaPath)
+			fragments, err := loadByterangesForSegment(data, baseMediaPath)
 			if err == nil && len(fragments) > 0 {
 				fragCount := int64(len(fragments))
 				baseDur := durationTicks / fragCount

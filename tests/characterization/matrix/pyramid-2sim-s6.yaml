@@ -1,0 +1,21 @@
+# 2-sim group, same recipe as the s6 single: s6 segments, pyramid @ 1 Mbps initial
+# cap + 1 Mbps client cap, NO live_offset, NO alternating. control=master arms the
+# pyramid, 1 slave follows via proxy group propagation.
+name: pyramid-2sim-s6
+class: config
+parallel: true
+reps: 1
+duration_s: 300
+defaults:
+  platform: ipad-sim
+  is.segment: s6
+  is.peak_bitrate_mbps: 1
+  proxy.shape:
+    pattern: pyramid                # climb the ladder then descend; master arms it, slave follows via group propagation
+    step_seconds: 12
+    rate_mbps: 1                    # initial network cap (Mbps) applied at config-on-connect, before the pattern arms
+groups:
+  - id: pair
+    control: { id: master }
+    variants:
+      - { id: slave1 }

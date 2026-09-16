@@ -32,3 +32,35 @@ type Launcher interface {
 	// session). Safe to call multiple times.
 	Close() error
 }
+
+// UICloser is the optional capability of driving the player's OWN UI to
+// close the playback screen — the way a real user does — so the app runs
+// its normal exit path and emits a genuine client play_end (#627). That
+// leaves the play cleanly ended in the sessions view (one bounded
+// play_id per play) instead of dangling in_progress after a hard
+// process terminate. Only AppiumLauncher implements it; CLI and Manual
+// launchers can't drive the UI, so callers type-assert and skip when the
+// launcher doesn't satisfy this interface.
+type UICloser interface {
+	// ClosePlaybackViaUI navigates the app back out of the playback
+	// screen (iOS back chevron / Android system Back), triggering the
+	// app's endSessionForUserBack → play_end. Best-effort: returns an
+	// error the caller may log, but a missing back affordance (already on
+	// home) is not fatal.
+	ClosePlaybackViaUI(ctx context.Context, d Device) error
+}
+
+// DeviceReleaser is the optional capability of fully releasing the device
+// after a run — terminating WebDriverAgent so iOS's system "Automation
+// Running" overlay clears. Appium deliberately keeps WDA resident between
+// sessions (useNewWDA=false) for fast reuse across back-to-back tests, so
+// ending the WebDriver session does NOT stop WDA. Killing it therefore
+// costs a WDA (re)launch on the next run, which is why callers gate this
+// behind CHAR_RELEASE_DEVICE=1 rather than running it unconditionally.
+// Only AppiumLauncher implements it.
+type DeviceReleaser interface {
+	// ReleaseDevice frees the device of automation residue (terminates the
+	// WDA runner on real iOS devices). No-op for simulators and platforms
+	// without the overlay. Best-effort.
+	ReleaseDevice(ctx context.Context, d Device) error
+}

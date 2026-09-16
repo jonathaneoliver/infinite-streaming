@@ -1,0 +1,279 @@
+// Package sweep is the local working store + experiment model for the
+// automated fault-injection sweep (issue #772, docs/sweep-design.md).
+//
+// An *experiment* is one runnable recipe (one
+// {platform × protocol × fault × shape × content × HLS-config × mode}
+// combination) — ephemeral working state. A confirmed failure becomes a
+// durable *finding* (a GitHub Issue) elsewhere; this package only owns the
+// experiment queue. The queue lives in ClickHouse (the master store, #772):
+// each experiment is one upsertable row keyed by `exp_id` with a `status`
+// column, reached over the forwarder API; the claim is arbitrated server-side
+// (§4, §7 of the design).
+package sweep
+
+// Class is the sweep tier an experiment belongs to. The two tiers never mix —
+// they have different purposes, recipe vocabularies, and oracle semantics, and
+// are seeded + run one class at a time:
+//
+//   - config: realistic stream-config + benign-network variation (content
+//     manipulation, rate shaping never below the sustainable floor, pattern
+//     ladders, server transfer-timeouts). Asks "does the player make GOOD
+//     decisions?" — ABR rung choice, over-downshift, manifest-config robustness.
+//     ANY bad QoE label is the signal; there is no injected error to recover from.
+//   - fault: explicit HTTP/connection error injection (4xx/5xx, corrupted,
+//     connection_refused, dns_failure, rate_limiting, transport drop/reject,
+//     request hangs). Asks "does the player RECOVER from errors, and are there
+//     bugs in recovery?" — judged against the per-fault recovery-expected
+//     envelope, so a fault the player should survive isn't a false positive.
+type Class string
+
+const (
+	ClassConfig Class = "config" // realistic stream-config + network variation (default)
+	ClassFault  Class = "fault"  // explicit error injection → recovery testing
+)
+
+// ClassOrDefault treats an empty Class as config (the default tier).
+func (e *Experiment) ClassOrDefault() Class {
+	if e.Class == "" {
+		return ClassConfig
+	}
+	return e.Class
+}
+
+// LaunchModeAppium is the only launcher TestSweepProbe supports — appium drives
+// every platform (iOS sims, Apple TV, and the physical Android TV over its adb
+// transport). cli/adb modes make the probe SKIP, so this is the launch
+// instruction every item carries.
+const LaunchModeAppium = "appium"
+
+// LaunchModeOrDefault resolves the probe launch mode, defaulting empty (legacy
+// rows seeded before the field existed) to appium so the runner never falls
+// back to a mode the probe skips.
+func (e *Experiment) LaunchModeOrDefault() string {
+	if e.LaunchMode == "" {
+		return LaunchModeAppium
+	}
+	return e.LaunchMode
+}
+
+// StartMode is the app-startup behaviour an experiment measures (#946) — a
+// first-class characterization axis, orthogonal to the appium-session plumbing.
+//
+//   - cold (default): the app is killed + relaunched, so playback starts from a
+//     fresh AVPlayer — empty buffers, no ABR history, cold decoder. The startup
+//     QoE (TTFF, first-frame rung) reflects a genuine cold start.
+//   - warm: the app stays running and a new play is started from the home
+//     screen, so warm buffers / ABR history / decoder state carry over — a
+//     different (usually faster) startup that a cold relaunch never sees.
+//
+// warm requires a warm appium session (config #3); cold can use either session
+// plumbing (fresh or warm) — the session reuse is out-of-band from playback.
+type StartMode string
+
+const (
+	StartModeCold StartMode = "cold"
+	StartModeWarm StartMode = "warm"
+)
+
+// StartModeOrDefault treats an empty StartMode as cold (the isolation-preserving
+// default — every rep independent).
+func (e *Experiment) StartModeOrDefault() StartMode {
+	if e.StartMode == "" {
+		return StartModeCold
+	}
+	return StartMode(e.StartMode)
+}
+
+// Kind is what produced an experiment and how aggressively the scheduler
+// should prioritise it (§5). isolation/bisect/hypothesis come from a hit;
+// seed is the broad starter set.
+type Kind string
+
+const (
+	KindSeed       Kind = "seed"       // broad starter cell
+	KindManual     Kind = "manual"     // operator-authored ad-hoc probe (`sweep add`); jumps the seed backlog, stays below hit-derived work
+	KindIsolation  Kind = "isolation"  // one-factor-at-a-time probe off a confirmed hit (non-recursive)
+	KindHypothesis Kind = "hypothesis" // proactive A/B comparison (non-recursive)
+	KindBisect     Kind = "bisect"     // recursive narrowing of a continuous axis (depth-bounded)
+)
+
+// Arm tags one side of an A/B pair (§6). Empty for standalone experiments.
+type Arm string
+
+const (
+	ArmControl Arm = "control"
+	ArmVariant Arm = "variant"
+)
+
+// Verdict is the trichotomy outcome of analysing a run, plus the infra
+// escape hatch `inconclusive` (§3, §11). Empty until the run is analysed.
+type Verdict string
+
+const (
+	VerdictClean        Verdict = "clean"        // only info / *qoe_tier_premium
+	VerdictNotable      Verdict = "notable"      // warning-tier label or high surprise, no error
+	VerdictAberration   Verdict = "aberration"   // error / critical envelope breach
+	VerdictInconclusive Verdict = "inconclusive" // probe/infra failure — NOT the player's fault
+)
+
+// Status is the lifecycle bucket — the `status` column on the experiment's
+// ClickHouse row (§4).
+type Status string
+
+const (
+	StatusBacklog  Status = "backlog"
+	StatusRunning  Status = "running"
+	StatusDone     Status = "done"
+	StatusFound    Status = "found"
+	StatusReview   Status = "review"
+	StatusFeedback Status = "feedback"
+)
+
+// AllStatuses is the canonical ordered list — used to create the dir layout
+// and to iterate buckets in `sweep status`.
+var AllStatuses = []Status{
+	StatusBacklog, StatusRunning, StatusDone, StatusFound, StatusReview, StatusFeedback,
+}
+
+// Fault mirrors the proxy FaultRule knobs the harness `fault add` exposes
+// (§1). Only ever set on a `fault`-class experiment; nil otherwise (a
+// config-class experiment never injects errors).
+type Fault struct {
+	Type        string `json:"type"`                   // 500, timeout, corrupted, connection_refused, …
+	RequestKind string `json:"request_kind,omitempty"` // segment, manifest, master_manifest, init, audio_segment, …
+	URLSubstr   string `json:"url_substr,omitempty"`   // optional URL scope
+	Frequency   int    `json:"frequency,omitempty"`
+	Mode        string `json:"mode,omitempty"`        // requests | seconds | failures_per_seconds | failures_per_packets
+	Consecutive int    `json:"consecutive,omitempty"` // failure run length
+}
+
+// Shape is the realistic-bandwidth + link-impairment knob (§1). RateMbps is a
+// static cap that must never sit below the lowest variant's sustainable rate
+// (the floor guard — we test ABR decision quality, never forced starvation);
+// Pattern is a ladder-derived sweep (pyramid/ramp/…) which stays within
+// sustainable rungs by construction.
+//
+// #826 added the link-impairment axes (delay/loss/jitter + correlations) so the
+// matrix can sweep over realistic — latency/loss/jitter dominated — links, not
+// just clean ones. All default nil/0 = "no impairment" so existing specs keep
+// their clean-link behaviour. Conventions (mirrored in the proxy.yaml Shape
+// doc): DelayMs is one-way (observed RTT ≈ DelayMs); LossCorrelationPct turns
+// uniform loss bursty (netem `loss <pct>% <corr>%`); JitterMs is the delay
+// stddev with JitterCorrelationPct on a normal distribution. Nil Shape means
+// "no shaping".
+type Shape struct {
+	RateMbps    *float64 `json:"rate_mbps,omitempty"`
+	Pattern     string   `json:"pattern,omitempty"`      // pyramid | valley | ramp_up | ramp_down | square_wave | transient_shock
+	StepSeconds int      `json:"step_seconds,omitempty"` // 6|12|18|24|60|120
+	MarginPct   int      `json:"margin_pct,omitempty"`   // 0|5|10|25|50
+
+	// Link impairment (#826). All one-way / percent; nil = unset (clean link).
+	DelayMs              *float64 `json:"delay_ms,omitempty"`               // one-way delay; RTT ≈ delay_ms
+	LossPct              *float64 `json:"loss_pct,omitempty"`               // packet loss %
+	JitterMs             *float64 `json:"jitter_ms,omitempty"`              // delay stddev (normal distribution)
+	LossCorrelationPct   *float64 `json:"loss_correlation_pct,omitempty"`   // burst correlation for loss (0 = uniform)
+	JitterCorrelationPct *float64 `json:"jitter_correlation_pct,omitempty"` // correlation for the delay distribution
+}
+
+// TransferTimeouts mirrors the proxy server-side transfer-timeout knob — a
+// genuinely slow/stalled origin (config-class, §1). Distinct from the
+// request_*_hang fault types (those are fault-class injected errors). 0 ⇒
+// disabled. AppliesSegments defaults true server-side; set the Applies* flags
+// to scope which request kinds the timeout governs.
+type TransferTimeouts struct {
+	ActiveSeconds    int  `json:"active_seconds,omitempty"`
+	IdleSeconds      int  `json:"idle_seconds,omitempty"`
+	AppliesSegments  bool `json:"applies_segments,omitempty"`
+	AppliesManifests bool `json:"applies_manifests,omitempty"`
+	AppliesMaster    bool `json:"applies_master,omitempty"`
+}
+
+// ContentManipulation mirrors the per-session master-manifest rewrite knobs
+// (§1, §6) — the levers for HLS-aspect A/B comparison. Nil means "unmodified
+// master". Pointers/empties distinguish "not set" from "set to zero".
+type ContentManipulation struct {
+	LiveOffset         *float64 `json:"live_offset,omitempty"`
+	AllowedVariants    string   `json:"allowed_variants,omitempty"` // e.g. "drop-top-rung", a rung-set spec
+	VariantOrder       string   `json:"variant_order,omitempty"`    // HLS-only
+	StripCodecs        bool     `json:"strip_codecs,omitempty"`
+	StripAvgBandwidth  bool     `json:"strip_avg_bandwidth,omitempty"`
+	StripResolution    bool     `json:"strip_resolution,omitempty"`
+	OverstateBandwidth *float64 `json:"overstate_bandwidth,omitempty"`
+}
+
+// Result is filled after a run is analysed.
+type Result struct {
+	Verdict Verdict  `json:"verdict"`
+	Labels  []string `json:"labels,omitempty"` // the QoE labels the oracle saw
+	Note    string   `json:"note,omitempty"`   // one-line human/oracle summary
+}
+
+// Experiment is one runnable recipe + its bookkeeping. JSON-serialised into the
+// `raw_json` column of its ClickHouse row (the recipe of record the runner
+// replays).
+type Experiment struct {
+	ID        string `json:"id"`
+	CreatedAt string `json:"created_at"`       // RFC3339 UTC; stamped by the caller (Date.now is unavailable in some contexts)
+	Status    Status `json:"status,omitempty"` // lifecycle bucket; authoritative on the CH column, stamped onto the struct by Store.List
+
+	// --- the recipe (matrix axes) ---
+	Class      Class  `json:"class,omitempty"`       // config (default) | fault — the sweep tier
+	Platform   string `json:"platform"`              // ipad-sim | iphone | appletv | androidtv | web
+	LaunchMode string `json:"launch_mode,omitempty"` // how the probe launches the app: appium (the only mode TestSweepProbe supports). Stamped at creation; the runner passes it as LAUNCH_MODE.
+	// Job selects which pool runner executes this item: "" (default) = the sweep
+	// probe (config-on-connect → TestSweepProbe → label oracle); "char" = run the
+	// named characterization Mode (Test<Mode><Platform>) scored by its OWN
+	// assertions. Lets one pool drain a mixed char+sweep backlog (Q1/Q2). Char
+	// items are in-memory only — not persisted to ClickHouse.
+	Job string `json:"job,omitempty"`
+
+	// --- device requirement beyond platform (#949) ---
+	// The dispatcher matches these against the live farm roster (#948) to decide
+	// serviceability (scenario 3's availability gate). Platform is the coarse gate
+	// (the server-side --serviceable claim filter is platform-level); these refine
+	// it. RequireReal: nil = either sim or hardware, true = hardware only, false =
+	// simulator only. DeviceUDID / DeviceAlias pin a specific device — e.g. a real
+	// "jonathans-iphone" — so the arm runs on THAT device or waits in backlog.
+	RequireReal *bool  `json:"require_real,omitempty"`
+	DeviceUDID  string `json:"device_udid,omitempty"`
+	DeviceAlias string `json:"device_alias,omitempty"`
+	StartMode   string `json:"start_mode,omitempty"` // cold (default) relaunches the app; warm resumes a new play in the running app (#946)
+	Protocol    string `json:"protocol"`             // hls | dash
+	Content     string `json:"content"`              // fixed to insane_new for now
+	Segment     string `json:"segment,omitempty"`    // master variant the probe requests via -is.segment: s2 | s6 | ll. Empty = app default (s6). Drives the segment×live-offset matrix (#793).
+	Muted       *bool  `json:"muted,omitempty"`      // #838 mute audio; nil = app default-mutes. Rides config-on-connect (bootstrap app_config.muted) so the per-arm value reaches the client off GET /api/sessions.
+	// Client-only launch knobs, now queue-carriable (#906). Previously refused by
+	// DroppedClientKnobs; delivered as -is.* launch args by the probe — singleton:
+	// qe-offhours.sh exports CHAR_SWEEP_*; fan: ArmFromExperiment → ProbeLaunchArgs.
+	// raw_json carries them, so no ClickHouse column / forwarder change is needed.
+	Codec               string               `json:"codec,omitempty"`                // is.codec — h264 | hevc | av1
+	AppLiveOffset       *float64             `json:"app_live_offset,omitempty"`      // is.live_offset — app-side seek to liveEdge−N (distinct from ContentManipulation.LiveOffset, the manifest lever)
+	PeakBitrateMbps     int                  `json:"peak_bitrate_mbps,omitempty"`    // is.peak_bitrate_mbps — startup peak-bitrate clamp
+	StartsFirstVariant  *bool                `json:"starts_first_variant,omitempty"` // is.starts_first_variant — join on first manifest rung vs let ABR pick
+	Mode                string               `json:"mode"`                           // steps | pyramid | downshift_severity | …
+	DurationS           int                  `json:"duration_s,omitempty"`
+	Fault               *Fault               `json:"fault,omitempty"` // fault-class only
+	Shape               *Shape               `json:"shape,omitempty"`
+	ContentManipulation *ContentManipulation `json:"content_manipulation,omitempty"`
+	TransferTimeouts    *TransferTimeouts    `json:"transfer_timeouts,omitempty"`
+
+	// --- provenance / scheduling ---
+	Kind     Kind    `json:"kind"`
+	Arm      Arm     `json:"arm,omitempty"`
+	Group    string  `json:"group,omitempty"`     // A/B pairing id
+	Reps     int     `json:"reps,omitempty"`      // confirmation reps requested (1 for seed; ≥3 to confirm)
+	RepGroup string  `json:"rep_group,omitempty"` // ties a rep-batch together
+	Depth    int     `json:"depth"`               // recursive bisection depth (0–3 bound)
+	Parent   string  `json:"parent,omitempty"`    // origin experiment id
+	Score    float64 `json:"score"`               // scheduler sort key (§5)
+	Why      string  `json:"why,omitempty"`       // LLM rationale slug (the why= label seed)
+	WhyText  string  `json:"why_text,omitempty"`  // full prose rationale (also emitted as a control_event)
+
+	// --- runtime / outcome ---
+	Owner     string  `json:"owner,omitempty"`      // runner/worktree id, stamped at claim
+	ClaimedAt string  `json:"claimed_at,omitempty"` // RFC3339 UTC stamped at claim; drives the stale-claim reaper (§11)
+	PlayerID  string  `json:"player_id,omitempty"`  // the proxy session the probe played (stamped at bootstrap)
+	PlayID    string  `json:"play_id,omitempty"`    // the play the run produced
+	Result    *Result `json:"result,omitempty"`     // filled after analysis
+	IssueURL  string  `json:"issue_url,omitempty"`  // GitHub Issue a confirmed hit was promoted to (idempotency: already promoted)
+}

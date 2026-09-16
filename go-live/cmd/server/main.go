@@ -33,8 +33,21 @@ func requestLogger(next http.Handler) http.Handler {
 	})
 }
 
+// Version is the build identifier, injected via -ldflags "-X main.Version=<sha>".
+// Empty on a plain `go build`. #679: handed to the api package so it rides the
+// X-Served-By header.
+var Version string
+
+func buildLabel() string {
+	if Version == "" {
+		return "dev"
+	}
+	return Version
+}
+
 func main() {
-	fmt.Println("Starting go-live LL-HLS server...")
+	api.BuildVersion = Version
+	fmt.Printf("Starting go-live LL-HLS server (build %q)...\n", buildLabel())
 	mgr := manager.NewProcessManager()
 	tracker := api.NewStreamTracker()
 	h := &api.Handler{Manager: mgr, Tracker: tracker}
@@ -57,12 +70,12 @@ func main() {
 	// Master playlist: /go-live/{content}/master.m3u8
 	router.HandleFunc("/go-live/{content}/master.m3u8", h.OnDemandMasterPlaylist).Methods(http.MethodGet, http.MethodHead)
 	// Master playlist with virtual durations
-	router.HandleFunc("/go-live/{content}/master_{duration:(?:2s|6s)}.m3u8", h.OnDemandMasterPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
-	router.HandleFunc("/go-live/{content}/{duration:(?:2s|6s)}/master.m3u8", h.OnDemandMasterPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
+	router.HandleFunc("/go-live/{content}/master_{duration:(?:1s|2s|6s)}.m3u8", h.OnDemandMasterPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
+	router.HandleFunc("/go-live/{content}/{duration:(?:1s|2s|6s)}/master.m3u8", h.OnDemandMasterPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
 
 	// Variant playlists with virtual durations
-	router.HandleFunc("/go-live/{content}/playlist_{duration:(?:2s|6s)}_{variant:.*}\\.m3u8", h.OnDemandVariantPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
-	router.HandleFunc("/go-live/{content}/{duration:(?:2s|6s)}/{variant:.*\\.m3u8}", h.OnDemandVariantPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
+	router.HandleFunc("/go-live/{content}/playlist_{duration:(?:1s|2s|6s)}_{variant:.*}\\.m3u8", h.OnDemandVariantPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
+	router.HandleFunc("/go-live/{content}/{duration:(?:1s|2s|6s)}/{variant:.*\\.m3u8}", h.OnDemandVariantPlaylistDuration).Methods(http.MethodGet, http.MethodHead)
 	// Variant playlists: /go-live/{content}/{variant}.m3u8
 	// This catches paths like /go-live/content/1080p/index.m3u8
 	router.HandleFunc("/go-live/{content}/{variant:.*\\.m3u8}", h.OnDemandVariantPlaylist).Methods(http.MethodGet, http.MethodHead)
@@ -81,6 +94,7 @@ func main() {
 	fmt.Println("  GET  /go-live/{content}/master.m3u8 - On-demand master playlist")
 	fmt.Println("  GET  /go-live/{content}/{variant}.m3u8 - On-demand variant playlist")
 	fmt.Println("  GET  /go-live/{content}/manifest.mpd - On-demand DASH MPD (LL)")
+	fmt.Println("  GET  /go-live/{content}/manifest_1s.mpd - On-demand DASH MPD (1s)")
 	fmt.Println("  GET  /go-live/{content}/manifest_2s.mpd - On-demand DASH MPD (2s)")
 	fmt.Println("  GET  /go-live/{content}/manifest_6s.mpd - On-demand DASH MPD (6s)")
 	fmt.Println()

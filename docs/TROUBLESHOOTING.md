@@ -49,7 +49,17 @@ The dashboard lists content by scanning `/media/dynamic_content`. If you copied 
 ### Manifest returns 404 or empty
 
 - Check `GET /go-live/api/status` — if no worker is listed for your content, the first manifest request should spawn one. If it doesn't, look in the container logs for errors from `go-live`.
-- Verify `/media/dynamic_content/{content}/manifest.json` exists and is readable. That file is the source of truth for go-live; if it's missing, the encoder never finished or the content name doesn't match the directory name exactly.
+- Verify `/media/dynamic_content/{content}/master.m3u8` (HLS) or `manifest.mpd` (DASH) exists and is readable. A directory with neither is skipped by the catalogue — usually an encode that never finished, or an Encoder output still in its `.pending.json` state (encoded but never packaged) — and `{content}` must match the directory name exactly.
+- Manifests load but every segment 404s: the directory may hold an Encoder output in its `.remote.json` state — manifests only, media still in S3. The catalogue can't tell it from a complete package. Fetch the media in the Encoder before copying the directory over.
+- A `_1s` / `_2s` / `_6s` name is pinned: go-live returns 404 for the other segment lengths by design. See [`CONTENT_FORMAT.md`](CONTENT_FORMAT.md#the-directory-name).
+
+### Content plays on the dashboard but is missing from the iOS / Android picker
+
+The apps filter by codec, and the codec comes **only** from the directory name's `_p200_<codec>` segment. `GET /api/content` shows `"codec": ""` for a name that doesn't match — e.g. `my-show_h264` or `my-show_p100_h264`. Rename the directory to `<stem>_p200[_padblack|_padpink]_<codec>[_<tag>]`; see [`CONTENT_FORMAT.md`](CONTENT_FORMAT.md#the-directory-name).
+
+### LL or 1s variant missing (`has_ll: false`)
+
+LL-HLS / LL-DASH and the 1s variant need partial-segment byte ranges in the source: `#EXT-X-PART … BYTERANGE=` in the rung playlists (or `.byteranges` sidecars). Plain segment-only playlists still serve 2s and 6s. See [`CONTENT_FORMAT.md`](CONTENT_FORMAT.md#partial-segment-information).
 
 ### Segments load but manifests don't update / player stalls after ~1 minute
 
@@ -119,7 +129,7 @@ Fixed in the same PR as cloud encoding. Pull `main` or cherry-pick the `create_a
 
 ### Cloud encoding failures
 
-See [`docs/CLOUD_ENCODING.md`](CLOUD_ENCODING.md#troubleshooting) — common issues (bad PAT, missing subnet egress, spot capacity) are covered there.
+Cloud and distributed encoding moved to [infinite-streaming-encoder](https://github.com/jonathaneoliver/infinite-streaming-encoder) — see its documentation for AWS Batch / spot and farm issues.
 
 ## Client apps (iOS / Roku / Android)
 

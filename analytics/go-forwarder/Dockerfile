@@ -17,6 +17,7 @@ COPY analytics/go-forwarder/ ./analytics/go-forwarder/
 RUN go work edit -dropuse ./tools/harness-cli || true
 RUN go work edit -dropuse ./tests/characterization || true
 RUN go work edit -dropuse ./tests/server_behavior || true
+RUN go work edit -dropuse ./tests/aberration_crawl || true
 WORKDIR /src/analytics/go-forwarder
 RUN CGO_ENABLED=0 GOFLAGS=-trimpath go build -o /out/forwarder .
 

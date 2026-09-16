@@ -23,6 +23,7 @@ type App struct {
 	ActiveMu    sync.Mutex
 	LogHub      *LogHub
 	Progress    *ProgressTracker
+	Results     *ResultTracker
 }
 
 func New(st *store.SQLiteStore, cfg config.Config) *App {
@@ -33,6 +34,7 @@ func New(st *store.SQLiteStore, cfg config.Config) *App {
 		ActiveProcs: make(map[string]*exec.Cmd),
 		LogHub:      NewLogHub(),
 		Progress:    NewProgressTracker(),
+		Results:     NewResultTracker(),
 	}
 }
 
@@ -146,6 +148,11 @@ func (a *App) ExecuteEncodingJob(ctx context.Context, jobID string) error {
 				a.LogHub.Broadcast(jobID, util.TimestampLog("📊 "+msg))
 			}
 		}
+		// Record what the encode actually does (encoders, padding) as the
+		// script reports it, so the job page shows reality, not the request.
+		if res := a.Results.Parse(jobID, line); res != nil {
+			_ = a.Store.UpdateJobStatus(jobID, store.JobStatusUpdate{Result: res})
+		}
 	})
 	if err != nil {
 		a.LogHub.Broadcast(jobID, util.TimestampLog("⚠️ "+err.Error()))
@@ -157,6 +164,7 @@ func (a *App) ExecuteEncodingJob(ctx context.Context, jobID string) error {
 	a.ActiveMu.Lock()
 	delete(a.ActiveProcs, jobID)
 	a.ActiveMu.Unlock()
+	a.Results.Forget(jobID)
 
 	if waitErr != nil {
 		return a.failJob(jobID, "Encoding failed: "+waitErr.Error())
@@ -186,8 +194,9 @@ func (a *App) ExecuteEncodingJob(ctx context.Context, jobID string) error {
 // Without this, the user's first navigation to Mosaic / Playback hits a
 // cold-start race (encode just finished → user clicks Mosaic → go-live
 // hasn't yet read the new master → handler returns 503 → player imposes
-// its own slow backoff). We hit nginx (loopback :30000) so the request
-// follows the same routing the browser would.
+// its own slow backoff). We hit nginx's cleartext loopback listener (see
+// goLiveWarmBase) so the request follows the same /go-live routing the
+// browser would.
 //
 // One HEAD per content is enough — go-live keys its worker map on content
 // alone (`hlsWorkers[content]` in api/handlers.go), and a single unified
@@ -197,11 +206,7 @@ func (a *App) ExecuteEncodingJob(ctx context.Context, jobID string) error {
 // Fire-and-forget on a goroutine so the encoder reports completion to the
 // SSE log hub without waiting on HTTP.
 func warmGoLiveWorkers(outputPaths []string) {
-	listenPort := os.Getenv("INFINITE_STREAM_LISTEN_PORT")
-	if listenPort == "" {
-		listenPort = "30000"
-	}
-	base := "http://127.0.0.1:" + listenPort + "/go-live"
+	base := goLiveWarmBase()
 	client := &http.Client{Timeout: 10 * time.Second}
 	for _, name := range outputPaths {
 		// `outputPaths` from findOutputDirectories is a list of bare
@@ -221,6 +226,20 @@ func warmGoLiveWorkers(outputPaths []string) {
 			resp.Body.Close()
 		}
 	}
+}
+
+// goLiveWarmBase is the plain-HTTP /go-live base for in-container requests to
+// nginx. It must be nginx's cleartext loopback listener (127.0.0.1:30005 in
+// nginx-content.conf.template), not the public listener: with TLS on (the
+// default) :30000 is HTTPS-only, so a plain-HTTP HEAD there gets a 400 and the
+// warm-up silently never happens. INFINITE_STREAM_UPSTREAM_PORT is the same
+// loopback port go-proxy dials, so both follow one setting.
+func goLiveWarmBase() string {
+	port := os.Getenv("INFINITE_STREAM_UPSTREAM_PORT")
+	if port == "" {
+		port = "30005"
+	}
+	return "http://127.0.0.1:" + port + "/go-live"
 }
 
 func (a *App) failJob(jobID, message string) error {

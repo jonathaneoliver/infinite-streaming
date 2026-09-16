@@ -48,19 +48,19 @@ type EventSource struct {
 // playerSnapshot tracks the per-player state used for diff detection.
 //   - rev:         control_revision; flips on PATCH writes.
 //   - hash:        fnv64a of the marshalled body; changes on ANY field
-//                  update including non-PATCH metric drains (RTT,
-//                  buffer, byte counters). A snapshot is "changed" when
-//                  either differs from the prior, ensuring
-//                  chart-feeding fields propagate even between PATCHes.
+//     update including non-PATCH metric drains (RTT,
+//     buffer, byte counters). A snapshot is "changed" when
+//     either differs from the prior, ensuring
+//     chart-feeding fields propagate even between PATCHes.
 //   - controlHash: fnv64a of just the control-surface projection
-//                  (labels / shape / fault_rules / transfer_timeouts /
-//                  content). Diffed independently so we can fire a
-//                  dedicated `player.controls.updated` event ONLY when
-//                  the user-editable surface actually changes — not on
-//                  every metrics tick. Dashboards subscribe to this
-//                  event instead of `player.updated` for control sync,
-//                  which kills the ETag-churn / 412-cascade caused by
-//                  the metrics tick bumping control_revision ~1Hz.
+//     (labels / shape / fault_rules / transfer_timeouts /
+//     content). Diffed independently so we can fire a
+//     dedicated `player.controls.updated` event ONLY when
+//     the user-editable surface actually changes — not on
+//     every metrics tick. Dashboards subscribe to this
+//     event instead of `player.updated` for control sync,
+//     which kills the ETag-churn / 412-cascade caused by
+//     the metrics tick bumping control_revision ~1Hz.
 type playerSnapshot struct {
 	rev         string
 	hash        uint64
@@ -424,7 +424,8 @@ func (s *EventSource) restorePlayScope(playerID, playID, reason string) {
 			switch {
 			case k == "_v2_shape_pattern":
 				touchedPattern = true
-			case k == "nftables_bandwidth_mbps", k == "nftables_delay_ms", k == "nftables_packet_loss":
+			case k == "nftables_bandwidth_mbps", k == "nftables_delay_ms", k == "nftables_packet_loss",
+				k == "nftables_jitter_ms", k == "nftables_loss_correlation_pct", k == "nftables_jitter_correlation_pct":
 				touchedShape = true
 			case k == "transport_failure_type", k == "transport_fault_type",
 				k == "transport_failure_frequency", k == "transport_consecutive_failures",
@@ -447,15 +448,7 @@ func (s *EventSource) restorePlayScope(playerID, playID, reason string) {
 	if touchedPattern {
 		if sess, ok := s.v1.SessionByPlayerID(playerID); ok {
 			steps := extractPatternSteps(sess)
-			delayMs := 0
-			if f, ok := numericFloat(sess["nftables_delay_ms"]); ok {
-				delayMs = int(f)
-			}
-			lossPct := 0.0
-			if f, ok := numericFloat(sess["nftables_packet_loss"]); ok {
-				lossPct = f
-			}
-			_ = s.v1.ApplyPatternToPlayer(playerID, steps, delayMs, lossPct)
+			_ = s.v1.ApplyPatternToPlayer(playerID, steps, LinkImpairmentFromSession(sess))
 		}
 	}
 	if touchedShape {

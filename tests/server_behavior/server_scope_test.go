@@ -109,12 +109,14 @@ func TestServerScope(t *testing.T) {
 		float64(otherVar.BandwidthBps)/1e6, otherTok)
 
 	// Arm a segment fault scoped to ONLY the in-scope variant's directory.
-	set := faultSet("segment", status, freq, 1)
-	set["segment_failure_urls"] = []string{faultTok}
-	if err := patchSession(p.c, p.apiBase, p.sess.SessionID, set); err != nil {
+	// v1 substring `segment_failure_urls=[tok]` → v2 filter.url_match substring
+	// (the same URL-token match; variant.resolutions scoping awaits #922).
+	rule := faultRuleV2("segment", status, freq, 1)
+	rule["filter"].(map[string]any)["url_match"] = map[string]any{"mode": "substring", "patterns": []string{faultTok}}
+	if err := setFaultsV2(p, rule); err != nil {
 		t.Fatalf("arm scoped fault: %v", err)
 	}
-	defer patchSession(p.c, p.apiBase, p.sess.SessionID, faultClear("segment"))
+	defer clearFaultsV2(p)
 	time.Sleep(settleKernel)
 
 	inHist := p.pullStatuses(t, func() []string { return p.pullVariant(faultVar.URL) }, samples)

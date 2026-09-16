@@ -1,0 +1,15 @@
+{
+  "server": {
+    "port": 4723,
+    "keep-alive-timeout": 800,
+    "use-plugins": ["device-farm"],
+    "plugin": {
+      "device-farm": {
+        "platform": "both",
+        "iosDeviceType": "both",
+        "androidDeviceType": "both",
+        "bootedSimulators": true
+      }
+    }
+  }
+}

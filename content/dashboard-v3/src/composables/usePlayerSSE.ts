@@ -62,18 +62,27 @@ export function usePlayerSSE(playerId: Ref<string | null | undefined>, handlers:
     // which (under HTTP/1.1's 6-per-origin cap) starves the second
     // browser tab's REST polls. The all-pool socket is server-side
     // unfiltered; we filter client-side by player_id.
+    // Match the canonical id OR the raw one the client registered with.
+    // The server canonicalises non-UUID player_ids (legacy 8-char ids like
+    // "47e4675a") to a v5 UUID, so `d.id` never equals the id in the page
+    // URL. usePlayer swaps `pid` to the canonical id once getPlayer
+    // resolves, but that GET 404s when the page loads before the player
+    // has registered and is never retried -- so without the raw match
+    // every event was dropped and the stats sat at "Idle" (#1025).
+    // `raw_session` is present because the pool subscribes with include=raw.
+    const matches = (d: any) => d?.id === pid || d?.raw_session?.player_id === pid;
     const filtered: AllPlayersSubscriber = {
       onCreated: (d) => {
-        if (d?.id === pid) handlers.onCreated?.(d);
+        if (matches(d)) handlers.onCreated?.(d);
       },
       onUpdated: (d) => {
-        if (d?.id === pid) handlers.onUpdated?.(d);
+        if (matches(d)) handlers.onUpdated?.(d);
       },
       onControlsUpdated: (d) => {
-        if (d?.id === pid) handlers.onControlsUpdated?.(d);
+        if (matches(d)) handlers.onControlsUpdated?.(d);
       },
       onDeleted: (d) => {
-        if (d?.id === pid || d?.player_id === pid) handlers.onDeleted?.(d);
+        if (matches(d) || d?.player_id === pid) handlers.onDeleted?.(d);
       },
       onHeartbeat: () => handlers.onHeartbeat?.(),
       onStateChange: (s) => { state.value = s; },

@@ -28,6 +28,7 @@ func (s *Server) GetApiV2Info(w http.ResponseWriter, r *http.Request) {
 		ApiVersions: &versions,
 	}
 	defaultRate := 0
+	var shaping ShapingCapabilities
 	if s.v1 != nil {
 		v := s.v1.Version()
 		base.Version = &v
@@ -38,6 +39,7 @@ func (s *Server) GetApiV2Info(w http.ResponseWriter, r *http.Request) {
 		an := s.v1.AnalyticsEnabled()
 		base.AnalyticsEnabled = &an
 		defaultRate = s.v1.DefaultRateMbps()
+		shaping = s.v1.ShapingCapabilities()
 	}
 	type infoWithDefaults struct {
 		oapigen.Info
@@ -47,8 +49,13 @@ func (s *Server) GetApiV2Info(w http.ResponseWriter, r *http.Request) {
 		// dashboard reads this to render the persistent baseline
 		// chip and to label the slider position at 0.
 		DefaultRateMbps int `json:"default_rate_mbps"`
+		// Shaping capability probe (#910): per-control kernel availability
+		// + resolved mode. The dashboard reads this to disable/annotate the
+		// network-shaping controls on a host without tc/netem/nftables
+		// instead of showing a phantom cap. Extra field pending a schema bump.
+		Shaping ShapingCapabilities `json:"shaping"`
 	}
-	writeJSON(w, http.StatusOK, infoWithDefaults{Info: base, DefaultRateMbps: defaultRate})
+	writeJSON(w, http.StatusOK, infoWithDefaults{Info: base, DefaultRateMbps: defaultRate, Shaping: shaping})
 }
 
 // ----- Players (reads) -----------------------------------------------------

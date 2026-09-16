@@ -117,6 +117,14 @@ type V1Adapter interface {
 	// non-Linux or has no traffic manager.
 	ApplyShapeToPlayer(playerID string) error
 
+	// ApplyShapingModeToPlayer reconciles the #910 per-session degraded gate
+	// on the player's bound port after `shaping_forced_mode` changed: degrading
+	// tears down any kernel shaping and closes the apply gate (HTTP faults
+	// still fire); clearing re-opens the gate and re-applies the session's
+	// stored shape. No-op when the proxy is non-Linux or has no traffic
+	// manager. Reads the mode from the session — no argument needed.
+	ApplyShapingModeToPlayer(playerID string) error
+
 	// ApplyTransportFaultToPlayer arms the transport-fault loop on the
 	// player's bound port with the supplied type/cadence. type="none"
 	// disarms.
@@ -125,9 +133,11 @@ type V1Adapter interface {
 	// ApplyPatternToPlayer drives v1's pattern step-engine on the
 	// player's bound port. `steps` is the time-varying rate profile
 	// (each step has a duration in seconds + rate in Mbps + an enabled
-	// flag). `delayMs` and `lossPct` carry through to the netem qdisc.
-	// Empty steps disarm the pattern loop and revert to static rate.
-	ApplyPatternToPlayer(playerID string, steps []ShapePatternStep, delayMs int, lossPct float64) error
+	// flag). `imp` carries the #826 link-impairment axes (delay/loss/
+	// jitter + burst correlations) through to the netem qdisc; they stay
+	// constant while the pattern varies the rate. Empty steps disarm the
+	// pattern loop and revert to static rate.
+	ApplyPatternToPlayer(playerID string, steps []ShapePatternStep, imp LinkImpairment) error
 
 	// DefaultRateMbps returns the deployment baseline rate cap (Mbps)
 	// read from INFINITE_STREAM_DEFAULT_RATE_MBPS at boot. 0 means no
@@ -136,6 +146,38 @@ type V1Adapter interface {
 	// (and any PATCH that requests "no override," i.e. rate_mbps=0 or
 	// null) get this cap. See issue #480.
 	DefaultRateMbps() int
+
+	// ShapingCapabilities reports the per-control kernel availability and
+	// the resolved shaping mode detected once at boot. The dashboard reads
+	// this to disable/annotate the network-shaping controls that would
+	// otherwise show a phantom cap on a host without tc/netem/nftables.
+	// Issue #910.
+	ShapingCapabilities() ShapingCapabilities
+}
+
+// ShapingCapabilities reports, per network-shaping control, whether the
+// kernel facility that backs it actually applies on this host, plus the
+// resolved shaping mode. Probed once at boot (detectShapingCapabilities in
+// package main). The per-control booleans are authoritative for the UI; Mode
+// is a coarse banner label. Issue #910.
+type ShapingCapabilities struct {
+	// Per-control kernel availability. Rate is tc HTB; Delay/Loss are tc
+	// netem; TransportFault is nftables. A false here means the control is
+	// unavailable on this host and must NOT be presented as an active cap.
+	Rate           bool `json:"rate"`
+	Delay          bool `json:"delay"`
+	Loss           bool `json:"loss"`
+	TransportFault bool `json:"transport_fault"`
+	// Mode is the resolved shaping backend: "kernel" (tc/netem present) or
+	// "http-only" (no kernel shaping — only the portable HTTP-fault surface
+	// works).
+	Mode string `json:"mode"`
+	// Forced is true when SHAPING_FORCE_DEGRADED overrode the live probe,
+	// used to exercise degraded mode on a host that DOES have NET_ADMIN.
+	Forced bool `json:"forced"`
+	// Reason is a short human string for the banner + startup log (e.g.
+	// "no sch_netem/sch_htb" or "forced via SHAPING_FORCE_DEGRADED").
+	Reason string `json:"reason"`
 }
 
 // ShapePatternStep is the v1-shaped step the adapter expects. Mirrors
@@ -145,6 +187,41 @@ type ShapePatternStep struct {
 	DurationSeconds float64
 	RateMbps        float64
 	Enabled         bool
+}
+
+// LinkImpairment carries the #826 netem axes from the v2 session map to
+// v1's kernel apply (delay/loss/jitter + burst correlations). Mirrors v1's
+// NetemParams; declared here so v2 server code stays free of v1 internals.
+// Zero values mean "unset" (clean link / uniform loss / auto-jitter).
+type LinkImpairment struct {
+	DelayMs              int
+	LossPct              float64
+	JitterMs             int
+	LossCorrelationPct   float64
+	JitterCorrelationPct float64
+}
+
+// LinkImpairmentFromSession reads the nftables_* impairment keys off a
+// post-patch session map. Centralises the read so the pattern arm and the
+// event-driven re-apply stay consistent. Missing keys read as zero.
+func LinkImpairmentFromSession(sess map[string]any) LinkImpairment {
+	imp := LinkImpairment{}
+	if f, ok := numericFloat(sess["nftables_delay_ms"]); ok {
+		imp.DelayMs = int(f)
+	}
+	if f, ok := numericFloat(sess["nftables_packet_loss"]); ok {
+		imp.LossPct = f
+	}
+	if f, ok := numericFloat(sess["nftables_jitter_ms"]); ok {
+		imp.JitterMs = int(f)
+	}
+	if f, ok := numericFloat(sess["nftables_loss_correlation_pct"]); ok {
+		imp.LossCorrelationPct = f
+	}
+	if f, ok := numericFloat(sess["nftables_jitter_correlation_pct"]); ok {
+		imp.JitterCorrelationPct = f
+	}
+	return imp
 }
 
 // SessionSnapshot is the v2-friendly shape of a SessionsEvent: the
