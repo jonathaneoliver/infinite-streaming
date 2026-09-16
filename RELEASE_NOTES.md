@@ -10,7 +10,7 @@ simulators and real hardware in parallel, configures each one from the
 server at connect time, runs a YAML-declared matrix across them, and
 leaves an overnight sweep hunting for aberrations while you sleep.
 
-262 commits since v2.0.0 (2026-05-27) — 127 features, 87 fixes.
+279 commits since v2.0.0 (2026-05-27) — 127 features, 97 fixes.
 **No breaking changes.**
 
 ---
@@ -79,8 +79,9 @@ columns only; nothing is lost, and nothing needs to be run by hand.
 One column also changes **type**: `session_events.control_revision` goes from
 `UInt64` to `String` (it holds go-proxy's RFC3339 revision; the old column only
 ever stored the truncated year). Self-heal converts it in place on the first
-boot. Until it has, a v2.1.0 forwarder can't write player metrics to a v2.0.0
-volume.
+boot (#1035). Until it has, a v2.1.0 forwarder can't write player metrics to a
+v2.0.0 volume — the upgrade was verified end to end from a clean v2.0.0 install
+carrying real archived sessions.
 
 ```bash
 # Standard upgrade — the schema self-heal runs on container boot.
@@ -491,6 +492,27 @@ per-segment/chunk startup timeline.
   without the `_p200_` marker, so `/api/content` listed it with an empty codec
   and the iOS app's stream picker was empty on a fresh install (present since
   v2.0.0; #1029). Already-seeded stacks keep the old names until re-seeded.
+- **Every encode path now names its output the same way**, so its content gets a
+  codec and reaches the apps' stream pickers:
+  - single-step `POST /api/upload` had the same bare-name bug as the seed
+    (#1036);
+  - the catalogue accepts **any** `_p<ms>` partial duration, not just `_p200`,
+    so the 1000 ms option in the upload / re-encode dialogs no longer produces
+    codec-less content. A non-200 partial stays in `clip_id`, so 200 ms and
+    1000 ms encodes of one source remain separate rows (#1037);
+  - padded Encoder packages (`<stem>_p200_padblack_<codec>`) keep their codec,
+    with the padding kept in `clip_id` (#1032).
+- **The catalogue reads the master playlist** instead of assuming the
+  `NNNp/playlist.m3u8` layout, so LL / 1s / native-length detection works for
+  any ladder (#1033).
+- **go-live: stale DASH manifests refresh.** `manifest_1s.mpd` — and every
+  variant of DASH-only content — used to be generated once and then served
+  frozen, so a DASH player ran off the end of the live window and stalled.
+  Cached MPDs older than their variant's max age are now regenerated on request
+  (#1033).
+- **The content format is now written down**: [`docs/CONTENT_FORMAT.md`](docs/CONTENT_FORMAT.md)
+  is the contract for what a package must look like, what each part of the name
+  drives, and what go-live reads (#1031).
 
 ---
 
