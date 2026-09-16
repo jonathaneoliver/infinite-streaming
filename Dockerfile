@@ -12,7 +12,7 @@ ENV VITE_BUILD_OUTDIR=/out/v3 \
     OPENAPI_PATH=/build/api/openapi/v2/proxy.yaml
 RUN npm run gen-types && npm run build
 
-FROM golang:1.26-alpine AS go-builder
+FROM golang:1.27-alpine AS go-builder
 RUN apk add git
 WORKDIR /build
 # #679: stamp the build into go-live so its X-Served-By header carries it and
