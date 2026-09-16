@@ -237,90 +237,115 @@ func runCharMatrixArmOnDevice(t *testing.T, p runner.Platform, dev runner.Device
 		t.Logf("arm %d HOME barrier released — starting playback", dev.FleetIndex)
 	}
 
-	var rerr error
-	if cfg.Content != "" {
-		rerr = appium.ResumePlaybackClip(setupCtx, *picked, clipIDFromContent(cfg.Content))
-	} else {
-		rerr = appium.ResumePlayback(setupCtx, *picked)
+	// Rep loop (#963: warm/channel_change): CHAR_REP_COUNT plays in ONE app launch.
+	// Rep 0 is the cold-launch play — where the constraints (is.peak_bitrate_mbps /
+	// is.segment via launch args, proxy.shape via config-on-connect) were configured
+	// above. For rep>0: CHAR_START_MODE=warm ends the prior play → home and starts a
+	// NEW play WITHOUT relaunching (the app keeps the cap/segment, the proxy session
+	// keeps the shape, AVPlayer keeps its learned estimate) = channel_change; cold
+	// relaunches the app per rep (fresh AVPlayer, config re-applied). Each rep emits
+	// its own ARM RESULT line tagged rep=/mode= (default reps=1 → the original path).
+	reps := envInt("CHAR_REP_COUNT", 1)
+	if reps < 1 {
+		reps = 1
 	}
-	if rerr != nil {
-		t.Fatalf("ResumePlayback: %v", rerr)
-	}
-	if herr := sess.WaitForHeartbeat(setupCtx, 90*time.Second); herr != nil {
-		t.Fatalf("WaitForHeartbeat: %v", herr)
-	}
+	warm := strings.EqualFold(strings.TrimSpace(os.Getenv("CHAR_START_MODE")), "warm")
+	repArgs := runner.ProbeLaunchArgs(runner.ProbeConfigFromArm(cfg))
 
-	// Capture the play_id NOW, while the player is confirmed connected. Reading it
-	// only at the END of the window (below) is fragile: a slow-starting arm — the
-	// Android TV cold-starts ~50s and stops heartbeating a few seconds before its
-	// window elapses — makes the end-read 404 and the play look unregistered even
-	// though it streamed the whole time. The play_id is stable for a play, so the
-	// earliest reliable read is the trustworthy source; the end-read only refreshes
-	// it. Brief poll because the play registers just after the first heartbeat.
-	var earlyPlayID string
-	for i := 0; i < 10; i++ {
-		if pid, e := sess.CurrentPlayID(setupCtx); e == nil && pid != "" {
-			earlyPlayID = pid
-			break
+	for rep := 0; rep < reps; rep++ {
+		if rep > 0 {
+			// End the prior play → home. Cold relaunches (fresh AVPlayer); warm stays
+			// in the running app (channel_change). Not counted in startup.
+			tdCtx, tdCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			_ = appium.ClosePlaybackViaUI(tdCtx, *picked)
+			if !warm {
+				if err := appium.LaunchAppWarmToHome(tdCtx, *picked, repArgs); err != nil {
+					tdCancel()
+					t.Fatalf("arm %d rep %d relaunch: %v", dev.FleetIndex, rep, err)
+				}
+			}
+			tdCancel()
 		}
-		time.Sleep(time.Second)
-	}
 
-	// Arm the bandwidth pattern post-launch (it can't ride config-on-connect — the
-	// ladder is built from the live manifest variants, so the master playlist must
-	// be fetched first). ONLY the master arms it; the proxy propagates the master's
-	// pyramid to the group's slaves (NETSHAPE group pattern propagation), so all
-	// arms share ONE bandwidth timeline. A slave arming its own would create an
-	// independent, out-of-phase pyramid and confound the comparison.
-	if cfg.Pattern != "" && cfg.PatternMaster {
-		if err := sess.WaitForManifest(setupCtx, 45*time.Second); err != nil {
-			t.Fatalf("arm %d (master): waiting for manifest before pattern: %v", dev.FleetIndex, err)
+		var rerr error
+		if cfg.Content != "" {
+			rerr = appium.ResumePlaybackClip(setupCtx, *picked, clipIDFromContent(cfg.Content))
+		} else {
+			rerr = appium.ResumePlayback(setupCtx, *picked)
 		}
-		if err := sess.ApplyPattern(setupCtx, cfg.Pattern, cfg.StepS, cfg.MarginPct); err != nil {
-			t.Fatalf("arm %d (master): ApplyPattern(%s): %v", dev.FleetIndex, cfg.Pattern, err)
+		if rerr != nil {
+			t.Fatalf("arm %d rep %d ResumePlayback: %v", dev.FleetIndex, rep, rerr)
 		}
-		t.Logf("arm %d MASTER: armed %s pattern (step=%ds margin=%d%%) — proxy propagates to the group", dev.FleetIndex, cfg.Pattern, cfg.StepS, cfg.MarginPct)
-	} else if cfg.Pattern != "" {
-		t.Logf("arm %d slave: pattern driven by the group master (no local ApplyPattern)", dev.FleetIndex)
-	}
+		if herr := sess.WaitForHeartbeat(setupCtx, 90*time.Second); herr != nil {
+			t.Fatalf("arm %d rep %d WaitForHeartbeat: %v", dev.FleetIndex, rep, herr)
+		}
 
-	// Let it play. The recipe (content/shape/live_offset/transfer) is already
-	// live, so this window is what the CLI's measurement step later reads.
-	t.Logf("arm %d playing for %ds…", dev.FleetIndex, durationS)
-	select {
-	case <-time.After(time.Duration(durationS) * time.Second):
-		// Normal: the full play window elapsed.
-	case <-interruptContext().Done():
-		// Operator stopped the run. Return EARLY so the deferred t.Cleanup
-		// releases this arm's appium session (CloseViaUI + Release) instead of
-		// orphaning it and blocking the next run (#853). Skip the RESULT capture.
-		t.Logf("arm %d: run interrupted — ending early so the appium session is released (#853)", dev.FleetIndex)
-		return
-	}
-
-	playID, perr := sess.CurrentPlayID(context.Background())
-	if playID == "" {
-		// End-of-window read failed/empty — e.g. the arm disconnected a few seconds
-		// before the window elapsed (the Android-TV teardown race). Fall back to the
-		// play_id captured at launch, which is the same play.
-		if earlyPlayID != "" {
-			playID = earlyPlayID
-		} else if perr != nil {
-			t.Logf("arm %d: could not read play_id: %v", dev.FleetIndex, perr)
+		// Capture the play_id NOW, while the player is confirmed connected. Reading it
+		// only at the END of the window is fragile: a slow-starting arm — the Android
+		// TV cold-starts ~50s and stops heartbeating a few seconds before its window
+		// elapses — makes the end-read 404 and the play look unregistered even though
+		// it streamed the whole time. The play_id is stable for a play, so the earliest
+		// reliable read is the trustworthy source; the end-read only refreshes it.
+		var earlyPlayID string
+		for i := 0; i < 10; i++ {
+			if pid, e := sess.CurrentPlayID(setupCtx); e == nil && pid != "" {
+				earlyPlayID = pid
+				break
+			}
+			time.Sleep(time.Second)
 		}
-	}
-	// Point the viewer link at the arm's OWN server (#942) — a cross-server arm's
-	// session/play lives there, not on the default base; fall back to HARNESS_BASE_URL.
-	base := strings.TrimRight(cfg.ServerURL, "/")
-	if base == "" {
-		base = strings.TrimRight(envOr("HARNESS_BASE_URL", "https://dev.jeoliver.com:21000"), "/")
-	}
-	viewer := fmt.Sprintf("%s/dashboard/session-viewer.html?player_id=%s", base, cfg.PlayerID)
-	if playID != "" {
-		viewer += "&play_id=" + playID
-	}
-	t.Logf("ARM %d RESULT player_id=%s play_id=%s viewer=%s", dev.FleetIndex, cfg.PlayerID, playID, viewer)
-	if playID == "" {
-		t.Errorf("arm %d: no play_id captured — playback never registered a play", dev.FleetIndex)
+
+		// Arm the bandwidth pattern post-launch (rep 0 only — the ladder is built from
+		// the live manifest variants, so the master must fetch the master playlist
+		// first). ONLY the master arms it; the proxy propagates to the group's slaves.
+		if rep == 0 && cfg.Pattern != "" && cfg.PatternMaster {
+			if err := sess.WaitForManifest(setupCtx, 45*time.Second); err != nil {
+				t.Fatalf("arm %d (master): waiting for manifest before pattern: %v", dev.FleetIndex, err)
+			}
+			if err := sess.ApplyPattern(setupCtx, cfg.Pattern, cfg.StepS, cfg.MarginPct); err != nil {
+				t.Fatalf("arm %d (master): ApplyPattern(%s): %v", dev.FleetIndex, cfg.Pattern, err)
+			}
+			t.Logf("arm %d MASTER: armed %s pattern (step=%ds margin=%d%%) — proxy propagates to the group", dev.FleetIndex, cfg.Pattern, cfg.StepS, cfg.MarginPct)
+		} else if rep == 0 && cfg.Pattern != "" {
+			t.Logf("arm %d slave: pattern driven by the group master (no local ApplyPattern)", dev.FleetIndex)
+		}
+
+		// Let it play. The recipe (content/shape/live_offset/transfer) is already live.
+		t.Logf("arm %d rep %d playing for %ds…", dev.FleetIndex, rep, durationS)
+		select {
+		case <-time.After(time.Duration(durationS) * time.Second):
+			// Normal: the full play window elapsed.
+		case <-interruptContext().Done():
+			// Operator stopped the run. Return EARLY so the deferred t.Cleanup
+			// releases this arm's appium session instead of orphaning it (#853).
+			t.Logf("arm %d: run interrupted — ending early so the appium session is released (#853)", dev.FleetIndex)
+			return
+		}
+
+		playID, perr := sess.CurrentPlayID(context.Background())
+		if playID == "" {
+			if earlyPlayID != "" {
+				playID = earlyPlayID
+			} else if perr != nil {
+				t.Logf("arm %d rep %d: could not read play_id: %v", dev.FleetIndex, rep, perr)
+			}
+		}
+		// Point the viewer link at the arm's OWN server (#942); fall back to base.
+		base := strings.TrimRight(cfg.ServerURL, "/")
+		if base == "" {
+			base = strings.TrimRight(envOr("HARNESS_BASE_URL", "https://dev.jeoliver.com:21000"), "/")
+		}
+		viewer := fmt.Sprintf("%s/dashboard/session-viewer.html?player_id=%s", base, cfg.PlayerID)
+		if playID != "" {
+			viewer += "&play_id=" + playID
+		}
+		mode := "cold"
+		if warm && rep > 0 {
+			mode = "channel_change"
+		}
+		t.Logf("ARM %d RESULT player_id=%s play_id=%s rep=%d mode=%s viewer=%s", dev.FleetIndex, cfg.PlayerID, playID, rep, mode, viewer)
+		if playID == "" {
+			t.Errorf("arm %d rep %d: no play_id captured — playback never registered a play", dev.FleetIndex, rep)
+		}
 	}
 }

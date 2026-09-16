@@ -100,6 +100,13 @@ export interface ChartOverlaySource {
   eventsStream: Stream<Record<string, unknown>>;
   /** Tagged, per-member-coloured series to overlay for this sibling. */
   series: SeriesSpec[];
+  /** Compare-mode start alignment (issue #963): milliseconds to SUBTRACT
+   *  from every sample's x so this sibling's playback start coincides with
+   *  the active session's — an elapsed-time overlay for sessions that ran at
+   *  different wall-clock times. 0 / absent = plot on the real clock.
+   *  Applied only at plot-insertion; the ingest watermark stays in the
+   *  stream's absolute coordinate. A change re-drains the sibling. */
+  xOffset?: number;
 }
 
 const props = defineProps({
@@ -415,6 +422,9 @@ interface OverlayRuntime {
   datasets: Array<Array<{ x: number; y: number | null }>>;
   watermark: number;
   epoch: number;
+  /** Last-applied start-alignment offset (ms). A change wipes + re-drains
+   *  so already-plotted points pick up the new shift (issue #963). */
+  xOffset: number;
 }
 const overlayRuntime = new Map<string, OverlayRuntime>();
 
@@ -486,7 +496,7 @@ function buildOverlayDatasetObjs(): any[] {
     const rtExisted = overlayRuntime.has(src.key);
     let rt = overlayRuntime.get(src.key);
     if (!rt) {
-      rt = { datasets: [], watermark: -Infinity, epoch: src.eventsStream.epoch.value };
+      rt = { datasets: [], watermark: -Infinity, epoch: src.eventsStream.epoch.value, xOffset: 0 };
       overlayRuntime.set(src.key, rt);
     }
     while (rt.datasets.length < src.series.length) rt.datasets.push([]);
@@ -1861,8 +1871,11 @@ function drainOverlays() {
     if (!rt) continue;
     // A sibling re-subscribe (play rotation / refetch-on-pan) bumps its
     // stream epoch — wipe and re-drain from scratch so we don't splice a
-    // new window's rows onto a stale watermark.
+    // new window's rows onto a stale watermark. A start-alignment offset
+    // change is handled separately (the offset watcher below) because it
+    // needs the empty-prime dance before a bulk refill (#963).
     const ep = src.eventsStream.epoch.value;
+    const off = src.xOffset ?? 0;
     if (ep !== rt.epoch) {
       rt.epoch = ep;
       rt.watermark = -Infinity;
@@ -1873,9 +1886,13 @@ function drainOverlays() {
     if (!rows.length) continue;
     let hw = rt.watermark;
     for (const row of rows) {
-      const x = tsOfRow(row);
-      if (!Number.isFinite(x)) continue;
-      if (rt.watermark !== -Infinity && x <= rt.watermark) continue;
+      // rawX is the stream's absolute epoch — used for the watermark + dedup
+      // so ingest bookkeeping stays in the stream's own coordinate. plotX is
+      // the aligned x actually written to the dataset.
+      const rawX = tsOfRow(row);
+      if (!Number.isFinite(rawX)) continue;
+      if (rt.watermark !== -Infinity && rawX <= rt.watermark) continue;
+      const x = rawX - off;
       const p = chRowToPlayerRecord(row);
       for (let i = 0; i < src.series.length; i++) {
         const arr = rt.datasets[i];
@@ -1894,7 +1911,7 @@ function drainOverlays() {
         if (yVal === null && arr.length === 0) continue;
         insertByX(arr, { x, y: yVal });
       }
-      if (x > hw) hw = x;
+      if (rawX > hw) hw = rawX;
       mutated = true;
     }
     rt.watermark = hw;
@@ -1944,6 +1961,33 @@ watch(
     return ovs.length + ':' + v;
   },
   () => { void drainOverlays(); },
+);
+
+// Start-alignment offset changes (#963) — a sibling's shift settling (0 → its
+// real offset once data loads) re-plots EVERY one of its points at a new x.
+// A bulk clear+refill would desync Chart.js's element cache and crash
+// `.skip`-on-undefined (issue #579), so mirror the structure watcher: wipe the
+// affected siblings' backing arrays + watermark, rebuild, re-prime element
+// tracking while EMPTY, then let drainOverlays refill incrementally.
+watch(
+  () => (props.overlays ?? []).map((o) => o.key + '=' + (o.xOffset ?? 0)).join(','),
+  () => {
+    let changed = false;
+    for (const src of props.overlays ?? []) {
+      const rt = overlayRuntime.get(src.key);
+      if (!rt) continue;
+      const off = src.xOffset ?? 0;
+      if (rt.xOffset === off) continue;
+      rt.xOffset = off;
+      rt.watermark = -Infinity;
+      for (const arr of rt.datasets) arr.length = 0;
+      changed = true;
+    }
+    if (!changed) return;
+    try { rebuildAllDatasets(); } catch (err) { console.warn('overlay offset rebuild skipped:', err); }
+    try { chart?.update('none'); } catch (err) { console.warn('overlay offset prime skipped:', err); }
+    void drainOverlays();
+  },
 );
 
 // Resume drain — flush any samples that arrived while pinned in

@@ -19,10 +19,15 @@ import (
 // The interesting metric is *recovery time*: how long after the rate returns
 // does the player begin playing again.
 
-func TestEmergencyDownshiftIPadSim(t *testing.T)   { runEmergencyDownshift(t, runner.PlatformIPadSim) }
-func TestEmergencyDownshiftIPhone(t *testing.T)    { runEmergencyDownshift(t, runner.PlatformIPhone) }
-func TestEmergencyDownshiftAppleTV(t *testing.T)   { runEmergencyDownshift(t, runner.PlatformAppleTV) }
-func TestEmergencyDownshiftAndroidTV(t *testing.T) { runEmergencyDownshift(t, runner.PlatformAndroidTV) }
+func TestEmergencyDownshiftIPhoneSim(t *testing.T) {
+	runEmergencyDownshift(t, runner.PlatformIPhoneSim)
+}
+func TestEmergencyDownshiftIPadSim(t *testing.T) { runEmergencyDownshift(t, runner.PlatformIPadSim) }
+func TestEmergencyDownshiftIPhone(t *testing.T)  { runEmergencyDownshift(t, runner.PlatformIPhone) }
+func TestEmergencyDownshiftAppleTV(t *testing.T) { runEmergencyDownshift(t, runner.PlatformAppleTV) }
+func TestEmergencyDownshiftAndroidTV(t *testing.T) {
+	runEmergencyDownshift(t, runner.PlatformAndroidTV)
+}
 
 func runEmergencyDownshift(t *testing.T, p runner.Platform) {
 	steps := []runner.Step{

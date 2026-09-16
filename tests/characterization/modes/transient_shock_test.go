@@ -40,6 +40,7 @@ import (
 //	CHAR_SHOCK_DIP_HOLD_S  hold at each drop (default 90; must outlast the
 //	                       buffer coast + wedge-cycle to see the outcome)
 
+func TestTransientShockIPhoneSim(t *testing.T) { runTransientShock(t, runner.PlatformIPhoneSim) }
 func TestTransientShockIPadSim(t *testing.T)   { runTransientShock(t, runner.PlatformIPadSim) }
 func TestTransientShockIPhone(t *testing.T)    { runTransientShock(t, runner.PlatformIPhone) }
 func TestTransientShockAppleTV(t *testing.T)   { runTransientShock(t, runner.PlatformAppleTV) }

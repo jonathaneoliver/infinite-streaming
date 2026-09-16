@@ -75,7 +75,7 @@ func sweepPlatformsForDevice(d DeviceCapability) []string {
 	case "android":
 		return []string{"androidtv"}
 	case "ios":
-		isPad := strings.Contains(strings.ToLower(d.Name), "ipad")
+		isPad := isIPadName(d.Name)
 		if d.Real {
 			if isPad {
 				return []string{"ipad"}
@@ -94,10 +94,11 @@ func sweepPlatformsForDevice(d DeviceCapability) []string {
 
 // runnerPlatformForDevice returns the platform the characterization RUNNER will
 // classify this device as during discovery — which the probe filters on. It
-// differs from the sweep tokens: the runner's mapSimRuntime labels EVERY iOS
-// simulator `ipad-sim` (never iphone-sim), so a Fleet iPhone 15 sim is
-// discovered as ipad-sim. Passing the experiment's own token (e.g. iphone) as
-// CHAR_SWEEP_PLATFORM would make the probe find no matching device and skip.
+// mirrors the runner's simPlatform: an iOS simulator is discovered as
+// iphone-sim or ipad-sim by its device model (a Fleet iPhone 15 sim → iphone-sim,
+// an iPad sim → ipad-sim). Passing a token the runner won't emit as
+// CHAR_SWEEP_PLATFORM would make the probe find no matching device and skip, so
+// this must stay in lockstep with sweepPlatformsForDevice's model split.
 func runnerPlatformForDevice(d DeviceCapability) string {
 	switch strings.ToLower(d.Platform) {
 	case "tvos":
@@ -106,14 +107,26 @@ func runnerPlatformForDevice(d DeviceCapability) string {
 		return "androidtv"
 	case "ios":
 		if d.Real {
-			if strings.Contains(strings.ToLower(d.Name), "ipad") {
+			if isIPadName(d.Name) {
 				return "ipad"
 			}
 			return "iphone"
 		}
-		return "ipad-sim" // the runner classifies every iOS simulator as ipad-sim
+		if isIPadName(d.Name) {
+			return "ipad-sim"
+		}
+		return "iphone-sim"
 	}
 	return d.Platform
+}
+
+// isIPadName reports whether a farm device's human name identifies an iPad.
+// The farm reports coarse platforms (ios/tvos/android) + a name; the iPhone vs
+// iPad split — for both real hardware and sims — is read from the name. Kept as
+// one predicate so sweepPlatformsForDevice and runnerPlatformForDevice can't
+// drift on what counts as an iPad.
+func isIPadName(name string) bool {
+	return strings.Contains(strings.ToLower(name), "ipad")
 }
 
 // serviceableTokens is the union of the sweep platform tokens the given free
@@ -178,10 +191,11 @@ func runStreamingPool(ctx context.Context, claimer poolClaimer, devices []Device
 		dev := dev
 		tokens := sweepPlatformsForDevice(dev)
 		// Also let this worker claim work keyed on its RUNNER platform — what the
-		// device runs AS (every iOS sim runs as ipad-sim, per runnerPlatformForDevice).
-		// This is what matches char items (keyed on the runner platform, e.g.
-		// TestRampupIPadSim) to a Fleet iPhone 15 sim whose raw sweep tokens are
-		// iphone-sim/iphone; it also lets a sim claim ipad-sim sweep work it can run.
+		// device runs AS (runnerPlatformForDevice: an iPhone sim → iphone-sim, an
+		// iPad sim → ipad-sim). This matches char items keyed on the runner
+		// platform to the device; for an iPhone sim it's already in the sweep
+		// tokens, but it still adds ipad-sim for an iPad sim (and the real-device
+		// runner tokens) so those claim their char work too.
 		if rp := runnerPlatformForDevice(dev); rp != "" && !containsToken(tokens, rp) {
 			tokens = append(tokens, rp)
 		}

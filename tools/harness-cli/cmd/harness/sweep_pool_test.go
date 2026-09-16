@@ -248,8 +248,9 @@ func TestRunnerPlatformForDevice(t *testing.T) {
 		dev  DeviceCapability
 		want string
 	}{
-		// Every iOS sim → ipad-sim (the runner's mapSimRuntime), even an iPhone model.
-		{"iphone sim", DeviceCapability{Platform: "ios", Name: "Fleet iPhone 15 #1"}, "ipad-sim"},
+		// iOS sims split by model (the runner's simPlatform): an iPhone sim →
+		// iphone-sim, an iPad sim → ipad-sim.
+		{"iphone sim", DeviceCapability{Platform: "ios", Name: "Fleet iPhone 15 #1"}, "iphone-sim"},
 		{"ipad sim", DeviceCapability{Platform: "ios", Name: "iPad Pro"}, "ipad-sim"},
 		{"real iphone", DeviceCapability{Platform: "ios", Name: "Jonathans iPhone", Real: true}, "iphone"},
 		{"real ipad", DeviceCapability{Platform: "ios", Name: "iPad Air", Real: true}, "ipad"},

@@ -159,7 +159,7 @@ func (m *ManualLauncher) findHeartbeating(ctx context.Context, d Device) (Player
 
 func platformUAHint(p Platform) string {
 	switch p {
-	case PlatformIPhone:
+	case PlatformIPhone, PlatformIPhoneSim:
 		return "iphone"
 	case PlatformIPad, PlatformIPadSim:
 		return "ipad"

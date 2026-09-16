@@ -82,7 +82,7 @@ var faultRecipes = []seedRecipe{
 // natural `--serviceable iphone-sim` claim path can't match it.
 var (
 	narrowPlatforms = []string{"iphone-sim"}
-	fullPlatforms   = []string{"iphone-sim", "iphone", "appletv", "androidtv"}
+	fullPlatforms   = []string{"iphone-sim", "ipad-sim", "iphone", "appletv", "androidtv"}
 	// Protocol is **HLS only** for now — the probe plays the app's default
 	// (HLS) and protocol selection isn't wired in yet. DASH returns when it is.
 	seedProtocols = []string{"hls"}

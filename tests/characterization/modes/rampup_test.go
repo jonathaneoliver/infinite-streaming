@@ -31,6 +31,7 @@ import (
 // go"). Rampup tests "given a constrained start, when does the player
 // climb?" — the floor for that is the second-from-bottom variant's
 // lowest surviving cap in the filled ladder.
+func TestRampupIPhoneSim(t *testing.T) { runRampup(t, runner.PlatformIPhoneSim) }
 func TestRampupIPadSim(t *testing.T)   { runRampup(t, runner.PlatformIPadSim) }
 func TestRampupIPhone(t *testing.T)    { runRampup(t, runner.PlatformIPhone) }
 func TestRampupAppleTV(t *testing.T)   { runRampup(t, runner.PlatformAppleTV) }

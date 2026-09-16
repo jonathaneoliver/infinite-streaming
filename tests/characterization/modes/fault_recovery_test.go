@@ -41,8 +41,9 @@ import (
 //
 // Appium launch mode only (skips otherwise). Honors CHARACTERIZATION_DEVICE_UDID.
 
-func TestFaultRecoveryIPadSim(t *testing.T) { runFaultRecovery(t, runner.PlatformIPadSim) }
-func TestFaultRecoveryIPhone(t *testing.T)  { runFaultRecovery(t, runner.PlatformIPhone) }
+func TestFaultRecoveryIPhoneSim(t *testing.T) { runFaultRecovery(t, runner.PlatformIPhoneSim) }
+func TestFaultRecoveryIPadSim(t *testing.T)   { runFaultRecovery(t, runner.PlatformIPadSim) }
+func TestFaultRecoveryIPhone(t *testing.T)    { runFaultRecovery(t, runner.PlatformIPhone) }
 
 func runFaultRecovery(t *testing.T, p runner.Platform) {
 	runFleet(t, p, runFaultRecoveryOnDevice)

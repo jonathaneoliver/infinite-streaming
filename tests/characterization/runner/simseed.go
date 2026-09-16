@@ -16,6 +16,7 @@ import (
 var DefaultBundleIDs = map[Platform]string{
 	PlatformIPhone:    "com.jeoliver.InfiniteStreamPlayer",
 	PlatformIPad:      "com.jeoliver.InfiniteStreamPlayer",
+	PlatformIPhoneSim: "com.jeoliver.InfiniteStreamPlayer",
 	PlatformIPadSim:   "com.jeoliver.InfiniteStreamPlayer",
 	PlatformAppleTV:   "com.jeoliver.InfiniteStreamPlayerTV",
 	PlatformAndroidTV: "com.infinitestream.player",
